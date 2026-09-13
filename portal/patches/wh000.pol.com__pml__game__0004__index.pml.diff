@@ -1,0 +1,30 @@
+--- a/wh000.pol.com/pml/game/0004/index.pml
++++ b/wh000.pol.com/pml/game/0004/index.pml
+@@ -13 +13,10 @@
+-	<!bgsound src="FMOContMusic.158.bgm">
++	<!-- pol-server: SE shipped this as `<!bgsound ...>` -- the SHORT COMMENT form,
++	     which ends at the first > -- so the track never played. The exclamation
++	     mark is removed here and nothing else, making it the same live tag the
++	     FFXI pages use (`<bgsound src-FFXIContMusic.151.bgm>`).
++	     The file it names was missing from the US install and was recovered from
++	     the JP All in One Pack 2006 disc: FMOContMusic.158.bgw, now in
++	     viewer/data/pmlus/bgm/. See work/disc-jp2006-bgm/README.md.
++	     Note the src says .bgm while the file on disk is .bgw -- that is the
++	     SE-authored convention, identical on every working FFXI page. -->
++	<bgsound src="FMOContMusic.158.bgm">
+@@ -15 +24,8 @@
+-	<!systembg src="file:/systembg/fmo.png">
++	<!-- pol-server: same story as the bgsound above -- SE shipped this as a short
++	     comment so the backdrop never showed, and the US install had no
++	     systembg/fmo.png to show anyway. The art exists only in the JP tree
++	     (work/dec/jp/systembg/fmo.png, plaintext); it was re-encrypted for the
++	     Western pmlus tree with pmlcodec.encode_image (seed 0x20260812) and
++	     installed. That encoder is proven, not assumed: given the original seed it
++	     reproduces 322 of 322 of the files SE shipped, byte for byte. -->
++	<systembg src="file:/systembg/fmo.png">
+@@ -58 +74,4 @@
+-<text size="640,480" bgcolor="#000000FF"></text>
++<!-- SCRIM, not a backdrop. At alpha FF this covered BOTH background sources the
++     page sets up -- <systembg fmo.png> and <body background-img_s/fmo.png> -- so
++     the logo appeared to float on flat black. Last hex byte tunes it. -->
++<text size="640,480" bgcolor="#000000a6"></text>

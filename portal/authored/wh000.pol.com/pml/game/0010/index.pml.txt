@@ -1,0 +1,197 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+
+	<title>DIRGE of CERBERUS: Top Page</title>
+
+	<!--
+	  pol-server AUTHORED PAGE. DIRGE of CERBERUS -FINAL FANTASY VII- is content
+	  id 10, past the client resolver table, so the Viewer renders Contents0010;
+	  the display name comes from the Games menu array in /pml/main/in01.pml.
+
+	  RECONSTRUCTION v3 (2026-08-19). SE served no DoC page in the West; 404 on the
+	  live server both doors. Built from a screenshot of the original rendered
+	  page, reusing FFXIs real menu chrome art
+	  (mn01s cap, mn02s.ang rows, mn03s cap in 0010/img/) over the dc.png title
+	  card. v2 used FFXIs one-big-sheet engine with arithmetic sizing and rendered
+	  BLACK; this version uses the proven separate-sheet, numeric-position pattern
+	  (the one Tetra uses). PS2-only title: Play armed on the console, greyed on PC.
+	-->
+
+	<include src="/pml/game/0010/style.pml">
+
+	<define name="$GAME_ID" value="10">
+
+	<if expr="$_PLATFORM=='PS2'">
+		<define name="$uLang" calc="$_LANG">
+	<else>
+		<define name="$uLang" calc="$_USER_LANG">
+	</if>
+	<if expr="$_PLATFORM=='PS2'">
+		<define name="$playbutton_enable" value="1">
+	<else>
+		<define name="$playbutton_enable" value="0">
+	</if>
+
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<systembg src="file:/systembg/dc.png">
+
+</head>
+<body altbgcolor="#00000000">
+
+<!-- SEMI-TRANSPARENT scrim over the systembg/dc.png title card. The art IS
+     installed (the first title-card version showed it); v3 briefly laid an
+     OPAQUE fill here and hid it, reading as black. a6 - ~65% so the art shows
+     through while the menu rows stay legible. -->
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="400" wait="2">
+	<text size="640,480" bgcolor="#120606a6"></text>
+</sheet>
+<!-- No client-drawn title text here. The systembg dc.png title card carries the
+     art, and a plain-text title over it read poorly, so it is left to the art
+     (we have no separate logo image to place). -->
+
+<!-- Menu labels, per language -->
+<if expr="$uLang=='fr-FR'">
+	<define name="$lPlay"  value="    Jouer">
+	<define name="$lInfo"  value="    Informations">
+	<define name="$lFirst" value="    Premiers pas">
+	<define name="$lGuide" value="    Guide de jeu">
+	<define name="$lRule"  value="    R&egrave;gles et savoir-vivre">
+	<define name="$lSup"   value="    Besoin d&rsquo;aide&nbsp;?">
+	<define name="$lCid"   value="    Identifiant de contenu">
+<elsif expr="$uLang=='de-DE'">
+	<define name="$lPlay"  value="    Spielen">
+	<define name="$lInfo"  value="    Information">
+	<define name="$lFirst" value="    F&uuml;r Einsteiger">
+	<define name="$lGuide" value="    Spielanleitung">
+	<define name="$lRule"  value="    Regeln &amp; Umgang">
+	<define name="$lSup"   value="    Hilfe">
+	<define name="$lCid"   value="    Content-ID">
+<else>
+	<define name="$lPlay"  value="    Play">
+	<define name="$lInfo"  value="    Information">
+	<define name="$lFirst" value="    For First-Timers">
+	<define name="$lGuide" value="    Play Guide">
+	<define name="$lRule"  value="    Rules &amp; Manners">
+	<define name="$lSup"   value="    Support">
+	<define name="$lCid"   value="    Content ID">
+</if>
+
+<if expr="$playbutton_enable==0">
+	<define name="$playHref"  value="null:">
+	<define name="$playRowSt" value="Mn14off">
+	<define name="$playAh"    value="^03You cannot play Dirge of Cerberus on this platform (PlayStation 2 title).">
+<else>
+	<define name="$playHref"  value="eval:'gameto:'+$GAME_ID">
+	<define name="$playRowSt" value="Mn14">
+	<define name="$playAh"    value="^03Play Dirge of Cerberus.">
+</if>
+
+<!-- Top cap -->
+<sheet name="sh_cap0" pos="45,112" size="229,19" border="0" alpha="1" delay="500" appeartime="200" wait="2">
+	<img size="229,19" src="/pml/game/0010/img/mn01s.png">
+</sheet>
+
+<!-- row 0: Play -->
+<sheet name="sh_r0" pos="45,131" size="229,26" type="4" border="0" alpha="1" delay="560" appeartime="200" wait="2">
+	<img name="FMe0" size="229,26" src="/pml/game/0010/img/mn02s.ang">
+	<text pos="0,1" size="229,26" style="$playRowSt" valign="middle">&var=$lPlay;</text>
+	<img name="FMf0" pos="20,0" size="189,26" src="file:/img_s/general/im01s.png"
+		 href="{$playHref}" mousesound="1" clicksound="3"
+		 onmouseover="sd:sequence=3@FMe0" onmouseout="sd:sequence=0@FMe0"
+		 onkeyup="sd:focus@apBtBack" onkeydown="sd:focus@FMf1"
+		 onkeycancel="sound:3,/pml/main/index.pml" alt="$playAh">
+</sheet>
+<!-- row 1: Information -->
+<sheet name="sh_r1" pos="45,157" size="229,26" type="4" border="0" alpha="1" delay="620" appeartime="200" wait="2">
+	<img name="FMe1" size="229,26" src="/pml/game/0010/img/mn02s.ang">
+	<text pos="0,1" size="229,26" style="Mn14" valign="middle">&var=$lInfo;</text>
+	<img name="FMf1" pos="20,0" size="189,26" src="file:/img_s/general/im01s.png"
+		 href="/pml/game/0010/information.pml" mousesound="1" clicksound="3"
+		 onmouseover="sd:sequence=3@FMe1" onmouseout="sd:sequence=0@FMe1"
+		 onkeyup="sd:focus@FMf0" onkeydown="sd:focus@FMf2"
+		 onkeycancel="sound:3,/pml/main/index.pml" alt="^03Read about Dirge of Cerberus.">
+</sheet>
+<!-- row 2: For First-Timers -->
+<sheet name="sh_r2" pos="45,183" size="229,26" type="4" border="0" alpha="1" delay="680" appeartime="200" wait="2">
+	<img name="FMe2" size="229,26" src="/pml/game/0010/img/mn02s.ang">
+	<text pos="0,1" size="229,26" style="Mn14" valign="middle">&var=$lFirst;</text>
+	<img name="FMf2" pos="20,0" size="189,26" src="file:/img_s/general/im01s.png"
+		 href="/pml/game/0010/first.pml" mousesound="1" clicksound="3"
+		 onmouseover="sd:sequence=3@FMe2" onmouseout="sd:sequence=0@FMe2"
+		 onkeyup="sd:focus@FMf1" onkeydown="sd:focus@FMf3"
+		 onkeycancel="sound:3,/pml/main/index.pml" alt="^03New to the multiplayer mode? Start here.">
+</sheet>
+<!-- row 3: Play Guide -->
+<sheet name="sh_r3" pos="45,209" size="229,26" type="4" border="0" alpha="1" delay="740" appeartime="200" wait="2">
+	<img name="FMe3" size="229,26" src="/pml/game/0010/img/mn02s.ang">
+	<text pos="0,1" size="229,26" style="Mn14" valign="middle">&var=$lGuide;</text>
+	<img name="FMf3" pos="20,0" size="189,26" src="file:/img_s/general/im01s.png"
+		 href="/pml/game/0010/guide.pml" mousesound="1" clicksound="3"
+		 onmouseover="sd:sequence=3@FMe3" onmouseout="sd:sequence=0@FMe3"
+		 onkeyup="sd:focus@FMf2" onkeydown="sd:focus@FMf4"
+		 onkeycancel="sound:3,/pml/main/index.pml" alt="^03How the online mode plays.">
+</sheet>
+<!-- row 4: Rules & Manners -->
+<sheet name="sh_r4" pos="45,235" size="229,26" type="4" border="0" alpha="1" delay="800" appeartime="200" wait="2">
+	<img name="FMe4" size="229,26" src="/pml/game/0010/img/mn02s.ang">
+	<text pos="0,1" size="229,26" style="Mn14" valign="middle">&var=$lRule;</text>
+	<img name="FMf4" pos="20,0" size="189,26" src="file:/img_s/general/im01s.png"
+		 href="/pml/game/0010/rule.pml" mousesound="1" clicksound="3"
+		 onmouseover="sd:sequence=3@FMe4" onmouseout="sd:sequence=0@FMe4"
+		 onkeyup="sd:focus@FMf3" onkeydown="sd:focus@FMf5"
+		 onkeycancel="sound:3,/pml/main/index.pml" alt="^03Rules of conduct for online play.">
+</sheet>
+<!-- row 5: Support -->
+<sheet name="sh_r5" pos="45,261" size="229,26" type="4" border="0" alpha="1" delay="860" appeartime="200" wait="2">
+	<img name="FMe5" size="229,26" src="/pml/game/0010/img/mn02s.ang">
+	<text pos="0,1" size="229,26" style="Mn14" valign="middle">&var=$lSup;</text>
+	<img name="FMf5" pos="20,0" size="189,26" src="file:/img_s/general/im01s.png"
+		 href="/pml/game/0010/support.pml" mousesound="1" clicksound="3"
+		 onmouseover="sd:sequence=3@FMe5" onmouseout="sd:sequence=0@FMe5"
+		 onkeyup="sd:focus@FMf4" onkeydown="sd:focus@FMf6"
+		 onkeycancel="sound:3,/pml/main/index.pml" alt="^03Support information.">
+</sheet>
+<!-- row 6: Content ID -->
+<sheet name="sh_r6" pos="45,287" size="229,26" type="4" border="0" alpha="1" delay="920" appeartime="200" wait="2">
+	<img name="FMe6" size="229,26" src="/pml/game/0010/img/mn02s.ang">
+	<text pos="0,1" size="229,26" style="Mn14" valign="middle">&var=$lCid;</text>
+	<img name="FMf6" pos="20,0" size="189,26" src="file:/img_s/general/im01s.png"
+		 href="/pml/game/0010/contentid.pml" mousesound="1" clicksound="3"
+		 onmouseover="sd:sequence=3@FMe6" onmouseout="sd:sequence=0@FMe6"
+		 onkeyup="sd:focus@FMf5" onkeydown="sd:focus@apBtBack"
+		 onkeycancel="sound:3,/pml/main/index.pml" alt="^03Content ID for this title.">
+</sheet>
+
+<!-- Bottom cap -->
+<sheet name="sh_cap1" pos="45,313" size="229,26" border="0" alpha="1" delay="500" appeartime="200" wait="2">
+	<img size="229,26" src="/pml/game/0010/img/mn03s.png">
+</sheet>
+
+<!-- Back button -->
+<if expr="$uLang=='fr-FR'"><define name="$backValue" value="Retour">
+<elsif expr="$uLang=='de-DE'"><define name="$backValue" value="Zur&uuml;ck">
+<else><define name="$backValue" value="Back"></if>
+<!-- Back button: a VISIBLE themed plate + caption. The btbk01s.ang icon I tried
+     first is a dark, low-contrast graphic that vanished against DoCs dark title
+     card. This uses the jan/tetra pattern instead -- a coloured plate, a
+     transparent im01s click layer (NO value-, so it never draws the generic
+     viewer button), and the Back caption as text over it. -->
+<sheet name="sh_bk" pos="45,356" size="92,30" border="0" alpha="1" delay="1000" appeartime="250" wait="2">
+	<text size="92,30" bgcolor="#3A1818ee"></text>
+	<img name="apBtBack" pos="0,0" size="92,30" src="file:/img_s/general/im01s.png"
+		 href="/pml/main/index.pml"
+		 onkeyup="sd:focus@FMf6" onkeydown="sd:focus@FMf0"
+		 onkeycancel="sound:3,/pml/main/index.pml"
+		 mousesound="1" alt="^03Return to PlayOnline Viewer main menu.">
+	<text size="92,30" align="center" valign="middle" style="Mn14">&var=$backValue;</text>
+</sheet>
+
+<if expr="$playbutton_enable==0">
+	<timer enable="1" delay="1100" href="sd:focus@FMf1">
+<else>
+	<timer enable="1" delay="1100" href="sd:focus@FMf0">
+</if>
+
+</body>
+</pml>

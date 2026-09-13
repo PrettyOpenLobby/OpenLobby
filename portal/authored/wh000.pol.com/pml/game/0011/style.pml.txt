@@ -1,0 +1,27 @@
+<!--
+  pol-server AUTHORED. Shared style + path defines for the FANTASY EARTH
+  (content id 11) page set. index.pml reuses FFXIs menu chrome (mn01s/mn02s/
+  mn03s in 0011/img/) with a gold Mn14 label style; the sub-pages use the
+  fe-themed styles. Self-contained: no server-hosted images (menu chrome is
+  client-local under 0011/img/; the title card is file:/systembg/fe.png).
+-->
+<define name="$C_PATH1" value="/pml/game/0011/">
+<define name="$F_PATH2" value="file:/img_s/">
+
+<!-- Title / heading -->
+<style name="felg"  size="34" color="#F0D8A8ff,#301A08ee" face="6" proportional="1" spacing="4">
+<style name="fesub" size="15" color="#C9BCA8ff,#1C1008ee" face="0" proportional="1" spacing="2">
+<style name="fesec" size="20" color="#F0D8A8ff,#301A08ee" face="6" proportional="1" spacing="2">
+
+<!-- Body copy -->
+<style name="tx15"  size="15" color="#E3E3E3ff,#000000ee" face="0" proportional="1" vspacing="7">
+<style name="tx14d" size="14" color="#B2A79Fff,#000000ee" face="0" proportional="1" vspacing="5">
+
+<!-- Menu row text: FFXIs Mn14 shape, gold-tinted for FE; brighter on hover;
+     dim for a Play row that cannot fire. -->
+<style name="Mn14"    face="2" size="14" color="#EAD9B8ff,#332211ff" proportional="1">
+<style name="Mn14_2"  face="2" size="14" color="#FFFFFFff,#332211ff" proportional="1">
+<style name="Mn14off" face="2" size="14" color="#8A8074ff,#221A10ff" proportional="1">
+
+<!-- Back button -->
+<style name="bt15"    size="15" color="#FFFFFFff,#000000ee" face="0" proportional="1" align="center">

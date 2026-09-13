@@ -1,0 +1,27 @@
+--- a/wh000.pol.com/pcd/mainmenu/ja-JP/data.pml
++++ b/wh000.pol.com/pcd/mainmenu/ja-JP/data.pml
+@@ -1,0 +2,12 @@
++<!-- pol-server: RESTORED FOR THE PS2, 2026-08-24. SEs final file gates every row on
++     WIN and zeroes BANNERSIZE for PS2, but that file is the 2013 PC/Xbox-era build,
++     by which time the console service was gone. A real 1.18.15f PS2 URL cache
++     (urlcache-1815) holds 24 downloaded /pcd/mainmenu/ja-JP/*.png banners, all
++     270x160 palette+tRNS, and all 24 are BYTE-IDENTICAL to what we already serve --
++     so the console did get banners at this era and can render this directory.
++     Matched, not invented. THE FORMAT WORRY IS SETTLED, SAME DAY, DO NOT REOPEN IT:
++     the three ids these rows name are the only RGBA truecolor PNGs in this directory
++     (132-139, 180-182) while all 24 the console ever cached are PLTE+tRNS, so there
++     was real reason to expect them not to draw. THEY DRAW. Confirmed live on a
++     1.18.15f PS2, 2026-08-24. The console renders truecolor RGBA from this directory
++     perfectly well -- do NOT re-encode this art to palette to "fix" a non-problem. -->
+@@ -5 +17 @@
+-		<if expr="$_PLATFORM=='WIN'"><ARRAY>"180","180.png","http://wh000.pol.com/pml/game/ff11/dev/topics/topm01.pml?df=1&ds=0&dt=-1&","0",'',"最新のトピックス一覧はこちら！",</ARRAY></if>
++		<if expr="$_PLATFORM=='WIN'||$_PLATFORM=='PS2'"><ARRAY>"180","180.png","http://wh000.pol.com/pml/game/ff11/dev/topics/topm01.pml?df=1&ds=0&dt=-1&","0",'',"最新のトピックス一覧はこちら！",</ARRAY></if>
+@@ -8 +20 @@
+-		<if expr="$_PLATFORM=='WIN'"><ARRAY>"181","181.png","http://wh000.pol.com/pml/game/ff11//dev/topics/topm02.pml?df=1&ds=0&dt=-1&pageNum=0&listNum=0&dir=14735&toolFlg=1&bkNum=1&","0",'',"公式フォーラムのアドレスはこちら！",</ARRAY></if>
++		<if expr="$_PLATFORM=='WIN'||$_PLATFORM=='PS2'"><ARRAY>"181","181.png","http://wh000.pol.com/pml/game/ff11//dev/topics/topm02.pml?df=1&ds=0&dt=-1&pageNum=0&listNum=0&dir=14735&toolFlg=1&bkNum=1&","0",'',"公式フォーラムのアドレスはこちら！",</ARRAY></if>
+@@ -11 +23 @@
+-		<if expr="$_PLATFORM=='WIN'"><ARRAY>"182","182.png","http://wh000.pol.com/pml/game/ff11//dev/topics/topm02.pml?df=1&ds=0&dt=-1&pageNum=0&listNum=0&dir=14736&toolFlg=1&bkNum=1&","0",'',"公式サイトのアドレスはこちら！",</ARRAY></if>
++		<if expr="$_PLATFORM=='WIN'||$_PLATFORM=='PS2'"><ARRAY>"182","182.png","http://wh000.pol.com/pml/game/ff11//dev/topics/topm02.pml?df=1&ds=0&dt=-1&pageNum=0&listNum=0&dir=14736&toolFlg=1&bkNum=1&","0",'',"公式サイトのアドレスはこちら！",</ARRAY></if>
+@@ -14 +26 @@
+-<if expr="$_PLATFORM=='PS2'"><ARRAY name="$BANNERSIZE">"0","0","0",</ARRAY></if>
++<if expr="$_PLATFORM=='PS2'"><ARRAY name="$BANNERSIZE">"1","1","1",</ARRAY></if>

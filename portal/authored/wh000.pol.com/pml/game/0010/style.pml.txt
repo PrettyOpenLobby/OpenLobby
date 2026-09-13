@@ -1,0 +1,30 @@
+<!--
+  pol-server AUTHORED. Shared style + path defines for the DIRGE of CERBERUS
+  (content id 10) page set. Included in the <head> of index.pml and every
+  sub-page. The menu on index.pml reuses FFXIs real menu chrome (mn01s/mn02s/
+  mn03s copied into 0010/img/) and its Mn14 text style, so the top page reads as
+  a genuine PlayOnline game menu rather than an invented layout; the sub-pages
+  keep the simple dc-themed styles. Self-contained: no server-hosted images
+  (the menu art is client-local under 0010/img/, the title card is
+  file:/systembg/dc.png). See index.pml header for the full rationale.
+-->
+<define name="$C_PATH1" value="/pml/game/0010/">
+<define name="$F_PATH2" value="file:/img_s/">
+
+<!-- Title / heading -->
+<style name="dclg"  size="30" color="#E8D0C0ff,#2A0808ee" face="6" proportional="1" spacing="4">
+<style name="dcsub" size="15" color="#C8A8A0ff,#1C0606ee" face="0" proportional="1" spacing="2">
+<style name="dcsec" size="20" color="#E8D0C0ff,#2A0808ee" face="6" proportional="1" spacing="2">
+
+<!-- Body copy -->
+<style name="tx15"  size="15" color="#E3E3E3ff,#000000ee" face="0" proportional="1" vspacing="7">
+<style name="tx14d" size="14" color="#B7A2A2ff,#000000ee" face="0" proportional="1" vspacing="5">
+
+<!-- Menu row text: FFXIs own Mn14 (normal) + a brighter hover, and the greyed
+     variant for a Play row that cannot fire on this platform. -->
+<style name="Mn14"    face="2" size="14" color="#E0E0E0ff,#333333ff" proportional="1">
+<style name="Mn14_2"  face="2" size="14" color="#FFFFFFff,#333333ff" proportional="1">
+<style name="Mn14off" face="2" size="14" color="#8A7C7Cff,#222222ff" proportional="1">
+
+<!-- Back button -->
+<style name="bt15"    size="15" color="#FFFFFFff,#000000ee" face="0" proportional="1" align="center">

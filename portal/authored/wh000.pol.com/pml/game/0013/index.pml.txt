@@ -1,0 +1,116 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+
+	<title>EverQuest II: Top Page</title>
+
+	<!--
+	  pol-server AUTHORED PAGE, ARCHIVAL. EverQuest II is content id 13 --
+	  `EVER_QUEST_II` in the client own content table (data/doc/sqpolcts.bin, read
+	  at runtime from app.dll). Corroborated twice over: that table names it, and
+	  the content-icon sheet carries an "EQII" badge at the tile the id maps to
+	  (cicn_s003, tile 1; id = 4*sheet + tile).
+
+	  INFORMATIONAL ONLY, on the JongHoLow and Dirge of Cerberus model. There is
+	  no Windows build in the app.dll per-title signature table, nothing in either
+	  registry hive, and no portal page on the live server (probed 2026-08-12
+	  against a working control). So there is no Play button.
+
+	  AND THE VIEWER WAS NEVER ITS LAUNCHER. Checked against a real installed JP
+	  client (BuildINF 2005/02/15): EQ2JP.exe, EverQuest2.exe and EQ2Settings.exe
+	  contain ZERO references to PlayOnline, polcore, pol.com or `gameto:` in
+	  ASCII or UTF-16, and a recursive grep of the whole install finds none
+	  either. Its endpoints are patch.station.sony.com / launchpad.station.sony.com
+	  -- Sony Station infrastructure, despite the SquareEnix install path. That
+	  matches this record flag in the client own content table: id 13 carries
+	  +0x104 = 0, grouping it with the mail services rather than with the titles
+	  the Viewer launches (FFXI, TM, Mahjong, FMO, DC, FE are all 1).
+
+	  References NO server-hosted images: one HTTP request.
+	-->
+
+	<define name="$GAME_ID" value="13">
+
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<!-- No title card exists for this id in any client tree, so the generic
+	     backdrop is used rather than borrowing another title art. -->
+	<systembg src="file:/systembg/bg02s.png">
+
+	<define name="$F_PATH2" value="file:/img_s/">
+
+	<style name="eqlg"  size="30" color="#E8DCB0ff,#141810ee" face="6" proportional="1" spacing="4">
+	<style name="eqsub" size="15" color="#BFC8A8ff,#0C1008ee" face="0" proportional="1" spacing="2">
+	<style name="tx15"  size="15" color="#E3E3E3ff,#000000ee" face="0" proportional="1" vspacing="6">
+	<style name="tx14d" size="14" color="#A8B29Fff,#000000ee" face="0" proportional="1" vspacing="5">
+
+</head>
+<body altbgcolor="#00000000">
+
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="400" wait="2">
+	<text size="640,480" bgcolor="#0C1008ff"></text>
+</sheet>
+<sheet pos="0,96" size="640,132" border="0" alpha="1" delay="150" appeartime="450" wait="2">
+	<text size="640,132" bgcolor="#1C2414ff"></text>
+</sheet>
+
+<sheet name="shLogo" pos="0,120" size="640,44" border="0" alpha="1" delay="300"
+ appeartime="300" wait="2">
+	<text size="640,44" align="center" valign="middle" style="eqlg">EverQuest II</text>
+</sheet>
+
+<sheet name="shSub" pos="0,170" size="640,22" border="0" alpha="1" delay="450"
+ appeartime="300" wait="2">
+	<text size="640,22" align="center" valign="middle" style="eqsub">PlayOnline content id 13</text>
+</sheet>
+
+<hr pos="170,204" width="300" height="2" skin="0" skincolor="#7E8C5Eaa">
+
+<sheet name="shTx" pos="110,236" size="420,120" border="0" alpha="1" delay="600"
+ appeartime="300" wait="2" delayproperties="1">
+	<if expr="$_USER_LANG=='fr-FR'">
+		<text size="420,120" align="center" style="tx15">Square Enix a exploit&eacute; le service japonais de ce MMORPG, et PlayOnline le prenait en charge : le Viewer conna&icirc;t toujours son identifiant de contenu et conserve son ic&ocirc;ne. Aucun client Windows n&rsquo;est distribu&eacute; ici.</text>
+	<elsif expr="$_USER_LANG=='de-DE'">
+		<text size="420,120" align="center" style="tx15">Square Enix betrieb den japanischen Dienst dieses MMORPG, und PlayOnline trug ihn mit: der Viewer kennt die Content-ID bis heute und liefert das Symbol mit. Ein Windows-Client wird hier nicht bereitgestellt.</text>
+	<else>
+		<text size="420,120" align="center" style="tx15">Square Enix published this MMORPG in Japan and PlayOnline registered a content id for it - id 13, dated 2004/12/20, still in the Viewer own table. But the game itself ran on Sony Station infrastructure: the Japanese client never referenced PlayOnline at all. The badge remained; the launcher never did.</text>
+	</if>
+</sheet>
+
+<sheet name="shNote" pos="110,372" size="420,20" border="0" alpha="1" delay="800"
+ appeartime="250" wait="2" delayproperties="1">
+	<if expr="$_USER_LANG=='fr-FR'">
+		<text size="420,20" align="center" valign="middle" style="tx14d">Entr&eacute;e d&rsquo;archive - rien &agrave; lancer.</text>
+	<elsif expr="$_USER_LANG=='de-DE'">
+		<text size="420,20" align="center" valign="middle" style="tx14d">Archiveintrag - nichts zu starten.</text>
+	<else>
+		<text size="420,20" align="center" valign="middle" style="tx14d">Archive entry - nothing to launch.</text>
+	</if>
+</sheet>
+
+<sheet name="shBtBackTx" pos="94,361" size="50,24" border="0" show="0" alpha="1" delay="0"
+ appeartime="150" wait="2">
+	<if expr="$_USER_LANG=='fr-FR'">
+		<text size="50,24" style="eqsub">Retour</text>
+	<elsif expr="$_USER_LANG=='de-DE'">
+		<text size="50,24" style="eqsub">Zur&uuml;ck</text>
+	<else>
+		<text size="50,24" style="eqsub">Back</text>
+	</if>
+</sheet>
+
+<sheet name="shBtBack" pos="73,378" size="70,32" border="0" alpha="1" delay="450"
+ appeartime="250" wait="2" delayproperties="1">
+	<text size="70,32" bgcolor="#26301Cff"></text>
+	<img name="apBtBack" pos="0,0" size="70,32" src="$F_PATH2+'general/im01s.png'"
+		 href="/pml/main/index.pml"
+		 onkeycancel="sound:3,/pml/main/index.pml"
+		 onmouseover="sd:show=1@shBtBackTx"
+		 onmouseout="sd:show=0@shBtBackTx"
+		 mousesound="1"
+		 alt="^03Return to PlayOnline Viewer main menu.">
+</sheet>
+
+<timer enable="1" delay="1000" href="sd:focus@apBtBack">
+
+</body>
+</pml>

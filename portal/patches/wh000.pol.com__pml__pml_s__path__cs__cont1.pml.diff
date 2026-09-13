@@ -1,0 +1,5 @@
+--- a/wh000.pol.com/pml/pml_s/path/cs/cont1.pml
++++ b/wh000.pol.com/pml/pml_s/path/cs/cont1.pml
+@@ -2 +2 @@
+-<define name="$C_PATH2" value="https://wh000.pol.com/pml2/cs/">
++<define name="$C_PATH2" value="http://wh000.pol.com/pml2/cs/">

@@ -1,0 +1,254 @@
+{
+  "format": 1,
+  "about": "One entry per portal page this project edits. `path` is the page under your www/ tree; `base` (when present) is the page the diff is computed from, for pages that are a second copy of an existing page. `sha256_original` is the page as served by Square Enix; `sha256_patched` is the result. `newlines: lf` means the original's CRLF line endings are converted to LF before the diff is applied. The `dev` block describes the maintainer's own tree and is only read by --selftest and --rebuild; `dev.repair` names mechanical damage found in that tree's copy (an editor accident, not an edit) which the diff deliberately does not carry.",
+  "patches": [
+    {
+      "path": "wh000.pol.com/pml/main/index.pml",
+      "description": "Main menu: $gmTest 0 -> 1 shows SE's own GM Call button, and three guards ($bnAny, $BANNERSIZE[$i]>0) stop a platform with no banner rows from rendering (Array Error) in the pickup box and in banner image URLs.",
+      "original_source": "portal capture, md5 5e36247c7caa44abe3be5b04333918ca, 54852 bytes",
+      "newlines": "keep",
+      "dev": {
+        "original": "../www-se-capture/wh000.pol.com/pml/main/index.pml",
+        "modified": "wh000.pol.com/pml/main/index.pml",
+        "restored_lines": 0
+      },
+      "diff": "wh000.pol.com__pml__main__index.pml.diff",
+      "sha256_original": "68bfbb97272b0e0cec0c3a070ef49bee849c9981d08c7b7a9f9c8b80e5472c54",
+      "size_original": 54852,
+      "sha256_patched": "ab357ecc6eae8b63cdea98cfd3fa27ea54351aecd5241ce210bd3369262e89c2",
+      "size_patched": 56487,
+      "scan": {
+        "hunks": 6,
+        "plus": 29,
+        "minus": 1
+      }
+    },
+    {
+      "path": "wh000.pol.com/pml/main/in01.pml",
+      "description": "Games submenu: our games list, one menu entry per content id this server can grant (adds the titles SE's final page no longer listed), on SE's own $_USER_LANG.",
+      "original_source": ".se-orig sibling in the development tree, md5 065157605d09c4f48531c5c391a6e6b8, 16940 bytes",
+      "newlines": "lf",
+      "dev": {
+        "original": "wh000.pol.com/pml/main/in01.pml.se-orig",
+        "modified": "wh000.pol.com/pml/main/in01.pml",
+        "restored_lines": 0
+      },
+      "diff": "wh000.pol.com__pml__main__in01.pml.diff",
+      "sha256_original": "995624f4cb012192c2d55f66fbdbee8cdec255aa28f2629e811e03b938f0982a",
+      "size_original": 16940,
+      "sha256_patched": "9aa6f3b8499244546afc90dea0b28ee88d80374d59fd111a6a359f8fedcb9e61",
+      "size_patched": 18938,
+      "scan": {
+        "hunks": 12,
+        "plus": 69,
+        "minus": 8
+      }
+    },
+    {
+      "path": "wh000.pol.com/pml/game/ff11/index.pml",
+      "description": "FINAL FANTASY XI top page: $bgs 3 -> 1 (the tree holds bgd00 and bgd01 only, so bgd02 would 404 into the Viewer's error background) and SE's own commented-out Test Server Play block (sh_testplay) restored, gated on $_PLATFORM=='WIN' alone.",
+      "original_source": "portal capture, md5 5f48b0c36cdebbf3e96458c64c5e063b, 46981 bytes",
+      "newlines": "keep",
+      "dev": {
+        "original": "../www-se-capture/wh000.pol.com/pml/game/ff11/index.pml",
+        "modified": "wh000.pol.com/pml/game/ff11/index.pml",
+        "restored_lines": 0
+      },
+      "diff": "wh000.pol.com__pml__game__ff11__index.pml.diff",
+      "sha256_original": "8735264e95c49f151c0f5e2ac2c8a205cf0ee5beaa0c0ae3410eabddce7db503",
+      "size_original": 46981,
+      "sha256_patched": "4a61cec3a7a71dd608b467d9f682e62aacd34b64ac2e9967491f3c90b8c2d05b",
+      "size_patched": 48475,
+      "scan": {
+        "hunks": 3,
+        "plus": 23,
+        "minus": 4
+      }
+    },
+    {
+      "path": "wh000.pol.com/pml/game/0004/index.pml",
+      "description": "FRONT MISSION ONLINE top page: SE's <!bgsound> and <!systembg> tags un-commented (they shipped as comments, so neither ever played or showed) and the 640x480 scrim lightened from #000000ff to #000000a6 so the system background shows through.",
+      "original_source": "portal capture, md5 f22e1513c323248c65cee8d13ea2e45a, 21224 bytes",
+      "newlines": "lf",
+      "dev": {
+        "original": "../www-se-capture/wh000.pol.com/pml/game/0004/index.pml",
+        "modified": "wh000.pol.com/pml/game/0004/index.pml",
+        "repair": [
+          "equals-to-dash"
+        ],
+        "repair_note": "a search-and-replace turned every = in SE's comment banners and several live tags into -; the patch keeps SE's bytes",
+        "restored_lines": 48
+      },
+      "diff": "wh000.pol.com__pml__game__0004__index.pml.diff",
+      "sha256_original": "276676e7ecbf9492ef1a79d90ecf105b112c720f7b6de49cb53550bee3679bae",
+      "size_original": 21224,
+      "sha256_patched": "51f73f1a4c470fe7f86498bf1fdabe1a235f909dd160944a2a66e3616b8f20ca",
+      "size_patched": 22200,
+      "scan": {
+        "hunks": 3,
+        "plus": 22,
+        "minus": 3
+      }
+    },
+    {
+      "path": "wh000.pol.com/pml/game/tetra/index.pml",
+      "description": "Tetra Master top page translated to English (SE never served an English one): title, button captions and hint text, the alert shown while another game runs, a 14 px caption style so the English fits the button art, and Back pointed at the main menu.",
+      "original_source": "SE's Japanese page as cached by a PS2 Viewer, md5 d4a61334882a5d5c3679b93d1b4efa48, 10939 bytes",
+      "newlines": "keep",
+      "dev": {
+        "original": "wh000.pol.com/pml/game/tetra/index.pml.ja",
+        "modified": "wh000.pol.com/pml/game/tetra/index.pml",
+        "repair": [
+          "utf8-replacement"
+        ],
+        "repair_note": "SE's Shift-JIS comment bytes were rewritten as U+FFFD by an editor; the patch keeps SE's bytes",
+        "restored_lines": 29
+      },
+      "diff": "wh000.pol.com__pml__game__tetra__index.pml.diff",
+      "sha256_original": "41418bec9c1d86c4aff614ad6ef76912df5395a2affda2f4cc52e3940144a514",
+      "size_original": 10939,
+      "sha256_patched": "845a17e9e9652422bb6dc78c3c7e5b3053d32e7ac72ef8920b7b5e409ca7826f",
+      "size_patched": 11124,
+      "scan": {
+        "hunks": 12,
+        "plus": 37,
+        "minus": 42
+      }
+    },
+    {
+      "path": "wh000.pol.com/pml/pml_s/path/cs/cont1.pml",
+      "description": "$C_PATH2 https:// -> http:// for the Japanese support pages: the Viewer cannot complete an https connection to a modern server, so every link through $C_PATH2 went nowhere.",
+      "original_source": ".se-orig sibling in the development tree, md5 ce4f6eefbe6e08125f58767320a2f12a, 206 bytes",
+      "newlines": "keep",
+      "dev": {
+        "original": "wh000.pol.com/pml/pml_s/path/cs/cont1.pml.se-orig",
+        "modified": "wh000.pol.com/pml/pml_s/path/cs/cont1.pml",
+        "restored_lines": 0
+      },
+      "diff": "wh000.pol.com__pml__pml_s__path__cs__cont1.pml.diff",
+      "sha256_original": "50880a79043e0fc1385e2ad4718a501f956d86527391aa97a76461349b325b4f",
+      "size_original": 206,
+      "sha256_patched": "f70d6bf59524561fea327ad9cf2296ae10b82c66f2c02b8d17234d3638650162",
+      "size_patched": 205,
+      "scan": {
+        "hunks": 1,
+        "plus": 1,
+        "minus": 1
+      }
+    },
+    {
+      "path": "wh000.pol.com/pcd/mainmenu/en-US/data.pml",
+      "description": "Main-menu banner rows (English): each $BANNER row is opened to PS2 as well as WIN and $BANNERSIZE for PS2 becomes 1,1,1; SE's final 2013 file had zeroed the console out after its service ended. Row content unchanged.",
+      "original_source": "portal capture, md5 d90dd556f011862e29de783ad1fc9447, 1078 bytes (no md5 recorded in the provenance row; the capture tree is the same one that hash-matches the other pages)",
+      "newlines": "keep",
+      "dev": {
+        "original": "../../pol-www/www-se-capture/wh000.pol.com/pcd/mainmenu/en-US/data.pml",
+        "modified": "wh000.pol.com/pcd/mainmenu/en-US/data.pml",
+        "restored_lines": 0
+      },
+      "diff": "wh000.pol.com__pcd__mainmenu__en-US__data.pml.diff",
+      "sha256_original": "11510287972934433e6823af186511fcf2487d931f57bfd1817db37b2e9f79b5",
+      "size_original": 1078,
+      "sha256_patched": "9f4b094388b27faf91d901e13c59c68f2eb6af3e49424b0c849cb5b6310de70a",
+      "size_patched": 2150,
+      "scan": {
+        "hunks": 5,
+        "plus": 16,
+        "minus": 4
+      }
+    },
+    {
+      "path": "wh000.pol.com/pcd/mainmenu/ja-JP/data.pml",
+      "description": "Main-menu banner rows (Japanese): each $BANNER row is opened to PS2 as well as WIN and $BANNERSIZE for PS2 becomes 1,1,1; SE's final 2013 file had zeroed the console out after its service ended. Row content unchanged.",
+      "original_source": "pre-edit backup sibling in the development tree, md5 055183d5b2dc79866e86c724b5610574, 1146 bytes; NOT hash-verified against a capture (the console never cached this file), but it has exactly the shape of the verified English twin",
+      "newlines": "keep",
+      "dev": {
+        "original": "wh000.pol.com/pcd/mainmenu/ja-JP/data.pml.bak-bctest",
+        "modified": "wh000.pol.com/pcd/mainmenu/ja-JP/data.pml",
+        "restored_lines": 0
+      },
+      "diff": "wh000.pol.com__pcd__mainmenu__ja-JP__data.pml.diff",
+      "sha256_original": "a5929d0c0d0e1a95c6b7bc554219057b20a9caf29c3d65c5d9d47c647a09b7b8",
+      "size_original": 1146,
+      "sha256_patched": "e29370451cdc3f4861c1af0986062f1ec3fd7a415b0ee53f15506753c4871f37",
+      "size_patched": 2218,
+      "scan": {
+        "hunks": 5,
+        "plus": 16,
+        "minus": 4
+      }
+    },
+    {
+      "path": "_eras/panel/wh000.pol.com/pml/main/index.pml",
+      "base": "wh000.pol.com/pml/main/index.pml",
+      "description": "Panel-era (PS2) copy of the main menu: defines $uLang once from $_PLATFORM ($_LANG on the console, $_USER_LANG on the PC) and uses it in every include path and language test, so the console stops substituting a variable error into include URLs; $bcTest 1 so every title counts as purchased. Written as a second copy under _eras/panel/, which the server serves to panel-era clients.",
+      "original_source": "portal capture, md5 5e36247c7caa44abe3be5b04333918ca, 54852 bytes (same base as the list-era patch)",
+      "newlines": "keep",
+      "dev": {
+        "original": "../www-se-capture/wh000.pol.com/pml/main/index.pml",
+        "modified": "_eras/panel/wh000.pol.com/pml/main/index.pml",
+        "restored_lines": 0
+      },
+      "diff": "_eras__panel__wh000.pol.com__pml__main__index.pml.diff",
+      "sha256_original": "68bfbb97272b0e0cec0c3a070ef49bee849c9981d08c7b7a9f9c8b80e5472c54",
+      "size_original": 54852,
+      "sha256_patched": "a8a01628b5c606b735012572edbdaa193d423d39c1b213c5def31ce8d2905f72",
+      "size_patched": 56268,
+      "scan": {
+        "hunks": 17,
+        "plus": 40,
+        "minus": 16
+      }
+    },
+    {
+      "path": "_eras/panel/wh000.pol.com/pml/main/in01.pml",
+      "base": "wh000.pol.com/pml/main/in01.pml",
+      "description": "Panel-era (PS2) copy of the Games submenu: our games list plus $uLang in place of SE's $_USER_LANG, which the console does not define. Must carry the same games list as the list-era in01.pml patch.",
+      "original_source": ".se-orig sibling in the development tree, md5 065157605d09c4f48531c5c391a6e6b8, 16940 bytes",
+      "newlines": "lf",
+      "dev": {
+        "original": "wh000.pol.com/pml/main/in01.pml.se-orig",
+        "modified": "_eras/panel/wh000.pol.com/pml/main/in01.pml",
+        "restored_lines": 0
+      },
+      "diff": "_eras__panel__wh000.pol.com__pml__main__in01.pml.diff",
+      "sha256_original": "995624f4cb012192c2d55f66fbdbee8cdec255aa28f2629e811e03b938f0982a",
+      "size_original": 16940,
+      "sha256_patched": "7f8bc81a5bc8d9d14b57cddab6f064108f53bc6c6df16af305c061c371c4d7e9",
+      "size_patched": 18738,
+      "scan": {
+        "hunks": 44,
+        "plus": 106,
+        "minus": 45
+      }
+    },
+    {
+      "path": "_eras/panel/wh000.pol.com/pml/main/ad01.pml",
+      "base": "wh000.pol.com/pml/main/ad01.pml",
+      "description": "Panel-era (PS2) copy of the main-menu ad page: every $_USER_LANG test becomes $uLang, the name the panel-era index.pml defines from $_PLATFORM.",
+      "original_source": "SE's page as served in the development tree, md5 f023000c41fbbc881c63639b99b24353, 3414 bytes, also present in the portal capture",
+      "newlines": "keep",
+      "dev": {
+        "original": "wh000.pol.com/pml/main/ad01.pml",
+        "modified": "_eras/panel/wh000.pol.com/pml/main/ad01.pml",
+        "restored_lines": 0
+      },
+      "diff": "_eras__panel__wh000.pol.com__pml__main__ad01.pml.diff",
+      "sha256_original": "7f21fe211fbdd5619098436404a085868874555084d1a7d6fd52bb9106ad429c",
+      "size_original": 3414,
+      "sha256_patched": "8ab38a2650376b754c004b59caf7aa700b2d1d94c09e1c0a327cd94619950e1c",
+      "size_patched": 3389,
+      "scan": {
+        "hunks": 5,
+        "plus": 5,
+        "minus": 5
+      }
+    }
+  ],
+  "not_shipped": [
+    {
+      "path": "_lang/en-US/wh000.pol.com/pml2/cs/in03.pml",
+      "why": "one array entry changed (the Membership item repointed from SE's https member portal to this server's account page over http), but SE's English original (4739 bytes, md5 edf50d1e2bde0a1552ee47cf6356da33) is not held anywhere in the development tree, so no diff could be verified"
+    }
+  ]
+}

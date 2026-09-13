@@ -1,0 +1,93 @@
+--- a/wh000.pol.com/pml/game/tetra/index.pml
++++ b/wh000.pol.com/pml/game/tetra/index.pml
+@@ -3 +3 @@
+-<title>ƒeƒgƒ‰@Fƒeƒgƒ‰ƒ}ƒXƒ^[ƒgƒbƒv</title>
++<title>TM: Top Page</title>
+@@ -12,0 +13,4 @@
++<!-- pol-server: was size 16 -- the English labels ("Rules and Manners" = 179px)
++     overran the 201px bt02i button plate. Dropped to 14 (longest now 156px) so
++     the translated captions sit inside the button art. -->
++<style name="Btn14" proportional="1" face="2" size="14" color="#e8e0d0ff" onmousecolor="#ffffffff">
+@@ -51,2 +55,2 @@
+-		"‘¼‚ÌƒQ[ƒ€‚ğƒvƒŒƒC’†‚Å‚·",
+-		"Œ»İ‘¼‚ÌƒQ[ƒ€‚ğƒvƒŒƒC’†‚Ì‚½‚ßAƒeƒgƒ‰ƒ}&br;ƒXƒ^[‚ğ‚²—˜—p‚¢‚½‚¾‚¯‚Ü‚¹‚ñB‚²—˜—p’†‚Ì&br;ƒQ[ƒ€‚ğI—¹‚µ‚Ä‚©‚çA‚±‚Ìƒ{ƒ^ƒ“‚ğ‚²—˜—p&br;‚­‚¾‚³‚¢B"
++		"Another game is in progress",
++		"You are currently playing another game,&br;so Tetra Master is unavailable. Please&br;quit the game you are playing before&br;using this button."
+@@ -74,8 +78,12 @@
+-	<array>"01","eval:$auto_news[($length!=0)&&($lk==0)]",					"^03ƒeƒgƒ‰ƒ}ƒXƒ^[‚ğƒvƒŒƒC‚µ‚Ü‚·B"</array>
+-	<array>"02","'/pml/info/index.pml?cnt=3&ret='+$C_PATH1+'index.pml'",	"^03ƒeƒgƒ‰ƒ}ƒXƒ^[‚ÌÅVî•ñ‚Í‚±‚¿‚ç‚©‚çB"</array>
+-	<array>"03","$C_PATH1+'community/copm01.pml'",							"^03ŠF‚³‚Ü‚ªQ‰Á‰Â”\‚ÈƒCƒxƒ“ƒg‚âƒR[ƒi[‚ğ‚²—pˆÓ‚µ‚Ä‚¢‚Ü‚·B"</array>
+-	<array>"04","$C_PATH1+'guidebook/gdpm01.pml'",							"^03ƒeƒgƒ‰ƒ}ƒXƒ^[‚Ì—V‚Ñ•û‚âU—ªî•ñ‚È‚ÇA–ğ—§‚Âî•ñ‚ª–Ú‚Å‚·B"</array>
+-	<array>"05","$C_PATH1+'rule/mepm001.pml'",								"^03ƒeƒgƒ‰ƒ}ƒXƒ^[‚Ì—˜—p‹K–ñ‚âƒ}ƒi[‚È‚Ç‚ªŠm”F‚Å‚«‚Ü‚·B"</array>
+-	<array>"06","$C_PATH1+'qa/mepm001.pml'",								"^03‚¨¢‚è‚ÌÛ‚É–ğ—§‚Âî•ñ‚ğ‚Ü‚Æ‚ß‚Ä‚¢‚Ü‚·B"</array>
+-	<array>"07","$C_PATH1+'id/mepm001.pml'",								"^03ƒvƒŒƒC‚·‚é‚½‚ß‚É•K—v‚ÈAƒRƒ“ƒeƒ“ƒcID‚É‚Â‚¢‚Äà–¾‚µ‚Ä‚¢‚Ü‚·BƒEƒFƒuƒ}ƒl[‚ÉŠÖ‚·‚éè‘±‚«‚à‚±‚±‚©‚çs‚¦‚Ü‚·B"</array>
+-	<array>"11","/pml/game/index.pml",										"^03ƒQ[ƒ€‚Ìƒgƒbƒvƒy[ƒW‚Ö–ß‚è‚Ü‚·B"</array>
++	<array>"01","eval:$auto_news[($length!=0)&&($lk==0)]",					"^03Play Tetra Master.",	"Play"</array>
++	<array>"02","'/pml/info/index.pml?cnt=3&ret='+$C_PATH1+'index.pml'",	"^03The latest Tetra Master news is here.",	"News"</array>
++	<array>"03","$C_PATH1+'community/copm01.pml'",							"^03Events and features everyone can take part in.",	"Community"</array>
++	<array>"04","$C_PATH1+'guidebook/gdpm01.pml'",							"^03Packed with useful information on how to play Tetra Master, strategy and more.",	"Guidebook"</array>
++	<array>"05","$C_PATH1+'rule/mepm001.pml'",								"^03Check the Tetra Master user agreement and manners.",	"Rules and Manners"</array>
++	<array>"06","$C_PATH1+'qa/mepm001.pml'",								"^03Useful information for when you run into trouble.",	"Need Help?"</array>
++	<array>"07","$C_PATH1+'id/mepm001.pml'",								"^03Explains the Content ID required in order to play. WebMoney procedures can also be carried out here.",	"Content ID"</array>
++	<!-- pol-server: Back was /pml/game/index.pml -- SE cp932 icon hub, which is
++	     the console-era Games page and reads as wrong on the PC, where the
++	     Games list lives in the main menu. Pointed at the main menu instead,
++	     matching SE own PC game pages (ff11 and 0004 both use this path). -->
++	<array>"11","/pml/main/index.pml",										"^03Return to the PlayOnline Viewer main menu.",	"Back"</array>
+@@ -99,20 +107,5 @@
+-	<if expr="$i==0">
+-		<if expr="$playbutton_enable!=0"><!’Êí>
+-			<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="192,40" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
+-				<img name="'img'+$i" size="192,40" src="$F_PATH1+'img_i/bt'+$BTN[$i][0]+'i.ang'"
+-					 href="eval:$BTN[{$i}][1]"
+-					 onkeycancel="sd:focus@img7"
+-					 alt="$BTN[$i][2]">
+-			</sheet>
+-		<else><!ƒvƒŒƒCƒ{ƒ^ƒ“–³Œø>
+-			<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="192,40" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
+-				<img name="'img'+$i" size="192,40" src="$C_PATH1+'img_i/bt01i.png'"
+-					 href="null:"
+-					 onkeycancel="sd:focus@img7"
+-					 alt="^03Œ»İƒeƒgƒ‰ƒ}ƒXƒ^[‚ÍƒvƒŒƒC‚Å‚«‚Ü‚¹‚ñB">
+-			</sheet>
+-		</if>
+-	<elsif expr="$i==5"><!‚¨¢‚è‚È‚ç>
+-		<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="192,40" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
+-			<img name="'img'+$i" size="192,40" src="$C_PATH1+'img_i/bt'+$BTN[$i][0]+'i.ang'"
+-				 href="eval:$BTN[{$i}][1]"
++	<if expr="($i==0)&&($playbutton_enable==0)"><!ï¿½vï¿½ï¿½ï¿½Cï¿½{ï¿½^ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½>
++		<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="201,33" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
++			<img name="'img'+$i" size="201,33" src="$C_PATH1+'img_i/bt01i.png'"
++				 value="$BTN[$i][3]" style="Btn14"
++				 href="null:"
+@@ -120 +113 @@
+-				 alt="$BTN[$i][2]">
++				 alt="^03Tetra Master cannot be played at this time.">
+@@ -122,3 +115,4 @@
+-	<elsif expr="$i==7"><!‘O‚Ö–ß‚é>
+-		<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="192,40" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
+-			<img name="'img'+$i" size="192,40" src="$F_PATH1+'img_i/bt'+$BTN[$i][0]+'i.ang'"
++	<elsif expr="$i==7"><!ï¿½Oï¿½Ö–ß‚ï¿½ -- keycancel must not target itself>
++		<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="201,33" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
++			<img name="'img'+$i" size="201,33" src="$C_PATH1+'img_i/bt02i.ang'"
++				 value="$BTN[$i][3]" style="Btn14"
+@@ -128,3 +122,4 @@
+-	<else><!‚»‚Ì‘¼‚Ìƒ{ƒ^ƒ“>
+-		<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="192,40" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
+-			<img name="'img'+$i" size="192,40" src="$F_PATH1+'img_i/bt'+$BTN[$i][0]+'i.ang'"
++	<else><!Western idiom: blank plate + drawn label>
++		<sheet name="'sh_bt'+$i" pos="38,86+42*$i" size="201,33" type="4" border="0" delay="300+200*$i" wait="0" appeartime="300">
++			<img name="'img'+$i" size="201,33" src="$C_PATH1+'img_i/bt02i.ang'"
++				 value="$BTN[$i][3]" style="Btn14"
+@@ -175 +170 @@
+-	<button name="cls" pos="120,132" size="100,50" style="b_body_b" value="•Â‚¶‚é"
++	<button name="cls" pos="120,132" size="100,50" style="b_body_b" value="Close"
+@@ -205 +200 @@
+-		<text pos="106,95" size="222,16" style="Nb16">•K‚¸‚¨“Ç‚İ‚­‚¾‚³‚¢</text>
++		<text pos="106,95" size="222,16" style="Nb16">Please Read</text>
+@@ -225 +220 @@
+-		<img name="im_bk" size="110,34" src="$F_PATH2+'general/im01s.png'" value="•Â‚¶‚é" style="Bb15_2"
++		<img name="im_bk" size="110,34" src="$F_PATH2+'general/im01s.png'" value="Close" style="Bb15_2"
+@@ -230 +225 @@
+-			 alt="^03ƒjƒ…[ƒX‚ğ•Â‚¶‚ÄƒQ[ƒ€‚ğƒvƒŒƒC‚µ‚Ü‚·B">
++			 alt="^03Close the news and play the game.">

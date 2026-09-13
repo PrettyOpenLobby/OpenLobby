@@ -1,0 +1,38 @@
+Images the authored pages reference but this repository does not ship
+=====================================================================
+
+The menu pages for content 0010 (DIRGE of CERBERUS) and 0011 (FANTASY EARTH)
+draw their menu with three small pieces of chrome art that the development
+tree borrowed from the FINAL FANTASY XI menu. That art is Square Enix's, so it
+is not included here. Supply your own three files under each directory, or
+copy the equivalents out of your own portal capture
+(wh000.pol.com/pml/game/ff11/img/ holds the FFXI originals of the same names).
+
+Both directories want the same three files:
+
+  wh000.pol.com/pml/game/0010/img/mn01s.png
+  wh000.pol.com/pml/game/0011/img/mn01s.png
+      PNG, 225 x 24 pixels, 8-bit palette. The top cap of the menu column.
+      The page draws it at 229 x 19.
+
+  wh000.pol.com/pml/game/0010/img/mn02s.ang
+  wh000.pol.com/pml/game/0011/img/mn02s.ang
+      PlayOnline animated image (.ang container), 225 x 27 pixels per cell,
+      6 cells. One menu row plate; the page shows cell 0 at rest and cell 1
+      on hover. Drawn at 229 x 26, repeated once per menu entry.
+
+  wh000.pol.com/pml/game/0010/img/mn03s.png
+  wh000.pol.com/pml/game/0011/img/mn03s.png
+      PNG, 225 x 30 pixels, 8-bit palette. The bottom cap of the menu
+      column. The page draws it at 229 x 26.
+
+Nothing else on these pages needs a server-side image. The title cards
+(file:/systembg/dc.png, file:/systembg/fe.png) and the transparent click
+plate (file:/img_s/general/im01s.png) are read from the client's own install.
+
+The JongHoLow page (wh000.pol.com/pml/game/jan/index.pml) draws SE's own logo
+and button plates from wh000.pol.com/pml/game/jan/img_s/, which is part of the
+portal tree you supply; it needs nothing beyond that tree.
+
+The 0008 (FINAL FANTASY XIV) and 0013 (EverQuest II) pages reference no
+images at all.

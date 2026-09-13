@@ -1,0 +1,57 @@
+# Server announcements.
+#
+# This is the file to edit. `tools/gen_news.py` renders it into the two places
+# the Viewer actually looks:
+#
+#   www/wh000.pol.com/pcd/ntool/<locale>/latestnews.pml   the login-screen feed
+#   www/info.playonline.com/snews/<locale>/index.pml      the Information page
+#
+# Newest first. Only `date` and `title` are required.
+#
+#   date     free text -- it is displayed verbatim, never parsed. SE's own feed
+#            writes "Aug. 9, 2026 22:00 [PDT]", so match that shape if you want
+#            it to look native. Put the newest entry at the top yourself; the
+#            generator does not sort, because "newest" is not recoverable from a
+#            string SE never parsed either.
+#   title    one line. This is all the login-screen feed shows.
+#   kind     info | maintenance | update | issue | recovery   (default: info)
+#            Chooses the two trailing numbers in SE's record -- see KINDS in
+#            gen_news.py for what each pair was observed to mean.
+#   content  playonline | ffxi | tetra | jan   (default: playonline)
+#            Which service the item is about. SE tags account and Friend List
+#            notices "playonline" and game notices "ffxi".
+#   body     optional. Shown on the Information page under the title. Blank
+#            lines separate paragraphs; it is wrapped for you.
+#
+# After editing:  python tools/gen_news.py
+
+- date: "Aug. 12, 2026 19:00 [UTC]"
+  title: "In-client registration is now open"
+  kind: update
+  content: playonline
+  body: |
+    You can now create a PlayOnline ID from inside the Viewer itself, without
+    an account being made for you on the server first.
+
+    The sign-up wizard walks through seven screens: age confirmation, this
+    privacy notice, your registration code, country, your password and handle
+    name, a confirmation screen, and finally the screen that issues your
+    PlayOnline ID. Write the ID down -- you will need it and your password
+    every time you log in.
+
+    Registration codes are optional. Without one you are granted the default
+    content; with one you get whatever that code carries.
+
+- date: "Aug. 12, 2026 18:00 [UTC]"
+  title: "Welcome to this PlayOnline server"
+  kind: info
+  content: playonline
+  body: |
+    This is a private, non-commercial PlayOnline revival server. It is not
+    operated by, affiliated with, or endorsed by Square Enix.
+
+    Accounts, handles, mail and friend lists are local to this server and are
+    not shared with anyone.
+
+    Announcements posted here appear on the login screen and in this
+    Information page.

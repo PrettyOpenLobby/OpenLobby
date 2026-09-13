@@ -1,0 +1,38 @@
+--- a/wh000.pol.com/pml/main/index.pml
++++ b/wh000.pol.com/pml/main/index.pml
+@@ -174 +174 @@
+-	<define name="$gmTest" nodefvalue="0">		<!-- GMコール表示切替： [0]非表示 [1]表示  -->
++	<define name="$gmTest" nodefvalue="1">		<!-- GMコール表示切替： [0]非表示 [1]表示  -->
+@@ -365,0 +366,7 @@
++<!-- pol-server: DOES THIS PLATFORM HAVE ANY BANNER AT ALL. data.pml gates every
++     $BANNER row behind $_PLATFORM==WIN and sets $BANNERSIZE to 0,0,0 for PS2 and
++     XBOX360, so $BANNER[n] is an EMPTY array there while $BANNERMAX stays 3. -->
++<define name="$bnAny" value="0">
++<for init="$i=0" cond="$i<=$bnMax" next="$i++">
++	<define name="$calc" calc="$bnAny+=$BANNERSIZE[$i]">
++</for>
+@@ -420,0 +428,8 @@
++<!-- pol-server: SAME SIGNAL AS THE IMAGE LOOP BELOW, WHICH THIS SHEET WAS MISSING.
++     It is gated only on $hasBanner (the ad01.pml banner), so on the PS2 it still
++     rendered &var=$BANNER[$culNum][$arBnDataSave[$culNum][0]][4] against an empty
++     array and drew the literal (Array error) in the PICKUP comment box at 404,325.
++     $arBnDataSave is never updated either -- the loop that fills it is inside the
++     guard -- so the subscript is [0][0][4] on nothing. Measured on a 1.18.15f PS2,
++     2026-08-24; screenshot symptom was the box under the three switch buttons. -->
++<if expr="$bnAny>0">
+@@ -428,0 +444 @@
++</if>
+@@ -447,0 +464,10 @@
++
++		<!-- pol-server: SKIP A SLOT SE DID NOT FILL FOR THIS PLATFORM.
++		     data.pml wraps every $BANNER entry in a $_PLATFORM=='WIN' guard and sets
++		     $BANNERSIZE to "0","0","0" for PS2 and XBOX360 -- that zero IS the
++		     signal. $BANNERMAX stays 3 regardless, so looping on it alone did
++		     $_RND%0 and then indexed an empty array, which substitutes the literal
++		     (Array Error) into the image URL: the console fetched
++		     /pcd/mainmenu/ja-JP/(Array Error) and drew a broken tile on the lobby
++		     screen. Measured 2026-08-15 on a 1.18.15f PS2. -->
++		<if expr="$BANNERSIZE[$i]>0">
+@@ -513,0 +540,2 @@
++		</if>
++

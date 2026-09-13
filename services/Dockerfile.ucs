@@ -1,0 +1,51 @@
+# Image for the UCS CGI (in-client account registration).
+#
+# Deliberately NOT the shared Dockerfile: that one is python:3.12-slim, which is
+# bookworm and ships OpenSSL 3.x -- and OpenSSL 3 removed SSLv3 entirely. The
+# PlayOnline Viewer's TLS ClientHello is genuine SSL 3.0 (record 16 03 00,
+# client_version 03 00, ciphers 000a/0005/0004/0009/0003/0008), so an OpenSSL 3
+# server can never complete that handshake.
+#
+# bullseye ships OpenSSL 1.1.1, which is the best chance available from a stock
+# base image. Note that even 1.1.1 is usually built `no-ssl3`, so this may still
+# not be enough -- if logs/ucs.log shows "TLS handshake FAILED", the answer is a
+# legacy TLS terminator in front (stunnel or `openssl s_server -ssl3` built with
+# enable-ssl3 + enable-ssl3-method), with this service run as POL_UCS_PLAIN=1.
+FROM python:3.11-slim-bullseye
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir pyyaml pycryptodome
+    # pycryptodome: gmcrypt (CAST-128, pulled in via admin -> gmd) refuses to
+    # import without it -- the CI smoke test caught this on 2026-08-23.
+
+WORKDIR /app
+COPY ucscgi.py /app/ucscgi.py
+COPY accounts.py /app/accounts.py
+# Admin dashboard (the `admin` service reuses this image). The dev compose
+# live-mounts services/ over /app so these look redundant there, but production
+# runs the image as built -- without them the prod `admin` container has no
+# code to run. admin.py resolves admin_web/ relative to itself.
+COPY admin.py /app/admin.py
+COPY admin_web /app/admin_web
+# Template evaluator for the admin PML preview (imported by admin.py).
+COPY pmleval.py /app/pmleval.py
+# Announcement store + every news PML the News tab publishes (imported by
+# admin.py). tools/gen_news.py imports this same module, so the CLI and the
+# panel can never render different files.
+COPY newsgen.py /app/newsgen.py
+# The transitive closure of the modules above (see the matching note in
+# ./Dockerfile): local imports of shipped modules ride along, guarded or not.
+COPY contentlist.py /app/contentlist.py
+COPY gmchat.py /app/gmchat.py
+COPY gmcrypt.py /app/gmcrypt.py
+COPY gmd.py /app/gmd.py
+COPY pmlrefs.py /app/pmlrefs.py
+COPY polnick.py /app/polnick.py
+# gmcrypt loads its CAST-128 s-boxes at import -- the file must ride or the
+# admin/gmd/gmcrypt imports all fail (caught by the CI smoke test 2026-08-23).
+COPY cast_sboxes.bin /app/cast_sboxes.bin
+
+ENTRYPOINT []
+CMD ["python", "ucscgi.py"]

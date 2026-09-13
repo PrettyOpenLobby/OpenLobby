@@ -1,0 +1,17 @@
+--- a/wh000.pol.com/pml/main/ad01.pml
++++ b/_eras/panel/wh000.pol.com/pml/main/ad01.pml
+@@ -3 +3 @@
+-<if expr="$_USER_LANG=='en-US'">
++<if expr="$uLang=='en-US'">
+@@ -54 +54 @@
+-<if expr="$_USER_LANG=='fr-FR'">
++<if expr="$uLang=='fr-FR'">
+@@ -60 +60 @@
+-<elsif expr="$_USER_LANG=='de-DE'">
++<elsif expr="$uLang=='de-DE'">
+@@ -92 +92 @@
+-<if expr="$_USER_LANG=='fr-FR'">
++<if expr="$uLang=='fr-FR'">
+@@ -96 +96 @@
+-<elsif expr="$_USER_LANG=='de-DE'">
++<elsif expr="$uLang=='de-DE'">

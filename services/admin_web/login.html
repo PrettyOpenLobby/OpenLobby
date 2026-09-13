@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<!-- Served by admin.py for ANY unauthenticated non-API request, so it must be
+     self-contained: /static/* needs a session too, and pulling app.js in here
+     would mean serving the panel's code to anyone who can reach the port. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenLobby Admin - Sign in</title>
+  <style>
+    :root {
+      --bg: #14161c; --panel: #1c1f28; --panel2: #232733; --line: #333949;
+      --text: #e6e8ee; --muted: #9aa2b4; --accent: #5aa9ff; --bad: #ff7a7a;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center;
+      justify-content: center; background: var(--bg); color: var(--text);
+      font: 14px/1.45 'Segoe UI', system-ui, sans-serif; }
+    form { background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 26px 26px 22px; width: 340px; }
+    h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; letter-spacing: .3px; }
+    .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+    input { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+      border-radius: 7px; padding: 9px 10px; font: inherit; width: 100%; }
+    button { background: var(--accent); color: #04121f; border: 0; width: 100%;
+      padding: 10px 16px; border-radius: 8px; font-weight: 600; font-size: 14px;
+      cursor: pointer; margin-top: 18px; }
+    button[disabled] { opacity: .6; cursor: default; }
+    .err { color: var(--bad); font-size: 12.5px; margin-top: 12px; min-height: 17px; }
+  </style>
+</head>
+<body>
+  <form id="f" autocomplete="on">
+    <h1>OpenLobby Admin</h1>
+    <div class="sub">Admin sign-in</div>
+    <label for="u">Username</label>
+    <input id="u" name="username" autocomplete="username" autofocus required>
+    <label for="p">Password</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" required>
+    <button id="go" type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+  <script>
+    const f = document.getElementById("f"), err = document.getElementById("err"),
+          go = document.getElementById("go");
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      err.textContent = ""; go.disabled = true; go.textContent = "Signing in…";
+      try {
+        const r = await fetch("/api/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: document.getElementById("u").value,
+                                 password: document.getElementById("p").value })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || r.statusText);
+        // The cookie is set; reload whatever URL was originally asked for.
+        location.reload();
+      } catch (ex) {
+        err.textContent = ex.message;
+        document.getElementById("p").value = "";
+        document.getElementById("p").focus();
+      } finally {
+        go.disabled = false; go.textContent = "Sign in";
+      }
+    };
+  </script>
+</body>
+</html>

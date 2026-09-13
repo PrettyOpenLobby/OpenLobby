@@ -1,0 +1,75 @@
+--- a/wh000.pol.com/pml/main/index.pml
++++ b/_eras/panel/wh000.pol.com/pml/main/index.pml
+@@ -6 +6,22 @@
+-	<if expr="$_USER_LANG=='ja-JP'">
++	<!--=== 言語 =================================================================================-->
++	<!-- pol-server: THE USER LANGUAGE HAS TWO NAMES.
++	     The PC Viewer calls it $_USER_LANG; the PS2 calls it $_LANG and has no
++	     $_USER_LANG at all (confirmed in the decrypted pml.pex variable table,
++	     which holds $_PLATFORM, $_LANG, $_HAVE_CONTENTSID and no $_USER_LANG).
++	     An unresolved name is not an error on the console: it is SUBSTITUTED
++	     into the text as the literal (変数エラー). That is how the include URLs
++	     below became /pcd/ntool/(変数エラー)/latestnews.pml, which returns an
++	     empty page and leaves this whole document blank, with the background
++	     of the previous page still on screen. Backing out of the Janhourou
++	     portal was the reproducer.
++	     $_PLATFORM exists on both (WIN / PS2), so branch on it once here and
++	     use $uLang everywhere below, including in ad01.pml and in01.pml, which
++	     are included further down and inherit it.
++	     Original preserved as index.pml.bak-ulang-20260812T161500Z. -->
++	<if expr="$_PLATFORM=='PS2'">
++		<define name="$uLang" calc="$_LANG">
++	<else>
++		<define name="$uLang" calc="$_USER_LANG">
++	</if>
++
++	<if expr="$uLang=='ja-JP'">
+@@ -8 +29 @@
+-	<elsif expr="$_USER_LANG=='fr-FR'">
++	<elsif expr="$uLang=='fr-FR'">
+@@ -10 +31 @@
+-	<elsif expr="$_USER_LANG=='de-DE'">
++	<elsif expr="$uLang=='de-DE'">
+@@ -52 +73 @@
+-	<if expr="$_USER_LANG=='fr-FR'||$_USER_LANG=='de-DE'">
++	<if expr="$uLang=='fr-FR'||$uLang=='de-DE'">
+@@ -55 +76 @@
+-		<include src="$nwPath+$_USER_LANG+'/latestnews.pml'">	<!-- インクルード -->
++		<include src="$nwPath+$uLang+'/latestnews.pml'">	<!-- インクルード -->
+@@ -69 +90 @@
+-	<if expr="$_USER_LANG=='ja-JP'">
++	<if expr="$uLang=='ja-JP'">
+@@ -71 +92 @@
+-	<elsif expr="$_USER_LANG=='en-US'">
++	<elsif expr="$uLang=='en-US'">
+@@ -76 +97 @@
+-	<include src="$bnPath+$_USER_LANG+'/data.pml'">			<!-- インクルード -->
++	<include src="$bnPath+$uLang+'/data.pml'">			<!-- インクルード -->
+@@ -80,0 +102,3 @@
++	<!-- pol-server: back to the SE default 0. Was 3 (forced Janhourou
++	     shortcut), harmless only while data.pml still defined 0 first.
++	     data.pml is SE bytes now and defines nothing. -->
+@@ -91 +115 @@
+-	<if expr="$_USER_LANG=='ja-JP'">
++	<if expr="$uLang=='ja-JP'">
+@@ -118 +142 @@
+-	<define name="$bcTest" nodefvalue="0">						<!-- テスト用フラグ -->
++	<define name="$bcTest" nodefvalue="1">						<!-- テスト用フラグ (pol-server: 1 = the SE-authored path that treats every title as purchased) -->
+@@ -131 +155 @@
+-	<if expr="$_USER_LANG=='ja-JP'">
++	<if expr="$uLang=='ja-JP'">
+@@ -295 +319 @@
+-	<if expr="$_USER_LANG=='en-US'">
++	<if expr="$uLang=='en-US'">
+@@ -302 +326 @@
+-	<define name="$AD_IMAGE_PATH" calc="'bn_i/'+$_USER_LANG+'/'+$_PLATFORM+'/'">
++	<define name="$AD_IMAGE_PATH" calc="'bn_i/'+$uLang+'/'+$_PLATFORM+'/'">
+@@ -456 +480 @@
+-			<img pos="0,0" !size="270,160" src="$bnPath+$_USER_LANG+'/'+$BANNER[$i][$bnRnd][1]" zindex="7"
++			<img pos="0,0" !size="270,160" src="$bnPath+$uLang+'/'+$BANNER[$i][$bnRnd][1]" zindex="7"
+@@ -1096 +1120 @@
+-		<if expr="$_USER_LANG=='de-DE'">
++		<if expr="$uLang=='de-DE'">
+@@ -1098 +1122 @@
+-		<elsif expr="$_USER_LANG=='fr-FR'">
++		<elsif expr="$uLang=='fr-FR'">

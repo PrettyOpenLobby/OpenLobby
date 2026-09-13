@@ -1,0 +1,125 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+
+	<title>FINAL FANTASY XIV: Top Page</title>
+
+	<!--
+	  pol-server AUTHORED PAGE, ARCHIVAL. FINAL FANTASY XIV IS a registered
+	  PlayOnline content -- id 8, `FINALFANTASY_XIV`, dated **2009/10/27** -- but
+	  only in the XBOX 360 Viewer family. Found in the mirrored patch tree
+	  X2U-1000, build 20091222_A (work/ps2/mirrors, .slc blob, decrypted with the
+	  int0 key like every other sqpolcts.bin).
+
+	  IT IS ABSENT FROM EVERY PC AND PS2 BUILD WE HOLD -- the 2003 CD, JP 1.15,
+	  JP preupdate, PS2, W2U-1000, EU, JP 2011 and US 1.18 tables all jump 7 -> 10.
+	  The two families diverge: the Xbox table carries id 8 and no id 15, while
+	  the 2011 PC tables carry id 15 (FINALFANTASY_XI_TEST) and no id 8.
+
+	  The PC side did ship the ART: the red "XIV" badge is in cicn_s002 tile 0 of
+	  the us-2011 and jp-2011 sheets (blank in jp-preupdate, EU and FriendList;
+	  the 2003 CD has no sheet 2 at all). So on PC the icon arrived without the
+	  registration -- which is why an earlier version of this page wrongly said
+	  the content was "never registered". It was, on Xbox, two years earlier.
+
+	  Its record flag is 0, the same as EverQuest II and the mail services, and
+	  unlike every title the Viewer actually launches (FFXI, TM, Mahjong, FMO, DC,
+	  FE are all 1) -- consistent with a portal/account registration rather than a
+	  launchable content. FFXIV shipped on the Square Enix account system.
+
+	  WHAT THE ICON IS FOR. The cicn_* sheets are the per-handle content BADGES:
+	  app.dll walks each handle character list, resolves every entry, and feeds
+	  the resulting u16 content code to the icon getter to pick the tile it draws
+	  beside that handle. Selection is by NUMBER and never consults this table, so
+	  on a PC client -- which has the tile but not the record -- an id 8 badge
+	  would still draw, while the title itself would resolve to the polcore
+	  fallback name "Contents0008".
+
+	  INFORMATIONAL ONLY -- no Play button, nothing installable.
+	  References NO server-hosted images: one HTTP request.
+	-->
+
+	<define name="$GAME_ID" value="8">
+
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<!-- No title card exists for this id in any client tree. -->
+	<systembg src="file:/systembg/bg02s.png">
+
+	<define name="$F_PATH2" value="file:/img_s/">
+
+	<style name="xvlg"  size="30" color="#DCDCE8ff,#101018ee" face="6" proportional="1" spacing="4">
+	<style name="xvsub" size="15" color="#B8B8C8ff,#0A0A10ee" face="0" proportional="1" spacing="2">
+	<style name="tx15"  size="15" color="#E3E3E3ff,#000000ee" face="0" proportional="1" vspacing="6">
+	<style name="tx14d" size="14" color="#A2A2B2ff,#000000ee" face="0" proportional="1" vspacing="5">
+
+</head>
+<body altbgcolor="#00000000">
+
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="400" wait="2">
+	<text size="640,480" bgcolor="#0A0A10ff"></text>
+</sheet>
+<sheet pos="0,96" size="640,132" border="0" alpha="1" delay="150" appeartime="450" wait="2">
+	<text size="640,132" bgcolor="#181824ff"></text>
+</sheet>
+
+<sheet name="shLogo" pos="0,120" size="640,44" border="0" alpha="1" delay="300"
+ appeartime="300" wait="2">
+	<text size="640,44" align="center" valign="middle" style="xvlg">FINAL FANTASY XIV</text>
+</sheet>
+
+<sheet name="shSub" pos="0,170" size="640,22" border="0" alpha="1" delay="450"
+ appeartime="300" wait="2">
+	<text size="640,22" align="center" valign="middle" style="xvsub">content id 8 - registered 2009/10/27</text>
+</sheet>
+
+<hr pos="170,204" width="300" height="2" skin="0" skincolor="#6E6E8Caa">
+
+<sheet name="shTx" pos="105,236" size="430,120" border="0" alpha="1" delay="600"
+ appeartime="300" wait="2" delayproperties="1">
+	<if expr="$_USER_LANG=='fr-FR'">
+		<text size="430,120" align="center" style="tx15">PlayOnline a bien enregistr&eacute; ce titre : contenu 8, dat&eacute; du 27/10/2009 - mais uniquement dans le Viewer Xbox 360, dont les clients PC et PS2 n&rsquo;ont jamais re&ccedil;u la table. Sur PC, l&rsquo;ic&ocirc;ne est arriv&eacute;e en 2011 sans l&rsquo;enregistrement correspondant.</text>
+	<elsif expr="$_USER_LANG=='de-DE'">
+		<text size="430,120" align="center" style="tx15">PlayOnline hat diesen Titel sehr wohl registriert: Inhalt 8, datiert auf den 27.10.2009 - allerdings nur im Xbox-360-Viewer, dessen Tabelle die PC- und PS2-Clients nie erhielten. Auf dem PC kam 2011 das Symbol ohne die zugeh&ouml;rige Registrierung.</text>
+	<else>
+		<text size="430,120" align="center" style="tx15">PlayOnline did register this title: id 8, dated 2009/10/27 - but only in the Xbox 360 Viewer, whose table the PC and PS2 clients never received. On PC the badge art shipped in 2011 without the registration behind it. The game itself launched on the Square Enix account system.</text>
+	</if>
+</sheet>
+
+<sheet name="shNote" pos="105,372" size="430,20" border="0" alpha="1" delay="800"
+ appeartime="250" wait="2" delayproperties="1">
+	<if expr="$_USER_LANG=='fr-FR'">
+		<text size="430,20" align="center" valign="middle" style="tx14d">Entr&eacute;e d&rsquo;archive - enregistr&eacute; sur Xbox 360 uniquement.</text>
+	<elsif expr="$_USER_LANG=='de-DE'">
+		<text size="430,20" align="center" valign="middle" style="tx14d">Archiveintrag - nur auf Xbox 360 registriert.</text>
+	<else>
+		<text size="430,20" align="center" valign="middle" style="tx14d">Archive entry - registered on Xbox 360 only.</text>
+	</if>
+</sheet>
+
+<sheet name="shBtBackTx" pos="94,361" size="50,24" border="0" show="0" alpha="1" delay="0"
+ appeartime="150" wait="2">
+	<if expr="$_USER_LANG=='fr-FR'">
+		<text size="50,24" style="xvsub">Retour</text>
+	<elsif expr="$_USER_LANG=='de-DE'">
+		<text size="50,24" style="xvsub">Zur&uuml;ck</text>
+	<else>
+		<text size="50,24" style="xvsub">Back</text>
+	</if>
+</sheet>
+
+<sheet name="shBtBack" pos="73,378" size="70,32" border="0" alpha="1" delay="450"
+ appeartime="250" wait="2" delayproperties="1">
+	<text size="70,32" bgcolor="#20202Cff"></text>
+	<img name="apBtBack" pos="0,0" size="70,32" src="$F_PATH2+'general/im01s.png'"
+		 href="/pml/main/index.pml"
+		 onkeycancel="sound:3,/pml/main/index.pml"
+		 onmouseover="sd:show=1@shBtBackTx"
+		 onmouseout="sd:show=0@shBtBackTx"
+		 mousesound="1"
+		 alt="^03Return to PlayOnline Viewer main menu.">
+</sheet>
+
+<timer enable="1" delay="1000" href="sd:focus@apBtBack">
+
+</body>
+</pml>
