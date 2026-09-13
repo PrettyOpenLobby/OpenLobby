@@ -1,0 +1,49 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+	<title>DIRGE of CERBERUS: Information</title>
+	<!-- pol-server AUTHORED. Sub-page of the content-10 set; see index.pml. -->
+	<include src="/pml/game/0010/style.pml">
+	<if expr="$_PLATFORM=='PS2'"><define name="$uLang" calc="$_LANG"><else><define name="$uLang" calc="$_USER_LANG"></if>
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<systembg src="file:/systembg/dc.png">
+</head>
+<body altbgcolor="#00000000">
+
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="350" wait="2">
+	<text size="640,480" bgcolor="#0E0505c0"></text>
+</sheet>
+
+<sheet name="shHead" pos="60,60" size="520,30" border="0" alpha="1" delay="200" appeartime="250" wait="2">
+	<text size="520,30" valign="middle" style="dcsec">Information</text>
+</sheet>
+<sheet name="shTtl" pos="60,92" size="520,18" border="0" alpha="1" delay="280" appeartime="250" wait="2">
+	<text size="520,18" valign="middle" style="dcsub">DIRGE of CERBERUS -FINAL FANTASY VII-</text>
+</sheet>
+<hr pos="60,118" width="520" height="2" skin="0" skincolor="#8C5050aa">
+
+<sheet name="shBody" pos="60,140" size="520,250" border="0" alpha="1" delay="400" appeartime="300" wait="2" delayproperties="1">
+	<if expr="$uLang=='fr-FR'">
+		<text size="520,250" style="tx15">Dirge of Cerberus -FINAL FANTASY VII- est un jeu de tir en vue subjective sorti sur PlayStation&nbsp;2 en 2006 (character design&nbsp;: Tetsuya Nomura). Son mode multijoueur en ligne passait par PlayOnline et n&rsquo;a &eacute;t&eacute; propos&eacute; qu&rsquo;au Japon.&br;&br;Le Viewer conserve son identifiant de contenu (10) et son illustration de titre. Le jeu lui-m&ecirc;me est un disque PlayStation&nbsp;2 et ne se lance que depuis la console&nbsp;; le service en ligne n&rsquo;est plus actif.</text>
+	<elsif expr="$uLang=='de-DE'">
+		<text size="520,250" style="tx15">Dirge of Cerberus -FINAL FANTASY VII- ist ein 2006 f&uuml;r die PlayStation&nbsp;2 erschienener Third-/First-Person-Shooter (Charakterdesign: Tetsuya Nomura). Sein Online-Mehrspielermodus lief &uuml;ber PlayOnline und wurde nur in Japan angeboten.&br;&br;Der Viewer kennt bis heute seine Content-ID (10) und liefert das Titelbild. Das Spiel selbst ist ein PlayStation-2-Titel und startet nur von der Konsole; der Online-Dienst ist nicht mehr aktiv.</text>
+	<else>
+		<text size="520,250" style="tx15">Dirge of Cerberus -FINAL FANTASY VII- is a shooter released for the PlayStation&nbsp;2 in 2006, with character design by Tetsuya Nomura. Its online multiplayer mode ran through PlayOnline and was offered in Japan only.&br;&br;The Viewer still knows this title's content ID (10) and ships its title artwork. The game itself is a PlayStation&nbsp;2 disc and can only be started from the console; the online service is no longer active.</text>
+	</if>
+</sheet>
+
+<if expr="$uLang=='fr-FR'"><define name="$backValue" value="Retour">
+<elsif expr="$uLang=='de-DE'"><define name="$backValue" value="Zur&uuml;ck">
+<else><define name="$backValue" value="Back"></if>
+<sheet name="shBack" pos="60,404" size="90,32" border="0" alpha="1" delay="500" appeartime="250" wait="2" delayproperties="1">
+	<text size="90,32" bgcolor="#3A2020ff"></text>
+	<img name="apBack" pos="0,0" size="90,32" src="$F_PATH2+'general/im01s.png'"
+		 style="bt15" value="$backValue"
+		 href="$C_PATH1+'index.pml'"
+		 onkeycancel="sound:3,{$C_PATH1+'index.pml'}"
+		 mousesound="1" alt="^03Return to the Dirge of Cerberus menu.">
+</sheet>
+<timer enable="1" delay="800" href="sd:focus@apBack">
+
+</body>
+</pml>

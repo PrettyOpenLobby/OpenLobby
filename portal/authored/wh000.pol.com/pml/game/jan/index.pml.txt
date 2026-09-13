@@ -1,0 +1,128 @@
+<pml>
+<head>
+	<title>JongHoLow</title>
+	<!--
+	  pol-server AUTHORED. RECONSTRUCTED 2026-08-19, ENGLISH RELABEL 2026-08-19.
+	  JongHoLow is content id 3. SE served no Western portal page (404), but the
+	  full menu art ships in this tree: the logo (lg01s) and the seven animated
+	  button plates (mnbt01-07s.ang). Each button is: the plate art (imgN, the
+	  hover target), the English caption as text over it, and a TRANSPARENT click
+	  layer (apN) on top that carries the href/focus -- the text must NOT be the
+	  topmost element or it swallows the clicks. Play goes to gameto:3; the other
+	  seven have no sub-page yet (null href).
+	-->
+	<config top="" loadinterval="0">
+	<systembg src="file:/systembg/bg02s.png">
+	<style name="jmtx"  size="16" face="2" proportional="1" align="center" color="#F4ECD8ff,#20140699" onmousecolor="#FFFFFFff,#201406cc">
+	<style name="bb15j" size="15" face="0" proportional="1" align="center" color="#FFFFFFff,#000000ee">
+</head>
+<body background="/pml/game/jan/img_s/bg01s.png" altbgcolor="#00000099">
+
+<!-- Logo (right) -->
+<sheet name="sh_lg" pos="410,74" size="161,320" border="0" wait="2" delay="200"
+       appeartime="400" background="/pml/game/jan/img_s/lg01s.png">
+</sheet>
+
+<!-- 0: Play -->
+<sheet name="sh_bt0" pos="40,46" size="232,45" type="4" border="0" delay="260" wait="0" appeartime="280">
+	<img name="img0" size="232,45" src="/pml/game/jan/img_s/mnbt01s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">Play</text>
+	<img name="ap0" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="gameto:3" mousesound="1"
+	     onmouseover="sd:sequence=1@img0" onmouseout="sd:sequence=0@img0"
+	     onkeyup="sd:focus@ap_bk" onkeydown="sd:focus@ap1"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03Play JongHoLow.">
+</sheet>
+
+<!-- 1: News -->
+<sheet name="sh_bt1" pos="40,90" size="232,45" type="4" border="0" delay="330" wait="0" appeartime="280">
+	<img name="img1" size="232,45" src="/pml/game/jan/img_s/mnbt02s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">News</text>
+	<img name="ap1" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="null:" mousesound="1"
+	     onmouseover="sd:sequence=1@img1" onmouseout="sd:sequence=0@img1"
+	     onkeyup="sd:focus@ap0" onkeydown="sd:focus@ap2"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03The latest JongHoLow news.">
+</sheet>
+
+<!-- 2: About Fees -->
+<sheet name="sh_bt2" pos="40,134" size="232,45" type="4" border="0" delay="400" wait="0" appeartime="280">
+	<img name="img2" size="232,45" src="/pml/game/jan/img_s/mnbt03s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">About Fees</text>
+	<img name="ap2" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="null:" mousesound="1"
+	     onmouseover="sd:sequence=1@img2" onmouseout="sd:sequence=0@img2"
+	     onkeyup="sd:focus@ap1" onkeydown="sd:focus@ap3"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03About JongHoLow usage fees.">
+</sheet>
+
+<!-- 3: Manual -->
+<sheet name="sh_bt3" pos="40,178" size="232,45" type="4" border="0" delay="470" wait="0" appeartime="280">
+	<img name="img3" size="232,45" src="/pml/game/jan/img_s/mnbt04s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">Manual</text>
+	<img name="ap3" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="null:" mousesound="1"
+	     onmouseover="sd:sequence=1@img3" onmouseout="sd:sequence=0@img3"
+	     onkeyup="sd:focus@ap2" onkeydown="sd:focus@ap4"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03The JongHoLow manual.">
+</sheet>
+
+<!-- 4: Mahjong Course -->
+<sheet name="sh_bt4" pos="40,222" size="232,45" type="4" border="0" delay="540" wait="0" appeartime="280">
+	<img name="img4" size="232,45" src="/pml/game/jan/img_s/mnbt05s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">Mahjong Course</text>
+	<img name="ap4" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="null:" mousesound="1"
+	     onmouseover="sd:sequence=1@img4" onmouseout="sd:sequence=0@img4"
+	     onkeyup="sd:focus@ap3" onkeydown="sd:focus@ap5"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03Learn how to play mahjong.">
+</sheet>
+
+<!-- 5: Rules & Manners -->
+<sheet name="sh_bt5" pos="40,266" size="232,45" type="4" border="0" delay="610" wait="0" appeartime="280">
+	<img name="img5" size="232,45" src="/pml/game/jan/img_s/mnbt06s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">Rules &amp; Manners</text>
+	<img name="ap5" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="null:" mousesound="1"
+	     onmouseover="sd:sequence=1@img5" onmouseout="sd:sequence=0@img5"
+	     onkeyup="sd:focus@ap4" onkeydown="sd:focus@ap6"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03Rules and online etiquette.">
+</sheet>
+
+<!-- 6: Support -->
+<sheet name="sh_bt6" pos="40,310" size="232,45" type="4" border="0" delay="680" wait="0" appeartime="280">
+	<img name="img6" size="232,45" src="/pml/game/jan/img_s/mnbt07s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">Support</text>
+	<img name="ap6" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="null:" mousesound="1"
+	     onmouseover="sd:sequence=1@img6" onmouseout="sd:sequence=0@img6"
+	     onkeyup="sd:focus@ap5" onkeydown="sd:focus@ap7"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03Support information.">
+</sheet>
+
+<!-- 7: Content ID -->
+<sheet name="sh_bt7" pos="40,354" size="232,45" type="4" border="0" delay="750" wait="0" appeartime="280">
+	<img name="img7" size="232,45" src="/pml/game/jan/img_s/mnbt01s.ang">
+	<text pos="0,0" size="232,45" align="center" valign="middle" style="jmtx">Content ID</text>
+	<img name="ap7" pos="0,0" size="232,45" src="file:/img_s/general/im01s.png"
+	     href="null:" mousesound="1"
+	     onmouseover="sd:sequence=1@img7" onmouseout="sd:sequence=0@img7"
+	     onkeyup="sd:focus@ap6" onkeydown="sd:focus@ap_bk"
+	     onkeycancel="sound:3,/pml/main/index.pml" alt="^03Content ID for this title.">
+</sheet>
+
+<!-- Back -->
+<sheet name="sh_bk" pos="40,410" size="70,32" border="0" delay="820" appeartime="250" wait="2">
+	<text size="70,32" bgcolor="#00000055"></text>
+	<text size="70,32" align="center" valign="middle" style="bb15j">Back</text>
+	<img name="ap_bk" pos="0,0" size="70,32" src="file:/img_s/general/im01s.png"
+	     href="/pml/main/index.pml"
+	     onkeyup="sd:focus@ap7" onkeydown="sd:focus@ap0"
+	     onkeycancel="sound:3,/pml/main/index.pml"
+	     mousesound="1" alt="^03Return to the PlayOnline Viewer main menu.">
+</sheet>
+
+<timer enable="1" delay="1100" href="sd:focus@ap0">
+
+</body>
+</pml>

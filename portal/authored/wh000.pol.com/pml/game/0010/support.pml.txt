@@ -1,0 +1,51 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+	<title>DIRGE of CERBERUS: Support</title>
+	<!-- pol-server AUTHORED. Sub-page of the content-10 set; see index.pml. -->
+	<include src="/pml/game/0010/style.pml">
+	<if expr="$_PLATFORM=='PS2'"><define name="$uLang" calc="$_LANG"><else><define name="$uLang" calc="$_USER_LANG"></if>
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<systembg src="file:/systembg/dc.png">
+</head>
+<body altbgcolor="#00000000">
+
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="350" wait="2">
+	<text size="640,480" bgcolor="#0E0505c0"></text>
+</sheet>
+
+<sheet name="shHead" pos="60,60" size="520,30" border="0" alpha="1" delay="200" appeartime="250" wait="2">
+	<if expr="$uLang=='fr-FR'"><text size="520,30" valign="middle" style="dcsec">Besoin d&rsquo;aide&nbsp;?</text>
+	<elsif expr="$uLang=='de-DE'"><text size="520,30" valign="middle" style="dcsec">Hilfe</text>
+	<else><text size="520,30" valign="middle" style="dcsec">Support</text></if>
+</sheet>
+<sheet name="shTtl" pos="60,92" size="520,18" border="0" alpha="1" delay="280" appeartime="250" wait="2">
+	<text size="520,18" valign="middle" style="dcsub">DIRGE of CERBERUS -FINAL FANTASY VII-</text>
+</sheet>
+<hr pos="60,118" width="520" height="2" skin="0" skincolor="#8C5050aa">
+
+<sheet name="shBody" pos="60,140" size="520,250" border="0" alpha="1" delay="400" appeartime="300" wait="2" delayproperties="1">
+	<if expr="$uLang=='fr-FR'">
+		<text size="520,250" style="tx15">Le service en ligne de Dirge of Cerberus a ferm&eacute; et aucune assistance sp&eacute;cifique n&rsquo;est disponible pour ce titre.&br;&br;Pour PlayOnline en g&eacute;n&eacute;ral, ouvrez Service &amp; Assistance depuis le menu principal. Cette page est conserv&eacute;e comme trace historique de la place du titre sur PlayOnline.</text>
+	<elsif expr="$uLang=='de-DE'">
+		<text size="520,250" style="tx15">Der Online-Dienst von Dirge of Cerberus wurde eingestellt; f&uuml;r diesen Titel gibt es keinen eigenen Support mehr.&br;&br;F&uuml;r PlayOnline selbst &ouml;ffnen Sie Service &amp; Support &uuml;ber das Hauptmen&uuml;. Diese Seite bleibt als historischer Nachweis erhalten.</text>
+	<else>
+		<text size="520,250" style="tx15">The Dirge of Cerberus online service has ended and no dedicated support is available for this title.&br;&br;For PlayOnline itself, open Service &amp; Support from the main menu. This page is preserved as a historical record of the title's place on PlayOnline.</text>
+	</if>
+</sheet>
+
+<if expr="$uLang=='fr-FR'"><define name="$backValue" value="Retour">
+<elsif expr="$uLang=='de-DE'"><define name="$backValue" value="Zur&uuml;ck">
+<else><define name="$backValue" value="Back"></if>
+<sheet name="shBack" pos="60,404" size="90,32" border="0" alpha="1" delay="500" appeartime="250" wait="2" delayproperties="1">
+	<text size="90,32" bgcolor="#3A2020ff"></text>
+	<img name="apBack" pos="0,0" size="90,32" src="$F_PATH2+'general/im01s.png'"
+		 style="bt15" value="$backValue"
+		 href="$C_PATH1+'index.pml'"
+		 onkeycancel="sound:3,{$C_PATH1+'index.pml'}"
+		 mousesound="1" alt="^03Return to the Dirge of Cerberus menu.">
+</sheet>
+<timer enable="1" delay="800" href="sd:focus@apBack">
+
+</body>
+</pml>

@@ -1,0 +1,158 @@
+# SSL 3.0 terminator for the PlayOnline Viewer.
+#
+# The Viewer's ClientHello is genuine SSL 3.0 (record 16 03 00, client_version
+# 03 00) offering only RSA key exchange with RC4/3DES/DES:
+#
+#   000a TLS_RSA_WITH_3DES_EDE_CBC_SHA      0005 TLS_RSA_WITH_RC4_128_SHA
+#   0004 TLS_RSA_WITH_RC4_128_MD5           0009 TLS_RSA_WITH_DES_CBC_SHA
+#   0003 TLS_RSA_EXPORT_WITH_RC4_40_MD5     0008 TLS_RSA_EXPORT_WITH_DES40_CBC_SHA
+#
+# No current distro can speak that: SSLv3 was removed from OpenSSL 3 entirely,
+# and both Debian and Alpine build 1.x with `no-ssl3` (verified -- stretch and
+# alpine:3.8 both refuse `openssl ciphers -ssl3`). So OpenSSL is compiled here
+# from source with SSLv3 and the weak ciphers explicitly re-enabled, and stunnel
+# is linked against that build.
+#
+# It terminates SSLv3 and forwards PLAINTEXT to the real service, which runs
+# with --plain. Nothing else changes.
+#
+# ---------------------------------------------------------------------------
+# THIS IS DELIBERATELY BROKEN CRYPTO. SSL 3.0 with RC4/export ciphers is
+# thoroughly dead -- POODLE, BEAST, RC4 biases. That is fine here and only here:
+# the sole peer is a 2003 game client on a private network, and the content is
+# a sign-up form for a revived hobby service. Do NOT put this in front of
+# anything else, and do NOT expose it to the internet. Bind it to Tailscale.
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim AS build
+
+# 1.1.1w. Verified to complete a real SSLv3 handshake (DES-CBC3-SHA) through
+# stunnel to a plain-HTTP backend. 1.0.2u works too, but 1.1.1w is four years
+# younger and gets everything except SSLv3 right, so prefer it.
+#
+# The catch is entirely in the cipher string: 1.1.x refuses SSLv3 at its default
+# security level, so stunnel-ssl3.conf must carry @SECLEVEL=0. 1.0.2 predates
+# security levels and REJECTS that syntax ("SSL_CIPHER_PROCESS_RULESTR: invalid
+# command"), so the two branches need different cipher strings -- switching
+# version means switching that too.
+ARG OPENSSL_VERSION=1.1.1w
+# Spelled out rather than derived: RUN uses /bin/sh (dash), which has no
+# ${var//./_} substitution, and the failure mode is a bare "Bad substitution".
+ARG OPENSSL_TAG=OpenSSL_1_1_1w
+# 1.1.x flags. For 1.0.2u use "enable-ssl3 enable-ssl3-method no-shared":
+# `no-tests` and `enable-weak-ssl-ciphers` are both 1.1.0+ only.
+ARG OPENSSL_FLAGS="enable-ssl3 enable-ssl3-method enable-weak-ssl-ciphers no-shared no-tests"
+# stunnel prunes /downloads/ down to the current release, so an older pin 404s
+# there (wget exit 8) even though the version existed. /archive/5.x/ keeps them,
+# so fetch from there and this stays reproducible as releases move on.
+ARG STUNNEL_VERSION=5.80
+
+# Checksums for the two source tarballs. Both were confirmed identical when
+# downloaded from two independent hosts (GitHub vs ftp.nluug.nl, and
+# stunnel.org vs ftp.nluug.nl), so a mirror serving something else is caught.
+# This matters more than usual: the artifact is a TLS terminator, and until now
+# the build trusted whatever the network returned.
+ARG OPENSSL_SHA256=cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8
+ARG STUNNEL_SHA256=6d0841d48de07cbbaf4a055919065bf7bb5ebc63cc15c97a2c76caa2bf285513
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential wget ca-certificates perl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# --- OpenSSL with SSLv3 put back ------------------------------------------
+#   enable-ssl3          the protocol itself
+#   enable-ssl3-method   the SSLv3_*method() entry points stunnel needs
+#   enable-weak-ssl-ciphers  RC4 / DES / export suites the client offers
+#
+# Fetched with mirror fallback, retries and a checksum. The single-URL `wget -q`
+# this replaces failed in CI with a bare "exit code: 8" -- a server error
+# response -- and -q had swallowed the status line, so the log did not say
+# whether it was a 404, a 429 or a proxy refusal. `-nv` keeps one line per
+# attempt AND prints wget's "ERROR <code>", which is the whole diagnosis.
+#
+# github.com is first because it is upstream's own host and www.openssl.org
+# simply 301s to it; nluug is a genuinely independent mirror, so it survives
+# GitHub rate-limiting or an egress allowlist that misses the release-asset CDN
+# (release-assets.githubusercontent.com is a DIFFERENT host from github.com --
+# an easy thing for a firewall to permit one of and not the other).
+RUN set -eu; \
+    tb="openssl-${OPENSSL_VERSION}.tar.gz"; \
+    for url in \
+        "https://github.com/openssl/openssl/releases/download/${OPENSSL_TAG}/${tb}" \
+        "https://ftp.nluug.nl/security/openssl/${tb}" \
+        "https://www.openssl.org/source/old/1.1.1/${tb}" ; do \
+      for try in 1 2 3; do \
+        echo ">>> openssl: $url (attempt $try)"; \
+        if wget -nv --tries=1 --timeout=30 -O "$tb" "$url" \
+           && echo "${OPENSSL_SHA256}  $tb" | sha256sum -c -; then \
+          got=1; break 2; \
+        fi; \
+        rm -f "$tb"; \
+        sleep $((try * 5)); \
+      done; \
+    done; \
+    if [ -z "${got:-}" ]; then echo "ERROR: every OpenSSL mirror failed"; exit 1; fi; \
+    tar xf "$tb" \
+    && cd "openssl-${OPENSSL_VERSION}" \
+    && ./config --prefix=/opt/ssl3 --openssldir=/opt/ssl3 ${OPENSSL_FLAGS} \
+    && make -j"$(nproc)" \
+    && make install_sw
+
+# Fail the build here rather than at runtime if SSLv3 did not survive.
+RUN /opt/ssl3/bin/openssl ciphers -ssl3 >/dev/null \
+    && echo "SSLv3 ciphers available:" \
+    && /opt/ssl3/bin/openssl ciphers -ssl3 | tr ':' '\n' | head -20
+
+# --- stunnel linked against it --------------------------------------------
+# Same fetch treatment as OpenSSL above: stunnel.org first, nluug as the
+# independent fallback.
+RUN set -eu; \
+    tb="stunnel-${STUNNEL_VERSION}.tar.gz"; \
+    for url in \
+        "https://www.stunnel.org/archive/5.x/${tb}" \
+        "https://ftp.nluug.nl/pub/networking/stunnel/archive/5.x/${tb}" ; do \
+      for try in 1 2 3; do \
+        echo ">>> stunnel: $url (attempt $try)"; \
+        if wget -nv --tries=1 --timeout=30 -O "$tb" "$url" \
+           && echo "${STUNNEL_SHA256}  $tb" | sha256sum -c -; then \
+          got=1; break 2; \
+        fi; \
+        rm -f "$tb"; \
+        sleep $((try * 5)); \
+      done; \
+    done; \
+    if [ -z "${got:-}" ]; then echo "ERROR: every stunnel mirror failed"; exit 1; fi; \
+    tar xf "$tb" \
+    && cd "stunnel-${STUNNEL_VERSION}" \
+    && ./configure --prefix=/opt/stunnel --with-ssl=/opt/ssl3 --disable-systemd \
+    && make -j"$(nproc)" \
+    && make install
+
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /opt/ssl3   /opt/ssl3
+COPY --from=build /opt/stunnel /opt/stunnel
+
+COPY stunnel-ssl3.conf /etc/stunnel/stunnel.conf
+# The web (443 + band 51443) and ucs (sign-up 8443) configs are baked in too,
+# selected per-service with STUNNEL_CONF. The dev compose bind-mounts them over
+# /etc/stunnel/stunnel.conf instead (tunable without a rebuild); production has
+# no repo checkout to mount from, so the image must carry them. Their
+# `connect = <service>:` backends are rewritten at start by SSL3_CONNECT_HOST
+# for host-networking deploys -- see ssl3-entrypoint.sh.
+COPY stunnel-web.conf /etc/stunnel/stunnel-web.conf
+COPY stunnel-ucs.conf /etc/stunnel/stunnel-ucs.conf
+COPY ssl3-entrypoint.sh /usr/local/bin/ssl3-entrypoint.sh
+RUN chmod +x /usr/local/bin/ssl3-entrypoint.sh
+
+# Where the generated self-signed cert lives; mount a volume to persist it.
+VOLUME ["/certs"]
+
+ENTRYPOINT ["/usr/local/bin/ssl3-entrypoint.sh"]

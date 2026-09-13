@@ -1,0 +1,91 @@
+--- a/wh000.pol.com/pml/main/in01.pml
++++ b/wh000.pol.com/pml/main/in01.pml
+@@ -38,0 +39,5 @@
++<!-- pol-server: id 3. SE shipped 1/2/4 only. See PML-AUTHORING.md 10. -->
++<elsif expr="$SC_ID==3"><array>"masc03i.png",  "/pml/game/jan/index.pml",    "^03Jump to the JongHoLow top page."</array>
++<!-- pol-server: ids 10/11 AUTHORED, not SE. AUTHORING 10. -->
++<elsif expr="$SC_ID==10"><array>"masc10i.png", "/pml/game/0010/index.pml",  "^03Jump to the Dirge of Cerberus -FINAL FANTASY VII- top page."</array>
++<elsif expr="$SC_ID==11"><array>"masc11i.png", "/pml/game/0011/index.pml",  "^03Jump to the FANTASY EARTH top page."</array>
+@@ -49,0 +55 @@
++	<!-- pol-server: a "Games" opener, not SE hardwired FFXI. AUTHORING 10. -->
+@@ -51 +57 @@
+-		"FINAL FANTASY XI",
++		"Games",
+@@ -53 +59 @@
+-			"^03Pour explorer le monde fantastique de Vana&rsquo;diel et jouer à ce jeu de rôle en ligne.",
++			"^03Choisissez un jeu auquel jouer.",
+@@ -55 +61 @@
+-			"^03Erkunden Sie in diesem Online-Rollenspiel die atemberaubende Welt Vana&rsquo;diels.",
++			"^03Wählen Sie ein Spiel aus.",
+@@ -57 +63 @@
+-			"^03Explore the breathtaking world of Vana&squo;diel in this online role-playing game.",
++			"^03Select a game to play.",
+@@ -59 +64,0 @@
+-		"'/pml/game/ff11/index.pml?SC='+$SC_ID+'&PF='+$_PLATFORM",
+@@ -60,0 +66 @@
++		"0",
+@@ -220 +226 @@
+-			"1","0"
++			"1","1"
+@@ -232 +238,49 @@
+-			"2","0"
++			"2","1"
++		</array>
++		<!-- pol-server: id 3, informational only (PS2). AUTHORING 10. -->
++		<array>
++			"JongHoLow",
++			"'/pml/game/jan/index.pml?SC='+$SC_ID+'&PF='+$_PLATFORM",
++			<if expr="$_USER_LANG=='fr-FR'">
++				"^03Le mah-jong en ligne de PlayOnline.",
++			<elsif expr="$_USER_LANG=='de-DE'">
++				"^03PlayOnlines Online-Mahjong.",
++			<else>
++				"^03PlayOnline&rsquo;s online mahjong parlor.",
++			</if>
++			"3","1"
++		</array>
++
++		<array>
++			"FRONT MISSION ONLINE",
++			"'/pml/game/0004/index.pml?SC='+$SC_ID+'&PF='+$_PLATFORM",
++			<if expr="$_USER_LANG=='fr-FR'">
++				"^03Pilotez votre wanzer sur les champs de bataille de l&rsquo;ile Huffman.",
++			<elsif expr="$_USER_LANG=='de-DE'">
++				"^03Steuern Sie Ihren Wanzer über die Schlachtfelder von Huffman Island.",
++			<else>
++				"^03Command your wanzer on the battlefields of Huffman Island.",
++			</if>
++			"4","1"
++		</array>
++
++		<!-- pol-server: id 11, trailing "1" is a forced owned-flag. AUTHORING 10. -->
++		<array>
++			"FANTASY EARTH",
++			"'/pml/game/0011/index.pml?SC='+$SC_ID+'&PF='+$_PLATFORM",
++			<if expr="$_USER_LANG=='fr-FR'">
++				"^03Combattez pour la domination du royaume dans ce jeu d&rsquo;action en ligne.",
++			<elsif expr="$_USER_LANG=='de-DE'">
++				"^03Kämpfen Sie in diesem Online-Actionspiel um die Vorherrschaft.",
++			<else>
++				"^03Fight for control of the realm in this online action game.",
++			</if>
++			"11","1"
++		</array>
++		<!-- pol-server: id 10, PS2-only. English only on purpose -- DoC never
++		     shipped in fr/de, so those arms would be pure bytes (PML-AUTHORING §10). -->
++		<array>
++			"Dirge of Cerberus -FINAL FANTASY VII-",
++			"'/pml/game/0010/index.pml?SC='+$SC_ID+'&PF='+$_PLATFORM",
++			"^03Take the fight to Deepground in this online-enabled action shooter.",
++			"10","1"
+@@ -240,0 +295,2 @@
++			<!-- pol-server: SE ja-JP gate, kept as shipped. Forcing it emptied
++			     every submenu. LIST-ERA ONLY. AUTHORING 10. -->
+@@ -245 +301,6 @@
+-					<define name="$calc2" calc="$arMenu2[$rpt1][$i-1][4]=$_HAVE_CONTENTID[$arMenu2[$rpt1][$i-1][3]]">
++					<! PS2 spells it CONTENTSID, with an S. AUTHORING 10. >
++					<if expr="$_PLATFORM=='PS2'">
++						<define name="$calc2" calc="$arMenu2[$rpt1][$i-1][4]=$_HAVE_CONTENTSID[$arMenu2[$rpt1][$i-1][3]]">
++					<else>
++						<define name="$calc2" calc="$arMenu2[$rpt1][$i-1][4]=$_HAVE_CONTENTID[$arMenu2[$rpt1][$i-1][3]]">
++					</if>

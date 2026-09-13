@@ -1,0 +1,110 @@
+# Portal UI ERAS -- which client build gets which pages.
+#
+# The games UI has two eras and a client must only ever be served its own;
+# serving the wrong one breaks it in BOTH directions. The boundaries were
+# measured by decrypting `data/utf/env.dat` out of every build that ships one
+# -- do not re-derive them here.
+#
+#   panel  POL_START_URL_GAME -> /pml/game/index.pml
+#          three hand-composited animated art panels, $GM_NUM=3 hardcoded
+#   list   POL_MAINMENU_URL   -> /pml/main/index.pml -> in01.pml
+#          contentID entries + help text, no art panels
+#
+# THE PANEL UI IS NOT "THE PS2 UI" -- it is the older UI on every platform. But
+# the platforms did NOT move together: the PS2 switched two years before the PC,
+# on a one-line env.dat delta (`+ POL_MAINMENU_URL`). So the boundary is per
+# SERVICE and expressed as a build id, not as a release number.
+#
+# HOW A CLIENT'S ERA IS DECIDED, in order:
+#   1. `overrides` below, by peer address (an operator override, always wins).
+#   2. The client's OWN `X-POL-VIEWER-VERSION` request header, e.g.
+#      `Ver.1.18.15e [PoL-Shim v0.1.0 b24]`, mapped through `boundaries` below.
+#      Every live client sends it on every portal request -- PC, Steam Deck and
+#      PS2 alike (verified 2026-08-16 in logs/captures). It is the only signal
+#      that belongs to THE REQUEST rather than to an address, so it is the only
+#      one that cannot be answered with another machine's version.
+#   3. The build the client reported to the POLP patch server, which records it
+#      in logs/client-builds.json, compared against `boundaries` below. Needed
+#      for a client too old to send the header. WARNING: It is keyed by PEER ADDRESS
+#      and every client here shares one (172.18.0.1, the Docker bridge), so all
+#      Windows Viewers write a single `W2U/1000` slot and the last one to check
+#      in speaks for the rest -- which is exactly why step 2 goes first.
+#   4. `default_era`, for a client that has neither.
+#
+# The User-Agent carries platform and language but NO build number (measured
+# 2026-08-14 from the recovered console caches). It still decides WHICH service
+# family's boundary applies, in both step 2 and step 3.
+
+# Set false to ignore `X-POL-VIEWER-VERSION` and decide on the reported build
+# alone -- i.e. to go back to pre-2026-08-16 behaviour. Only reason to: a client
+# whose header lies about the tree it is actually running.
+trust_version_header: true
+
+eras:
+  - id: panel
+    label: "panel games menu (older)"
+  - id: list
+    label: "list main menu (newer)"
+
+# First build of the LIST era per service. A client BELOW this is panel era.
+# Build ids sort as dates, which is what makes an unarchived build resolvable.
+boundaries:
+  # MEASURED: the env.dat delta 20040706_2 ->
+  # 20041207_3 is exactly `+ POL_MAINMENU_URL`, +1/-0.
+  PS2: "20041207_3"
+  # INFERRED: P2U ships the same build ids as PS2 from 20041207_3 on, and the
+  # measurement was made on the JP tree. Verify by decrypting a P2U env.dat.
+  P2U: "20041207_3"
+  # MEASURED: the PC switch rode the PolContents.dll 32 KB -> 72 KB rewrite in
+  # the same build, which is why its delta is +4/-2 rather than +1/-0.
+  W2U: "20061212_3"
+  W20: "20061212_3"
+  # UNKNOWN. The Xbox 360 service opens at 1.17.00w (2006-02-15) -- after the
+  # PS2 switch, before the PC's -- and nothing has been measured about it. Left
+  # unset so such a client takes default_era rather than a guess dressed up as
+  # a rule. Its env.dat would settle it the same way.
+  X2U: null
+  XB2: null
+
+default_era: list
+
+# --- a SEPARATE, still-open question: the PML variable set --------------------
+# The menu era above is not known to be the same transition as the page-language
+# one. Established 2026-08-14:
+#   * our PS2 (build 20040428_5, panel era) has NO $_USER_LANG -- it uses $_LANG,
+#     emits short codes (`/pcd/mainmenu/ja/`), and loads title art from the
+#     client (`file:/game/ff11/`).
+#   * the PC's app.dll carries the variable table as UTF-16LE strings, and
+#     1.17.04c (build 20061212_3 -- the SAME build as the PC menu switch) is the
+#     earliest we hold containing USER_LANG / PLATFORM / VIEWER_VERSION. It
+#     still contains LANG and HAVE_CONTENTSID, so the modern engine is a
+#     superset, not a replacement.
+#   * a 1.18.15f PS2 drive's cache holds the modern $_USER_LANG FFXI page and
+#     that console emitted 26 full-tag `/pcd/mainmenu/ja-JP/` URLs.
+# So on the PC the two changes coincide; on the PS2 it is UNKNOWN whether the
+# variable set moved with the menu in 2004-12 or later. It cannot be read
+# statically -- every console module ships as `.pex.enc`, and a scan of all 42
+# PS2 builds finds nothing, which is the encryption and not an answer. Patch a
+# drive to a candidate build and watch whether it asks for `/pcd/ntool/ja/` or
+# `/pcd/ntool/ja-JP/`; one boot per candidate.
+
+# --- resolution ---------------------------------------------------------------
+# Roots are tried in order and the first file that exists wins. `<era>` is the
+# client's era, `<lang>` its User-Agent language tag (en-US / ja-JP).
+#
+#   www/_eras/<era>/<lang>/<host>/<path>   our translations, era-specific
+#   www/_eras/<era>/<host>/<path>          SE originals for that era
+#   www/_lang/<lang>/<host>/<path>         our translations, era-agnostic
+#   www/<host>/<path>                      today's tree (list-era originals)
+#
+# An empty era directory falls straight through to www/<host>/, so nothing
+# changes for any client until pages are actually placed in an era root.
+#
+# EVERY file under _eras/ or _lang/ that is not SE's own bytes must carry a
+# `.polprov` sidecar naming its origin, so a real original can replace it later
+# without archaeology. `tools/portal_provenance.py --check` enforces it.
+
+# Per-client overrides, by peer address. Use when a client cannot report a build
+# or to force a page set for a test.
+overrides: {}
+  # "127.0.0.1": panel

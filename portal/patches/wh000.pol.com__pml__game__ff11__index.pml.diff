@@ -1,0 +1,32 @@
+--- a/wh000.pol.com/pml/game/ff11/index.pml
++++ b/wh000.pol.com/pml/game/ff11/index.pml
+@@ -84 +84,4 @@
+-	<define name="$bgs" value="3"><!画像枚数>
++	<!POL-REVIVAL: SE ships bgd00..bgd02; our capture only caught bgd00, so the>
++	<!other two 404 and the Viewer falls back to its error background. Held at 1>
++	<!until img/bgd01.png + img/bgd02.png are fetched (tools/polfetch.py). Was 3.>
++	<define name="$bgs" value="1"><!画像枚数>
+@@ -859,2 +862,19 @@
+-<!--
+-<if expr="$_PLATFORM=='WIN' && $_VIEWER_VERSION>='Ver.1.18.15e'">
++<!-- pol-server RESTORE: SE shipped this block COMMENTED OUT (the open marker sat
++     here, the close marker just after the </if> below) while leaving every
++     reference to sh_testplay live -- the tiESRBTESTSERVER timer, the $imbtc
++     onkeycancel entry and $PLY all still toggle a sheet that was never defined.
++     Un-commented so content 15 (FINAL FANTASY XI Test Server, sqpolcts.bin
++     record 15) gets back the Play button SE built for it. This is SE's own
++     markup restored, not a route we invented.
++
++     The VERSION half of SE's gate is deliberately dropped. The original read
++         $_PLATFORM=='WIN' && $_VIEWER_VERSION>='Ver.1.18.15e'
++     and $_VIEWER_VERSION occurs nowhere else in SE's corpus, nor in the PML
++     engine's variable table read out of the PS2 pml.pex (which has $_VERSION
++     and $_MAJOR_VERSION). An unknown name is a variable error, which would
++     leave the sheet undefined and the button permanently invisible -- the exact
++     failure this restore exists to undo. Our only PC client IS 1.18.15e, so the
++     test is a no-op for us. The platform half is KEPT: $_PLATFORM is a real
++     variable and is used twice more in this file. Put the full expression back
++     if $_VIEWER_VERSION is ever confirmed to resolve on the PC engine. -->
++<if expr="$_PLATFORM=='WIN'">
+@@ -885 +904,0 @@
+--->

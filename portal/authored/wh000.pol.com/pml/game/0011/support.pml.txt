@@ -1,0 +1,53 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+	<title>FANTASY EARTH: Support</title>
+	<!-- pol-server AUTHORED. Sub-page of the content-11 set; see index.pml. On
+	     SE's own page this menu item (お困りなら) was GREYED; here it is a live
+	     page whose text explains that same service status. -->
+	<include src="/pml/game/0011/style.pml">
+	<if expr="$_PLATFORM=='PS2'"><define name="$uLang" calc="$_LANG"><else><define name="$uLang" calc="$_USER_LANG"></if>
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<systembg src="file:/systembg/fe.png">
+</head>
+<body altbgcolor="#00000000">
+
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="350" wait="2">
+	<text size="640,480" bgcolor="#120A05c0"></text>
+</sheet>
+
+<sheet name="shHead" pos="60,60" size="520,30" border="0" alpha="1" delay="200" appeartime="250" wait="2">
+	<if expr="$uLang=='fr-FR'"><text size="520,30" valign="middle" style="fesec">Besoin d&rsquo;aide&nbsp;?</text>
+	<elsif expr="$uLang=='de-DE'"><text size="520,30" valign="middle" style="fesec">Hilfe</text>
+	<else><text size="520,30" valign="middle" style="fesec">Support</text></if>
+</sheet>
+<sheet name="shTtl" pos="60,92" size="520,18" border="0" alpha="1" delay="280" appeartime="250" wait="2">
+	<text size="520,18" valign="middle" style="fesub">FANTASY EARTH -THE RING OF DOMINION-</text>
+</sheet>
+<hr pos="60,118" width="520" height="2" skin="0" skincolor="#8C6E4Eaa">
+
+<sheet name="shBody" pos="60,140" size="520,250" border="0" alpha="1" delay="400" appeartime="300" wait="2" delayproperties="1">
+	<if expr="$uLang=='fr-FR'">
+		<text size="520,250" style="tx15">Sur la page d&rsquo;origine de Square Enix, cet &eacute;l&eacute;ment de menu &eacute;tait gris&eacute;&nbsp;: le service Fantasy Earth n&rsquo;offrait pas d&rsquo;assistance d&eacute;di&eacute;e ici. Le client Windows reste install&eacute;, mais aucun serveur de monde ne r&eacute;pond.&br;&br;Pour PlayOnline en g&eacute;n&eacute;ral, ouvrez Service &amp; Assistance depuis le menu principal.</text>
+	<elsif expr="$uLang=='de-DE'">
+		<text size="520,250" style="tx15">Auf der Originalseite von Square Enix war dieser Men&uuml;punkt ausgegraut: Fantasy Earth bot hier keinen eigenen Support. Der Windows-Client bleibt installiert, doch es antwortet kein Weltserver.&br;&br;F&uuml;r PlayOnline selbst &ouml;ffnen Sie Service &amp; Support &uuml;ber das Hauptmen&uuml;.</text>
+	<else>
+		<text size="520,250" style="tx15">On Square Enix's own page this menu item was greyed out -- Fantasy Earth offered no dedicated support here. The Windows client remains installed, but no world server answers.&br;&br;For PlayOnline itself, open Service &amp; Support from the main menu.</text>
+	</if>
+</sheet>
+
+<if expr="$uLang=='fr-FR'"><define name="$backValue" value="Retour">
+<elsif expr="$uLang=='de-DE'"><define name="$backValue" value="Zur&uuml;ck">
+<else><define name="$backValue" value="Back"></if>
+<sheet name="shBack" pos="60,404" size="90,32" border="0" alpha="1" delay="500" appeartime="250" wait="2" delayproperties="1">
+	<text size="90,32" bgcolor="#36251Aff"></text>
+	<img name="apBack" pos="0,0" size="90,32" src="$F_PATH2+'general/im01s.png'"
+		 style="bt15" value="$backValue"
+		 href="$C_PATH1+'index.pml'"
+		 onkeycancel="sound:3,{$C_PATH1+'index.pml'}"
+		 mousesound="1" alt="^03Return to the Fantasy Earth menu.">
+</sheet>
+<timer enable="1" delay="800" href="sd:focus@apBack">
+
+</body>
+</pml>

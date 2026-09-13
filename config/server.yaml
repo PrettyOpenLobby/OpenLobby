@@ -1,0 +1,667 @@
+# PlayOnline private-server config -- the single source of truth.
+#
+# Everything else (DNS answers, which ports the loggers bind, the generated
+# env.dat) is derived from this file. For local dev you edit `stub_ip` and run
+# `docker compose up`; for production you point each component at its real
+# backend and regenerate env.dat.
+#
+# ---------------------------------------------------------------------------
+# The one wrinkle to understand up front:
+#
+# env.dat is the client's server directory, but it does NOT contain every host
+# the client talks to. The login pool host is built at runtime from a hardcoded
+# template ("pp%03d.pol.com") that env.dat cannot override. So redirection is
+# done primarily by DNS (which catches *every* pol.com name), and env.dat
+# regeneration is a secondary tool for changing specific values/paths.
+# ---------------------------------------------------------------------------
+
+# Where the client should send all pol.com traffic, as the CLIENT sees it.
+#   - client + docker on the same Windows box .... 127.0.0.1
+#   - client in a VM, docker on the host ......... the host's LAN IP
+#   - production ................................. your server's public IP
+stub_ip: "127.0.0.1"
+
+dns:
+  # Every name under these zones (and the bare zone) resolves to stub_ip.
+  zones:
+    - pol.com
+    - playonline.com
+    - sqex.net
+  # Anything not under a zone above is forwarded here, so the client machine
+  # keeps working when it uses this box as its DNS server.
+  upstream: "1.1.1.1"
+  # When non-empty, ONLY these hosts are redirected to the stub; all other
+  # pol.com names forward to their real SE IP. This lets the client load SE's
+  # real portal/content (wh000, ucs, ...) while we still intercept the
+  # login-critical hosts. Empty this list to redirect the whole zone again.
+  redirect_only:
+    - pt008.pol.com   # POLP patch/version (NA node)
+    - pt002.pol.com   # other ptNNN names -> all resolve to 124.150.156.107;
+    - pt004.pol.com   # the JP client uses pt004 as its patch host, so redirect
+    - pt007.pol.com   # these too and relay them, to capture the JP region code
+    - pt011.pol.com
+    - pt012.pol.com
+    # pc<content-id><region> = the PER-TITLE patch hosts, on port 53000 + id.
+    # These are now REDIRECTED, because work/ps2/mirrors holds a complete local
+    # archive of both live per-title trees and polserver2.py serves them:
+    #   pc001* -> 53001 FINAL FANTASY XI      (7.7 GB, still patched by SE)
+    #   pc002* -> 53002 Tetra Master          (SYNTHESISED, see below)
+    #   pc003* -> 53003 Janhourou             (SYNTHESISED, PS2 only)
+    #   pc004* -> 53004 Front Mission Online  (SYNTHESISED)
+    #   pc011* -> 53011 Fantasy Earth         (SYNTHESISED)
+    #   pc014* -> 53014 PlayOnline Friend List
+    # All pcNNN names resolve to the same SE box, so the region suffix only
+    # documents which client asked; the server discriminates on the region and
+    # product fields inside the POLP request, not on the hostname.
+    - pc001w2u.pol.com
+    - pc001w20.pol.com
+    # FFXI TEST SERVER (content id 0015) -> :53015. The name comes from app.dll's
+    # own template `pc%03d%s.pol.com`, so content 15 asks pc015<region>. There is
+    # no 0015 tree and never will be -- SE's 53015 was to deliver the ~15 GB the
+    # Test Client installer omits, and it is gone. This is redirected so the
+    # pre-launch update check reaches US and is answered W2U/0015 via
+    # POLP_CURRENT, instead of forwarding to a retired SE box: a dead patch
+    # server is NOT "no update available" to the client, it errors out. Exactly
+    # the PS2/0001 shape -- see the POLP_CURRENT comment in docker-compose.yml.
+    - pc015w2u.pol.com
+    - pc015w20.pol.com   # JP name listed so a JP client fails fast on us too
+    - pc002w2u.pol.com   # Tetra Master: SE's 53002 has been CLOSED for years, so
+    - pc002w20.pol.com   # this tree could not be archived. It is SYNTHESISED from
+                         # the installed title by work/ps2/polsynth.py -- one
+                         # version, Direct blobs only, no history. W2U is built
+                         # from the US install and W20 from the JP one, because
+                         # those two trees genuinely differ.
+    # PS2 titles. Janhourou (0003) was JP-only, so region PS2 and nothing else.
+    # Tetra Master DID ship on the West PS2 (P2U) -- but our tree is built from
+    # the JP disc (SLPS-20200), and a West tree is a genuinely DIFFERENT tree,
+    # exactly as the PC W2U and W20 Tetra Master trees are. So P2U is NOT
+    # aliased to it: serving the JP assets to a West client would be wrong
+    # content, not a near-enough substitute. pc002p2u is redirected anyway so
+    # such a client fails fast on us instead of hanging on dead SE.
+    - pc002ps2.pol.com
+    - pc002p2u.pol.com   # no P2U/0002 bundle yet -- needs a West PS2 source
+    - pc003ps2.pol.com
+    # FFXI on the PS2 asks for its patch host as pc001ps2 (MEASURED 2026-08-14:
+    # `A pc001ps2.pol.com -> forwarded` in dns.log, seconds before the console
+    # reported POL-1161). Only the two PC names were listed, so the console's
+    # lookup went upstream to a host SE retired, it never reached :53001, and the
+    # launch died at the update prompt -- the same shape as the Friend List
+    # W2U/0014 miss, one layer lower. p2u is listed with it because a West PS2
+    # would ask that way and should fail fast on us rather than hang on dead SE.
+    - pc001ps2.pol.com
+    - pc001p2u.pol.com
+    # SAME TWO-LAYER GAP, ONE TITLE OVER (measured 2026-08-15): launching FMO
+    # on the console logged `A pc004ps2.pol.com -> forwarded` and the title
+    # then reported it could not update. Only the two PC names were listed.
+    # Dirge of Cerberus (10) is here too -- it is on the PS2 games menu now,
+    # so it will ask the moment anyone opens it.
+    - pc004ps2.pol.com
+    - pc004p2u.pol.com
+    - pc010ps2.pol.com
+    - pc010p2u.pol.com
+    # Front Mission Online and Fantasy Earth are JP builds (FMO's own
+    # Data/version/verwinjp.cfg says `verwinjp_060823_1647`), so their bundles
+    # are W20 -- but they carry a W2U region alias, since which region code the
+    # client actually puts in cmd 7 has never been measured for these titles.
+    - pc004w20.pol.com
+    - pc004w2u.pol.com
+    - pc011w20.pol.com
+    - pc011w2u.pol.com
+    - pc014w20.pol.com
+    - pc014w2u.pol.com
+    - ci000.pol.com   # login directory
+    # -- account creation / registration --------------------------------------
+    # Added for the PS2 Viewer, whose "add a PlayOnline ID" flow goes here.
+    # All of these forward to NXDOMAIN upstream (SE retired the hosts), so
+    # without them the client cannot even resolve the registration gate.
+    # Which pair a client uses depends on its vintage: the 1.09-era Viewer
+    # talks to userctl.pol.com, the 1.18.15-era one to *.square-enix.com.
+    # Real captures of both flows sit in ps2hdd/urlcache-1093 and -1815.
+    - userctl.pol.com          # 1.09-era account control
+    - ucsgate.pol.com          # account gate
+    - account.square-enix.com  # 1.18-era account system
+    - secure.square-enix.com   # ...and its HTTPS half. NOTE: this one still
+                               # resolves to a LIVE SE box (61.195.53.13), so
+                               # leaving it off the whitelist sends real
+                               # registration attempts to Square Enix. Delete
+                               # this line to capture from the live host again.
+    - gi000.pol.com            # Tetra Master world server. Missing until
+                               # 2026-08-12, when TM first BOOTED and failed with
+                               # trm-8196-37302: the client resolved this name,
+                               # DNS logged `-> forwarded`, and the connect went
+                               # to the real (dead) internet. The whitelist trap
+                               # again -- gi003 was listed, gi000 never was.
+    - gi003.pol.com            # Janhourou world server
+    # Front Mission Online world servers -- named verbatim in
+    # FrontMissionOnline.dll, which contains exactly five pol.com strings:
+    # ci000 (login, already listed) and these four. Missing until 2026-08-12,
+    # when FMO first RENDERED -- it went fullscreen and looped its opening movie
+    # forever, accepting no input, because the name resolved to the real (dead)
+    # internet and the connect never answered. The whitelist trap for the THIRD
+    # time (gi000 for Tetra Master, gd000/gm000 for Friend List). If a title
+    # boots and then hangs on a splash, cutscene or black screen, CHECK THIS LIST
+    # BEFORE ANYTHING ELSE.
+    # fmo00 = the PS2 FMO world/auth host (PS2 client dials fmo00, not the
+    # PC region hosts fmo01-04). Was missing here so DNS FORWARDED it
+    # upstream -> PS2 FMO "failed to connect to the authentication server".
+    # Added live on prod 2026-08-23.
+    #
+    # WARNING: The note added with it said "prod-local; server.yaml is not tracked to
+    # origin". THAT IS WRONG -- this file IS tracked, and the fix sat in prod's
+    # working tree as an uncommitted modification for hours, one `git checkout`
+    # away from gone. It also wedged `pol-git-sync` the moment another commit
+    # touched a file it had local edits in. Committed 2026-08-23 for that
+    # reason; see prod-checkout-local-edits-wedge-sync.
+    - fmo00.pol.com
+    - fmo01.pol.com
+    - fmo02.pol.com
+    - fmo03.pol.com
+    - fmo04.pol.com
+    # Fantasy Earth world server -- the whitelist trap for the FOURTH time, and
+    # the first one the client named out loud. Found 2026-08-13 once FE actually
+    # booted: pol-shim's dbgstring hook caught FE_Client's own logging saying
+    #   LLB Connect start IP=f-earth00.pol.com, port=54848
+    #   FE_NETWORK :: Connect / IP=f-earth00.pol.com port=54848 /mode=0
+    #   FE_NETWORK :: ReleaseConnect() ...
+    # The name is NXDOMAIN at SE now, so without this line DNS forwards it, the
+    # connect dies, and FE shows an in-game dialog (its OWN widget, not a Win32
+    # MessageBox -- the MessageBoxA hook lands in FE_Client and never fires).
+    # NOTE the port: 54848, not the 5124x auth band and not 53000+id.
+    - f-earth00.pol.com
+    # FFXI lobby server -- named verbatim in FFXiMain.dll (ASCII @0x32780),
+    # found by static scan 2026-08-13 BEFORE first launch, precisely because of
+    # the four whitelist bites above. The client also embeds the retail lobby
+    # ports 54230/54231/54001/54002 as u16 constants, and the tcp logger already
+    # publishes 54230/54231 -- so with this line, the first FFXI launch attempt
+    # lands in our capture instead of the dead internet. Long-term this name
+    # points at a LandSandBoat backend (docker-compose.lsb.yml scaffold).
+    - ffxi00.pol.com
+    # FFXI TEST SERVER lobby (content id 0015). The "FINAL FANTASY XI Test
+    # Client" build dials THIS name, not ffxi00 -- measured 2026-08-17 in that
+    # tree's own FFXiMain.dll (ASCII @0x32d10), whose PDB path names its build
+    # config outright: FFXiMain___Win32_Retail_TestServer. Same port constants
+    # as retail (54001/54002/54230/54231), so it is the retail lobby protocol
+    # pointed at a separate world -- which is exactly what a test server is.
+    # Unlike f-earth00 this name STILL RESOLVES at SE (124.150.154.124), so
+    # without this line DNS forwards it to a box that will never answer and the
+    # launch dies outside our capture.
+    - ffxi015.pol.com
+    # DIRGE OF CERBERUS world/login server -- the whitelist trap for the SIXTH
+    # time, and this one is already OBSERVED, not predicted: with DoC booting for
+    # the first time (2026-08-23, see memory/doc-kel-wait-chain.md) the console
+    # queried `kel-1001.pol.com` every ~5 s, our DNS answered NameError (3)
+    # because this list is a whitelist, and the game drew its own dialog reading
+    # "the server could not be found".
+    # The name is hardcoded in the preview build's kel.pex: two copies, at EE
+    # 0x005f34a8 (the default, strcpy'd into the 64-byte host buffer 0x00616b40
+    # at 0x003c9b7c) and 0x00608568. The connect site 0x003c3b70 logs `** LOGIN`
+    # and sits next to `sqPlayOnlineLoadOptionCheck() error %d` and the POL
+    # option keys GOPN1_HF / GOPN1_AO, so this is DoC's POL login step.
+    # WARNING: There is a DEBUG OVERRIDE: when the u16 at 0x006169d8 == 1 the host comes
+    # from a buffer instead of the literal, and the build also carries an SE
+    # internal address `172.16.51.16` (0x005f3550), an in-game constant (polcheck: allow)
+    # rather than a network address here. Do not read the literal as
+    # the only possible name.
+    - kel-1001.pol.com
+    - pp000.pol.com   # world/lobby pool
+    # -- GM call / GM directory ----------------------------------------------
+    # Named verbatim inside the standalone Friend List app (FriendList.dll's
+    # `GMCallApp` namespace, strings `gd000.pol.com` / `gm000.pol.com`). Not
+    # needed to log in, but SE's boxes are dead, so leaving them un-redirected
+    # means the app blocks on a connect that will never answer. Redirected so it
+    # fails FAST (our stack refuses/logs) instead of hanging.
+    - gd000.pol.com   # GM directory   (Friend List app's hardcoded name)
+    - gm000.pol.com   # GM chat        (Friend List app's hardcoded name)
+    # THE 000/001 SPLIT IS REAL, AND ONLY THE 000 HALF WAS LISTED -- fixed
+    # 2026-08-15, the whitelist trap for the FIFTH time. `gd000`/`gm000` are the
+    # FALLBACKS, hardcoded in the binary and used by the standalone Friend List
+    # app. The VIEWER reads its names from env.dat instead
+    # (POL_GMD_SERVER_NAME / POL_GMCHAT_SERVER_NAME), and the shipped values are
+    # `gd001` / `gm001` -- confirmed in work/pc/envdat-decrypted.txt. polcore
+    # only falls back to the 000 names when the env.dat lookup FAILS, which on a
+    # stock install it does not. So every GM Call from the Viewer resolved
+    # upstream to a retired SE box while this list looked complete.
+    - gd001.pol.com   # GM directory   (env.dat POL_GMD_SERVER_NAME, UDP 51112)
+    - gm001.pol.com   # GM chat        (env.dat POL_GMCHAT_SERVER_NAME)
+    # -- DNAS ------------------------------------------------------------------
+    # Sony's own per-title authentication, NOT a pol.com service, and the first
+    # time we have ever seen the console ask for it: the PS2 Viewer's installer
+    # dials it during "Online Certification" when installing Front Mission
+    # Online off its disc. Forwarded, it NXDOMAINs (Sony retired DNAS in 2016),
+    # no TCP is attempted, and the installer stops with POL-1556, "a
+    # communications error occurred during authentication".
+    # Redirected here so the connect reaches our stack and the exchange can be
+    # captured -- what it sends decides whether DNAS can be emulated (the
+    # console's trust anchors are the four 1996 VeriSign/RSA roots dumped in
+    # ps2hdd/certdb, all patchable data) or has to be patched out of the title,
+    # the way console-binding and install-binding already are.
+    - gate1.jp.dnas.playstation.org
+    # -- Portal content hosts -------------------------------------------------
+    # These were left COMMENTED so the portal would load from real SE during
+    # normal play. That premise is dead in own-server mode: SE's portal no longer
+    # answers, so `wh000 -> forwarded` meant the post-login PAGE VIEW could not
+    # connect at all, and the Viewer stopped at **POL-1302 "DIGEST-P authentication
+    # failed"** (polerr.bin) -- a hard stop with no route to the main menu.
+    # Redirected to us now; the http service answers them (www/ is empty, so
+    # expect 404s until we serve real PML -- but a 404 from us is diagnosable,
+    # a dead host is not).
+    - wh000.pol.com   # portal web/content (news, PML pages)
+    # Redirected in BOTH modes: the in-client sign-up wizard fetches its form
+    # from ucs.pol.com:51305 and SE's box 403s the whole legacy tree, so the only
+    # way to serve a real registration page is to answer it ourselves (the `ucs`
+    # service). ucs is a different box (219.117.150.8) from the portal's wh000
+    # (202.67.54.55), so this does not affect portal capture.
+    - ucs.pol.com     # user content service (friends, profiles, community)
+    # POL_SERVERINFO_PAGE_URL -- http://info.playonline.com/snews/%s/index.pml.
+    # A PLAIN-HTTP PML page the client fetches around login (confirmed: it appears
+    # in logs/dns.log). Redirected so we can serve our own PML there and prove the
+    # renderer accepts our markup, independently of the SSLv3 blocker (POL-1322)
+    # that stops the real sign-up URL. Remove to hand it back to SE.
+    - info.playonline.com
+#CAPTURE    - usercte.pol.com # ucs alt hostname seen in env.dat
+    - ma000.pol.com   # SMTP -- the Viewer's mail wizard names this itself
+    - po000.pol.com   # POP3 -- ditto. redirect_only is a WHITELIST, so while
+                      # these were commented out they resolved to REAL (dead) SE
+                      # and mail Receive could never have worked.
+
+    # -- Dance Dance Revolution (Konami), NOT PlayOnline ----------------------
+    # WARNING: PUBLICATION NOTE: everything in this DDR block belongs to a SEPARATE
+    # project (the "DDR Online" repo, E:/Code/DDR Online on the dev box). It
+    # lives in this file only because prod's resolver is the DNS the PCSX2
+    # consoles on the tailnet already point at, which makes DDR testing easy.
+    # Before publishing this repo anywhere, strip or split out the DDR entries
+    # (this comment block through the konamionline.com names below).
+    #
+    # A different publisher's dead PS2 service, riding this resolver because it
+    # is the DNS a PCSX2 console on this tailnet already points at. `matches()`
+    # never consults `dns.zones` while redirect_only is non-empty, so putting
+    # `konamionline.com` up there would have been silently inert -- these have
+    # to be HERE. `info.playonline.com` above is the precedent for a non-pol.com
+    # name in this list.
+    #
+    # They answer with POL_ADVERTISE (127.0.0.1) like every other name, so the
+    # DDR gate server has to run on THIS box, tcp/9573. Until it does these three
+    # resolve to a host with nothing listening -- still strictly better than the
+    # status quo, where they forward upstream to Konami's long-dead IPs.
+    #
+    # Provenance: the DDR Online reverse-engineering work. Extreme 2 hardcodes the gate on
+    # tcp/9573 (immediate 0x2565 at 0x001d4f34) and STUN on udp/3478 inline in
+    # SLUS_211.74; SuperNOVA reuses the SAME gate host from a pointer table at
+    # 0x002d0120 and has its own STUN name.
+    - dx2gate01.konamionline.com    # gate/directory -- BOTH games, but on
+                                    #   DIFFERENT ports: Extreme 2 tcp/9573,
+                                    #   SuperNOVA tcp/19573 (service table
+                                    #   0x002d013c packs 19573/19570 as a u16
+                                    #   pair). ddr-gate binds all three.
+    - dx2stun.konamionline.com      # STUN udp 3478 -- DDR Extreme 2
+    - ddrsnstun.konamionline.com    # STUN udp 3478 -- DDR SuperNOVA
+    # SuperNOVA ONLY. After the gate and STUN succeed it fetches three documents
+    # over HTTP; with these forwarded to Konami's dead hosts its HTTP layer
+    # returns -1005..-1008 and the client shows "Failed to connect to the server.
+    # Server may currently be under maintenance." (UI message 0x6f, raised at
+    # 0x00a9c6a0 in DATA08). Extreme 2 has no equivalent -- it never asks.
+    # Served by ddr-web on tcp/19580; the stock URLs point at 80/443, which are
+    # taken on this box, so the ELF service-table URLs are rewritten in the
+    # patched disc.
+    - dx2web.konamionline.com          # OUA/PIA text + reguser/chgpswd pages
+    - info.service.konamionline.com    # service information
+
+# Logical components and the shipped hostnames they use. Informational for now
+# (DNS redirects all of pol.com regardless); ports here feed the TCP logger and
+# document what we expect each component to be.
+components:
+  patch:  { host: "pt008.pol.com",   proto: http }
+  web:    { host: "wh000.pol.com",   proto: [http, https] }
+  ucs:    { host: "usercte.pol.com", proto: http }
+  # Login/auth. The client resolves this then dials port 51240 (observed
+  # 2026-08-09); it is NOT the pp%03d pool, which has no DNS records at all.
+  ci:     { host: "ci000.pol.com",   proto: tcp, port: 51240 }
+  # GM Call. BOTH OF THESE ARE UDP, NOT TCP -- corrected 2026-08-15 from the
+  # decompiled polcore: `socket(2,2,0)` (SOCK_DGRAM) at 0x00e290 and `sendto` at
+  # 0x00e490. GMD is contacted first on port 0xc7a8 = 51112, which IS hardcoded
+  # (FUN_037cb0b0 defaults it immediately before resolving gd001), and it answers
+  # with a redirect carrying the chat server's port and IP -- so gmchat's port is
+  # genuinely not knowable in advance. Both host names come from env.dat
+  # (POL_GMD_SERVER_NAME / POL_GMCHAT_SERVER_NAME), so they can be repointed
+  # without patching.
+  gmd:    { host: "gd001.pol.com",   proto: udp, port: 51112 }
+  gmchat: { host: "gm001.pol.com",   proto: udp }
+  # The login pool. host is a template; index is chosen at runtime.
+  login:  { host_template: "pp%03d.pol.com", proto: tcp }
+
+# What the loggers bind. HTTP/HTTPS are known.
+#
+# The old note here -- "the TCP login/GM ports are NOT yet known, the connect
+# port is passed in by the caller, not hardcoded" -- is RETRACTED for GM as of
+# 2026-08-15. It is half wrong in both halves: GM is UDP, not TCP, and its first
+# port IS hardcoded (0xc7a8 = 51112, FUN_037cb0b0). The "passed in by the caller"
+# reading was true only of the CHAT server, whose address arrives in GMD's reply.
+# Login remains as described: the port is named inside the greeting token.
+#
+# Nothing binds 51112 yet, and it is outside the 51200-51310 band below, so a GM
+# Call today leaves the machine. Adding it is the one live test GM chat needs.
+listen:
+  http:  [80]
+  https: [443]
+  # 51240 is the login directory service; 51241-51250 is the range the client
+  # has been seen redirected onto (51240, 51241, 51245 so far) -- the exact port
+  # is named inside the greeting token, so we bind the whole span.
+  # 51200-51310 is one contiguous band: 51240-51250 is the login/auth redirect
+  # range; the rest is the world/lobby pool (pp000.pol.com). Post-auth the client
+  # resolves pp000 (DNS -> us) and dials a port named inside the *encrypted* auth
+  # payload -- observed 51220 and 51305 across sessions -- so we bind the whole
+  # band and relay whichever port it picks. Ranges written "a-b" are expanded.
+  # 53001 (FFXI) and 53014 (Friend List) are the per-title POLP patch trees
+  # (53000 + content id). They are deliberately NOT listed here: the patch server
+  # is a separate container (work/ps2/docker-compose.patchserver.yml) and owns
+  # them. Two processes cannot hold one port, and an ambiguous double-bind is
+  # worse than either mode -- which one a connection reaches is undefined.
+  # Add them back ONLY to capture a client's game-patch traffic with no archive
+  # in hand, and stop the patch server first.
+  # 54001/54230 (FFXI view/data) are now owned by the POL->LSB bridge
+  # (lsb/ffxi_bridge.py), not the logger. 54002/54231 stay for observation. See
+  # ../docker-compose.lsb.yml and lsb/README.md.
+  # 54848 = FANTASY EARTH's world server, f-earth00.pol.com. Named by the client
+  # itself once FE finally booted (2026-08-13): pol-shim's dbgstring hook caught
+  # FE_Client logging "LLB Connect start IP=f-earth00.pol.com, port=54848".
+  # Nothing answered, so FE logged ">Connection FAILURE." and quit after ~30s.
+  # Logging it here is the first look at that protocol -- it is neither the
+  # 5124x auth band nor 53000+content-id, so no existing responder covers it.
+  # 54848 is UNBOUND again on purpose -- see the note above. The capture we wanted
+  # is done: FE sends `00 02 00 02` and resends it every 15s forever. Binding it
+  # with only a LOGGER attached is WORSE than not binding it, because the connect
+  # then SUCCEEDS and FE waits on a reply that never comes -- it sits on
+  # "Connecting to lobby balancer (f-earth00.pol.com, port 54848)..." with no way
+  # out but killing the process. Refused instead, FE reports the failure and shows
+  # a dismissable dialog, so the user can back out to PlayOnline normally.
+  # Re-add it only together with a real responder that answers the poll.
+  # 54000 is deliberately NOT here: in own-patch mode (the prod default) the
+  # `patch` service OWNS 54000 (plus 53001-53014), and under host networking the
+  # tcp logger binding it too is a hard EADDRINUSE clash -- the patch server then
+  # cannot start. Re-add 54000 ONLY for capture/relay mode with the patch service
+  # stopped (see proxy.tcp_targets below).
+  #
+  # 51200-51310 and 25/110 are deliberately NOT here either, for exactly the same
+  # reason -- and this one bit production, 2026-08-15. In OWN-SERVER mode the band
+  # belongs to the real responders, not the logger:
+  #   51240        directory   `login`
+  #   51241-51250  auth        `authsess`
+  #   51260/51261  POL mail    `login`   (25/110 are the generic pair, also `login`)
+  #   51272        Janhourou   `jan`
+  #   51305        sign-up     `ucs`
+  #   rest of band lobby/world `login`
+  # The dev compose fences this off with its port-publish list (tcp publishes only
+  # 21/54002/54231; `login` publishes the band), so a contiguous "51200-51310" here
+  # was harmless under bridge networking. docker-compose.prod.yml sets
+  # network_mode: host on every service, where `ports:` is INERT -- so the logger
+  # bound the whole band directly on the host, won every race it started first, and
+  # `login`/`authsess` came up spewing EADDRINUSE with no sockets at all while still
+  # reporting Up. `jan` was the only one that exited, so a crash-looping mahjong
+  # container was the visible symptom of a dead login service.
+  # Re-add the band ONLY for capture/relay mode, with login/authsess/jan/ucs stopped.
+  # 61300 = FRONT MISSION ONLINE's world server. MEASURED LIVE 2026-08-17, not
+  # guessed: pol-shim's connect() hook caught exactly one dial to
+  # 127.0.0.1:61300 during an FMO session, on a socket whose socket()/bind()
+  # were logged by the IAT hooks installed in FrontMissionOnline.dll itself
+  # (app.dll's own ws2 hooks were not yet re-armed at that point in the log), and
+  # `fmo01.pol.com` was resolved 18s earlier. It appears ONCE in every shim log on
+  # the machine. So this retires STATUS §14's "FMO's world port remains
+  # unmeasured -- do not assume the TM/Janhourou auth-band finding applies": it is
+  # neither the 5124x auth band nor 53000+content-id, same as Fantasy Earth's
+  # 54848.
+  #
+  # The host is region-selected inside the DLL, from a 24-byte table at .rdata
+  # RVA 0x33B600 keyed by the region stamp: W20_ -> fmo01, DWJ_ -> fmo02,
+  # W2U_ -> fmo03, DWU_ -> fmo04. Our US Viewer is W20, hence fmo01. All four are
+  # already in dns.redirect_only.
+  #
+  # WARNING: 61300 IS NO LONGER THE LOGGER'S. The capture did its job -- the packet
+  # layout and its checksum are solved -- so the port now belongs to the `fmo`
+  # service (services/fmo.py), which ANSWERS instead of only recording. Two
+  # processes cannot hold one port, so it must not be listed here as well.
+  # Revert to capture mode: put 61300 back on this line, restore its tcp_hold
+  # row below, move the publish back to the tcp service, and stop `fmo`.
+  # 54002/54231 released to the LSB stack 2026-08-20 (docker-compose.lsb.prod.yml
+  # HOST-PORT PREREQUISITE: LSB `search` publishes 54002, and a logger answering
+  # 54231 shadows LSB auth for host-net dialers). Put them back only if LSB is
+  # retired from this box.
+  # WARNING:WARNING: 55040/TCP IS THE WRONG TRANSPORT AND THIS BIND WILL NEVER FIRE.
+  # MEASURED 2026-08-23, the same day it was staged: with kel-1001 resolving,
+  # DoC dialled
+  #     DEV9: Socket: Creating New UDP Connection from fixed port 56138 to 55040
+  # and then logged its own `[KEL NET UDP] packet lost 128 65533/65534`. So the
+  # PORT NUMBER BELOW IS CORRECT -- 0xd700 was right -- but DoC's world channel
+  # is **UDP**, and `listen.tcp` cannot see it. Same shape as FMO, whose world
+  # channel is also UDP (services/fmo.py serve_udp).
+  # The bind is left in place because it is harmless and documents the port; it
+  # is NOT evidence of anything. Capture is currently a tcpdump on prod pending a
+  # real UDP listener -- stub.py has no generic UDP support, only DNS on udp/53.
+  # DoC only sends for ~20 s and then idles the socket out ("UDP: Fixed port max
+  # idle reached"), so a capture has to be listening BEFORE the title is launched.
+  #
+  # Original staging note, kept because its reasoning was right and its
+  # prediction is what caught the error:
+  # 55040 = DIRGE OF CERBERUS, WARNING: STATIC READ, NOT YET MEASURED ON A WIRE.
+  # `ori a2, zero, 0xd700` (=55040) is the third argument at BOTH connect sites
+  # in kel.pex (0x003c3bc8 and 0x003c3bf8), passed with a1 = "kel-1001.pol.com"
+  # and a3 = 0 through the virtual call `[[0x005ee4d8]+4]+20`. Argument position
+  # says port; the vtable could NOT be resolved to confirm it, because
+  # [0x005ee4d8] is still NULL in the only savestate we have (the object is
+  # constructed after the point where DoC used to hang).
+  # ⇒ TREAT AS A GUESS. The cheap confirmation is free on the next boot: PCSX2's
+  # DEV9 log prints "Socket: Creating New TCP Connection ... to <port>" the
+  # moment kel-1001 resolves. If it names another port, move this entry.
+  tcp:   [21, 55040]
+
+  # Hard ceiling, in seconds, on a log-only TCP conversation (see stub.py's
+  # _tcp_client). NOT an idle timeout: it fires even while the client is still
+  # talking. This exists because Fantasy Earth proved a logger-only bind is worse
+  # than no bind at all -- the connect succeeds and the game waits on a reply for
+  # ever, with no way back to the Viewer but killing pol.exe. With a hold the
+  # client gets a clean disconnect, reports its own failure, and stays usable,
+  # while we still get the opening bytes.
+  #
+  # Empty on purpose: 61300's row moved out with the port (see above). Keep the
+  # mechanism -- the next title's world port wants exactly this on its first
+  # capture, and `fmo.py` carries its own FMO_HOLD for the same reason.
+  # 55040 gets a hold for exactly the reason the comment above records: a
+  # logger-only bind with no hold is WORSE than no bind, because the connect
+  # succeeds and the title waits on a reply for ever. 6 s is enough to capture an
+  # opening burst and short enough that DoC reports its own failure and stays on
+  # its feet (it already handles the failure path -- it drew a dialog when DNS
+  # said NXDOMAIN). Remove this row when a real responder takes the port.
+  tcp_hold: {55040: 6}
+
+# MITM relay: for these TCP ports, forward the client through to the REAL
+# PlayOnline server and log both directions, instead of just logging the client
+# side.  Parts of the live service are still up (pt008.pol.com:54000 answers), so
+# this captures genuine responses -- valid checksums and all -- which is how we
+# learn the POLP patch protocol.  Ports NOT listed here stay log-only.
+proxy:
+  upstream_dns: "1.1.1.1"          # resolve real IPs here, NOT via our own DNS
+  tcp_targets:
+    # POLP version/patch protocol. TWO MODES -- they cannot both hold port 54000:
+    #
+    #  RELAY (this line active, the default): 54000 forwards to the real pt008,
+    #    which is still up. Use it to capture genuine traffic.
+    #  OWN PATCH SERVER: comment this line out AND remove "54000:54000" from the
+    #    tcp service's ports in docker-compose.yml, then run
+    #    `docker compose -f work/ps2/docker-compose.patchserver.yml up --build`.
+    #    That serves the complete local mirror (work/ps2/mirrors, ~9.5 GB: all six
+    #    Viewer regions + FFXI + Friend List, every version) and is byte-identical
+    #    to SE's replies -- see work/ps2/PATCHSERVER-README.md. It also binds
+    #    53001/53014, which the relay never handled at all.
+    #
+    # Own mode is the one that survives SE going dark; relay mode is not a
+    # replacement, it is a tap on someone else's box.
+    #
+    # OWN-PATCH MODE ACTIVE (2026-08-11) -- commented out, and "54000:54000" is
+    # likewise commented out of the tcp service's ports in docker-compose.yml.
+    #
+    # TEMPORARILY RESTORED for the MITM capture run (2026-08-11): with this target
+    # commented out, 54000 binds "log-only", so the Viewer's startup version check
+    # against pt008 gets NO answer and the client dies with POL-0033 before it ever
+    # reaches login. (POL-0033 is 「PS2のEE<->IOPバスのエラー」 reused as a generic
+    # "unexpected problem" on PC -- it names nothing, so the relay log is the only
+    # way to see this.) The capture compose DOES publish 54000, so the two halves
+    # were inconsistent. Re-comment this when going back to own-patch mode.
+    # 54000: "pt008.pol.com"   # standalone patch server owns this port
+    51240: "ci000.pol.com"         # login DIRECTORY -- hands out a node redirect
+    # The redirect target. "@learned" means "the node that issued the most
+    # recent greeting on 51240", which is how we follow the client onto a
+    # connection it makes by raw IP.
+    51241: "@learned"
+    51242: "@learned"
+    51243: "@learned"
+    51244: "@learned"
+    51245: "@learned"
+    51246: "@learned"
+    51247: "@learned"
+    51248: "@learned"
+    51249: "@learned"
+    51250: "@learned"
+    # World/lobby pool. The client reaches these via DNS (pp000.pol.com -> us),
+    # not via a redirect token, so relay straight to the real pp000 host on
+    # whichever port the (encrypted) auth payload named. No greeting to rewrite
+    # here -- the stream is Blowfish-encrypted end to end. The two bands flank
+    # the 51240-51250 auth range, which keeps its @learned entries above.
+    # 51220 carved out for our own lobby responder (own-server mode).
+    # CAPTURE MODE (2026-08-10): the band is relayed to the REAL pp000 again so a
+    # genuine SE session can be recorded -- the PORTAL PML rides these ports as
+    # plaintext HTTP, so this is how we obtain SE's real /pml/main/index.pml.
+    # The capture/own-server profile files were retired 2026-09-13 (git history
+    # has them as config/server.yaml.capture / .ownserver if capture mode is
+    # ever needed again).
+    # NOTE the contiguous range: 51220 must NOT be carved out here in capture
+    # mode. It is the port a real SE session actually uses, and with no target
+    # the relay accepted the client's 40-byte lobby hello and dropped it
+    # (log-only), which looked like SE being unreachable.
+    "51200-51239": "pp000.pol.com"     # lobby/session (51220 seen live)
+    # PORTAL CONTENT. The Viewer fetches PML as plain HTTP from the CONTENT host
+    # on these ports -- wh000.pol.com:51300/51304/51305 are OPEN while its 80/443
+    # are firewalled (which is why every earlier reachability test said "down").
+    # The server is Apache/1.3.26 and answers 401 with
+    #   WWW-Authenticate: Digest realm="POL" algorithm="x-MD5-pol" domain="/pml/"
+    # i.e. the DIGEST-P of POL-1302. Relaying these lets the CLIENT do that auth
+    # while we record the plaintext pages.
+    # 51305 is carved out for the `ucs` service (in-client registration). It is
+    # NOT lost to the portal: ucscgi.py sniffs the first byte and passes any
+    # non-TLS connection straight through to wh000.pol.com:51305 unchanged, so
+    # plain-HTTP portal fetches on that port behave exactly as if relayed here.
+    # Only the TLS half (the sign-up wizard) is claimed.
+    "51251-51304": "wh000.pol.com"
+    "51306-51310": "wh000.pol.com"
+  # Rewrite the login greeting on these ports so the client's follow-up comes
+  # back to us. Rewriting the IRC prefix alone does NOT work -- the client reads
+  # the address out of the base-32 token -- so stub.py decodes the token, swaps
+  # the embedded IPv4, and re-encodes it, leaving the port (and the 4-symbol
+  # trailing checksum) alone. Whether that checksum is enforced is unknown.
+  rewrite_prefix_ports: [51240, 51241, 51242, 51243, 51244, 51245,
+                         51246, 51247, 51248, 51249, 51250]
+  # POLP (tcp/54000) hands the client the download host as a raw-IP string in
+  # its cmd-8 reply; the client dials it directly, bypassing DNS. Rewriting that
+  # field to stub_ip (and recomputing the now-cracked checksum) routes the whole
+  # file-transfer phase back through the relay so we can capture it.
+  rewrite_polp_dlhost_ports: []
+  pins:                            # skip DNS for these (real IPs, seen 2026-08)
+    pt008.pol.com: "124.150.156.107"
+    ci000.pol.com: "202.67.54.52"
+    pp000.pol.com: "202.67.54.51"  # world/lobby pool (pp001+ are NXDOMAIN)
+    # Portal content box. REQUIRED by the `ucs` service: it passes non-TLS
+    # traffic on 51305 through to the real portal, and resolving this name
+    # normally would go through OUR DNS (wh000 is in redirect_only) and point the
+    # passthrough straight back at itself.
+    wh000.pol.com: "202.67.54.55"
+
+# Portal content mirroring (http service). When `mirror: true`, a request for
+# one of `hosts` that we have no local file for is forwarded to the REAL SE host
+# (resolved via upstream DNS / proxy.pins), the reply is handed back to the
+# client, AND archived under www/<host>/<path> with a .polmeta sidecar. A single
+# client browse of the portal thus builds an offline copy. Serve that copy back
+# later by setting `mirror: false` (or removing the hosts from dns.redirect_only)
+# so the http service answers purely from www/.
+#
+#   To CAPTURE:  set mirror:true here + uncomment the content hosts in
+#                dns.redirect_only above, `docker compose up -d --build`, then
+#                drive the Viewer through every portal screen (news, friends,
+#                profiles, member search, mail, manuals, extras).
+#   To REPLAY:   set mirror:false; the www/ tree is served offline.
+#
+# NOTE (HTTPS): plain-HTTP pages (most PML content) mirror cleanly. For https
+# the client hits our self-signed cert (logs/stub-cert.pem); whether the POL
+# embedded browser accepts it is unverified -- watch the http log for TLS errors
+# on 443 during the first capture and report back.
+content:
+  mirror: false
+  hosts:
+    - wh000.pol.com
+    - ucs.pol.com
+    - usercte.pol.com
+    - ma000.pol.com
+    - po000.pol.com
+  upstream_dns: "1.1.1.1"
+  # Region partitioning. PlayOnline content is region-specific (JP / US / EU),
+  # and the same portal URL differs per region, so the mirror splits the archive
+  # into www/<region>/<host>/<path> to stop one region clobbering another.
+  #
+  # `region` tags the WHOLE capture session -- set it to match the regional
+  # client you are driving (a POL install is region-locked, so this is always
+  # correct). Leave empty for a flat www/<host>/... layout (no partitioning).
+  # Run one capture per client: eu now, then us/jp when those clients are set up.
+  region: ""            # "jp" | "us" | "eu" | "" (flat)
+  #
+  # `region_rules` OPTIONALLY auto-split within a single run, once we have a
+  # portal capture that shows how region rides in the request (a path segment, a
+  # header, the account, ...). Each rule regex-matches `in: path|host|header`
+  # (header needs `header:`) and maps to a region; first match wins, else
+  # `region` above is used. Empty until we know the discriminator.
+  # Example (SPECULATIVE, do not enable until confirmed):
+  #   region_rules:
+  #     - { in: path,   match: "/(eu|europe)/",  region: eu }
+  #     - { in: path,   match: "/(us|na)/",      region: us }
+  #     - { in: header, header: "Accept-Language", match: "^ja", region: jp }
+  region_rules: []
+
+# env.dat generation (optional). Key overrides written into the file; leave
+# empty to rely on DNS alone. Example:
+#   overrides:
+#     PATCH_SERVER_DOMAIN: "patch.example.com"
+# In-client account registration (services/ucscgi.py, the `ucs` compose service).
+# The sign-up wizard's second screen is a HOSTED PML page; the client was measured
+# fetching it from ucs.pol.com:51305 over TLS. `kinou_id=20` is the registration
+# function and submissions land in the account DB (services/accounts.py).
+# The service only claims TLS connections on this port -- see the tcp_targets note.
+ucs:
+  port: 51305
+
+env:
+  overrides: {}
+  # --- in-client account registration ---------------------------------------
+  # The Viewer still builds a sign-up URL entirely from env.dat keys (app.dll
+  # 0x049ff3a1):
+  #
+  #   "https:" + POL_UCS_URL + POL_UCS_CGI
+  #     + "?kinou_id=20&ret_url=tologin%3A&"
+  #     + "area_kbn=" POL_UCS_AREA_KBN "&login_pf=" POL_UCS_LOGIN_PF
+  #     + "&property=" POL_UCS_PROPERTY + "&isp_kbn=" (01 if the connection
+  #       profile is "OCN", else 00)
+  #
+  # The shipped env.dat sets only POL_UCS_URL (`//ucs.pol.com/pml-cgi-bin/` --
+  # the leading `//` is why the scheme is prepended separately); the other four
+  # are absent and substitute empty. The 2002 JP PS2 build aimed the same
+  # builder at `https://userctl.pol.com/pml-cgi-bin/UMENZ001.cgi`, so
+  # POL_UCS_CGI is `UMENZ001.cgi`.
+  #
+  # ucs.pol.com is already in dns.redirect_only, so a sign-up attempt ALREADY
+  # arrives at our http service -- watch logs/http.log for `kinou_id=20` to see
+  # the exact request. Setting the keys below only changes the path.
+  #
+  # NOT YET USEFUL to enable: we cannot author a reply. Every PML sample we hold
+  # (viewer/data/pmlus/*.pml, the usr/all/url/cache/*.dcf archive, StringTable
+  # .bin) is in the container whose key is still uncracked, so the markup
+  # dialect is unknown and anything we serve is a guess. Crack that first.
+  #
+  #   POL_UCS_CGI: "UMENZ001.cgi"
+  #   POL_UCS_AREA_KBN: "00"
+  #   POL_UCS_LOGIN_PF: "01"
+  #   POL_UCS_PROPERTY: "00"

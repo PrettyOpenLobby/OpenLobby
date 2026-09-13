@@ -1,0 +1,51 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+	<title>DIRGE of CERBERUS: Play Guide</title>
+	<!-- pol-server AUTHORED. Sub-page of the content-10 set; see index.pml. -->
+	<include src="/pml/game/0010/style.pml">
+	<if expr="$_PLATFORM=='PS2'"><define name="$uLang" calc="$_LANG"><else><define name="$uLang" calc="$_USER_LANG"></if>
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<systembg src="file:/systembg/dc.png">
+</head>
+<body altbgcolor="#00000000">
+
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="350" wait="2">
+	<text size="640,480" bgcolor="#0E0505c0"></text>
+</sheet>
+
+<sheet name="shHead" pos="60,60" size="520,30" border="0" alpha="1" delay="200" appeartime="250" wait="2">
+	<if expr="$uLang=='fr-FR'"><text size="520,30" valign="middle" style="dcsec">Guide de jeu</text>
+	<elsif expr="$uLang=='de-DE'"><text size="520,30" valign="middle" style="dcsec">Spielanleitung</text>
+	<else><text size="520,30" valign="middle" style="dcsec">Play Guide</text></if>
+</sheet>
+<sheet name="shTtl" pos="60,92" size="520,18" border="0" alpha="1" delay="280" appeartime="250" wait="2">
+	<text size="520,18" valign="middle" style="dcsub">DIRGE of CERBERUS -FINAL FANTASY VII-</text>
+</sheet>
+<hr pos="60,118" width="520" height="2" skin="0" skincolor="#8C5050aa">
+
+<sheet name="shBody" pos="60,140" size="520,250" border="0" alpha="1" delay="400" appeartime="300" wait="2" delayproperties="1">
+	<if expr="$uLang=='fr-FR'">
+		<text size="520,250" style="tx15">Dans le mode multijoueur en ligne, les joueurs incarnaient des personnages de l&rsquo;univers de Dirge of Cerberus et s&rsquo;affrontaient dans des combats &agrave; distance. L&rsquo;&eacute;quipement et la progression obtenus en ligne se r&eacute;percutaient dans le jeu sur la console.&br;&br;Les r&egrave;gles compl&egrave;tes &eacute;taient fournies avec le disque et via ce portail. Les serveurs en ligne ne fonctionnent plus.</text>
+	<elsif expr="$uLang=='de-DE'">
+		<text size="520,250" style="tx15">Im Online-Mehrspielermodus &uuml;bernahmen die Spieler Rollen von Figuren aus dem Dirge-of-Cerberus-Universum und traten in Fernkampf-Gefechten gegeneinander an. Online erspielte Ausr&uuml;stung und Fortschritt wirkten sich auf das Spiel auf der Konsole aus.&br;&br;Die vollst&auml;ndigen Regeln lagen der Disc bei und wurden &uuml;ber dieses Portal verteilt. Die Online-Server laufen nicht mehr.</text>
+	<else>
+		<text size="520,250" style="tx15">In the online multiplayer mode, players took the roles of characters from the Dirge of Cerberus setting and competed in ranged-combat matches. Equipment and progress earned online carried back into the game on the console.&br;&br;Full rules were supplied with the disc and through this portal. The online servers are no longer running.</text>
+	</if>
+</sheet>
+
+<if expr="$uLang=='fr-FR'"><define name="$backValue" value="Retour">
+<elsif expr="$uLang=='de-DE'"><define name="$backValue" value="Zur&uuml;ck">
+<else><define name="$backValue" value="Back"></if>
+<sheet name="shBack" pos="60,404" size="90,32" border="0" alpha="1" delay="500" appeartime="250" wait="2" delayproperties="1">
+	<text size="90,32" bgcolor="#3A2020ff"></text>
+	<img name="apBack" pos="0,0" size="90,32" src="$F_PATH2+'general/im01s.png'"
+		 style="bt15" value="$backValue"
+		 href="$C_PATH1+'index.pml'"
+		 onkeycancel="sound:3,{$C_PATH1+'index.pml'}"
+		 mousesound="1" alt="^03Return to the Dirge of Cerberus menu.">
+</sheet>
+<timer enable="1" delay="800" href="sd:focus@apBack">
+
+</body>
+</pml>

@@ -1,0 +1,54 @@
+<pml>
+<head>
+<meta http-equiv="Content-Type" content="text/x-playonline-pml;charset=UTF-8">
+	<title>FANTASY EARTH: Content ID</title>
+	<!-- pol-server AUTHORED. Sub-page of the content-11 set; see index.pml. -->
+	<include src="/pml/game/0011/style.pml">
+	<if expr="$_PLATFORM=='PS2'"><define name="$uLang" calc="$_LANG"><else><define name="$uLang" calc="$_USER_LANG"></if>
+	<config top="" addbookmark="0" screensaverlock="1" loadinterval="0">
+	<systembg src="file:/systembg/fe.png">
+</head>
+<body altbgcolor="#00000000">
+
+<sheet pos="0,0" size="640,480" border="0" alpha="1" delay="0" appeartime="350" wait="2">
+	<text size="640,480" bgcolor="#120A05c0"></text>
+</sheet>
+
+<sheet name="shHead" pos="60,60" size="520,30" border="0" alpha="1" delay="200" appeartime="250" wait="2">
+	<if expr="$uLang=='fr-FR'"><text size="520,30" valign="middle" style="fesec">Identifiant de contenu</text>
+	<elsif expr="$uLang=='de-DE'"><text size="520,30" valign="middle" style="fesec">Content-ID</text>
+	<else><text size="520,30" valign="middle" style="fesec">Content ID</text></if>
+</sheet>
+<sheet name="shTtl" pos="60,92" size="520,18" border="0" alpha="1" delay="280" appeartime="250" wait="2">
+	<text size="520,18" valign="middle" style="fesub">FANTASY EARTH -THE RING OF DOMINION-</text>
+</sheet>
+<hr pos="60,118" width="520" height="2" skin="0" skincolor="#8C6E4Eaa">
+
+<sheet name="shId" pos="60,138" size="520,44" border="0" alpha="1" delay="380" appeartime="250" wait="2" delayproperties="1">
+	<text size="520,22" style="fesub">Content ID: 0011&nbsp;&nbsp;&nbsp;(FANTASY_EARTH)</text>
+</sheet>
+<sheet name="shBody" pos="60,178" size="520,210" border="0" alpha="1" delay="440" appeartime="300" wait="2" delayproperties="1">
+	<if expr="$uLang=='fr-FR'">
+		<text size="520,210" style="tx15">Chaque titre et service de PlayOnline est d&eacute;sign&eacute; par un identifiant de contenu num&eacute;rique. Fantasy Earth est le contenu&nbsp;11, enregistr&eacute; le 20/12/2004.&br;&br;Le Viewer utilise cet identifiant pour retrouver l&rsquo;ic&ocirc;ne, le nom et les donn&eacute;es du titre. Le contenu&nbsp;11 est enregistr&eacute; dans les deux ruches PlayOnline, et le client Windows est install&eacute; localement.</text>
+	<elsif expr="$uLang=='de-DE'">
+		<text size="520,210" style="tx15">Jeder Titel und Dienst auf PlayOnline wird &uuml;ber eine numerische Content-ID angesprochen. Fantasy Earth ist Inhalt&nbsp;11, registriert am 20.12.2004.&br;&br;Der Viewer nutzt diese ID f&uuml;r Symbol, Name und Daten des Titels. Inhalt&nbsp;11 ist in beiden PlayOnline-Registrierungszweigen eingetragen, und der Windows-Client ist lokal installiert.</text>
+	<else>
+		<text size="520,210" style="tx15">Every title and service on PlayOnline is addressed by a numeric content ID. Fantasy Earth is content 11, registered on 2004/12/20.&br;&br;The Viewer uses this ID to look up the title's icon, name and data. Content 11 is registered in both PlayOnline hives, and the Windows client is installed locally.</text>
+	</if>
+</sheet>
+
+<if expr="$uLang=='fr-FR'"><define name="$backValue" value="Retour">
+<elsif expr="$uLang=='de-DE'"><define name="$backValue" value="Zur&uuml;ck">
+<else><define name="$backValue" value="Back"></if>
+<sheet name="shBack" pos="60,404" size="90,32" border="0" alpha="1" delay="500" appeartime="250" wait="2" delayproperties="1">
+	<text size="90,32" bgcolor="#36251Aff"></text>
+	<img name="apBack" pos="0,0" size="90,32" src="$F_PATH2+'general/im01s.png'"
+		 style="bt15" value="$backValue"
+		 href="$C_PATH1+'index.pml'"
+		 onkeycancel="sound:3,{$C_PATH1+'index.pml'}"
+		 mousesound="1" alt="^03Return to the Fantasy Earth menu.">
+</sheet>
+<timer enable="1" delay="800" href="sd:focus@apBack">
+
+</body>
+</pml>

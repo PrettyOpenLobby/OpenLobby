@@ -1,0 +1,135 @@
+# Japanese -> English for the account pages our mirror serves.
+# Generated once by a helper script, edited by hand after.
+# Applied by tools/xlate_pages.py. Columns: jp <TAB> en <TAB> pages
+# \n \r \t are ESCAPED in both columns -- several of SE's strings
+# span lines, which would otherwise break the row format.
+期間延長	Extend Contract	idpm01
+^03ウェブマネーの期間延長を行います。	^03Extend your contract using WebMoney.	idpm01
+コンテンツIDの復活	Reactivate Content ID	idpm01
+^03FINAL FANTASY XIのコンテンツIDの復活を行います。	^03Reactivate your FINAL FANTASY XI Content ID.	idpm01
+^03FINAL FANTASY XIのトップページへ戻ります。	^03Return to the FINAL FANTASY XI top page.	idpm01
+閉じる	Close	cipm01,idpm01
+購　入	Purchase	cipm01,idpm01
+戻　る	Back	idpm01
+FFXI　　：コンテンツID	FFXI: Content ID	idpm01
+コンテンツIDについて	About Content IDs	cipm01,idpm01
+ウェブマネーご利用の方へ	For WebMoney Users	idpm01
+前へ戻る	Back	idpm01
+ウェブマネーで購入したコンテンツIDの使用期限&br;\n\t\t\t が切れてしまった場合には「戻る」を選択し、&br;\n\t\t\t「ウェブマネーご利用の方へ」の「コンテンツID&br;\n\t\t\t の復活」から手続きをしてください。&br;\n\t\t\t コンテンツIDを新規・追加で購入する場合には、&br;\n\t\t\t お支払い方法に関わらず「購入」を選択してくだ&br;\n\t\t\t さい。	If a Content ID purchased with WebMoney has&br;\n\t\t\t expired, select "Back" and use "Reactivate&br;\n\t\t\t Content ID" under "For WebMoney Users".&br;\n\t\t\t To buy a new or additional Content ID,&br;\n\t\t\t select "Purchase" regardless of your&br;\n\t\t\t payment method.	idpm01
+プレイ中は【購入】できません	Cannot purchase while playing	cipm01,idpm01
+&sp;ゲームを一時抜けた状態の時は、この機能を&br;&sp;ご利用いただけません。&br;&sp;ゲームを終了してからご変更ください。	&sp;This feature is unavailable while a game is&br;&sp;suspended.&br;&sp;Please exit the game before making changes.	idpm01
+プレイ中は【解約】できません	Cannot cancel while playing	cipm01,idpm01
+プレイ中は【復活】できません	Cannot reactivate while playing	cipm01,idpm01
+^03はじめてFINAL FANTASY XIをプレイする前にぜひお読みください。	^03Please read this before playing FINAL FANTASY XI for the first time.	idpm01
+^03FINAL FANTASY XIのコンテンツIDの新規購入・追加購入を行います。	^03Purchase a new or additional Content ID for FINAL FANTASY XI.	idpm01
+解　約	Cancel	cipm01,idpm01
+^03FINAL FANTASY XIのコンテンツIDの解約を行います。	^03Cancel your FINAL FANTASY XI Content ID.	idpm01
+^03ウェブマネーでコンテンツIDを購入された方は、その期間延長やコンテンツIDの復活を行います。	^03If you purchased a Content ID with WebMoney, extend the contract or reactivate the Content ID here.	idpm01
+^03詳細を閉じます。	^03Close the details.	cipm01
+^03ファイナルファンタジーXIのトップページへ戻ります。	^03Return to the FINAL FANTASY XI top page.	cipm01
+^03シートを閉じます。	^03Close this panel.	cipm01
+必要環境・推奨環境を確認	View System Requirements	cipm01
+^03必要環境・推奨環境を表示します。	^03Show the system requirements.	cipm01
+^03コンテンツID購入確認画面へ戻ります。	^03Return to the Content ID purchase confirmation screen.	cipm01
+引継ぎ購入	Transfer Purchase	cipm01
+FFXI：コンテンツID	FFXI: Content ID	cipm01
+コンテンツID	Content ID	cipm01
+&pre=1;拡張データディスクなどを購入して新しい要素をプレイする場合には、スクウェア・エニックス アカウントによる手続きが必要です。スクウェア・エニックス アカウントをお持ちでない方は、スクウェア・エニックス アカウントを新規取得のうえ、「プレイオンラインID移行（リンク）を行ってください。\n\t&style=spacer03;　&style;\n\tプレイオンラインIDの移行に関する詳細は、以下のウェブページでご覧いただけます。\n\thttp://www.playonline.com/home/polshift/	&pre=1;Purchasing an expansion disc and playing its new content requires a Square Enix account. If you do not have one, create a Square Enix account and then link your PlayOnline ID to it.\n\t&style=spacer03;　&style;\n\tDetails on migrating a PlayOnline ID are on the following web page.\n\thttp://www.playonline.com/home/polshift/	cipm01
+拡張コンテンツ	Expansions	cipm01
+戻 る	Back	cipm01
+Windows XP/Vista/7 （日本語版）	Windows XP/Vista/7	cipm01
+Intel Pentium III 800MHz以上	Intel Pentium III 800MHz or higher	cipm01
+メインメモリー	Main Memory	cipm01
+実装128MB以上	128MB or more installed	cipm01
+グラフィックカード	Graphics Card	cipm01
+&pre=1;&li= ;NVIDIA GeForce / ATI Radeon9000以上シリーズチップ搭載のグラフィックカードVRAM32MB以上\n&style=Tr13;&li=※;DirectX 8.1と100%互換性のあるドライバー\nソフトウェアが必要です。&li;&style;&li;	&pre=1;&li= ;Graphics card with an NVIDIA GeForce / ATI Radeon 9000 series or later chipset, 32MB VRAM or more\n&style=Tr13;&li=*;Driver software 100% compatible with DirectX 8.1 is required.&li;&style;&li;	cipm01
+サウンドカード	Sound Card	cipm01
+DirectX 8.1と100%互換性のあるドライバー&br;\n\t\t ソフトウェアを備えたサウンドカード	Sound card with driver software 100% compatible&br;with DirectX 8.1	cipm01
+ハードディスクドライブ&br;空き容量	Hard Disk Drive&br;Free Space	cipm01
+9.5GB以上	9.5GB or more	cipm01
+通信環境	Connection	cipm01
+56kbps対応モデム相当以上の速度でインター&br;\n\t\t ネットへ接続可能な環境	Internet connection at 56kbps modem speed&br;or faster	cipm01
+その他	Other	cipm01
+キーボード、マウス、DirectX 8.1、DVD-ROM&br;\n\t\t ドライブ	Keyboard, mouse, DirectX 8.1, DVD-ROM&br;drive	cipm01
+Windows XP Professional （日本語版）	Windows XP Professional	cipm01
+Intel Pentium 4以上	Intel Pentium 4 or higher	cipm01
+実装256MB以上	256MB or more installed	cipm01
+&pre=1;&li= ;NVIDIA GeForce3、GeForce4 Tiシリーズ、GeForceFX5600以上チップ搭載のグラフィックカード VRAM64MB以上\n&style=Tr13;&li=※;DirectX 8.1と100%互換性のあるドライバー\nソフトウェアが必要です。&li;&style;&li;	&pre=1;&li= ;Graphics card with an NVIDIA GeForce3, GeForce4 Ti series, or GeForce FX5600 or later chipset, 64MB VRAM or more\n&style=Tr13;&li=*;Driver software 100% compatible with DirectX 8.1 is required.&li;&style;&li;	cipm01
+DirectX 8.1と100%互換性のあるドライバー&br; ソフトウェアを備えたサウンドカード	Sound card with driver software 100% compatible&br;with DirectX 8.1	cipm01
+インターネットへ常時接続可能な環境	Always-on Internet connection	cipm01
+キーボード(テンキー付き)、マウス(ホイール&br; 付き)、DirectX 8.1、DVD-ROMドライブ	Keyboard (with numeric keypad), mouse (with&br;wheel), DirectX 8.1, DVD-ROM drive	cipm01
+グラフィックカード種別	Graphics Card	cipm01
+OS種別&br;Windows Vista/7　　　Windows XP	OS&br;Windows Vista/7    Windows XP	cipm01
+GeForce 400 シリーズ	GeForce 400 Series	cipm01
+GeForce 200 シリーズ	GeForce 200 Series	cipm01
+GeForce 9 シリーズ	GeForce 9 Series	cipm01
+GeForce 8シリーズ	GeForce 8 Series	cipm01
+GeForce 7シリーズ	GeForce 7 Series	cipm01
+GeForce 6800シリーズ	GeForce 6800 Series	cipm01
+GeForce 6600シリーズ	GeForce 6600 Series	cipm01
+GeForce 6200シリーズ	GeForce 6200 Series	cipm01
+GeForce FX5900シリーズ	GeForce FX5900 Series	cipm01
+GeForce FX5700シリーズ	GeForce FX5700 Series	cipm01
+GeForce FX5600シリーズ	GeForce FX5600 Series	cipm01
+GeForce FX5200シリーズ	GeForce FX5200 Series	cipm01
+GeForce 4Tiシリーズ	GeForce 4Ti Series	cipm01
+GeForce 3Tiシリーズ	GeForce 3Ti Series	cipm01
+GeForce 4MXシリーズ	GeForce 4MX Series	cipm01
+GeForce 2MXシリーズ	GeForce 2MX Series	cipm01
+Radeon HD 6800 シリーズ	Radeon HD 6800 Series	cipm01
+正常動作せず&br;（Catalyst 11.1）&style=Ty14cn;※2&style;	Does not work&br;(Catalyst 11.1)&style=Ty14cn;*2&style;	cipm01
+Radeon HD &br;5800/5700/5600シリーズ	Radeon HD &br;5800/5700/5600 Series	cipm01
+Radeon HD 4800/4600&br;シリーズ	Radeon HD 4800/4600&br; Series	cipm01
+OK（Catalyst 9.4）&br;要注意 &style=Ty14cn;※3&style;	OK (Catalyst 9.4)&br;Caution &style=Ty14cn;*3&style;	cipm01
+Radeon HD 3800シリーズ	Radeon HD 3800 Series	cipm01
+Radeon HD 2900シリーズ	Radeon HD 2900 Series	cipm01
+Radeon HD 2600シリーズ	Radeon HD 2600 Series	cipm01
+Radeon X1900シリーズ	Radeon X1900 Series	cipm01
+Radeon X1800シリーズ	Radeon X1800 Series	cipm01
+Radeon X1600シリーズ	Radeon X1600 Series	cipm01
+Radeon X1300シリーズ	Radeon X1300 Series	cipm01
+Radeon X800シリーズ	Radeon X800 Series	cipm01
+Radeon X700シリーズ	Radeon X700 Series	cipm01
+Radeon X600シリーズ	Radeon X600 Series	cipm01
+Radeon X300シリーズ	Radeon X300 Series	cipm01
+Radeon 9800シリーズ	Radeon 9800 Series	cipm01
+Radeon 9700シリーズ	Radeon 9700 Series	cipm01
+Radeon 9600シリーズ	Radeon 9600 Series	cipm01
+Radeon 9500シリーズ	Radeon 9500 Series	cipm01
+Radeon 9200シリーズ	Radeon 9200 Series	cipm01
+Radeon 9000シリーズ	Radeon 9000 Series	cipm01
+データ引継ぎ購入確認	Data Transfer Purchase Confirmation	cipm01
+&pre=1; ファイナルファンタジーXI βテストに参加していた場合は「データ\n\t 引継ぎ購入」を行うことにより、βテスト時のキャラクターデータの一部\n\t を引継いだ状態で正式サービスを利用できるようになります。\n\t&style=spacer02; &style;\n\t「データ引継ぎ購入」を行う場合は、下の「データ引継ぎ購入」より手続\n\t き画面に進んでください。βテストに参加していなかった場合、またはβ\n\t テストのデータを引継がずに新たにゲームを開始したい場合は「閉じる」\n\t を選択し、「購入」より手続きを行ってください。	&pre=1; If you took part in the FINAL FANTASY XI beta test, a "Data\n\t Transfer Purchase" lets you carry part of your beta character data\n\t over into the live service.\n\t&style=spacer02; &style;\n\tTo do so, continue from "Data Transfer Purchase" below. If you did\n\t not take part in the beta test, or you would rather start fresh\n\t without carrying data over, select "Close" and use "Purchase"\n\t instead.	cipm01
+^03はじめてファイナルファンタジーXIをプレイする前にお読みください。	^03Please read this before playing FINAL FANTASY XI for the first time.	cipm01
+^03コンテンツIDの解約を行います。	^03Cancel your Content ID.	cipm01
+拡張コンテンツについて	About Expansions	cipm01
+^03拡張コンテンツの登録について説明しています。	^03Explains how to register expansion content.	cipm01
+ゲームを一時抜けた状態の時は、この機能をご利用いただけません。&br;ゲームを終了してからご変更ください。	This feature is unavailable while a game is suspended.&br;Please exit the game before making changes.	cipm01
+プレイ中は【登録】できません	Cannot register while playing	cipm01
+コンテンツID購入確認	Content ID Purchase Confirmation	cipm01
+ウェブマネーで購入したコンテンツIDの使用期限が切れてしまった場合には「閉&br;じる」を選択し、「復活」から手続きをしてください。コンテンツIDを新規・追&br;加で購入する場合には、お支払い方法に関わらず「購入」を選択してください。&br;&br;&sp=14;[ファイナルファンタジーをお楽しみいただくために]&br;&sp=5;コンテンツIDご購入の前には、必要環境・推奨環境をご確認ください。	If a Content ID purchased with WebMoney has expired, select "Close"&br;and use "Reactivate". To buy a new or additional Content ID, select&br;"Purchase" regardless of your payment method.&br;&br;&sp=14;[Before playing FINAL FANTASY XI]&br;&sp=5;Please check the system requirements before purchasing a Content ID.	cipm01
+ウェブマネーで購入したコンテンツIDの使用期限が切れてしまった場合には「閉&br;じる」を選択し、「復活」から手続きをしてください。コンテンツIDを新規・追&br;加で購入する場合には、お支払い方法に関わらず「購入」を選択してください。	If a Content ID purchased with WebMoney has expired, select "Close"&br;and use "Reactivate". To buy a new or additional Content ID, select&br;"Purchase" regardless of your payment method.	cipm01
+確認　　　　　　　　　 	View	chpm01
+確認　　　　　　　　　　	View	chpm01
+登録・変更　　　　　　　	Register / Change	chpm01
+ウェブマネーの期間延長　	WebMoney Extension	chpm01
+利用料金とお支払いの流れ	Fees and Payment	chpm01
+変更　　　　　　　　　 	Change	chpm01
+パスワードの変更　　　　	Change Password	chpm01
+アカウントの確認・変更　	View / Change Account	chpm01
+キャラクターネームアドレス　	Character Name Address	chpm01
+メール転送　　　　　　　	Mail Forwarding	chpm01
+メール着信拒否　　　　　	Block Mail	chpm01
+解約　　　　　　　　　　	Cancel	chpm01
+復活　　　　　　　　　　	Reactivate	chpm01
+&image=ilYes; は  い  	&image=ilYes; Yes  	chpm01
+&image=ilNo; いいえ  	&image=ilNo; No  	chpm01
+サポート：会員情報	Support: Member Information	chpm01
+会員情報	Member Information	chpm01
+「接続」を選ぶとサーバーに接続します。時間がかかることがあります。	Choosing "Connect" contacts the server. This may take a moment.	chpm01
+&pre=1;ゲームを一時的に抜けた状態の時は、この機能をご利用いただけません。\r\n\t\t\tゲームを終了してからご変更ください。	&pre=1;This feature is unavailable while a game is suspended.\r\n\t\t\tPlease exit the game before making changes.	chpm01
+\n\t&pre=1;PlayOnline Viewerからは、契約中のコンテンツIDを解約する操作のみ行えます。\n\tお支払い方法の確認や変更、ウェブマネーによる利用期間延長など、解約以\n\t外の各種操作を行うためにはスクウェア・エニックス アカウントが必要で\n\tす。\n\tスクウェア・エニックス アカウントをお持ちでない方は、スクウェア・エ\n\tニックス アカウントを新規取得のうえ、「プレイオンラインID移行を行っ\n\tてください。\n\t&style=spacer03;　&style;\n\tプレイオンラインIDの移行に関する詳細は、以下のウェブページでご覧いただけます。\n\thttp://www.playonline.com/home/polshift/\n\t&style=spacer03;　&style;\n\t&style=Tv16b;コンテンツIDについて&style;\n\tファイナルファンタジーXI利用料金 ： 1,408円（税抜価格1,280円）\n\tコンテンツID追加料金 ： 110円／月（税抜価格100円）\n\t	\n\t&pre=1;From the PlayOnline Viewer you can only cancel a Content ID you are currently contracted for.\n\tChecking or changing your payment method, extending a WebMoney period,\n\tand other operations besides cancellation require a Square Enix account.\n\tIf you do not have one, create a Square Enix account and then migrate\n\tyour PlayOnline ID to it.\n\t&style=spacer03;　&style;\n\tDetails on migrating a PlayOnline ID are on the following web page.\n\thttp://www.playonline.com/home/polshift/\n\t&style=spacer03;　&style;\n\t&style=Tv16b;About Content IDs&style;\n\tFINAL FANTASY XI service fee: 1,408 yen (1,280 yen excl. tax)\n\tAdditional Content ID fee: 110 yen/month (100 yen excl. tax)\n\t	cipm01
+\n\t&pre=1;Xbox 360版「ファイナルファンタジーXI」のβテスト終了に伴って、現在コンテンツIDのデータ引継ぎ購入が行えます。\n期間中にこの手続きを行うと、βテスト時のキャラクターデータを一部引継いだ状態で正式サービスを利用することが可能になります。\n&style=spacer01;　&style;\nデータ引継ぎ購入を希望する場合は、メニューから「データ引継ぎ購入」を選択し、画面の案内に沿って手続きを行ってください。\nβテストに参加していなかった場合、またはβテスト時のデータを引継がずに新たなコンテンツIDとキャラクターでゲームを開始したい場合は「閉じる」を選択し、メニューの「購入」より新規コンテンツIDの購入手続きを行ってください。\n&style=spacer01;　&style;\n&style=Cb14;&li=※;βテスト参加時にXbox 360版のプレイオンラインIDを新たに取得・使用していた場合は、あらかじめプレイオンラインへの継続入会を行ってから、上記の手続きに進んでください。\n&li;&style;\n\t	\n\t&pre=1;With the end of the Xbox 360 FINAL FANTASY XI beta test, a Content ID data transfer purchase is currently available.\nCompleting it during this period lets you carry part of your beta character data over into the live service.\n&style=spacer01;　&style;\nTo do so, choose "Data Transfer Purchase" from the menu and follow the on-screen instructions.\nIf you did not take part in the beta test, or you would rather start fresh with a new Content ID and character, select "Close" and use "Purchase" from the menu to buy a new Content ID.\n&style=spacer01;　&style;\n&style=Cb14;&li=*;If you obtained and used a new Xbox 360 PlayOnline ID for the beta test, please complete continued enrolment in PlayOnline before proceeding.\n&li;&style;\n\t	cipm01
+&pre=1;&li=ng01;必須環境\n\t\t&style=spacer01;　&style;\n&table=intb1;\n&style=Ty14c;&li=※;Windows PCのパーツの組み合わせによっては正常に動作しない可能性があります。&li;\n&li=※;プレイオンラインビューアーおよびファイナルファンタジーXIのインストールは、\n管理者権限で行う必要があります。&li;&style;&li;\n\n\t\t&li=ng01;推奨環境\n\t\t&style=spacer01;　&style;\n&table=intb2;\n&style=Ty14c;&li=※;Windows PCのパーツの組み合わせによっては正常に動作しない可能性があります。&li;\n&li=※;プレイオンラインビューアーおよびファイナルファンタジーXIのインストールは、\n管理者権限で行う必要があります。&li;&style;&li;\n\n\t\t&li=ng01;動作確認済みグラフィックカードについて\n\t\t&style=spacer01;　&style;\nNVIDIA社ならびにAMD（ATI）社と弊社開発スタッフにより、協力して検証作業を進めてまいりました結果、2011年2月15日現在、下記グラフィックチップ搭載グラフィックカードとドライバーソフトウェアにて、ファイナルファンタジーXI for Windowsの動作確認が終了したことをお知らせいたします。\n\n&style=Tkb16;動作確認済みカードおよびドライバーソフトウェア\n（2011年2月15日現在）&style;\n\t\t&style=spacer01;　&style;\n表中の（ ）内は、動作確認作業を行ったドライバーソフトウェアのバージョンです。NVIDIA社GeForce 7300シリーズおよびAMD（ATI）社Radeon X300シリーズ以降は、PCI-Express接続のグラフィックカードのみ、動作確認を行っております。また、NVIDIA社GeForce 6シリーズ以降に対応するドライバーソフトウェアの利用には、DirectX 9.0cが必要です。ドライバーソフトウェアは、各社のWebサイトからダウンロードして入手してください。なお、動作確認は、Microsoft Windows XP 32bit/Vista 32bit/ 7 32bit/64bitで行っております。\n\t\t&style=spacer01;　&style;\n（NVIDIA社GeForce 8シリーズ、AMD(ATI)社 RADEON X1000シリーズ以降の製品は、Windows XP/Vistaでの動作確認となります。）\n\t\t&style=spacer01;　&style;\nWindows 7での検証はNVIDIA社GeForce8シリーズ、AMD(ATI)社 Radeon HD 4000シリーズ以降での動作確認となります。\nなお、デュアルGPUカードやSLI、CrossFireでの動作はサポートしておりません。&li;\n\n&li=ng01;NVIDIA社　&style=Ty14c;（http://jp.nvidia.com/page/home.html）&style;\n&table=intb3;\n&style=Ty14c;&li=※1 ;FINAL FANTASY XI Configにて、BumpMapを無効に設定した状況での\n動作確認となります。&li;&style;\n\n&style=Tkb16;BumpMap無効操作手順（Windows XPの場合）&style;\n\t\t&style=spacer01;　&style;\n&li=1.;「スタート」→「すべてのプログラム」→「PlayOnline」→「FINAL FANTASY XI」→「FINAL FANTASY XI Config」を起動&li;\n&li=2.;「3D Map」のタブを開き、「BumpMapEnable」のチェックボックスのチェックを外し[閉じる]ボタンを押す&li;\n&li=3.;「設定を保存しますか？」の画面で[はい]を押し、保存して終了&li;\n\t\t&style=spacer01;　&style;\n&style=Ty14c;プレイオンラインビューアーならびにファイナルファンタジーXIを起動している\n状態でFINAL FANTASY XI Config内の設定を行うことはできません。&style;\n\n&li=ng01;AMD（ATI）社　&style=Ty14c;（http://www.amd.com/jp-ja/）&style;\n&table=intb4;&li;\n&style=Ty14c;&li=※2 ;大幅な動作パフォーマンスの低下が発生いたします。現時点では問題無く動作する組み合わせがありません。&li;\n&li=※3;Catalyst 9.6以降のドライバーソフトウェアでは、大幅な動作パフォーマンスの低下が発生いたします。\nその為、Catalyst 9.6以降のドライバーソフトウェアを必要とするグラフィックカードではゲームプレイは困難となります。&li;&style;\n\n\t\t&image=ng01;注意事項\n\t\t&style=spacer01;　&style;\n&li=・;ファイナルファンタジーXI公式サイト（PCインフォメーション）において、モバイル用チップセット搭載の一部Windows PCを発売元PCメーカーとの共同検証にて動作確認済み機種としておりますが、それらモバイル用グラフィックチップならびにグラフィックチップセット単体についての動作を保証するものではございません。&li;\n&li=・;Windows PCのパーツの組み合わせによっては正常に動作しない可能性があります。ドライバーソフトウェアの入手、適用に関してはお客様ご自身の責任において行っていただきますようお願いいたします。&li;\n&li=・;上記情報は2011年2月時点での確認結果であり、上記動作確認済みドライバーソフトウェアでは 最新、および一部グラフィックカードが正常に認識、動作しない場合がございます。 あらかじめご了承ください。&li;\n&li=・;ご利用のWindows PCがメーカー製の場合は、メーカー側で用意したドライバーソフトウェアの適用をお願いいたします。&li;\n\t\t	&pre=1;&li=ng01;Minimum Requirements\n\t\t&style=spacer01;　&style;\n&table=intb1;\n&style=Ty14c;&li=*;Depending on the combination of parts in your Windows PC, it may not operate correctly.&li;\n&li=*;Installing the PlayOnline Viewer and FINAL FANTASY XI requires\nadministrator privileges.&li;&style;&li;\n\n\t\t&li=ng01;Recommended Requirements\n\t\t&style=spacer01;　&style;\n&table=intb2;\n&style=Ty14c;&li=*;Depending on the combination of parts in your Windows PC, it may not operate correctly.&li;\n&li=*;Installing the PlayOnline Viewer and FINAL FANTASY XI requires\nadministrator privileges.&li;&style;&li;\n\n\t\t&li=ng01;About Verified Graphics Cards\n\t\t&style=spacer01;　&style;\nWorking with NVIDIA and AMD (ATI) alongside our own development staff, we are pleased to announce that as of February 15, 2011, FINAL FANTASY XI for Windows has completed verification with graphics cards carrying the chipsets listed below, together with their driver software.\n\n&style=Tkb16;Verified cards and driver software\n(as of February 15, 2011)&style;\n\t\t&style=spacer01;　&style;\nFigures in parentheses in the table are the driver software versions used for verification. For the NVIDIA GeForce 7300 series and the AMD (ATI) Radeon X300 series onward, only PCI-Express graphics cards were verified. Driver software for the NVIDIA GeForce 6 series and later also requires DirectX 9.0c. Please download driver software from each manufacturer's website. Verification was carried out on Microsoft Windows XP 32bit/Vista 32bit/ 7 32bit/64bit.\n\t\t&style=spacer01;　&style;\n(NVIDIA GeForce 8 series and AMD (ATI) RADEON X1000 series products and later were verified on Windows XP/Vista.)\n\t\t&style=spacer01;　&style;\nWindows 7 verification covers the NVIDIA GeForce 8 series and the AMD (ATI) Radeon HD 4000 series onward.\nDual-GPU cards, SLI and CrossFire are not supported.&li;\n\n&li=ng01;NVIDIA　&style=Ty14c;(http://www.nvidia.com/)&style;\n&table=intb3;\n&style=Ty14c;&li=*1 ;Verified with BumpMap disabled in FINAL FANTASY XI Config.&li;&style;\n\n&style=Tkb16;Disabling BumpMap (Windows XP)&style;\n\t\t&style=spacer01;　&style;\n&li=1.;Start -> All Programs -> PlayOnline -> FINAL FANTASY XI -> FINAL FANTASY XI Config&li;\n&li=2.;Open the "3D Map" tab, clear the "BumpMapEnable" checkbox and press [Close]&li;\n&li=3.;Press [Yes] at "Save settings?" to save and exit&li;\n\t\t&style=spacer01;　&style;\n&style=Ty14c;FINAL FANTASY XI Config settings cannot be changed while the PlayOnline Viewer\nor FINAL FANTASY XI is running.&style;\n\n&li=ng01;AMD (ATI)　&style=Ty14c;(http://www.amd.com/)&style;\n&table=intb4;&li;\n&style=Ty14c;&li=*2 ;A severe drop in performance occurs. At present there is no combination that works without problems.&li;\n&li=*3;Driver software from Catalyst 9.6 onward causes a severe drop in performance.\nGame play is therefore difficult on graphics cards that require Catalyst 9.6 or later.&li;&style;\n\n\t\t&image=ng01;Notes\n\t\t&style=spacer01;　&style;\n&li=-;The FINAL FANTASY XI official site (PC Information) lists certain Windows PCs with mobile chipsets as verified, following joint testing with the PC manufacturers; this does not guarantee the operation of those mobile graphics chips or of the graphics chipsets on their own.&li;\n&li=-;Depending on the combination of parts in your Windows PC, it may not operate correctly. Obtaining and applying driver software is done at your own risk.&li;\n&li=-;The information above reflects testing as of February 2011. Some newer graphics cards may not be recognised or may not work correctly with the verified driver software listed. We ask for your understanding.&li;\n&li=-;If your Windows PC is from a manufacturer, please use the driver software that manufacturer supplies.&li;	cipm01
+（	(	cipm01
+）	)	cipm01

@@ -1,0 +1,199 @@
+# Brings up the whole PlayOnline-compatible core with one command:
+#
+#   docker compose up -d --build
+#
+# Before first start: copy .env.example to .env and set POL_ADVERTISE to the
+# address your clients will reach this host on. Empty means 127.0.0.1
+# (loopback-only testing).
+#
+# State lives in named volumes (pol-data, pol-certs). The two read-only
+# mounts, www/ and mirrors/, hold content you supply yourself; see README.md
+# ("bring your own client files").
+
+# Exactly one service (dns) builds each image; every other service consumes
+# it with pull_policy: never, so nothing tries to pull from a registry and
+# parallel builds cannot race on the same tag.
+x-app: &app
+  image: openlobby:latest
+  pull_policy: never
+  restart: unless-stopped
+  environment: &appenv
+    POL_CONFIG: /config/server.yaml
+    POL_ADVERTISE: "${POL_ADVERTISE:-}"
+  volumes:
+    - ./config:/config:ro
+    - pol-data:/data
+    - pol-logs:/logs
+
+volumes:
+  pol-data:
+  pol-logs:
+  pol-certs:
+
+services:
+  dns:
+    <<: *app
+    build: ./services
+    pull_policy: build
+    command: dns
+    ports:
+      # POL_DNS_BIND lets hosts whose own resolver occupies the wildcard
+      # bind (WSL, systemd-resolved on an interface) pin this to one address
+      - "${POL_DNS_BIND:-0.0.0.0}:53:53/udp"
+    healthcheck: &pyhc
+      test: ["CMD", "python", "-c", "import socket;socket.socket().close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  http:
+    <<: *app
+    command: http
+    ports:
+      - "80:80"
+    volumes:
+      - ./config:/config:ro
+      - pol-data:/data
+      - pol-logs:/logs
+      - ${POL_WWW:-./www}:/www:ro
+    healthcheck: *pyhc
+
+  # SSL 3.0 terminators for the 2002-era client. Each container mints the
+  # revival CA on first start (shared via the pol-certs volume), then runs
+  # stunnel with the mounted config.
+  ssl3web:
+    build:
+      context: ./services
+      dockerfile: Dockerfile.ssl3
+    image: openlobby-ssl3:latest
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./services/stunnel-web.conf:/etc/stunnel/stunnel.conf:ro
+      - pol-certs:/certs
+    depends_on:
+      - http
+
+  ssl3ucs:
+    image: openlobby-ssl3:latest
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      SSL3_CN: "ucs.pol.com"
+    volumes:
+      - ./services/stunnel-ucs.conf:/etc/stunnel/stunnel.conf:ro
+      - pol-certs:/certs
+    depends_on:
+      - ucs-plain
+
+  ucs:
+    <<: *app
+    entrypoint: ["python", "ucscgi.py"]
+    ports:
+      - "51305:51305"
+    healthcheck: *pyhc
+
+  login:
+    <<: *app
+    entrypoint: ["python", "responders.py"]
+    command: directory,lobby,world,mail
+    ports:
+      # 51272 and 51305 are deliberately absent: 51272 belongs to a game
+      # title's own service and 51305 to the ucs service.
+      - "51200-51240:51200-51240"
+      - "51251-51271:51251-51271"
+      - "51273-51304:51273-51304"
+      - "51306-51310:51306-51310"
+      - "51330:51330"
+      - "110:110"
+      - "25:25"
+    volumes:
+      - ./config:/config:ro
+      - pol-data:/data
+      - pol-logs:/logs
+      # the Viewer fetches portal pages through the lobby band, so the
+      # portal tree must be visible here too (see the http service)
+      - ${POL_WWW:-./www}:/www:ro
+    healthcheck: *pyhc
+
+  authsess:
+    <<: *app
+    entrypoint: ["python", "responders.py"]
+    command: authserv
+    environment:
+      <<: *appenv
+      # bind the auth band at relay-port + 200; authrelay dials it there
+      POL_AUTH_LISTEN_OFFSET: "200"
+    healthcheck: *pyhc
+
+  authrelay:
+    <<: *app
+    entrypoint: ["python", "authrelay.py"]
+    environment:
+      <<: *appenv
+      # on this bridge network the auth responder is the authsess service
+      # (host-networked deployments leave this at the 127.0.0.1 default)
+      POL_RELAY_UPSTREAM: "authsess"
+    ports:
+      - "51241-51250:51241-51250"
+    healthcheck: *pyhc
+
+  # GM Call responder (the in-client "GM Call" band). Optional: it needs a
+  # human GM watching the ticket directory, so it is off unless you start it
+  # with `docker compose --profile gm up -d` and set POL_GM_CALL=1 so the
+  # built-in menu shows the entry.
+  gmd:
+    <<: *app
+    profiles: ["gm"]
+    entrypoint: ["python", "gmd.py"]
+    environment:
+      <<: *appenv
+      POL_GMD_PORT: "51112"
+      POL_GMD_CHAT_IP: "${POL_ADVERTISE:-127.0.0.1}"
+      POL_GMD_CHAT_PORT: "51112"
+      POL_GMD_STATUS_FLAGS: "0x60"
+      POL_GMD_CHAT_ROOM: "#gmchat001"
+      POL_GMD_TICKET_DIR: "/data/gm-calls"
+    ports:
+      - "51112:51112/udp"
+    healthcheck: *pyhc
+
+  ucs-plain:
+    <<: *app
+    entrypoint: ["python", "ucscgi.py"]
+    command: ["--plain", "--port", "8080"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck: *pyhc
+
+  admin:
+    <<: *app
+    entrypoint: ["python", "admin.py"]
+    ports:
+      - "127.0.0.1:8090:8090"
+    healthcheck: *pyhc
+
+  # The version-check server. The Viewer's FIRST connection is here (POL-1160
+  # when it cannot answer). With no patch trees under mirrors/ it answers
+  # "you are up to date" for the Viewer product in every region (POLP_CURRENT
+  # below); drop your own patch trees into mirrors/ to serve real updates.
+  patch:
+    <<: *app
+    environment:
+      <<: *appenv
+      # POLP_CURRENT_ALL=1: every tree not under mirrors/ is answered as up to
+      # date, so the Viewer and every title launch with no patch files at all.
+      # Set it to 0 (and list trees in POLP_CURRENT) for strict behaviour.
+      POLP_CURRENT_ALL: "${POLP_CURRENT_ALL:-1}"
+      POLP_CURRENT: "${POLP_CURRENT:-}"
+    entrypoint: ["sh", "-c", "exec python polserver2.py /mirrors --advertise \"${POL_ADVERTISE:-127.0.0.1}\""]
+    ports:
+      - "54000:54000"
+      - "53001-53015:53001-53015"
+    volumes:
+      - ./config:/config:ro
+      - pol-data:/data
+      - pol-logs:/logs
+      - ${POL_MIRRORS:-./mirrors}:/mirrors:ro
+    healthcheck: *pyhc

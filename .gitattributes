@@ -1,0 +1,5 @@
+* text=auto
+*.png binary
+*.bin binary
+portal/patches/*.diff -text
+portal/authored/** -text

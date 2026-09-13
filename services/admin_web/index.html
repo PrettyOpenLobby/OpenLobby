@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenLobby Admin</title>
+  <style>
+    :root {
+      --bg: #14161c; --panel: #1c1f28; --panel2: #232733; --line: #333949;
+      --text: #e6e8ee; --muted: #9aa2b4; --accent: #5aa9ff; --good: #57d38c;
+      --warn: #ffcf6b; --bad: #ff7a7a;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.45 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg); color: var(--text); }
+    header { padding: 14px 20px; border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 16px; background: var(--panel); }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+    header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); }
+    nav { display: flex; gap: 4px; }
+    nav button { background: none; border: 0; color: var(--muted); padding: 7px 14px;
+      border-radius: 7px; cursor: pointer; font-size: 14px; }
+    nav button.active { background: var(--panel2); color: var(--text); }
+    main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .tab { display: none; } .tab.active { display: block; }
+    .panel { background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; padding: 16px 18px; margin-bottom: 18px; }
+    .panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+    input[type=text], textarea, select { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
+      font: inherit; width: 100%; }
+    textarea { font: 12.5px/1.5 'Consolas', monospace; resize: vertical; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+    .row > div { flex: 1; min-width: 160px; }
+    button.act { background: var(--accent); color: #04121f; border: 0;
+      padding: 9px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+    button.ghost { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); padding: 9px 14px; border-radius: 8px; cursor: pointer; }
+    /* A ghost button promoted to the primary action -- the News tab's Save when
+       there are unsaved edits. Needed because `button.ghost` is declared AFTER
+       `button.act` at the same specificity, so adding `act` to a ghost button
+       did nothing at all: Save had never once lit up for a dirty store. */
+    button.ghost.act { background: var(--accent); color: #04121f;
+      border-color: transparent; font-weight: 600; }
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2);
+      border: 1px solid var(--line); border-radius: 20px; padding: 5px 12px; cursor: pointer; }
+    .chip input { accent-color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line);
+      font-size: 13px; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; }
+    code.mono { font: 13px 'Consolas', monospace; background: var(--panel2);
+      padding: 2px 7px; border-radius: 5px; }
+    .pill { font-size: 11px; padding: 2px 9px; border-radius: 20px; }
+    .pill.open { background: rgba(87,211,140,.15); color: var(--good); }
+    .pill.used { background: rgba(255,122,122,.15); color: var(--bad); }
+    .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel2);
+      border: 1px solid var(--line); border-left: 3px solid var(--good);
+      padding: 12px 16px; border-radius: 8px; opacity: 0; transform: translateY(8px);
+      transition: .2s; max-width: 340px; }
+    .toast.show { opacity: 1; transform: none; }
+    .toast.err { border-left-color: var(--bad); }
+
+    /* PML editor + preview */
+    .editwrap { display: grid; grid-template-columns: 1fr 660px; gap: 16px; align-items: start; }
+    @media (max-width: 1100px) { .editwrap { grid-template-columns: 1fr; } }
+    .edtoolbar { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 10px; flex-wrap: wrap; }
+    .edtoolbar > div { flex: 0 0 auto; }
+    #pml { height: 560px; }
+    .stagewrap { background: #000; border: 1px solid var(--line); border-radius: 10px;
+      padding: 10px; position: sticky; top: 16px; }
+    .stagewrap .cap { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    /* the client viewport is 640 wide; render at that scale */
+    .pml-stage { position: relative; width: 640px; height: 480px; background: #202020;
+      overflow: hidden; color: #fff; font-family: 'Segoe UI', sans-serif;
+      user-select: none; }
+    .pml-input { outline: none; }
+    .pml-plate { width: 100%; height: 100%; background:
+      linear-gradient(#5b6b86, #3d4a63); border: 1px solid #6d7f9e; border-radius: 3px;
+      display: flex; align-items: center; justify-content: center; }
+    .pml-cap { position: absolute; inset: 0; display: flex; align-items: center;
+      justify-content: center; pointer-events: none; text-shadow: 0 1px 2px #000; }
+    .pml-art-missing { outline: 1px dashed #c66; }
+    /* body copy shown for a file that carries text but no layout of its own */
+    .pml-doc { position: absolute; inset: 0; overflow: auto; padding: 14px 18px;
+      background: #f4f1ea; color: #23201a; font: 14px/1.5 'Segoe UI', sans-serif; }
+    .pml-doc-label { font: 10px 'Consolas', monospace; letter-spacing: .06em;
+      text-transform: uppercase; color: #8a8272; margin: 14px 0 4px;
+      border-bottom: 1px solid #ddd6c8; }
+    .pml-doc-label:first-child { margin-top: 0; }
+    .pml-doc-body img { max-width: 100%; height: auto; }
+    .pml-inline-img { display: inline-block; font: 10px 'Consolas', monospace;
+      border: 1px dashed #b3a98f; border-radius: 3px; padding: 0 4px;
+      color: #8a8272; vertical-align: middle; }
+    /* the `show="0"` panels a page hides until a script reveals one */
+    .stagelayers { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px;
+      align-items: center; }
+    .stagelayers .lbl { color: var(--muted); font-size: 11px; margin-right: 2px; }
+    .stagelayers button { background: var(--panel2); color: var(--muted);
+      border: 1px solid var(--line); border-radius: 20px; padding: 2px 10px;
+      font: 11px 'Consolas', monospace; cursor: pointer; }
+    .stagelayers button.on { background: rgba(90,169,255,.18);
+      border-color: rgba(90,169,255,.5); color: var(--text); }
+    .stagenote { color: var(--muted); font-size: 12px; margin-top: 8px;
+      line-height: 1.45; }
+    .stagenote b { color: var(--text); font-weight: 600; }
+    /* which pages pull this file in, and which it pulls in */
+    .stagerefs { margin-top: 8px; font-size: 12px; line-height: 1.7; }
+    .stagerefs .rl { color: var(--muted); margin-right: 6px; }
+    .stagerefs a { color: var(--accent); cursor: pointer; text-decoration: none;
+      font-family: 'Consolas', monospace; font-size: 11.5px;
+      border-bottom: 1px dotted rgba(90,169,255,.45); margin-right: 10px;
+      white-space: nowrap; }
+    .stagerefs a:hover { border-bottom-style: solid; }
+    .stagerefs .more { color: var(--muted); cursor: pointer;
+      text-decoration: underline dotted; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+    /* PML file browser */
+    .browsepanel { border: 1px solid var(--line); border-radius: 10px;
+      margin-bottom: 14px; overflow: hidden; }
+    .browsebar { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end;
+      padding: 12px 14px; background: var(--panel2); border-bottom: 1px solid var(--line); }
+    .browsebar > div { flex: 0 0 auto; }
+    .browsebar > div.grow { flex: 1 1 220px; }
+    .browsebar select, .browsebar input { min-width: 140px; padding: 7px 9px; }
+    .browsebar label { margin: 0 0 4px; }
+    .filelist { max-height: 320px; overflow: auto; background: var(--panel); }
+    .filegroup .dir { color: var(--accent); font-size: 11px; font-weight: 600;
+      padding: 8px 14px 3px; position: sticky; top: 0; background: var(--panel);
+      border-bottom: 1px solid var(--line); }
+    .fileitem { padding: 4px 14px 4px 26px; cursor: pointer;
+      font: 12.5px 'Consolas', monospace; display: flex; justify-content: space-between;
+      gap: 10px; align-items: center; }
+    .fileitem:hover { background: var(--panel2); }
+    .fileitem.active { background: rgba(90,169,255,.16); }
+    .fileitem .badges { color: var(--muted); font-size: 10px; white-space: nowrap;
+      font-family: 'Segoe UI', sans-serif; }
+    .fileitem .badge { background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 10px; padding: 1px 7px; margin-left: 5px; }
+    /* how a page was made: assembled from fragments, or self-contained */
+    .fileitem .badge.built { border-color: rgba(90,169,255,.45); color: var(--accent); }
+    .fileitem .badge.original { border-color: rgba(87,211,140,.45); color: var(--good); }
+    .filelist .empty { color: var(--muted); padding: 16px; font-size: 13px; }
+
+    /* header identity / sign-out */
+    header .who { margin-left: auto; display: flex; align-items: center; gap: 10px;
+      color: var(--muted); font-size: 12.5px; }
+    header .who button { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); padding: 5px 12px; border-radius: 7px;
+      cursor: pointer; font-size: 12.5px; }
+    /* security tab */
+    input[type=password] { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
+      font: inherit; width: 100%; }
+    .note { border-left: 3px solid var(--accent); background: var(--panel2);
+      padding: 10px 14px; border-radius: 0 7px 7px 0; font-size: 13px;
+      margin-bottom: 14px; color: var(--muted); }
+    .note.warn { border-left-color: var(--warn); }
+    .note b { color: var(--text); font-weight: 600; }
+    .narrow { max-width: 520px; }
+
+    /* News tab: pickers that SHOW the choice, and a live effect summary.
+       Kind and Service each pick a piece of SE's own art, so the picker draws
+       that art -- an operator should not have to publish to find out that
+       "Extras" wears an FMO badge. */
+    .pickstrip { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .pick { flex: 1 1 116px; background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; padding: 8px 9px;
+      cursor: pointer; font: inherit; text-align: left; display: flex;
+      flex-direction: column; gap: 5px; }
+    .pick:hover { border-color: #4b5468; }
+    .pick.on { border-color: var(--accent); background: rgba(90,169,255,.13); }
+    .pick .art { height: 24px; display: flex; align-items: center; }
+    .pick .nm { font-size: 12.5px; font-weight: 600; }
+    .pick .sub { font-size: 11px; color: var(--muted); line-height: 1.3; }
+    .pick.on .sub { color: #b9c4d8; }
+    /* The ticker plate is dark; badges have no background of their own. */
+    .plate { background: #23262e; border-radius: 3px; padding: 2px 3px;
+      display: inline-flex; align-items: center; }
+    .plate img, .pick .art img { image-rendering: pixelated; display: block; }
+    .effect { background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 8px; padding: 10px 12px; margin-top: 14px; }
+    .effect h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .5px;
+      text-transform: uppercase; color: var(--muted); font-weight: 600; }
+    .effect .er { display: flex; gap: 10px; align-items: flex-start;
+      padding: 7px 0; border-top: 1px solid var(--line); font-size: 12.5px; }
+    .effect .er:first-of-type { border-top: 0; padding-top: 2px; }
+    .effect .er .w { width: 124px; flex: none; color: var(--muted); }
+    .effect .er .v { flex: 1; min-width: 0; }
+    .effect .er.off .v { color: var(--muted); }
+    .effect .er .v b { font-weight: 600; }
+    /* `.mono` alone is unstyled -- only `code.mono` has a rule -- so the effect
+       box carries its own, for the file names it quotes inline. */
+    .effect .mono { font: 12px 'Consolas', monospace; background: rgba(255,255,255,.06);
+      padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+    /* A 1:1 mock of the login-screen ticker line: badge left, headline right. */
+    .tickerline { display: flex; align-items: center; gap: 9px; background: #0e1016;
+      border: 1px solid #2b3040; border-radius: 4px; padding: 5px 9px;
+      overflow: hidden; }
+    .tickerline .hd { font-size: 12.5px; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; }
+    /* The text box wraps onto its own line: a datetime-local will not shrink
+       below its intrinsic width in Chrome, so sharing one line squeezes the
+       field that actually gets published down to nothing. */
+    .datefield { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .datefield input[type=text] { flex: 1 1 100%; min-width: 0; }
+    .datefield button { flex: none; white-space: nowrap; padding: 8px 12px; }
+    input[type=datetime-local] { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
+      font: inherit; flex: none; color-scheme: dark; }
+
+    /* destructive actions + confirm dialog */
+    button.danger { background: none; color: var(--bad); border: 1px solid var(--line);
+      padding: 4px 11px; border-radius: 7px; cursor: pointer; font-size: 12px; }
+    button.danger:hover { border-color: var(--bad); background: rgba(255,122,122,.1); }
+    button.danger.solid { background: var(--bad); color: #2a0b0b; border: 0;
+      padding: 9px 16px; font-size: 14px; font-weight: 600; }
+    button.danger.solid:disabled { opacity: .4; cursor: not-allowed; }
+    .modal { position: fixed; inset: 0; background: rgba(8,9,13,.72);
+      display: none; align-items: center; justify-content: center; padding: 20px;
+      z-index: 50; }
+    .modal.show { display: flex; }
+    .modal .card { background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 20px 22px; width: 100%; max-width: 520px;
+      max-height: 90vh; overflow: auto; }
+    .modal h3 { margin: 0 0 4px; font-size: 16px; }
+    .modal .card > p { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+    .modal .foot { display: flex; gap: 10px; justify-content: flex-end;
+      margin-top: 16px; align-items: center; }
+    /* the inventory of what is about to be destroyed */
+    .inv { background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 14px; }
+    .inv div { display: flex; justify-content: space-between; gap: 12px;
+      padding: 3px 0; }
+    .inv div span:first-child { color: var(--muted); }
+    .inv div.hot span:last-child { color: var(--warn); font-weight: 600; }
+    /* GM chat transcript. Monospace on purpose: half of what shows up here is
+       a record whose shape we got wrong, and alignment is how that reads. */
+    .chatlog { background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 8px; padding: 10px 12px; height: 300px; overflow-y: auto;
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+    .chatlog div { padding: 2px 0; display: flex; gap: 10px; }
+    .chatlog .t { color: var(--muted); flex: 0 0 auto; }
+    .chatlog .w { flex: 0 0 96px; overflow: hidden; text-overflow: ellipsis; }
+    .chatlog .m { flex: 1 1 auto; word-break: break-word; }
+    .chatlog .out .w { color: var(--warn); }
+    .chatlog .in  .w { color: var(--ok, #6cc); }
+    .chatlog .hexy { color: var(--muted); font-size: 11px; }
+    .duty { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .duty .state { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="dot"></span>
+    <h1>OpenLobby Admin</h1>
+    <nav>
+      <button data-tab="codes" class="active">Codes</button>
+      <button data-tab="accounts">Accounts</button>
+      <button data-tab="reports">Reports</button>
+      <button data-tab="issues">Issues</button>
+      <button data-tab="gmcalls">GM Calls</button>
+      <button data-tab="news">News</button>
+      <button data-tab="pml">PML Preview</button>
+      <button data-tab="security">Security</button>
+    </nav>
+    <div class="who" id="who"></div>
+  </header>
+
+  <main>
+    <!-- CODES -->
+    <section id="tab-codes" class="tab active">
+      <div class="panel">
+        <h2>Generate a registration code</h2>
+        <div class="row">
+          <div style="flex:2">
+            <label>Code (blank = random)</label>
+            <input type="text" id="code" placeholder="PLAY-NINE-REVA-GAME-FFXI"
+                   maxlength="24" autocomplete="off" spellcheck="false" class="mono">
+            <p class="hint" id="codeHint">Five groups of four - dashes are
+              inserted as you type.</p>
+          </div>
+          <div><button class="ghost" id="randBtn">Random</button></div>
+        </div>
+        <label>Grants content</label>
+        <div class="chips" id="contentChips"></div>
+        <label>Note (optional)</label>
+        <input type="text" id="note" placeholder="e.g. launch giveaway">
+        <div style="margin-top:14px"><button class="act" id="createBtn">Create code</button></div>
+      </div>
+      <div class="panel">
+        <h2>Existing codes</h2>
+        <table><thead><tr><th>Code</th><th>Grants</th><th>Note</th><th>Status</th></tr></thead>
+          <tbody id="codesBody"></tbody></table>
+      </div>
+    </section>
+
+    <!-- ACCOUNTS -->
+    <section id="tab-accounts" class="tab">
+      <div class="panel">
+        <h2>Grant content to an account</h2>
+        <p class="hint">No registration code needed - this grants the titles
+          outright and links them to the account&rsquo;s handle, which is what the
+          client actually reads when it decides whether the Play button works.</p>
+        <div class="row">
+          <div style="flex:1"><label>PlayOnline ID</label>
+            <input type="text" id="grantPol" placeholder="AB-1234567" list="polidList">
+            <datalist id="polidList"></datalist></div>
+        </div>
+        <label>Content <span class="hint" style="display:inline">(pick any number)</span></label>
+        <div class="chips" id="grantChips"></div>
+        <div class="row" style="margin-top:12px; align-items:center">
+          <div><button class="act" id="grantBtn">Grant</button></div>
+          <div><button class="danger" id="revokeBtn">Revoke</button></div>
+          <div><button class="ghost" id="grantAllBtn">Select all</button></div>
+          <div><button class="ghost" id="grantNoneBtn">Clear</button></div>
+        </div>
+        <p class="hint">Revoke cancels the picked content on this account and
+          removes its character from the launcher (the client returns to
+          &ldquo;Create character&rdquo;). Reversible - a later Grant
+          restores the same Content ID.</p>
+      </div>
+      <div class="panel">
+        <h2>Create an account</h2>
+        <p class="hint">Exactly what the in-client sign-up does - one
+          transaction for the PlayOnline ID, member, handle, content and mailbox.
+          The password is shown <b>once</b>, here; only its hash is stored, so
+          there is nowhere to read it back from.</p>
+        <div class="row">
+          <div style="flex:1"><label>Handle <span class="hint" style="display:inline">(blank = Player####)</span></label>
+            <input type="text" id="newHandle" maxlength="15" autocomplete="off" spellcheck="false"></div>
+          <div style="flex:1"><label>Password <span class="hint" style="display:inline">(blank = generated)</span></label>
+            <input type="text" id="newPw" maxlength="15" autocomplete="off" spellcheck="false" class="mono"></div>
+          <div style="flex:1"><label>Registration code <span class="hint" style="display:inline">(optional)</span></label>
+            <input type="text" id="newCode" maxlength="24" autocomplete="off" spellcheck="false" class="mono"
+                   placeholder="its grants replace the picks below"></div>
+        </div>
+        <label>Content</label>
+        <div class="chips" id="newChips"></div>
+        <div style="margin-top:14px"><button class="act" id="newBtn">Create account</button></div>
+        <div class="inv" id="newResult" style="display:none; margin-top:14px"></div>
+      </div>
+      <div class="panel">
+        <h2>Accounts</h2>
+        <table><thead><tr><th>PlayOnline ID</th><th>Handle</th><th>Content</th><th>Playable</th><th>Created</th><th></th></tr></thead>
+          <tbody id="accountsBody"></tbody></table>
+      </div>
+    </section>
+
+    <!-- ABUSE REPORTS -->
+    <section id="tab-reports" class="tab">
+      <div class="panel">
+        <h2>User reports</h2>
+        <p class="hint">Filed from the Viewer's <b>Report User</b> dialog, which
+          submits a real SMTP mail to <code>tos@&hellip;playonline.com</code>. Those
+          addresses are aliased to the local <b id="reportsBox">tos</b> mailbox, so
+          every report is also readable as ordinary mail. The client attaches its
+          own chat transcript - the reporter pastes nothing.</p>
+        <table><thead><tr><th>Received</th><th>Reported</th><th>Where</th>
+          <th>Reporter</th><th>Explanation</th></tr></thead>
+          <tbody id="reportsBody"></tbody></table>
+      </div>
+      <div class="panel" id="reportLogPanel" style="display:none">
+        <h2>Attached transcript - <span id="reportLogWho"></span></h2>
+        <pre id="reportLog" style="white-space:pre-wrap; overflow-x:auto"></pre>
+      </div>
+    </section>
+
+    <!-- TESTER ISSUE REPORTS -->
+    <!-- Not the same thing as the Reports tab above. That one is SE's own
+         Report User dialog (a player accusing a player, by SMTP); this one is a
+         tester telling us the software broke, filed by the shim's report chord
+         with both halves of the logs attached. -->
+    <section id="tab-issues" class="tab">
+      <div class="panel">
+        <h2>Issue reports</h2>
+        <p class="hint">Filed by a tester pressing the report chord in-game. Each
+          bundle carries the client's own logs <em>and</em> the same minutes cut
+          from this server's logs, so it still means something after everything
+          it was cut from has rolled. Click a row to open it.</p>
+        <table><thead><tr><th>Received</th><th>Who</th><th>Title</th>
+          <th>What they said</th><th>Correlated</th></tr></thead>
+          <tbody id="issuesBody"></tbody></table>
+      </div>
+      <div class="panel" id="issueDetail" style="display:none">
+        <h2>Bundle <span id="issueId" class="mono"></span></h2>
+        <p class="hint" id="issueWarn" style="display:none; color:var(--warn,#c80)"></p>
+        <pre id="issueDesc" style="white-space:pre-wrap"></pre>
+        <div id="issueShot"></div>
+        <p class="hint">Files - client is theirs, server is the window we cut:</p>
+        <div id="issueFiles" class="mono" style="line-height:1.9"></div>
+        <h3 id="issueViewName" class="mono" style="display:none"></h3>
+        <pre id="issueView" style="white-space:pre-wrap; overflow-x:auto;
+             max-height:32em; overflow-y:auto"></pre>
+      </div>
+    </section>
+
+    <!-- GM CALLS -->
+    <section id="tab-gmcalls" class="tab">
+      <div class="panel">
+        <h2>The GM desk</h2>
+        <p class="hint">What <code>gmd</code> tells a caller when their GM Call
+          screen polls for status. <b>Join</b> is flag <code>0x40</code> and
+          <b>Start</b> is <code>0x20</code> - both measured live, as is the
+          queue count. Changes land on the caller&rsquo;s <i>next</i> poll, not
+          instantly: the client asks on its own schedule.</p>
+        <div class="duty">
+          <span>Status:</span>
+          <span class="state" id="gmState">&hellip;</span>
+          <span class="pill" id="gmWhy"></span>
+        </div>
+        <div class="row" style="margin-top:12px; align-items:flex-end">
+          <div><button class="act" id="gmOnDuty">Go on duty</button></div>
+          <div><button class="ghost" id="gmOffDuty">Sign off</button></div>
+          <div><button class="ghost" id="gmClearDuty">Hand back to config</button></div>
+        </div>
+        <div class="row" style="margin-top:14px; align-items:flex-end">
+          <div style="flex:1"><label>Pin the queue count <span class="hint" style="display:inline">(blank = live)</span></label>
+            <input type="text" id="gmQueue" class="mono" placeholder="live" autocomplete="off"></div>
+          <div style="flex:1"><label>Pin the flags <span class="hint" style="display:inline">(blank = from the status above)</span></label>
+            <input type="text" id="gmFlags" class="mono" placeholder="e.g. 0x60" autocomplete="off"></div>
+          <div><button class="act" id="gmPin">Apply</button></div>
+          <div><button class="ghost" id="gmUnpin">Clear pins</button></div>
+        </div>
+        <div class="inv" id="gmDesk" style="margin-top:14px"></div>
+      </div>
+
+      <div class="panel">
+        <h2>GM chat - <span id="gmRoomName" class="mono"></span></h2>
+        <p class="hint"><b>Delivered is not rendered.</b> A line here really does
+          reach the client - authserv relays it and logs it - but
+          nothing we send has yet been seen to <i>draw</i>. A <code>T</code> takes
+          its speaker from the client&rsquo;s member table and no relayed speaker
+          has ever been admitted to it (FACTS &sect;&ldquo;GM CHAT, THE ROOM
+          ITSELF&rdquo;). So the raw and nick boxes are the point, not a debug
+          leftover: the encoders are written against the client&rsquo;s parsers
+          with no surviving capture to check them against, and this is where a
+          wrong guess costs one line instead of a rebuild.</p>
+        <div class="chatlog" id="gmLog"></div>
+        <div class="row" style="margin-top:12px; align-items:flex-end">
+          <div style="flex:3"><label>Say</label>
+            <input type="text" id="gmSay" placeholder="Hello, how can I help?" autocomplete="off"></div>
+          <div style="flex:1"><label>As nick <span class="hint" style="display:inline">(blank = the GM)</span></label>
+            <input type="text" id="gmNick" class="mono" placeholder="self" autocomplete="off"></div>
+          <div><button class="act" id="gmSend">Send</button></div>
+        </div>
+        <details style="margin-top:12px">
+          <summary class="hint" style="cursor:pointer">Membership events and raw records</summary>
+          <div class="row" style="margin-top:10px; align-items:flex-end">
+            <div style="flex:1"><label>Event</label>
+              <select id="gmEvent">
+                <option value=""> - </option>
+                <option value="S">S - started</option>
+                <option value="G">G - joined</option>
+                <option value="E">E - left</option>
+                <option value="A">A - suspended</option>
+                <option value="R">R - resumed</option>
+              </select></div>
+            <div style="flex:1"><label>About</label>
+              <input type="text" id="gmEventWho" class="mono" placeholder="Fox" autocomplete="off"></div>
+            <div><button class="ghost" id="gmSendEvent">Send event</button></div>
+          </div>
+          <label style="margin-top:12px">Raw record <span class="hint" style="display:inline">(<code>\xNN</code> escapes work)</span></label>
+          <div class="row" style="align-items:flex-end">
+            <div style="flex:3"><input type="text" id="gmRaw" class="mono"
+              placeholder="T\x07literally these bytes" autocomplete="off"></div>
+            <div><button class="ghost" id="gmSendRaw">Send raw</button></div>
+          </div>
+          <p class="hint" style="margin-top:8px">Nick <code>self</code>
+            attributes a record to the receiving client&rsquo;s <i>own</i> nick.
+            That is the probe that separates &ldquo;the record is
+            malformed&rdquo; from &ldquo;the speaker did not resolve&rdquo; - if a line renders as <code>self</code> and not as the GM, the
+            record is fine and the member table is the problem.</p>
+        </details>
+      </div>
+
+      <div class="panel">
+        <h2>GM Call requests</h2>
+        <p class="hint">Submitted from the Viewer's <b>GM Call</b> screen and
+          filed by the <code>gmd</code> service, which answers the GM Call UDP
+          band on 51112 and drops each decoded request into
+          <code>data/gm-calls/</code>. Read-only: this is the ticket, and
+          <code>gmd</code> answers the handshake, the queue count and the room
+          redirect on its own. Nothing here replies - the chat itself rides
+          the auth band (<code>#gmchat001</code>) and is still conducted by hand.</p>
+        <table><thead><tr><th>Received</th><th>Req No.</th><th>Handle</th>
+          <th>Title</th><th>Issue</th><th>Subject</th></tr></thead>
+          <tbody id="gmBody"></tbody></table>
+      </div>
+      <div class="panel" id="gmDetail" style="display:none">
+        <h2>Request <span id="gmWho"></span></h2>
+        <pre id="gmText" style="white-space:pre-wrap; overflow-x:auto"></pre>
+      </div>
+    </section>
+
+    <!-- NEWS -->
+    <section id="tab-news" class="tab">
+      <div class="panel">
+        <h2>Announcements</h2>
+        <p class="hint">One entry feeds every news surface the Viewer has: the
+          <b>login-screen ticker</b> (<code class="mono">latestnews.pml</code> - by far the most-requested file on the server), the <b>Information
+          section</b>&rsquo;s per-category lists
+          (<code class="mono">news&lt;N&gt;.pml</code>), a <b>detail page</b> per
+          story that the ticker headline links straight to
+          (<code class="mono">&lt;serial&gt;.pml</code>), and our own substitute
+          Information page. Saving only writes the store; nothing reaches a client
+          until you <b>Publish</b>.</p>
+        <div id="newsState" class="note" style="display:none"></div>
+        <div id="newsDraftNote" class="note" style="display:none"></div>
+        <div class="row" style="align-items:center">
+          <div><button class="act" id="newsAddBtn">New announcement</button></div>
+          <div style="flex:0 0 auto"><button class="ghost" id="newsSaveBtn">Save</button>
+            <span class="hint" id="newsDraftHint"
+                  style="margin:0 0 0 8px; display:inline"
+                  title="Edits are kept in this browser as you type, so a refresh does not lose them. Only Save writes the store."></span></div>
+          <div><button class="act" id="newsPublishBtn">Publish</button></div>
+          <div><button class="ghost" id="newsDryBtn">What would change?</button></div>
+          <div class="grow"><span class="hint" id="newsStoreHint" style="margin:0"></span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="editwrap">
+          <div>
+            <div id="newsList" class="filelist" style="max-height:210px"></div>
+            <div id="newsForm" style="margin-top:14px">
+              <div class="row">
+                <div style="flex:2"><label>Date <span class="hint" style="display:inline">(shown verbatim - the client never parses it)</span></label>
+                  <div class="datefield">
+                    <input type="text" id="nDate" spellcheck="false"
+                           placeholder="Aug. 20, 2026 19:00 [UTC]">
+                    <button class="ghost" id="nDateNow"
+                            title="This hour, UTC, in SE's format. Rounds DOWN so a story never claims a time that has not happened yet.">Now</button>
+                    <input type="datetime-local" id="nDatePick" step="3600"
+                           title="Pick a time; it is written into the box in SE's format.">
+                  </div>
+                  <p class="hint" id="nDateHint" style="margin-top:6px"></p></div>
+                <div style="flex:0 0 auto"><label>Serial</label>
+                  <input type="text" id="nSerial" class="mono" readonly
+                         style="width:90px" title="Identity, not a sequence - it names the detail file."></div>
+              </div>
+              <label>Headline <span class="hint" style="display:inline">(this is all the ticker shows)</span></label>
+              <input type="text" id="nTitle" spellcheck="false">
+
+              <label>Kind <span class="hint" style="display:inline">(files the story under a category, and picks the marker beside it)</span></label>
+              <div class="pickstrip" id="nKindStrip"></div>
+
+              <label>Service <span class="hint" style="display:inline">(SE&rsquo;s content id - it IS the ticker badge, and it decides which Information pages carry the story)</span></label>
+              <div class="pickstrip" id="nContentStrip"></div>
+              <p class="hint" id="nIconHint" style="margin-top:6px"></p>
+
+              <div class="row">
+                <div style="flex:1"><label>External link <span class="hint" style="display:inline">(optional - replaces the detail page)</span></label>
+                  <input type="text" id="nLink" spellcheck="false" class="mono"
+                         placeholder="http://… - must end in ? or &amp;"></div>
+              </div>
+              <label style="display:flex; align-items:center; gap:8px">
+                <input type="checkbox" id="nStatus" style="width:auto; margin:0">
+                <span>Show in the Status / Maintenance panel</span></label>
+              <p class="hint" style="margin-top:2px">That panel says &ldquo;current or
+                recently resolved&rdquo;, so it is opt-in - an old outage should
+                not sit there forever claiming to be live.</p>
+
+              <div class="effect" id="nEffect"></div>
+
+              <label>Body <span class="hint" style="display:inline">(blank line = new paragraph; blank body = a headline with no detail page)</span></label>
+              <textarea id="nBody" spellcheck="true" style="min-height:190px"></textarea>
+              <div class="row" style="margin-top:10px">
+                <div><button class="ghost" id="nUpBtn">Move up</button></div>
+                <div><button class="ghost" id="nDownBtn">Move down</button></div>
+                <div class="grow"></div>
+                <div><button class="ghost" id="nDelBtn">Delete</button></div>
+              </div>
+            </div>
+          </div>
+          <div class="stagewrap">
+            <div class="cap">
+              <select id="newsOutput" style="max-width:100%"></select>
+            </div>
+            <div id="newsPreviewWrap">
+              <div id="newsStage" class="pml-stage"></div>
+              <div id="newsNote" class="stagenote"></div>
+            </div>
+            <pre id="newsRaw" class="mono"
+                 style="display:none; margin:0; padding:10px; overflow:auto;
+                        max-height:470px; white-space:pre-wrap; font-size:12px"></pre>
+            <div class="stagelayers">
+              <button class="on" id="newsViewRender">Rendered</button>
+              <button id="newsViewRaw">PML</button>
+            </div>
+          </div>
+        </div>
+        <p class="hint">The rendered view draws our substitute Information page,
+          which is self-contained. The data files
+          (<code class="mono">latestnews.pml</code>,
+          <code class="mono">news&lt;N&gt;.pml</code>,
+          <code class="mono">&lt;serial&gt;.pml</code>) carry no markup of their own - they are arrays SE&rsquo;s pages read - so those show as PML.
+          To see the real Information section, publish and then open
+          <code class="mono">wh000.pol.com/pml/info/index.pml</code> in the PML
+          Preview tab.</p>
+      </div>
+    </section>
+
+    <!-- PML PREVIEW -->
+    <section id="tab-pml" class="tab">
+      <div class="panel">
+        <h2>PML editor &amp; live preview</h2>
+        <div class="browsepanel">
+          <div class="browsebar">
+            <div><label>Location</label><select id="fHost"></select></div>
+            <div><label>Game</label><select id="fGame"></select></div>
+            <div><label>Locale</label><select id="fLocale"></select></div>
+            <div><label>Show</label><select id="fKind">
+              <option value="page">Complete pages</option>
+              <option value="draws">Pages + anything that draws</option>
+              <option value="layout">&nbsp;&nbsp; - layout fragments</option>
+              <option value="content">&nbsp;&nbsp; - text content</option>
+              <option value="data">&nbsp;&nbsp; - data only</option>
+              <option value="">Everything</option>
+            </select></div>
+            <div><label>Sort</label><select id="fSort">
+              <option value="path">Path</option>
+              <option value="name">Name</option>
+            </select></div>
+            <div class="grow"><label>Search <span id="pmlCount" class="hint" style="margin:0"></span></label>
+              <input type="text" id="fSearch" spellcheck="false" style="width:100%"
+                     placeholder="filter by path or filename…"></div>
+            <div><span id="pmlKind" class="hint" style="margin:0"></span></div>
+          </div>
+          <div id="fileList" class="filelist"></div>
+        </div>
+        <div class="edtoolbar">
+          <div>
+            <label>…or load a live wizard page</label>
+            <select id="liveKinou">
+              <option value="20">20 - registration</option>
+              <option value="25">25 - list content IDs</option>
+              <option value="31">31 - redeem code</option>
+            </select>
+          </div>
+          <div><label>Step</label>
+            <select id="liveStep">
+              <option>1</option><option>2</option><option>3</option><option>4</option>
+              <option>5</option><option>6</option><option>7</option>
+            </select>
+          </div>
+          <div><button class="ghost" id="loadBtn">Load</button></div>
+          <div><button class="act" id="renderBtn">Render</button></div>
+        </div>
+        <div class="editwrap">
+          <div>
+            <textarea id="pml" spellcheck="false" placeholder="Paste or edit PML here - it renders live as you type."></textarea>
+            <div class="hint">Renders as you type. Templates (<code class="mono">define</code>/<code class="mono">for</code>/<code class="mono">if</code>/<code class="mono">include</code>) are run server-side first; art resolves against the open file's own host tree, and <code class="mono">.ang</code> sprites show as a plate. Only about one file in twenty is a whole page - the line under the stage says what this one is. This is a layout preview, not the client's exact bitmap fonts.</div>
+          </div>
+            <div class="stagewrap">
+            <div class="cap">Client viewport - 640&times;480</div>
+            <div id="stage" class="pml-stage"></div>
+            <div id="stageLayers" class="stagelayers"></div>
+            <div id="stageNote" class="stagenote"></div>
+            <div id="stageRefs" class="stagerefs"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <!-- SECURITY -->
+    <section id="tab-security" class="tab">
+      <div class="panel narrow">
+        <h2>Admin sign-in</h2>
+        <div id="secState"></div>
+        <label>Username</label>
+        <input type="text" id="secUser" autocomplete="username" placeholder="admin">
+        <div id="secCurrentWrap">
+          <label>Current password</label>
+          <input type="password" id="secCurrent" autocomplete="current-password">
+        </div>
+        <label>New password</label>
+        <input type="password" id="secNew" autocomplete="new-password">
+        <label>Confirm new password</label>
+        <input type="password" id="secNew2" autocomplete="new-password">
+        <div style="margin-top:16px"><button class="act" id="secSave">Save credentials</button></div>
+        <div class="hint">At least 8 characters; any characters are allowed. Saving
+          signs out every other session, including this panel open in another
+          browser.</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Delete-account confirmation. Shows the inventory the server counted, and
+       takes the POL ID typed back, because nothing here can be undone. -->
+  <div class="modal" id="delModal">
+    <div class="card">
+      <h3>Delete <code class="mono" id="delPolid"></code>?</h3>
+      <p>This erases the account and everything below. There is no undo and no
+         backup - take one first if this account matters.</p>
+      <div class="inv" id="delInv"></div>
+      <label>Type <code class="mono" id="delEcho"></code> to confirm</label>
+      <input type="text" id="delConfirm" spellcheck="false" autocomplete="off">
+      <label class="chip" style="margin-top:12px; display:inline-flex">
+        <input type="checkbox" id="delRelease"> Return their registration code(s) to the unused pool
+      </label>
+      <div class="foot">
+        <button class="ghost" id="delCancel">Cancel</button>
+        <button class="danger solid" id="delGo" disabled>Delete account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Password change. Two separate keys live behind this dialog and the copy
+       spells out which is which: the password is what the in-client account
+       screens check, the login token is what the LOBBY checks. -->
+  <div class="modal" id="pwModal">
+    <div class="card">
+      <h3>Password for <code class="mono" id="pwPolid"></code></h3>
+      <label>New password</label>
+      <input type="text" id="pwNew" maxlength="15" spellcheck="false" autocomplete="off" class="mono">
+      <div class="hint">8-15 characters, no spaces - the limits of the
+        client&rsquo;s own entry field. Shown in the clear because you have to read
+        it out to somebody.</div>
+      <label class="chip" style="margin-top:14px; display:inline-flex">
+        <input type="checkbox" id="pwResetToken"> Also reset the login token
+      </label>
+      <p class="hint" style="margin-top:8px">The password above is checked by the
+        <b>in-client account screens</b>. The <b>lobby login</b> checks something
+        else - the NICK token it recorded the first time this account signed
+        in - and changing the password does not touch it. Tick the box only
+        if they are locked out of the lobby: it makes the next client to connect
+        as this account trusted on sight.</p>
+      <div class="foot">
+        <button class="ghost" id="pwCancel">Cancel</button>
+        <button class="act" id="pwGo">Save password</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/pml.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
