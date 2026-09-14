@@ -272,13 +272,17 @@ def main_index(content_ids=None, gm_call=None):
 
 
 def game_index(cid):
-    """pml/game/<code>/index.pml: Play, Content ID, Back."""
+    """pml/game/<code>/index.pml: Play and Back. (The Content ID sub-page
+    still answers at its own address; the button was judged noise on the
+    title page, 2026-09-14.)"""
     t = title_of(cid)
-    d = game_dir(cid)
-    rows = [("Play", "gameto:%d" % cid, "Play %s." % t),
-            ("Content ID", "/pml/game/%s/contentid.pml" % d,
-             "Content ID information for this title."),
-            ("Back", "toviewer:", "Return to the PlayOnline main menu.")]
+    rows = [("Play", "gameto:%d" % cid, "Play %s." % t)]
+    if cid == 1 and 15 in offered_ids():
+        # SE's own FFXI page launches the test server as content 15
+        # (`'gameto:'+$TESTSERVER_ID`); offered when this server lists it.
+        rows.append(("Play on Test Server", "gameto:15",
+                     "Play on the %s test server." % t))
+    rows.append(("Back", "toviewer:", "Return to the PlayOnline main menu."))
     return (_head("%s: Top Page" % t)
             + '<body altbgcolor="#00000000">\r\n'
             + _heading(t, "Content %04d. Built-in page." % cid, "fbTt")

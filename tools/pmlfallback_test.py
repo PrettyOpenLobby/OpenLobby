@@ -189,8 +189,8 @@ for cid in (1, 2, 3, 4, 10, 11, 15, 99):
           flat.count(f'href="gameto:{cid}"'), 1)
     check(f"game {cid}: no other launch target",
           len(re.findall(r'gameto:\d+', flat)), 1)
-    check(f"game {cid}: links its Content ID page",
-          f'href="/pml/game/{d}/contentid.pml"' in flat)
+    check(f"game {cid}: offers Play and Back only (no Content ID button)",
+          f'href="/pml/game/{d}/contentid.pml"' not in flat)
     check(f"game {cid}: Back returns with toviewer:",
           'href="toviewer:"' in flat)
     check(f"game {cid}: the title is named",
