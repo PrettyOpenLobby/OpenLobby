@@ -337,6 +337,8 @@ check("an explicit -1/-1 no-event window is still inert",
        or titles.resource_template("b/g/TM0EventDataList")), None)
 
 os.environ["POL_TM_EVENT_START"] = "1"            # any non -1 declares the event
+# the board's rows come from the title's configuration (nobody by default):
+os.environ["POL_TM_EVENT_MEMBERS"] = "1000000002:MEMBER-B:90"
 if titles.resource_template("b/g/TM0EventDataList") is None:
     print("[SKIP] event-window resource checks: the Tetra Master title module "
           "is not loaded in this run (POL_TITLES)")
@@ -358,7 +360,7 @@ else:
     check("the full serve path returns the populated list, not zeros",
           R._resource_blob("b/g/TM0EventMemberList", 10248)[0x04:0x08],
           _memb[0x04:0x08])
-    for _k in ("POL_TM_EVENT_START", "POL_TM_EVENT_END"):
+    for _k in ("POL_TM_EVENT_START", "POL_TM_EVENT_END", "POL_TM_EVENT_MEMBERS"):
         os.environ.pop(_k, None)
 
 print("%s (%d failure%s)" % ("round trip intact" if not fails else "FAILED",
