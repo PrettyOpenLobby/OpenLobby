@@ -810,6 +810,33 @@ _SIGNUP = {}
 _STORE_TTL = int(os.environ.get("POL_UCS_TTL", "1800"))
 
 
+def _signup_open():
+    """PERMISSIVE SIGN-UP: `POL_SIGNUP_ANY_CODE=1` accepts whatever the player
+    types in the registration-code box and grants the new account every title
+    this server offers (`POL_LOBBY_CONTENT_IDS`). For a private server whose
+    players are its friends; the default keeps SE's shape, where a code minted
+    on the admin panel decides who may join and what they get."""
+    return os.environ.get("POL_SIGNUP_ANY_CODE", "0") == "1"
+
+
+def _all_content_codes():
+    """The titles this server offers, as the core lists them (its release
+    default when the environment does not say)."""
+    ids = os.environ.get("POL_LOBBY_CONTENT_IDS")
+    if not ids:
+        try:
+            import srvcore
+            ids = srvcore.RELEASE_DEFAULTS.get("POL_LOBBY_CONTENT_IDS", "1")
+        except ImportError:
+            ids = "1"
+    out = []
+    for c in ids.split(","):
+        c = c.strip()
+        if c.isdigit() and int(c) not in out:
+            out.append(int(c))
+    return tuple(out) or (1,)
+
+
 def _store_sweep(store):
     now = time.time()
     for k in [k for k, (born, _) in store.items() if now - born > _STORE_TTL]:
@@ -2577,7 +2604,9 @@ class Handler(BaseHTTPRequestHandler):
                 db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
                                                      accounts.DEFAULT_DB))
                 try:
-                    if accounts.check_regcode(db, code) is None:
+                    if _signup_open():
+                        pass            # any code opens the door; see _signup_open
+                    elif accounts.check_regcode(db, code) is None:
                         return page_step3(tok, error="That registration code is "
                                                      "not valid or has already "
                                                      "been used.")
@@ -3009,8 +3038,12 @@ class Handler(BaseHTTPRequestHandler):
                 # accounts.register_account. A failure here leaves nothing
                 # behind, so the user can fix the problem and try again. No
                 # `profile=` any more: we do not collect the contact fields.
-                acct = accounts.register_account(db, handle, pw,
-                                                 code=st.get("code"))
+                if _signup_open():
+                    acct = accounts.register_account(
+                        db, handle, pw, contents=_all_content_codes())
+                else:
+                    acct = accounts.register_account(db, handle, pw,
+                                                     code=st.get("code"))
             except accounts.RegistrationError as exc:
                 log(f"registration refused: {exc}")
                 return page_step4(tok, error=str(exc))

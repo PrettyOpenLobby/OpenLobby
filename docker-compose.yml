@@ -90,6 +90,11 @@ services:
   ucs:
     <<: *app
     entrypoint: ["python", "ucscgi.py"]
+    environment:
+      <<: *appenv
+      # "1": the in-client wizard accepts any registration code and grants
+      # every title the server offers (see .env.example)
+      POL_SIGNUP_ANY_CODE: "${POL_SIGNUP_ANY_CODE:-}"
     ports:
       - "51305:51305"
     healthcheck: *pyhc
@@ -163,6 +168,9 @@ services:
     <<: *app
     entrypoint: ["python", "ucscgi.py"]
     command: ["--plain", "--port", "8080"]
+    environment:
+      <<: *appenv
+      POL_SIGNUP_ANY_CODE: "${POL_SIGNUP_ANY_CODE:-}"
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck: *pyhc

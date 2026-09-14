@@ -70,7 +70,9 @@ person on the other end.
    it can mint registration codes for in-client sign-up, or create complete
    accounts directly (PlayOnline ID, handle, password, per-title grants) so
    players never touch the sign-up flow at all. Set a panel password on the
-   Security tab before exposing the port beyond localhost.
+   Security tab before exposing the port beyond localhost. For a server among
+   friends, `POL_SIGNUP_ANY_CODE=1` in `.env` lets the in-client wizard accept
+   any code and grants every title the server offers.
 
 ## Selftests
 

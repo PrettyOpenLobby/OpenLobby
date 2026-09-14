@@ -4516,6 +4516,11 @@ def main(argv=None):
                     print(f"      {nm:<16} class {cls}  guid 0x{guid:x}"
                           + ("  PENDING (invited, not accepted)"
                              if nm in pend else ""))
+    # Every subcommand above writes through `conn`; the pooled connection
+    # commits on release, which a one-shot process never reaches. Without this
+    # `add-account` printed its success and left nothing in the file.
+    conn.commit()
+    conn.close()
     return 0
 
 
