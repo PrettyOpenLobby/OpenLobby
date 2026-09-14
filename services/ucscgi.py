@@ -561,7 +561,22 @@ SKINS = {
     },
 }
 
-SKIN = SKINS.get(os.environ.get("POL_UCS_SKIN", "ucs"), SKINS["ucs"])
+
+
+def art_served():
+    """Is SE's registration art kit (the served skin's buttons, backdrop and
+    icons) under WWW_DIR? A stack with no portal content has none of it, and
+    then the wizard must draw with what the client ships: the `local` skin
+    for the chrome and text plates for the buttons (see `_buttons`)."""
+    return os.path.isfile(os.path.join(WWW_DIR, "ucs", "img_s", "bt01s.ang"))
+
+
+#: The default skin follows the art on disk; POL_UCS_SKIN still overrides.
+SKIN = SKINS.get(os.environ.get("POL_UCS_SKIN")
+                 or ("ucs" if art_served() else "local"), SKINS["ucs"])
+#: A transparent hit target the client ships (the same one the core's built-in
+#: menu uses), for buttons drawn without the art kit.
+HITBOX = "file:/img_s/general/im01s.png"
 
 
 def _page(title, inner, extra_head="", background=None, onclose=None):
@@ -651,9 +666,18 @@ def _buttons(buttons, y):
         # on a real, visible target instead of landing on the empty content
         # region (the "invisible button" the gamepad kept selecting first).
         focus = ' focus="1"' if i == 0 else ''
-        out.append(f'\t\t<img name="bt{i}" pos="0,0" size="{w},30" '
-                   f'src="{art}" style="btn" value="{html.escape(caption)}" '
-                   f'href="{href}"{focus} clicksound="1">\n')
+        if art_served():
+            out.append(f'\t\t<img name="bt{i}" pos="0,0" size="{w},30" '
+                       f'src="{art}" style="btn" value="{html.escape(caption)}" '
+                       f'href="{href}"{focus} clicksound="1">\n')
+        else:
+            # NO ART KIT: a coloured text plate with a transparent hit target
+            # over it, the idiom the core's built-in menu draws with.
+            out.append(f'\t\t<text pos="0,0" size="{w},30" style="btn" '
+                       f'align="center" valign="middle" bgcolor="#2a3340e0">'
+                       f'{html.escape(caption)}</text>\n')
+            out.append(f'\t\t<img name="bt{i}" pos="0,0" size="{w},30" '
+                       f'src="{HITBOX}" href="{href}"{focus} clicksound="1">\n')
         out.append('\t</sheet>\n')
         x += w + gap
     return "".join(out)
