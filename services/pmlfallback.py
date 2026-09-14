@@ -195,16 +195,18 @@ def _head(title):
 def _heading(main, sub, style="fbHd"):
     """A translucent dark stage fill (the Viewer's wallpaper shows through it,
     dimmed; the stock pages paint no fill at all), then a heading and a
-    sub-line. The heading sits at y=42, the row the stock main menu starts
-    its content on, under the handle-info bar the head keeps pinned
-    (`activehandleinfo="1"`, as the stock page declares). `fbTt` (18px) is
+    sub-line. The heading sits at y=96, clear of the handle-info bar the
+    head keeps pinned (`activehandleinfo="1"`, as the stock page declares):
+    the bar covers roughly y 42..82 of the stage, portrait, ID, clock and
+    icons, and anything drawn there is hidden behind it (seen live
+    2026-09-14). `fbTt` (18px) is
     for a title page, whose heading is a title name that can run long; the
     600px box holds the longest shipped name at that size with room left."""
     return ('<sheet name="shBg" pos="0,0" size="%d,%d" border="0" alpha="1" '
             'delay="0" appeartime="200" wait="2">\r\n'
             '\t<text size="%d,%d" bgcolor="#10141880"></text>\r\n'
             '</sheet>\r\n'
-            '<sheet name="shHd" pos="20,42" size="600,60" border="0" alpha="1" '
+            '<sheet name="shHd" pos="20,96" size="600,60" border="0" alpha="1" '
             'delay="100" appeartime="200" wait="2">\r\n'
             '\t<text pos="0,0" size="600,30" style="%s" valign="middle">'
             '%s</text>\r\n'
@@ -214,7 +216,7 @@ def _heading(main, sub, style="fbHd"):
             % (STAGE_W, STAGE_H, STAGE_W, STAGE_H, style, esc(main), esc(sub)))
 
 
-def _rows(rows, cancel, y0=120, step=30):
+def _rows(rows, cancel, y0=160, step=30):
     """One sheet per row: a label on its own coloured plate (`bgcolor` and
     `margin` on a `<text>`, as the stock main menu draws its rows), then the
     transparent hitbox over it. `rows` is a list of (label, href, help);
