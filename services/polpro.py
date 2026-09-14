@@ -283,7 +283,7 @@ def build_pm(code=-721):
 #     $0..$9   the Nth value of the request's FIRST group
 # An unknown placeholder resolves to "0" rather than blowing up mid-request.
 SPEC_FILE = os.environ.get("POL_POLPRO_SPEC", "/config/polpro.json")
-_SPEC_CACHE = {"mtime": 0.0, "spec": None}
+_SPEC_CACHE = {}         # path -> (mtime, spec)
 
 #: Used when no spec file exists. Echo the request and add a status group -- the
 #: least-invented thing we can say. `OK` is the obvious status tag (id 88 in the
@@ -294,20 +294,43 @@ DEFAULT_SPEC = {
 }
 
 
-def reply_spec():
-    """The template table, re-read whenever the file changes."""
+#: Extra template files, merged OVER the core file: a title module registers
+#: its own reply templates here (services/titles.py) so its tag-keyed entries
+#: ship with the title, not with the core. Same re-read-on-mtime rule.
+EXTRA_SPEC_FILES = []
+_EXTRA_CACHE = {}        # path -> (mtime, spec)
+
+
+def _spec_file(path, cache):
+    """One template file, re-read whenever it changes; None when unreadable."""
     try:
-        st = os.stat(SPEC_FILE)
+        st = os.stat(path)
     except OSError:
-        return _SPEC_CACHE["spec"] or DEFAULT_SPEC
-    if st.st_mtime != _SPEC_CACHE["mtime"] or _SPEC_CACHE["spec"] is None:
+        return None
+    got = cache.get(path)
+    if got is None or got[0] != st.st_mtime:
         try:
-            with open(SPEC_FILE, "r", encoding="utf-8") as f:
-                _SPEC_CACHE["spec"] = json.load(f)
-            _SPEC_CACHE["mtime"] = st.st_mtime
+            with open(path, "r", encoding="utf-8") as f:
+                cache[path] = (st.st_mtime, json.load(f))
         except (OSError, ValueError):
-            return _SPEC_CACHE["spec"] or DEFAULT_SPEC
-    return _SPEC_CACHE["spec"]
+            return got[1] if got else None
+    return cache[path][1]
+
+
+def reply_spec():
+    """The template table, re-read whenever a file changes: the core file, then
+    each title's file merged over it. With no file at all, DEFAULT_SPEC."""
+    base = _spec_file(SPEC_FILE, _SPEC_CACHE)
+    extras = [s for s in (_spec_file(p, _EXTRA_CACHE) for p in EXTRA_SPEC_FILES)
+              if s]
+    if base is None and not extras:
+        return DEFAULT_SPEC
+    if not extras:
+        return base
+    merged = dict(base or {})
+    for s in extras:
+        merged.update(s)
+    return merged
 
 
 #: Where the served blobs live -- the same directory `responders._resource_file`

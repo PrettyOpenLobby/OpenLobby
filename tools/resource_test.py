@@ -315,33 +315,36 @@ check("and it is the 0x02 -> 0x03 SE sends", R._b64decode(token)[0x42], 0x03)
 check("a path too short to be a record pushes nothing",
       R._mail_push_token("O/m/TTTT"), None)
 
-# --- THE EVENT RESOURCES: shipped, but INERT until an event is declared -------
+# --- A TITLE'S EVENT RESOURCES: shipped, but INERT until an event is declared
 #
-# `b/g/TM0Event{DataList,MemberList}` ship in `services/tmdata/` so prod can
-# serve a real ranking (the fixtures were gitignored under `data/resources/`,
-# the same missing-fixture class as the ZL/PTL/RANKLIST regressions). But a
+# Tetra Master's `b/g/TM0Event{DataList,MemberList}` come with its title module
+# (services/titles.py) and are served through `titles.resource_template`. A
 # populated ranking with no event window is a phantom event, so the template is
-# gated on `_tm_event_active()` -- the SAME POL_TM_EVENT_START/END the countdown
-# reads. Off by default = None = prod's current all-zero empty list.
+# gated on the title's event window -- the SAME POL_TM_EVENT_START/END its
+# countdown reads. Off by default = None = an all-zero empty list. With no
+# title loaded (POL_TITLES unset) the template is None and the checks skip.
+import titles                                                    # noqa: E402
 print("\nthe event ranking ships but stays inert until an event is declared")
 
 for _k in ("POL_TM_EVENT_START", "POL_TM_EVENT_END"):
     os.environ.pop(_k, None)
 check("with no window declared, the event data list is not served",
-      R._tm_template_blob("b/g/TM0EventDataList"), None)
+      titles.resource_template("b/g/TM0EventDataList"), None)
 check("with no window declared, the event member list is not served",
-      R._tm_template_blob("b/g/TM0EventMemberList"), None)
+      titles.resource_template("b/g/TM0EventMemberList"), None)
 check("an explicit -1/-1 no-event window is still inert",
       (os.environ.update({"POL_TM_EVENT_START": "-1", "POL_TM_EVENT_END": "-1"})
-       or R._tm_template_blob("b/g/TM0EventDataList")), None)
+       or titles.resource_template("b/g/TM0EventDataList")), None)
 
-if R._tm_template_blob("b/g/TM0EventDataList") is None:
-    print("[SKIP] event-window resource checks: the TM0 lobby templates "
-          "come with the Tetra Master title module and are not in this tree")
+os.environ["POL_TM_EVENT_START"] = "1"            # any non -1 declares the event
+if titles.resource_template("b/g/TM0EventDataList") is None:
+    print("[SKIP] event-window resource checks: the Tetra Master title module "
+          "is not loaded in this run (POL_TITLES)")
+    for _k in ("POL_TM_EVENT_START", "POL_TM_EVENT_END"):
+        os.environ.pop(_k, None)
 else:
-    os.environ["POL_TM_EVENT_START"] = "1"        # any non -1 declares the event
-    _data = R._tm_template_blob("b/g/TM0EventDataList")
-    _memb = R._tm_template_blob("b/g/TM0EventMemberList")
+    _data = titles.resource_template("b/g/TM0EventDataList")
+    _memb = titles.resource_template("b/g/TM0EventMemberList")
     check("a declared window serves the data list at its measured length",
           _data is not None and len(_data), 4872)
     check("and the member list at its measured length",
