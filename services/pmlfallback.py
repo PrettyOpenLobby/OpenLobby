@@ -186,21 +186,25 @@ def _head(title):
             '\t<meta http-equiv="Content-Type" '
             'content="text/x-playonline-pml;charset=UTF-8">\r\n'
             '\t<title>%s</title>\r\n'
-            '\t<config top="" addbookmark="0" screensaverlock="1" '
-            'loadinterval="0">\r\n'
+            '\t<config top="" activehandleinfo="1" addbookmark="0" '
+            'screensaverlock="1" loadinterval="0">\r\n'
             '\t<systembg src="">\r\n'
             '%s</head>\r\n' % (esc(title), _STYLES))
 
 
 def _heading(main, sub, style="fbHd"):
-    """The dark stage fill, then a heading and a sub-line. `fbTt` (18px) is
+    """A translucent dark stage fill (the Viewer's wallpaper shows through it,
+    dimmed; the stock pages paint no fill at all), then a heading and a
+    sub-line. The heading sits at y=42, the row the stock main menu starts
+    its content on, under the handle-info bar the head keeps pinned
+    (`activehandleinfo="1"`, as the stock page declares). `fbTt` (18px) is
     for a title page, whose heading is a title name that can run long; the
     600px box holds the longest shipped name at that size with room left."""
     return ('<sheet name="shBg" pos="0,0" size="%d,%d" border="0" alpha="1" '
             'delay="0" appeartime="200" wait="2">\r\n'
-            '\t<text size="%d,%d" bgcolor="#101418ff"></text>\r\n'
+            '\t<text size="%d,%d" bgcolor="#10141880"></text>\r\n'
             '</sheet>\r\n'
-            '<sheet name="shHd" pos="20,34" size="600,60" border="0" alpha="1" '
+            '<sheet name="shHd" pos="20,42" size="600,60" border="0" alpha="1" '
             'delay="100" appeartime="200" wait="2">\r\n'
             '\t<text pos="0,0" size="600,30" style="%s" valign="middle">'
             '%s</text>\r\n'
