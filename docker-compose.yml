@@ -97,6 +97,13 @@ services:
       POL_SIGNUP_ANY_CODE: "${POL_SIGNUP_ANY_CODE:-}"
     ports:
       - "51305:51305"
+    volumes:
+      - ./config:/config:ro
+      - pol-data:/data
+      - pol-logs:/logs
+      # the wizard checks whether the registration art kit is present under
+      # the portal tree (login serves it); without it, it draws art-free
+      - ${POL_WWW:-./www}:/www:ro
     healthcheck: *pyhc
 
   login:
@@ -173,6 +180,11 @@ services:
       POL_SIGNUP_ANY_CODE: "${POL_SIGNUP_ANY_CODE:-}"
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - ./config:/config:ro
+      - pol-data:/data
+      - pol-logs:/logs
+      - ${POL_WWW:-./www}:/www:ro
     healthcheck: *pyhc
 
   admin:
