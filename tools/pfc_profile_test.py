@@ -260,10 +260,11 @@ def main():
 
     # 7. THE SHIPPED TEMPLATE. It answers when the code path declines, so it has
     #    to carry the right code and the right arity even though it has no data.
-    spec_path = os.path.join(HERE, os.pardir, "config", "polpro.json")
-    with open(spec_path, encoding="utf-8") as f:
-        spec = json.load(f)
-    for key in ("PG", "MJS:PG", "TM0:PG"):
+    #    The template files ship with the titles (services/titles.py merges
+    #    them over /config/polpro.json), so read the MERGED table the server
+    #    answers from, and check only the keys it carries.
+    spec = polpro.reply_spec()
+    for key in [k for k in ("PG", "MJS:PG", "TM0:PG") if k in spec]:
         tag, vals = groups_of(polpro.reply_for(LIVE_PG, spec=spec,
                                                tag=key.split(":")[0].encode()
                                                if ":" in key else None))
