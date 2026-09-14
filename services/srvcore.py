@@ -35,7 +35,8 @@ RELEASE_DEFAULTS = {
     "POL_LOBBY_PAYLEN": "4:1=128,4:0=128",
     "POL_LOBBY_TAIL": "3:0=acct0",
     "POL_SEARCH_RECORD": "600",
-    "POL_RESOURCE_PAYLEN": "b/g/RL001=876,b/g/RL002=876,b/g/RL003=876,b/g/RL004=876,b/g/PTL=24484",
+    # No POL_RESOURCE_PAYLEN here: a title declares the lengths of its own
+    # lobby lists (titles.Title.resource_length); the core carries none.
     "POL_LOBBY_LIST_MODE": "0:7=handles,0:9=handles,1:3=chars,2:3=friends,7:12=groups",
     "POL_LOBBY_CONTENT_IDS": "1,2,4,11,14",
     "POL_ACCOUNTS_ENFORCE": "1",      # unknown NICKs are refused; accounts come from sign-up or the admin panel
