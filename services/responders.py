@@ -24551,6 +24551,10 @@ def main():
                          "patch directory authcap authserv lobby world "
                          "mail all")
     modes = set(sys.argv[1].split(","))
+    # Say which title plugins this process carries; a title that failed to
+    # load raised at import, so an absent name here means it was not named.
+    log("startup", "titles loaded: " + (", ".join(t.tag.decode("latin1") for t in titles.all()) or "none")
+        + (" (" + titles.describe() + ")" if titles.describe() else ""))
     if "all" in modes:
         modes |= {"patch", "directory", "authserv", "lobby", "world", "mail"}
     cfg = load_config()
