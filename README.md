@@ -74,6 +74,32 @@ person on the other end.
    friends, `POL_SIGNUP_ANY_CODE=1` in `.env` lets the in-client wizard accept
    any code and grants every title the server offers.
 
+## PlayStation 2 clients
+
+Two of the titles (Janhourou, and Tetra Master's console release) are
+played from a PlayStation 2 whose hard disk carries a PlayOnline install.
+The core serves such a console the same way it serves the Viewer: the
+console asks the DNS for names under `pol.com` (its game hosts, `gi003`
+and the rest, are answered too), logs in on the same ports, and fetches
+its lobby lists and saves in the console's own layouts. What you need on
+the console side:
+
+- a PlayOnline install on a PlayStation 2 hard disk: a retail install on
+  real hardware, or an image of one under an emulator that boots from a
+  hard-disk image. There is no installer, image, or patch here, and no way
+  to make one from files this project provides;
+- the console's DNAS check defeated. Before a title starts, the install
+  compares the console's own id against the one recorded when it was
+  installed; on an emulator, or a transplanted disk, that comparison fails
+  and the title will not launch. Working around it is a change to your own
+  copy of the install and is not provided here;
+- the console's DNS pointed at this server (the emulator's or the router's
+  setting).
+
+This path was worked out on a private deployment with an emulated console;
+it has not yet been exercised against this public stack. Treat it as an
+expert route.
+
 ## Selftests
 
 ```
