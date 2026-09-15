@@ -651,7 +651,12 @@ def _buttons(buttons, y):
     # SE centres the row: [S] 102x30 plates, 11px apart, starting at x=95 for the
     # four-button case. Compute the same centring for whatever count we have so
     # a 2- or 3-button screen is not left hanging at the left margin.
-    plates = [(BUTTON_ART_M, 170) if len(c) > _BTN_M_THRESHOLD
+    # A TEXT PLATE NEEDS THE ROOM THE ART PLATE HIDES. SE's [M] plate is 170
+    # wide and its caption sits on the bevel; a text plate clips instead, and
+    # the fit checker's own advance tables put "Add to Login Screen" at 176px
+    # in the button face. So the art-free plate for a long caption is 200.
+    long_w = 170 if art_served() else 200
+    plates = [(BUTTON_ART_M, long_w) if len(c) > _BTN_M_THRESHOLD
               else (BUTTON_ART_S, 102) for c, _ in buttons]
     gap = 11
     total = sum(w for _, w in plates) + gap * (len(plates) - 1)

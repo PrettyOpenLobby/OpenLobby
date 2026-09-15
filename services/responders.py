@@ -598,14 +598,6 @@ try:
 except ImportError:
     accounts = None
 try:
-    # The GAME world modules ride this same auth band -- see _game_notice_reply.
-    # Optional in the same way as the two above: absent = the old capture-only
-    # behaviour, which is silence. (janhourou imports janwire itself, so a
-    # missing wire module lands here too.)
-    import janhourou
-except ImportError:
-    janhourou = None
-try:
     # The plaintext profile/ranking channel on the same envelope -- see polpro.py.
     import polpro
 except ImportError:
@@ -617,39 +609,6 @@ try:
     import issuereport
 except ImportError:
     issuereport = None
-try:
-    # Janhourou's LOBBY LISTS, built from the room registry rather than served
-    # from an authored file -- see `_jan_lobby_blob`. Optional like the rest:
-    # absent, every b/g/* path falls back to the stored blob exactly as before.
-    import janlobby
-except ImportError:
-    janlobby = None
-try:
-    # Janhourou's SEAT STORE -- and, since 2026-09-03, its table-row DELTA
-    # sequence. `_jan_roster_delta_reply` answers `<DR>` from it; absent, the
-    # poll goes unanswered exactly as it did before, which costs realtime table
-    # updates and nothing else.
-    import janseats
-except ImportError:
-    janseats = None
-try:
-    # JANHOUROU'S PLAYER SAVE. `U/g/MJSUserData` is composed SERVER-side -- the
-    # client never writes it (`sqMgWriteFileCheck` has 0 callers in
-    # JanHouRou.pex) -- so a player's record only exists if we keep it.
-    # `janstats` keeps it, `jansave` turns it into the 976 bytes. Optional like
-    # the rest: absent, the stored blob is served exactly as before.
-    import janstats
-    import jansave
-except ImportError:
-    janstats = jansave = None
-try:
-    # JANHOUROU'S TABLE RULES (2026-09-04). The master's MjTBLCONFALL is stored
-    # by janhourou on the auth band; the `b/g/MJSTableInfoSub` fetch on the
-    # lobby band serves it back through `janrules.values_for`. Optional: absent,
-    # the blob carries the engine's defaults as before.
-    import janrules
-except ImportError:
-    janrules = None
 K0_IV = bytes.fromhex("4f5f4d4661d9c59f")   # = SE modulus[0:8], recovered
 _P0, _S0 = sessioncrypt.bf_setkey(b"\x00" * 8)
 
@@ -699,123 +658,6 @@ def _room_of_member(member_id):
     return None
 
 
-def _jan_roster_delta_reply(payload):
-    """Janhourou's `<DD>` answer to a class-L `<DR>`. Returns (reply, handled).
-
-    WHY THIS EXISTS: Jan's `b/g/PTL` is a SNAPSHOT taken at room entry, and
-    until 2026-09-03 nothing ever updated it -- a reservation changed the seat
-    count on the server and no client in the room could see it, including the
-    one that made it. But the client had been asking all along: `cp__002fb218`
-    polls `<DR>(serial)` about every 2 s while LobbyState == 15, and we logged
-    every one of them as "no template for this command -- silent".
-
-    THE MECHANISM IS TETRA MASTER'S, REUSED -- NOT A NEW PROTOCOL. `cp.c` and
-    `lb.c` are two of the five sqMg translation units statically linked into
-    BOTH game modules, so Janhourou already contains the whole consumer:
-    `cp__002fae98` walks the `<DD>` pairs and `cp__002fb290` applies them, its
-    command-0x15 arm parsing a `TD` group with `lb__002f9e10` into 104 bytes
-    and copying them over the row `lb__002f9f18` matched BY NAME. `TD` is
-    polpro tag index 21 == 0x15, which is what ties the tag to that arm.
-
-    Three answers, and the difference between them is the whole point:
-
-        deltas_after -> [..]   send them; the rows change with no fetch at all
-        deltas_after -> []     CURRENT: say nothing. Silence is the right
-                               answer to a poll with no news, and it is what
-                               keeps this from becoming a re-fetch storm.
-        deltas_after -> None   cannot serve from the log -- send `<DO>`, which
-                               `cp__002fb7d0` turns into a snapshot reload.
-
-    `<DO>` IS EMITTED HERE RATHER THAN LEFT TO THE TEMPLATE. There is no
-    `MJS:DR` entry in polpro.json and class L withholds the `*` wildcard, so
-    falling through is SILENCE -- and a client that had fallen out of the log
-    would then never be told to reload. a title can fall through because its own `<DR>` entry
-    exists; we cannot.
-
-    THE CHUNK LIMIT IS TM'S, MEASURED THE HARD WAY: a batch the client cannot
-    fully apply is answered with a reload instead, because A PREFIX HAS NEVER
-    BEEN OBSERVED TO ADVANCE A CLIENT -- see `_roster_delta_reply`'s banner for
-    the logs behind that. Jan serves four tables, so a full resync is four
-    deltas and this should effectively never fire.
-    """
-    if (janseats is None or janlobby is None
-            or not janseats.enabled()
-            or os.environ.get("POL_JAN_DELTAS", "1") != "1"):
-        return None, False
-    try:
-        groups = polpro.parse(payload)
-        if not groups or groups[0][0] != "DR":
-            return None, False
-        have = (groups[0][1] or ["0"])[0]
-        # THE POLL IS THE LEASE (finding 24). A player waiting at a table sends
-        # no game-band line for as long as they wait -- this `<DR>` every ~2 s
-        # is their heartbeat -- so renew the seat here or a 15-minute wait
-        # unseats them silently.
-        _dr_member = _session_get("member_id")
-        if _dr_member:
-            janseats.touch(_dr_member)
-        # THE ROOM (finding 30). The sequence and the rows are PER ROOM --
-        # a `TD` delta is applied to the row matched BY NAME, and every
-        # room's rows share the four names, so Room 2-3's delta landing in
-        # Room 1-1 would overwrite the wrong row. A poller the registry
-        # cannot place (no member, or not in a Jan channel) is answered
-        # against room 0, the unknown-room set its PTL would have carried.
-        _dr_room = _jan_member_room(_dr_member)
-        _dr_rid = _dr_room.id if _dr_room is not None else 0
-        # HEAL BEFORE ANSWERING. A seat expires at READ time with nobody
-        # writing anything, so a row can move with no bump behind it, and this
-        # poll is the only regular tick this subsystem gets.
-        # (tm-table-state-invariant, one game over: a repair that only runs on
-        # new writes never heals old state.)
-        janseats.reconcile()
-        # ...and an expiry that took a master out promoted somebody: queue
-        # the MjNOTICEMEMBER that tells them, plus the time-up warnings.
-        if janhourou is not None:
-            try:
-                janhourou.notify_master_changes(peer="dr-band")
-                janhourou.warn_expiring_seats(peer="dr-band")
-            except Exception as _e:
-                log("authserv", f"  jan roster: master/expiry notices raised "
-                                f"({_e!r}) -- continuing")
-        cur = janseats.sequence(_dr_rid)
-        deltas = janseats.deltas_after(have, _dr_rid)
-    except Exception as e:
-        log("authserv", f"  jan roster: <DR> raised ({e!r}) -- silent")
-        return None, False
-    _where = (_dr_room.channel if _dr_room is not None
-              else "room UNKNOWN (room 0)")
-    chunk = int(os.environ.get("POL_JAN_DELTA_CHUNK", "4") or 0)
-    if deltas is not None and chunk and len(deltas) > chunk:
-        log("authserv", f"  jan roster: <DR>({have}) in {_where} is owed "
-                        f"{len(deltas)} deltas, more than the {chunk} one "
-                        f"notice carries -- answering <DO>, i.e. a RELOAD")
-        deltas = None
-    if deltas is None:
-        log("authserv", f"  jan roster: <DR>({have}) in {_where} cannot be "
-                        f"served from the log (it is at {cur}) -- <DO>, i.e. "
-                        f"reload the snapshot")
-        return polpro.build([("DO", [str(cur)])]), True
-    if not deltas:
-        return None, True               # CURRENT -- silence, deliberately
-    out = [("DD", ["0"]), ("DN", [str(len(deltas))])]
-    rows = []
-    for seq, tid in deltas:
-        # `tid` is the ROOM's composite; the row it renders carries the base
-        # id and the shared name, which is what the client matches on.
-        values = janlobby.table_values_for(tid, _live_rooms())
-        if values is None:
-            log("authserv", f"  jan roster: delta {seq} names table {tid}, "
-                            f"which is not in JAN_TABLES -- <DO> instead")
-            return polpro.build([("DO", [str(cur)])]), True
-        out.append(("DC", [str(int(seq))]))
-        out.append(("TD", [str(v) for v in values]))
-        rows.append("%d:%s seated=%s state=%s"
-                    % (seq, values[0], values[5], values[3]))
-    log("authserv", f"  jan roster: <DR>({have}) in {_where} -> {len(deltas)} "
-                    f"delta(s), now at {cur} -- " + "  ".join(rows))
-    return polpro.build(out), True
-
-
 def _member_content_id(member_id, content_code):
     """A member's stored Content ID for one game, or None if we cannot read it.
 
@@ -835,149 +677,6 @@ def _member_content_id(member_id, content_code):
         log("authserv", f"  content id lookup failed for member {member_id} "
                         f"({exc!r})")
         return None
-
-
-def _jan_rank_reply(payload):
-    """`MJS:RR` -> `<RF>(U/g/MJS_RANKLIST<n>)` + `<LN>(rows)`, or fall through.
-
-    THE SHAPE IS rkc.c's (read 2026-09-04): `rkc__002f1cb0` maps the LEAD
-    group's tag -- `<RF>` (91) = success, `<RG>` (92) = failure, anything
-    else dropped -- and `rkc__002f1658` copies `<RF>`'s string into a 63-byte
-    path buffer and `<LN>` into the record count. `sqMgRkcpReadRankList` then
-    reads `count x 232` bytes of THAT PATH (the `<PO>` profile struct, one
-    per row, already sorted: the client draws `index + 1` as the rank). The
-    category is `<RR>`'s own value (0 Jan Rating, 1 Title score, 2 Overall
-    gamble, 3 Weekly, 4 Event); `<PI>` carries the asker's PolID/domain/
-    volume, not the category.
-
-    The path carries the category so the FETCH (login band, `_rank_list_blob`)
-    builds the same order this reply promised -- the same split TM's lists
-    live with. `<LN>` 0 is legal (an empty list, ranking_win.c:847). Rows are
-    capped at janstats.RANK_LIST_MAX; the client's record array holds 113.
-    """
-    if janstats is None or polpro is None:
-        return None, False
-    if os.environ.get("POL_JAN_RANK", "1") != "1":
-        return None, False
-    try:
-        groups = polpro.parse(payload)
-        if not groups or groups[0][0] != "RR":
-            return None, False
-        try:
-            cat = int((groups[0][1] or ["0"])[0])
-        except ValueError:
-            cat = 0
-        if not 0 <= cat < len(janstats.RANK_CATEGORIES):
-            log("authserv", f"  jan rankings: <RR>({cat}) is not a category "
-                            f"0..4 -- answering <RG>")
-            return polpro.build([("RG", ["-8706"])]), True
-        rows = len(janstats.rank_list(cat, remember=False))
-        path = janstats.rank_list_path(cat)
-        log("authserv", f"  jan rankings: <RR>({cat}) = "
-                        f"{janstats.RANK_CATEGORIES[cat]} -> <RF>({path}) "
-                        f"<LN>({rows})")
-        return polpro.build([("RF", [path]), ("LN", [str(rows)])]), True
-    except Exception as exc:
-        log("authserv", f"  jan rankings: reply failed ({exc!r}) -- the "
-                        f"polpro.json entry still stands")
-        return None, False
-
-
-def _jan_rank_blob(path):
-    """The `U/g/MJS_RANKLIST<n>` bytes for the fetch: every member with a game
-    on record, named from the accounts DB, sorted for the path's category."""
-    if janstats is None:
-        return None
-    cat = janstats.rank_category_of(path)
-    if cat is None:
-        return None
-    names, cids = {}, {}
-    for m in janstats.all_members():
-        try:
-            names[m] = _member_display_name(m) or None
-            cids[m] = 0
-            if accounts is not None:
-                cids[m] = accounts.content_id_int(
-                    _member_content_id(m, _JAN_CONTENT_ID)) or 0
-        except Exception:
-            continue
-    try:
-        blob = janstats.rank_list_blob(cat, names=names, content_ids=cids)
-    except Exception as exc:
-        log("lobby", f"  3:0 {path!r}: rank list build failed ({exc!r})")
-        return None
-    log("lobby", f"  3:0 {path!r}: {len(blob) // janstats.PROFILE_REC} row(s) "
-                 f"of {janstats.RANK_CATEGORIES[cat]}")
-    return blob
-
-
-def _jan_member_for_cid(cid):
-    """(member id, handle name) for a Jan Content ID, or (None, None)."""
-    if accounts is None or not cid:
-        return None, None
-    try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
-        try:
-            row = accounts.handle_by_content_id(db, cid)
-            if row is None:
-                return None, None
-            return int(row["member_id"]), (row["handle_name"] or "").strip() or None
-        finally:
-            db.close()
-    except Exception as exc:
-        log("authserv", f"  jan profile: member lookup for {cid} failed ({exc!r})")
-        return None, None
-
-
-def _jan_show_flags(cid):
-    """`{k: 0/1}` from the stored `<GR>` write: `<NO>(k, v)` sets show flag k
-    (= reply value v41+k); `<PP>`/`<PO>` ride along as v3/v7. Unset = shown."""
-    out, extra = {}, {}
-    rec = (_content_profiles() or {}).get(str(cid)) or {}
-    for g, vals in rec.get("groups") or []:
-        try:
-            if g == "NO" and len(vals) >= 2:
-                out[int(vals[0])] = 1 if int(vals[1]) == 0 else 0
-            elif g == "PP" and vals:
-                extra[3] = int(vals[0])
-            elif g == "PO" and vals:
-                extra[7] = int(vals[0])
-        except (TypeError, ValueError):
-            continue
-    return out, extra
-
-
-def _jan_pool_reply(payload):
-    """`MJS:CR` (+`<AN>`): the member naming its Jan character.
-
-    `<CS>` accepts; a name another member's record already carries is refused
-    with `<NS>(-8700)` -- handlesel.c:394-415 draws that code as "That player
-    name is already in use" (-8711 is the vulgar-name arm). The name is kept
-    in janstats (`note_name`) so the popup, the rank list and the table
-    panels all print what the player typed.
-    """
-    if janstats is None or polpro is None:
-        return None, False
-    try:
-        groups = dict(polpro.parse(payload))
-        if "CR" not in groups:
-            return None, False
-        member = _session_get("member_id")
-        an = (groups.get("AN") or [""])[0].strip()
-        if not member or not an:
-            return None, False
-        for other in janstats.all_members():
-            if other != int(member) and janstats.load(other).get("name") == an:
-                log("authserv", f"  jan pool: member {member} asked for the "
-                                f"name {an!r}, held by member {other} -- <NS>")
-                return polpro.build([("NS", ["-8700"])]), True
-        janstats.note_name(member, an)
-        log("authserv", f"  jan pool: member {member} is {an!r} -- <CS>")
-        return polpro.build([("CS", ["0"])]), True
-    except Exception as exc:
-        log("authserv", f"  jan pool: reply failed ({exc!r}) -- the template "
-                        f"answers")
-        return None, False
 
 
 #: Where per-Content-ID game profiles the CLIENT wrote are kept. A plain JSON
@@ -1005,7 +704,7 @@ def _content_profile_note(payload, tag):
 
     THE WRITE IS THE ONLY PLACE THIS DATA EXISTS. The per-Content-ID profile is
     the game's own state -- Tetra Master's card level, title, rank, money and
-    purpose; Janhourou's title and purpose; FFXI's world/nation/job/race -- and
+    purpose; content 3's title and purpose; FFXI's world/nation/job/race -- and
     POL cannot author any of it. Until 2026-08-23 the write could not even
     COMPLETE (TM's `<GR>` had no reply template and the client hung on
     "Updating profile..."), so nothing was ever offered to us. Now it completes,
@@ -1022,7 +721,7 @@ def _content_profile_note(payload, tag):
     GET reply carries at value[41+i].
 
     Stored VERBATIM, as groups, not as a decoded struct. We know TM's field
-    NAMES (Friend.BIN) and jan's (JanHouRou.pex) but NOT either game's wire
+    NAMES (Friend.BIN) and content 3's (its PS2 module) but NOT either game's wire
     descriptor, so a decode now would be invention; the raw groups keep every
     byte the client sent for whoever recovers those schemas. Keyed by Content ID
     because that is what the profile IS.
@@ -1110,7 +809,7 @@ def _pfc_profile_reply(payload, tag):
 
     The reply vocabulary is MEASURED -- `polpro.PROFILE_PO` carries the evidence:
     71 positional values in one `<PO>` group, identical in `TM.dll` and
-    `JanHouRou.pex`. What is NOT measured is the game MEANING of most of those 71
+    the PS2 module. What is NOT measured is the game MEANING of most of those 71
     slots, so this fills only the ones the two builds' own code names:
 
         value[0]  the Content ID, hex     value[1]  the same, decimal
@@ -1194,34 +893,17 @@ def _pfc_profile_reply(payload, tag):
         # attribute tail (v9 str<=64 = z_attrstr, v16..23 u32 = z_attrsi0..7,
         # v24..31 u16 = z_attrss0..7) and NOT at the head, where v2 is the name
         # and schema field 2 is z_ctid. Everything below is in the tail.
-        if tag == b"MJS" and janstats is not None:
-            # JANHOUROU'S 71 SLOTS (finding 27), measured off showprof.c and
-            # lb__002f90e0 on 2026-09-04: v2 name, v10 money, v12-v15 the
-            # floats x1e6 (avg place, top rate, Jan Rating, Title score),
-            # v17 total games, v19-v23 the gamble counters, v25 yakuman, v26
-            # rank, v27-v31 the five title counts, v32 level, v41+ the show
-            # flags the client saved with `<GR>`. ONE producer --
-            # janstats.profile_fields -- shared with the rank list.
-            _jm, _jname = _jan_member_for_cid(cid)
-            if _jm is None:
-                _jm = member_id
-            flags, extra = _jan_show_flags(cid)
-            if _jm:
-                jf = janstats.profile_fields(
-                    _jm, name=(janstats.load(_jm).get("name") or name or _jname),
-                    content_id=cid, show_flags=flags)
-                jf.update(extra)
-                fields.update(jf)
-                name = fields.get(2) or name
-                member_id = _jm
-        else:
-            game = _content_game_fields(2, cid, member_id)
-            if _TM_CARD_LEVEL in game:
-                fields[16] = int(game[_TM_CARD_LEVEL])
-            if _TM_TITLE in game:
-                fields[24] = int(game[_TM_TITLE])
-            if _TM_AVG_RANK in game:
-                fields[9] = str(game[_TM_AVG_RANK])
+        # THE TITLE FILLS ITS OWN SLOTS. Which values a title's profile has
+        # and where they sit in the 71-value group is the title's knowledge:
+        # it hands back the fields to add, plus the name and member it
+        # resolved for the Content ID (either may be the ones passed in).
+        _pf = titles.polpro_profile(tag, cid, name, member_id)
+        if _pf is not None:
+            _pfields, _pname, _pmember = _pf
+            fields.update(_pfields or {})
+            name = _pname or name
+            if _pmember is not None:
+                member_id = _pmember
         cinfo_slot = os.environ.get("POL_POLPRO_PG_CINFO", "").strip()
         if info and cinfo_slot.isdigit():
             fields[int(cinfo_slot)] = info
@@ -1245,8 +927,6 @@ def _rank_list_blob(path):
     it and `_resource_blob` serves bytes with it, so the `<LN>` we promise and
     the file we hand over are the same file by construction.
     """
-    if janstats is not None and janstats.is_rank_list_path(path):
-        return _jan_rank_blob(path)         # built live from the stat files
     # A title's ranking lists, and every other shipped-template path it owns,
     # come through the same hook: the published tally if its job has run, the
     # title's shipped fixture if not, None for a path nobody serves.
@@ -1287,13 +967,14 @@ def _game_notice_reply(arg, nick, srv, sess=None):
     """Answer a content module's world traffic on the auth band, or None.
 
     `sess` is this connection's ChatSession when the caller has one: it is
-    remembered in `_JAN_GAME_PEER` so the jan deadline sweeper can push down
-    the SAME socket the game talks on (`_jan_sweeper_push`).
+    handed to the title with the envelope, and a title pins it as the socket
+    its unprompted records go down (the SAME one the game talks on).
 
     CAPTURED LIVE 2026-08-12, and it corrects the endpoint this whole workstream
-    was built on. Janhourou does NOT open its own socket to gi003.pol.com:51272
-    -- 51272 is only an immediate inside JanHouRou.pex, and the module never
-    connects. What actually happens when a game launches on the PS2:
+    was built on. The PS2 title does NOT open its own socket to its
+    game host's 51272 port -- that port is only an immediate inside the
+    module, and the module never connects. What actually happens when a game
+    launches on the PS2:
 
         DNS  gi003.pol.com          -> us
         TCP  gi003.pol.com:51241    -> an ORDINARY AUTH SESSION (SESSION token,
@@ -1306,23 +987,23 @@ def _game_notice_reply(arg, nick, srv, sess=None):
     the Viewer core, not the game) -- the prediction just got the
     port wrong. The envelope is 'G' + a three-character SERVICE TAG + 'G':
 
-        MJS   Janhourou     payload is the 'B' record line (44 chars)
-        <tag> a title module's own format (Tetra Master's `<8 hex code>@Cmd=`
-              text lines) -- handed to the title registered for that tag
-              through `titles.notice`; the shared POLpro classes stay here
+        <tag> a title's own format (a 44-character binary record line, or
+              `<8 hex code>@Cmd=` text lines) -- handed to the title registered
+              for that tag through `titles.notice`; the shared POLpro classes
+              stay here
 
     Returning None here is byte-identical to the pre-2026-08-12 behaviour, which
-    is what produced the black screen: the game sends MjGETLNDV and blocks, and
-    ~19 s later the hop closes and the Viewer falls back to the portal.
+    is what produced the black screen: the game sends its first request and
+    blocks, and ~19 s later the hop closes and the Viewer falls back to the
+    portal.
     """
-    if os.environ.get("POL_GAME_NOTICE", "1") != "1" or (
-            janhourou is None and not titles.loaded()):
+    if os.environ.get("POL_GAME_NOTICE", "1") != "1" or not titles.loaded():
         return None
     target, _, text = arg.partition(b" :")
     target = target.strip()
     # THE CLASS CHARACTER IS NOT ALWAYS 'G'. This used to require text[4:5]=='G'
     # and so ignored two whole sub-protocols. Measured 2026-08-13:
-    #   G  the 'B' binary record   (janwire)
+    #   G  the 'B' binary record   (the PS2 title's wire codec)
     #   P  profile   <PG>...       (plaintext, polpro)
     #   R  ranking   <RR>...       (plaintext, polpro)
     # A CHANNEL TARGET IS CHAT, NOT A GAME ENVELOPE. Measured 2026-08-15 against
@@ -1351,7 +1032,7 @@ def _game_notice_reply(arg, nick, srv, sess=None):
                     f"payload={len(payload)}B {bytes(payload[:64])!r}")
     # THE TITLE'S OWN FORMAT FIRST. Classes P/R/A/L are NOT a title's text
     # format -- they are the shared POLpro plaintext channel (profile, ranking,
-    # auction, lobby), the same one Janhourou uses as MJS P/R -- so a title
+    # auction, lobby), the same one the PS2 title uses -- so a title
     # hands those back with PASS and the polpro block below answers them. The
     # class list has to be kept in step in THREE places: the title's PASS
     # guard, this guard and the tuple below it. Measured 2026-08-15/16/17, one
@@ -1361,8 +1042,8 @@ def _game_notice_reply(arg, nick, srv, sess=None):
     _tr = titles.notice(cls, tag, payload, text, target, nick, srv, sess)
     if _tr is not titles.PASS:
         return _tr
-    if tag != b"MJS" and not (titles.for_tag(tag) is not None
-                              and cls in (b"P", b"R", b"A", b"L")):
+    if not (titles.for_tag(tag) is not None
+            and cls in (b"P", b"R", b"A", b"L")):
         # Anything else: log it and stay silent. Inventing a reply for an
         # undecoded format is how POL-5135 got raised elsewhere.
         log("authserv", f"  no decoder for service {tag!r} yet -- captured, "
@@ -1382,7 +1063,7 @@ def _game_notice_reply(arg, nick, srv, sess=None):
         try:
             log("authserv", f"  polpro {cls.decode()} <- {polpro.describe(payload)}")
             # PASS THE SERVICE TAG. This channel carries both games and a request
-            # shape does not tell them apart -- TM and Jan send byte-identical
+            # shape does not tell them apart -- two titles send byte-identical
             # `<RR>`+`<PI>` rankings requests that need different replies. See
             # `polpro._spec_keys`; an untagged spec key still matches everything.
             # Class L is DECODE-ONLY until its reply vocabulary is measured --
@@ -1396,29 +1077,10 @@ def _game_notice_reply(arg, nick, srv, sess=None):
             # title registered for the tag answers those; declining falls
             # through to `reply_for` and the template exactly as before.
             reply, handled = titles.polpro_reply(cls, tag, payload)
-            # JANHOUROU'S TABLE ROWS RIDE THE SAME CHANNEL. Not the same
-            # handler, because each game keeps its room state in its own
-            # module and shares none of it -- but the same CLIENT code applies
-            # both, because `cp.c`/`lb.c` are statically linked into each game
-            # module. See `_jan_roster_delta_reply`.
-            if not handled and cls == b"L" and tag == b"MJS":
-                reply, handled = _jan_roster_delta_reply(payload)
-            # JANHOUROU'S RANKINGS (finding 17): `<RR>`'s value is the
-            # category; the only arms rkc.c has are `<RF>`+`<LN>` (success)
-            # and `<RG>` (failure) -- the static `<OK>` was dropped unread and
-            # the screen looped for ever. See `_jan_rank_reply`.
-            if not handled and cls == b"R" and tag == b"MJS":
-                reply, handled = _jan_rank_reply(payload)
-            # JANHOUROU'S CHARACTER NAME (finding 27): `<CR>`+`<AN>` is the
-            # client naming itself; a name another member already holds is
-            # refused with `<NS>(-8700)`, the code handlesel.c:394-415 renders
-            # as "already in use". See `_jan_pool_reply`.
-            if not handled and cls == b"P" and tag == b"MJS":
-                reply, handled = _jan_pool_reply(payload)
             # AND THE PER-CONTENT-ID GAME CHARACTER, in the same shape as the
             # same shape: `<PG>` names ONE character by Content ID and a spec key
             # is a tag, so the template can only say one profile to everybody.
-            # NOT gated on the service tag -- jan and Tetra Master run the same
+            # NOT gated on the service tag -- every title runs the same
             # parser over the same 71-value `<PO>` group (polpro.PROFILE_PO), so
             # one answer is correct for both. Declining falls through to the
             # polpro.json entry untouched.
@@ -1447,26 +1109,20 @@ def _game_notice_reply(arg, nick, srv, sess=None):
         titles.polpro_noted(cls, tag, payload, target)
         # AND THE PROFILE WRITE, for both games. `<GR>` is the client handing us
         # its game character; it is the only source of that data and it is now
-        # able to complete, so keep it. Not tag-gated -- jan writes the same
-        # command on the same band.
+        # able to complete, so keep it. Not tag-gated -- every title writes
+        # the same command on the same band.
         if cls == b"P":
             _content_profile_note(payload, tag)
-        if tag == b"MJS" and janseats is not None and janseats.enabled():
-            # Any lobby-band line from the member renews their seat lease
-            # (finding 24); `<DR>` did it above, the rest do it here.
-            try:
-                janseats.touch(_session_get("member_id"))
-            except Exception:
-                pass
-        _jan_push = (_jan_pending_lines(_session_get("member_id"),
-                                        on_sid=_session_sid())
-                     if tag == b"MJS" else [])
+        # RECORDS THE PLAYER IS WAITING FOR ride this reply: a seat that is not
+        # talking only ever polls, so the title hands over what it has queued
+        # for this member, framed for this connection.
+        _pushes = titles.polpro_pushes(tag, cls, payload)
         if not reply:
-            if _jan_push:
+            if _pushes:
                 # The client is CURRENT on deltas (the correct silence) but has
                 # game records waiting. Silence is the right answer to the
                 # poll, not to the player.
-                return _jan_push
+                return _pushes
             # WARNING: TWO SILENCES, TWO MEANINGS -- and printing the same line for
             # both cost 20 minutes of misdiagnosis on 2026-08-20T22:40: the
             # delta path's "CURRENT -- silent" arm returns handled=True with no
@@ -1501,7 +1157,7 @@ def _game_notice_reply(arg, nick, srv, sess=None):
         # and the game's own timeout here is far longer than this delay.
         #
         # VERIFIED: CONFIRMED FOR `<PG>` TOO (2026-08-23, static, both builds). This was
-        # written as "worth trying for Janhourou"; it is now read rather than
+        # written as "worth trying for the PS2 title"; it is now read rather than
         # hoped. `sqMgPfcGetCharacterProfile` (TM.dll sqmg_1a64d0) sends at
         # `sqmg_19e920` and only THEN takes the pfc lock and sets its state to 1,
         # and the result arm `sqmg_1a66d0` opens with `if (state == 1)`. Same
@@ -1523,7 +1179,7 @@ def _game_notice_reply(arg, nick, srv, sess=None):
             time.sleep(delay_ms / 1000.0)
         log("authserv", f"  polpro {cls.decode()} -> {polpro.describe(reply)}")
         body = b"G" + tag + cls + reply
-        lines = [NoPad(_game_notice_line(body, target, nick, srv))] + _jan_push
+        lines = [NoPad(_game_notice_line(body, target, nick, srv))] + _pushes
         try:
             chase = polpro.chaser_for(payload, tag=tag)
         except Exception as e:
@@ -1535,153 +1191,9 @@ def _game_notice_reply(arg, nick, srv, sess=None):
             lines.append(NoPad(_game_notice_line(b"G" + tag + cls + chase,
                                                  target, nick, srv)))
         return lines
-    # *** THIS MESSAGE IS THE ONLY EVIDENCE THAT ANYONE IS IN JANHOUROU. ***
-    # The client never reports content id 3 on 4:5 -- zero occurrences across
-    # four log generations against 10,361 messages like this one -- so the friend
-    # list showed a Janhourou player as "in the Viewer" for the whole session,
-    # while Tetra Master (which does report) painted correctly.
-    #
-    # So we infer it from traffic, and we LEASE it rather than latch it, because
-    # the client will not report the exit either. Every message renews it; when
-    # the player stops, it lapses and the watcher pushes "left the title".
-    # POL_JAN_TITLE_ZONE=0 turns the inference off without touching the game path.
-    if os.environ.get("POL_JAN_TITLE_ZONE", "1") == "1":
-        _title_zone_lease(_session_get("member_id"), _JAN_CONTENT_ID)
-    try:
-        # `member_id` keys the GAME MANAGER's table, the same way it keys
-        # a title's save above: a hand of mahjong has to survive across
-        # lines, and this band hands us one line at a time with no session
-        # object of our own. 0 is fine for a single console.
-        _jan_mid = _session_get("member_id") or 0
-        if _jan_mid:
-            # WARNING: A PUSH MUST NAME THE PEER ITSELF. An unprompted record has no
-            # arriving message to answer, so the (target, nick) a reply gets
-            # for free has to be remembered from the last line this member DID
-            # send on the game band -- which they always have, because
-            # reserving is a game-band message. Same law as TM's `source` split
-            # for table-settings propagation, one game over.
-            # WARNING: THE SESSION ID, NOT THE NICK. A player holds MORE THAN ONE
-            # connection and they share a nick, so pinning by nick does not
-            # discriminate: measured live 2026-09-04, member 15's records went
-            # out on 127.0.0.1:50861 twice and then on :50779, and the ones
-            # that took the second pipe were consumed into a socket the game
-            # was not reading. `_session_sid()` is per-connection.
-            # WARNING: ONLY FOR A 'B' RECORD. A chat 'A' line (MjISAY) is addressed
-            # to the TABLE CHANNEL, so its `target` is a channel name; taking
-            # it as the peer would frame every later push "from" the channel.
-            if payload[1:2] != b"A":
-                _JAN_GAME_PEER[_jan_mid] = (target, nick, srv, _session_sid(),
-                                            sess)
-        reply = janhourou.handle_line(payload[1:], peer="auth-band",
-                                      member_id=_jan_mid)
-    except Exception as e:
-        log("authserv", f"  janhourou raised on {payload[:80]!r}: {e} -- silent")
-        return None
-    if not reply:
-        return None
-    # Back the way it came: from the peer the game addressed (that nick is what
-    # its own sqMg member table has bound to the id it is talking to), to us.
-    # INFERENCE -- the prefix is the part with no direct evidence yet, so
-    # POL_GAME_NOTICE_PREFIX switches it in one restart if the client ignores us:
-    #   peer (default) -- ":<target>!~x@ NOTICE <nick> :..."  (empty host,
-    #   srv            -- ":<srv> NOTICE <nick> :..."
-    #   bare           -- "NOTICE <nick> :..."   (no prefix at all)
-    #
-    # SEVERAL LINES, like a title's own branch above: once a hand is running one
-    # inbound record produces several outbound ones, because the three seats
-    # with no client behind them play in between. A bare bytes reply stays a
-    # single line, so nothing that predates the game manager changes.
-    replies = reply if isinstance(reply, (list, tuple)) else [reply]
-    return [NoPad(_game_notice_line(b"G" + tag + b"G" + r, target, nick, srv))
-            for r in replies]
-
-
-#: member id -> (target, nick, srv, session id, ChatSession) from the last
-#: GAME-band line they sent. Process-local and deliberately so: it is a
-#: routing convenience, and a member we have not heard from on that band has
-#: nothing queued for them anyway. The ChatSession (5th, may be None) is what
-#: the sweeper pushes on; older 4-tuples are still read everywhere.
-_JAN_GAME_PEER = {}
-
-
-def _jan_sweeper_push(members):
-    """`jangame.Manager.on_swept`: the deadline sweeper (a thread in THIS
-    process, audit finding 8) just queued records for these members -- push
-    them NOW down the game-band session each one last spoke on, instead of
-    waiting for the 2 s idle tick. Same pin as `_jan_pending_lines` (the
-    session id, not the nick), same chunk cap as the idle push, same
-    `ChatSession.send` door (it takes the socket lock, so a connection thread
-    writing at the same moment is safe). A member whose session is unknown or
-    dead keeps its records queued: the idle tick / their next line drains."""
-    chunk = int(os.environ.get("POL_JAN_PUSH_CHUNK", "2") or 0) or None
-    pad = b" " if os.environ.get("POL_GAME_NOTICE_PAD") == "space" else b""
-    for m in members or ():
-        got = _JAN_GAME_PEER.get(m)
-        sess = got[4] if got and len(got) > 4 else None
-        if sess is None or not getattr(sess, "alive", False):
-            continue
-        try:
-            lines = _jan_pending_lines(m, on_sid=got[3], limit=chunk)
-        except Exception as exc:
-            log("authserv", f"  sweeper push drain raised ({exc!r}) -- silent")
-            continue
-        sent = 0
-        for ln in lines:
-            if not sess.send([ln], pad_override=pad):
-                log("authserv", f"  sweeper push to member {m} failed -- peer "
-                                f"gone ({len(lines) - sent} record(s) lost)")
-                break
-            sent += 1
-        if sent:
-            log("authserv", f"  sweeper pushed {sent} jan record(s) unprompted "
-                            f"to member {m}")
-
-
-if janhourou is not None and getattr(janhourou, "GAMES", None) is not None:
-    # The Manager's sweeper thread starts lazily on the first in-game line
-    # (`jangame.Manager.ensure_sweeper`); this is how its records leave.
-    try:
-        janhourou.GAMES.on_swept = _jan_sweeper_push
-    except Exception as _e:                                   # pragma: no cover
-        log("authserv", f"jan sweeper push hook not installed: {_e!r}")
-
-
-def _jan_pending_lines(member, on_sid=None, limit=None):
-    """Jan game records queued for `member`, framed as game-band NOTICEs.
-
-    Called from the `<DR>` path and the connection idle tick as well as the
-    game path, because a player still in the room only ever sends `<DR>` and
-    one waiting for their turn sends NOTHING -- see `janhourou.take_pending`.
-
-    WARNING: `on_sid` PINS THE SOCKET, and it has to be the SESSION -- not the nick.
-    A player holds more than one connection and they SHARE a nick, so a nick
-    pin does not discriminate at all: measured live 2026-09-04, member 15's
-    records went out on `127.0.0.1:50861` twice and then on `:50779`, and
-    whatever took the second pipe was consumed into a socket the game was not
-    reading. That is why a hand ran "a couple of rounds and then froze" -- it
-    worked until a record happened to leave by the wrong door.
-
-    A mismatch returns nothing and leaves the records QUEUED for the connection
-    that does match.
-    """
-    if janhourou is None or not member:
-        return []
-    got = _JAN_GAME_PEER.get(member)
-    if not got:
-        return []           # never seen their game band; nothing to frame with
-    if on_sid is not None and (len(got) < 4 or got[3] != on_sid):
-        return []           # wrong connection -- leave them queued
-    try:
-        recs = janhourou.take_pending(member, peer="dr-band", limit=limit)
-    except Exception as exc:
-        log("authserv", f"  jan pending drain raised ({exc!r}) -- silent")
-        return []
-    if not recs:
-        return []
-    tgt, nk, sv = got[0], got[1], got[2]
-    log("authserv", f"  jan: {len(recs)} queued record(s) for member {member} "
-                    f"ride the <DR> reply")
-    return [NoPad(_game_notice_line(b"GMJSG" + r, tgt, nk, sv)) for r in recs]
+    # A class the title did not take and the POLpro block did not answer:
+    # nothing to say (the title's own classes returned above).
+    return None
 
 
 def _game_notice_line(body, target, nick, srv):
@@ -3499,12 +3011,6 @@ def _status_frame_zone(state):
     return zone, (named if _STATUS_ZONE_LATCH else (state[19] == 1 and named))
 _PRESENCE_ZONE_CHATROOM = 1001
 
-#: Janhourou's content id, and therefore its presence zone -- the same number the
-#: games menu and the launch gate use (contentlist.CONTENT_NAMES[3]). Named here
-#: because the title is inferred from traffic rather than reported by the client;
-#: see `_title_zone_lease`.
-_JAN_CONTENT_ID = 3
-
 #: WHICH TITLE A MEMBER IS IN (2026-08-16). The client says so itself, in the
 #: 4:5 KChangeMyStatus state: u16 at +20 is the zone -- 1000 the Viewer, and the
 #: CONTENT ID of the title otherwise (Tetra Master is 2) -- with +19 set to 1
@@ -3530,7 +3036,8 @@ _TITLE_ZONE_TTL = 12 * 3600
 #: that died. It is badly wrong for a zone we synthesised, because there is no
 #: exit report to wait for -- see `_title_zone_lease`.
 #:
-#: 900s is measured, not picked. Janhourou's inter-message gaps over 4082 samples:
+#: 900s is measured, not picked. The PS2 title's inter-message gaps
+#: over 4082 samples:
 #: p50 2.0s, p90 3.3s, p95 5.1s, **p99 105s**, max 586s. A short lease (60-90s)
 #: would expire mid-session on any of the ~1% of gaps past 105s and flap the
 #: friend list; 900s clears a dead console in 15 minutes and sits comfortably
@@ -3540,7 +3047,7 @@ _TITLE_ZONE_LEASE_TTL = int(os.environ.get("POL_TITLE_LEASE_TTL", "900"))
 
 #: Refresh at a third of the lease, so two refreshes can be lost before a live
 #: session expires. Without this the lease would rewrite the file on EVERY game
-#: message -- Janhourou alone logged 10,361 of them -- and two containers do
+#: message -- one title alone logged 10,361 of them -- and two containers do
 #: read-modify-write on it.
 _TITLE_ZONE_REFRESH = max(5, _TITLE_ZONE_LEASE_TTL // 3)
 
@@ -3589,10 +3096,11 @@ def _title_zone_lease(member_id, zone):
 
     WHY THIS IS NOT `_publish_title_zone`. That one records what the CLIENT said
     on 4:5, and the client also says when it leaves -- so the entry is a latch and
-    its 12-hour TTL only covers a console that died. **Janhourou never sends 4:5
-    at all**, in either direction (measured 2026-08-17: zone 3 appears zero times
-    in four log generations, against 10,361 MJS messages), so a latch set here
-    would never be cleared and the friend list would show "in Janhourou" forever
+    its 12-hour TTL only covers a console that died. **The PS2 title
+    never sends 4:5 at all**, in either direction (measured 2026-08-17: zone 3
+    appears zero times in four log generations, against 10,361 game messages),
+    so a latch set here would never be cleared and the friend list would show
+    "in the title" forever
     -- including after the player is back at the Viewer, which is worse than
     showing nothing.
 
@@ -3603,7 +3111,7 @@ def _title_zone_lease(member_id, zone):
         because `_publish_title_zone` deletes the key outright;
       * the member going offline -- `_presence_zone` already answers 0 for an
         offline subject, and the watcher skips them;
-      * the lease lapsing -- the backstop, and for Janhourou the ONLY one that
+      * the lease lapsing -- the backstop, and for that title the ONLY one that
         covers "quit the game but stayed logged in", because no exit is reported.
 
     THE REFRESH IS FREE. The caller is the per-message game dispatch, so a live
@@ -6608,24 +6116,13 @@ def _auth_session_reply(cmd_txt, nick, srv, peer_ip=b"0.0.0.0", sess=None):
             for chan, others in ROOMS.drop(sess):
                 if others:
                     ROOMS.broadcast(chan, [line])
-        # A JAN SEAT DIES WITH ITS GAME-BAND SESSION (finding 24). Only that
-        # session: a member holds several connections (GM chat QUITs too), and
-        # `_JAN_GAME_PEER` pins the one the game talks on. Releasing promotes
-        # the next guest if the leaver was master; the notice is queued for
-        # the survivors' next line.
+        # A SEAT DIES WITH ITS GAME-BAND SESSION. Only that session: a member
+        # holds several connections (GM chat QUITs too), and the title knows
+        # which one its game talks on.
         try:
-            _qm = _session_get("member_id")
-            _qp = _JAN_GAME_PEER.get(_qm) if _qm else None
-            if (janseats is not None and janseats.enabled() and _qp
-                    and len(_qp) >= 4 and _qp[3] == _session_sid()):
-                _qt = janseats.release_member(_qm, why="QUIT")
-                if _qt:
-                    log("authserv", f"  jan: member {_qm} QUIT its game-band "
-                                    f"session -- seat at table {_qt} released")
-                    if janhourou is not None:
-                        janhourou.notify_master_changes(peer="quit")
+            titles.session_quit(_session_get("member_id"), _session_sid())
         except Exception as _e:
-            log("authserv", f"  jan: QUIT seat release raised ({_e!r})")
+            log("authserv", f"  title QUIT hook raised ({_e!r})")
         return [b"ERROR :Closing Link: " + nick]
     return None
 
@@ -6716,7 +6213,7 @@ def _read_for(conn, seconds, want_crlf=False, minlen=0):
     the lobby has one.
 
     A 2026-08-19 sweep of every other socket reader in `services/` found none
-    with this shape: the patch server, FMO, FE and Janhourou all frame on a
+    with this shape: the patch server and the game worlds all frame on a
     declared length or on a line terminator, POP3/SMTP block in `readline`, and
     `stub.handle_tcp` is capture-only by design."""
     conn.settimeout(1.0)
@@ -7982,51 +7479,6 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                                 log("authserv", f"{peer} push requeue itself raised "
                                                 f"{_e!r} -- {len(_left)}"
                                                 f" push(es) LOST")
-                # WARNING: JANHOUROU NEEDS A REAL PUSH, AND THIS IS WHY. Records for
-                # the seat that is not talking wait in `Table.outbox` and were
-                # drained only when that member SPOKE -- on the game band
-                # (`handle_line`) or, since f2f262fd, on their `<DR>` poll. Both
-                # of those are replies, and an in-game client that is waiting
-                # for us SENDS NOTHING: measured live 2026-09-04, seat 0
-                # discarded at 02:21:04, seat 1's private MjTSUMO went to its
-                # outbox, and 20 s later it had still not moved because seat 1
-                # -- correctly -- had nothing to say. `<DR>` does not help
-                # either: that poll is gated on LobbyState == 15 and stops the
-                # moment the player enters the table.
-                #
-                # A hand between two humans therefore cannot be driven by
-                # replies alone. This is the same idle tick the TM push above
-                # rides, with the same law: a push must NAME ITS PEER, because
-                # there is no arriving message to inherit one from.
-                if (janhourou is not None and _fresh
-                        and os.environ.get("POL_JAN_IDLE_PUSH", "1") == "1"):
-                    try:
-                        _jan_mid = _session_get("member_id")
-                        # PINNED to this connection's nick, and CAPPED. TM
-                        # measured that a batch the client cannot apply in one
-                        # go advances it not at all (4 worked, 16 did not); the
-                        # remainder stays queued for the next tick, which is
-                        # seconds away.
-                        _jan_lines = (_jan_pending_lines(
-                            _jan_mid, on_sid=_session_sid(),
-                            limit=int(os.environ.get("POL_JAN_PUSH_CHUNK", "2")
-                                      or 0) or None)
-                            if _jan_mid else [])
-                        for _jl in _jan_lines:
-                            if not chat_sess.send([_jl], pad_override=(
-                                    b" " if os.environ.get("POL_GAME_NOTICE_PAD")
-                                    == "space" else b"")):
-                                log("authserv", f"{peer} idle jan push failed "
-                                                f"-- peer gone")
-                                break
-                        if _jan_lines:
-                            log("authserv", f"{peer} pushed {len(_jan_lines)} "
-                                            f"jan record(s) unprompted to "
-                                            f"member {_jan_mid}")
-                    except Exception as _e:
-                        log("authserv", f"{peer} idle jan push raised {_e!r} "
-                                        f"-- the queue is untouched, so the "
-                                        f"next tick retries")
                 if time.time() - last_ping < ping_every:
                     continue                   # a spool poll, not a ping tick
                 last_ping = time.time()
@@ -8425,7 +7877,7 @@ _LOBBY_HDR_LEN = 0x18                             # s2c body starts here
 # fields stayed invisible for hours -- the standing
 # warning about 0x80-byte dumps.
 #
-# It is now blocking a live question: Janhourou's save fetch stalls 23/23 while
+# It is now blocking a live question: the PS2 title's save fetch stalls 23/23 while
 # Tetra Master's identical 3:0 fetch completes 18/18, and `sqMgReadFile` packs
 # the caller's identity (Nick/Domain/Volume/HandleID -- named off SE's own debug
 # strings) into that same unseen region. Dumping 3:0 in full
@@ -8931,7 +8383,7 @@ def _session_put(sid, **fields):
         #
         # The note above says two clients behind one NAT collide. What it did not
         # anticipate: **a launched GAME is a second client from the same address.**
-        # Janhourou opens its own auth hop to gi003:51241, recovers its own IV, and
+        # A launched PS2 title opens its own auth hop, recovers its own IV, and
         # `slot["iv"]` overwrote the Viewer's -- after which the Viewer's own lobby
         # traffic decrypted with the game's IV and every header came out garbage.
         # Measured 2026-08-12: pre-launch lobby messages decode (type=0x02, length
@@ -9333,7 +8785,7 @@ _LAST_SEARCH_COUNT = [0]
 #: 03:00 REPLY LENGTH IS PER PATH, and it comes from the CLIENT'S CODE.
 #:
 #: RETRACTED, 2026-08-12: I first read payload +0x0C as "the size the request asks
-#: for", because a live `U/g/MJSUserData` fetch had 0xC8 = 200 there. It is not a
+#: for", because a live game-save fetch had 0xC8 = 200 there. It is not a
 #: length -- the very next capture showed `u/account` carrying the same 0xC8, and
 #: serving 200 bytes to u/account broke the account record that had been working.
 #: One sample that fit a theory, and the theory was wrong.
@@ -9342,9 +8794,9 @@ _LAST_SEARCH_COUNT = [0]
 #: the resource reader, so they are readable statically and exactly:
 #:
 #:   u/account         664   polcore sub_037e0120 allocates 0x298
-#:   U/g/MJSUserData   976   JanHouRou.pex 0x002b2aa0:
-#:                             a0 = 0x00414e80 "U/g/MJSUserData"
-#:                             a1 = 0x00446110 (destination buffer)
+#:   a title's save    976   the game module's read call:
+#:                             a0 = the path string
+#:                             a1 = the destination buffer
 #:                             a2 = 976        <- the length
 #:
 #: So add a path here when a new resource appears, with the site it came from.
@@ -9358,7 +8810,7 @@ _LAST_SEARCH_COUNT = [0]
 #: Getting that wrong is NOT a checksum failure, it is a HANG: declaring 976 for a
 #: 976-byte reader delivers 972 bytes of data, the client waits for the remaining 4
 #: forever, and `handle_lobby` logs "TIMED OUT -- client is still WAITING on us".
-#: That is precisely what kept Janhourou's save data blank -- the read never
+#: That is precisely what kept one title's save data blank -- the read never
 #: completed, so the magic we had just fixed never reached the buffer at all.
 
 #: A title's variable-length resources (ranking lists, auction lists: the
@@ -9376,37 +8828,24 @@ _FETCH_PATHLEN = {
     # At 664 we were serving a 660-byte record: not a hang (the client got the
     # length it was told) but four bytes of the account record short, every time.
     "u/account": 668,
-    # 976 bytes of data (JanHouRou.pex 0x002b2aa4: a2 = 976) + 4 checksum.
-    "U/g/MJSUserData": 976 + 4,
     "b/g/ZL": 2120 + 4,
     # b/g/PTL -- the table/participant list, and the THIRD member of that same
-    # chain. Measured 2026-08-16 from the JANHOUROU side
-    # instead: JanHouRou.pex `cp__002fc608` calls
-    # mg__002f5c58(path, &DAT_003fb8a8, 0xc050, ...) -- 49232 bytes -- and the
-    # path is sprintf'd at 0x002f61c8. The same two-module agreement that gave us
-    # ZL and RL: those two were read off TMaster.pex and Janhourou asks for byte-
-    # identical lengths, so this one should hold for Tetra Master too.
+    # chain. Measured 2026-08-16 from the PS2 title's module instead: its
+    # `cp__002fc608` calls mg__002f5c58(path, buf, 0xc050, ...) -- 49232
+    # bytes -- and the path is sprintf'd at 0x002f61c8. The same two-module
+    # agreement that gave us ZL and RL: those two were read off TMaster.pex
+    # and the PS2 module asks for byte-identical lengths, so this one should
+    # hold for Tetra Master too.
     #
     # WHY THIS ENTRY ALONE IS WORTH HAVING:
     # sqMgCpEnterRoom BLOCKS on this fetch (states 10/11) before it will join the
-    # room channel, and unlike U/g/MJSUserData the poll (`cp__002fc6b8`) has NO
+    # room channel, and unlike a game save the poll (`cp__002fc6b8`) has NO
     # format gate -- it is a bare sqMgReadFileCheck. So the all-zero fallback at
     # this length is a well-formed EMPTY list (header count `pn` at +0x44 and
     # `tn` at +0x48 both read 0), which should carry EnterRoom through to the
-    # channel join. Untested on hardware -- it needs one Janhourou launch.
+    # channel join. A title declares the content-bearing length through
+    # `titles.Title.resource_length`; this is the reader's buffer, the ceiling.
     "b/g/PTL": 49232 + 4,
-    # b/g/MJSTableInfoSub -- JANHOUROU'S TABLE-SETTINGS BLOB, and the only fetch
-    # in the game that is Jan's alone rather than shared sqMg. Requested by
-    # ruleset.cc via lfile__002ae000(obj, key, "b/g/MJSTableInfoSub", 0x330) --
-    # 816 bytes -- and driven by lfriend.cc's read machine (30 retries, 60-tick
-    #
-    # WARNING: UNLIKE b/g/PTL, ZEROS ARE NOT SEMANTICALLY RIGHT HERE. ruleset__003473b0
-    # reads 33 twelve-byte records at +0x20 -- {group, config index, current,
-    # default, legal-value mask lo, mask hi} -- so an all-zero blob yields
-    # SelectItems = 0 for all 33 settings: a rules screen on which nothing can be
-    # chosen. The length is still worth declaring (a short read is strictly
-    # worse), but a WORKING settings screen needs a real blob, not the fallback.
-    "b/g/MJSTableInfoSub": 816 + 4,
 }
 
 #: Paths whose name is FORMATTED per request, so they cannot be dict keys. The
@@ -9417,7 +8856,6 @@ _FETCH_PATHLEN = {
 _FETCH_PATHLEN_PREFIX = {
     "b/g/RL": 51272 + 4,
 }
-JAN_USERDATA_PATH = "U/g/MJSUserData"
 
 
 #: WHERE A CLIENT NAMES THE PARTY A FETCH IS ABOUT: the 8 bytes immediately in
@@ -9455,7 +8893,7 @@ def _fetch_subject(pt):
 #:     member 16  b/g/RL000         0x384ea5822c   <- the SAME as ZL
 #:     member 16  b/g/PTL           0xf0e4bcbb91
 #:     member  8  b/g/PTL           0x3d7c0054cc
-#:     member  8  U/g/MJSUserData   0xc8e3816e18
+#:     member  8  a game save       0xc8e3816e18
 #:     member  1  u/account         0x162e92cdc54
 #:
 #: The `b/g/*` rows prove the subject is NOT the account -- one session, two
@@ -9474,17 +8912,18 @@ def _fetch_subject(pt):
 #: member id -- never to a shared file, which would be the collapse this split
 #: exists to prevent.
 #:
-#: THE MODEL (Jan track's, and it is a model, not a measurement): the subject is
+#: THE MODEL (a model, not a measurement): the subject is
 #: an sqMg OBJECT NICK -- `cp__002fcae8` prints the cp context as
 #: Nick / LnNick / RgmNick / TgmNick. Own nick for user paths, the LOBBY's for
 #: ZL+RL (hence identical), the ROOM's for PTL, which is `cp__002fc608`'s fourth
 #: argument `DAT_003f1878`, set by `sqMgCpEnterRoom(RgmNick, chan, ...)`. Two
 #: testable predictions ride on it: the two games' ZL subjects should DIFFER
-#: (Jan dials gi003.pol.com and TM does not), and PTL's subject should be
-#: per-ROOM. If Jan's `b/g/ZL` comes back as 0x384ea5822c the model is wrong and
-#: the tracks have a real collision -- which keying could not fix anyway, since
-#: two games wanting different content at one path under one key is resolvable
-#: only by per-game generation (`_jan_lobby_blob`'s route).
+#: (the PS2 title dials its own game host and TM does not), and PTL's subject
+#: should be per-ROOM. If the PS2 title's `b/g/ZL` comes back as 0x384ea5822c
+#: the model is wrong and the tracks have a real collision -- which keying could
+#: not fix anyway, since two games wanting different content at one path under
+#: one key is resolvable only by per-game generation (a title's
+#: `resource_live`).
 _SUBJECT_KEYED_PATHS = ("b/g/ZL", "b/g/PTL")
 _SUBJECT_KEYED_PREFIXES = ("b/g/RL",)
 
@@ -9500,7 +8939,8 @@ def _subject_keyed(path):
 #:
 #: WHY. `_resource_file` keys the store by the SESSION'S MEMBER, which is not
 #: what SE did: the subject above is the client naming the object it wants, and
-#: it varies BY PATH within one session (`janlobby.FETCH_KEY_OFF`, same 0x30,
+#: it varies BY PATH within one session (the same 0x30 the PS2 title's lobby
+#: module reads,
 #: four captures 2026-08-18: member 16 sends 0x384ea5822c for `b/g/ZL` and
 #: `b/g/RL000` but 0xf0e4bcbb91 for `b/g/PTL`). Keying by member instead has
 #: already forked one global zone list into four divergent copies across 17
@@ -10227,7 +9667,10 @@ def _lobby_paylen(op1, op2, req_pt=None):
         # the title promised on the auth band, so no constant can be right for
         # more than one length, and the one header whose length differs by
         # client build. See `titles.Title.resource_length`.
-        _tn = titles.resource_length(path)
+        # THE REQUESTER'S OWN TITLE IS ASKED FIRST: two titles serve the same
+        # lobby-list paths at different lengths, and which one this member is
+        # in is known from the title-zone lease.
+        _tn = titles.resource_length(path, zone=_title_zone(_session_get("member_id")))
         if _tn is not None:
             return _tn
         if path:
@@ -10237,9 +9680,9 @@ def _lobby_paylen(op1, op2, req_pt=None):
             # `u/account` in the same breath, which is the path-mixing trap this
             # file has fallen into twice.
             #
-            #   POL_RESOURCE_PAYLEN="U/g/MJSUserData=668"
+            #   POL_RESOURCE_PAYLEN="U/g/<a save path>=668"
             #
-            # WHY THIS EXISTS (2026-08-13): `U/g/MJSUserData` is the ONLY reply on
+            # WHY THIS EXISTS (2026-08-13): one title's save was the ONLY reply on
             # the whole channel that stalls deterministically -- 10/10 across every
             # log we have, at both lengths tried (1000 and 1004 total), while
             # replies of 1040, 1208, 1884, 2048 and 60028 bytes are all accepted.
@@ -10256,7 +9699,7 @@ def _lobby_paylen(op1, op2, req_pt=None):
                         break
                     # WARNING: Do not re-add the old "transport probe; the game will
                     # reject the short blob" wording here: it was inherited
-                    # from the 2026-08-13 MJSUserData probe and is WRONG for
+                    # from the 2026-08-13 save-path probe and is WRONG for
                     # b/g/RL000, whose 1476B declare the client ACCEPTS
                     # (confirmed live 2026-08-19T20:30Z).
                     log("lobby", f"  3:0 {path!r}: PAYLEN OVERRIDE {n} "
@@ -10301,7 +9744,7 @@ def _lobby_paylen(op1, op2, req_pt=None):
     # will read, i.e. exactly the shape of the bug the 604 entry itself fixed.
     if (op1, op2) == (0x05, 0x04) and _is_content_profile_request(req_pt):
         # AND THE CONTENT RECORD'S LENGTH IS PER TITLE, not a constant 280.
-        # `prof_<code>.pib` carries it: 280 FFXI, 432 TM, 432 jan, 280 FMO,
+        # `prof_<code>.pib` carries it: 280 FFXI, 432 TM, 432 code 3, 280 FMO,
         # 240 (code 10), 464 FE. Serving 284 to a title that reads 436 is the
         # same class of defect as the 604-to-a-content-request above, one layer
         # down. See `_CONTENT_SCHEMAS`.
@@ -10673,13 +10116,13 @@ def _build_lobby_reply_pt(req_pt, world_ip):
     # nothing has ever written, that is arguably the *correct* reply rather than a
     # zero-filled blob -- and it is what makes a client run its own "initialise"
     # path, which is precisely how the LOCAL save file behaves when absent
-    # (JanHouRou 0x0030acd0: read fails -> "be missing. Initialize Save Data", and
-    # that branch is NOT fatal).
+    # (the PS2 title's module, 0x0030acd0: read fails -> "be missing.
+    # Initialize Save Data", and that branch is NOT fatal).
     #
     # Armed per path, because it is a behaviour change on a channel that works:
-    #   POL_RESOURCE_NODATA="U/g/MJSUserData"      (comma-separated; "*" = all)
+    #   POL_RESOURCE_NODATA="U/g/<a save path>"    (comma-separated; "*" = all)
     # WHICH no-data code, and why it matters (measured 2026-08-14, live EE debugger).
-    # Janhourou's save-load loop (JanHouRou.pex 0x002bc244) branches on the poll's
+    # That module's save-load loop (0x002bc244) branches on the poll's
     # return with its OWN trace strings, and they say what each value means:
     #   s2 == -650 -> "File Not Found\n"     -> NORMAL exit (new player, not fatal)
     #   s2  <  0   -> "File Read Error\n"    -> INFINITE LOOP, hangs forever
@@ -10690,8 +10133,8 @@ def _build_lobby_reply_pt(req_pt, world_ip):
     # turns a non-zero type byte into -(5200 + type), and sqMgReadFileCheck maps
     # -5326 -> -650. 5326 - 5200 = 126 = 0x7E.
     #   0x72 = -5314 "no data"        (the original, what (4,5)/(4,6) special-case)
-    #   0x7E = -5326 -> -650          "File Not Found" -- Jan's new-player exit
-    # Anything else negative drops Jan into the 0x002bc2a4 infinite loop, so do NOT
+    #   0x7E = -5326 -> -650          "File Not Found" -- the new-player exit
+    # Anything else negative drops it into the 0x002bc2a4 infinite loop, so do NOT
     # pick a type at random.
     if (req_pt[1], req_pt[2]) == (0x03, 0x00):
         want = [s.strip() for s in
@@ -10791,214 +10234,6 @@ def _lobby_dump_reply_n():
     except ValueError:
         pass
     return int(os.environ.get("POL_LOBBY_DUMP_REPLY", "0"), 0)
-
-
-#: Content id 3. A member the traffic inference has parked in Janhourou gets its
-#: lobby lists built live; everyone else -- above all Tetra Master, which SHARES
-#: `b/g/ZL`, `b/g/RL000` and `b/g/PTL` -- keeps the stored file untouched.
-#:
-#:   POL_JAN_LOBBY_LIVE=1       the default: live, but only inside Janhourou
-#:   POL_JAN_LOBBY_LIVE=force   live for every requester (ignores the title zone)
-#:   POL_JAN_LOBBY_LIVE=0       off; the authored blobs answer, as before
-def _jan_lobby_blob(path, n, req_pt=None):
-    """Janhourou's zone / room / table list from LIVE room state, or None.
-
-    None means "not ours" and the caller serves the stored file, which is the
-    behaviour every other title keeps.
-
-    WARNING: THE TITLE-ZONE GATE IS WHY THIS IS SAFE ON A SHARED PATH. `b/g/PTL` and
-    `b/g/ZL` are one resource per member for BOTH games (`8.b_g_PTL.bin` and
-    friends), and the Tetra Master track authors its own. Answering those paths
-    unconditionally would replace a live worker's content with Jan's topology.
-    """
-    mode = os.environ.get("POL_JAN_LOBBY_LIVE", "1").strip().lower()
-    if janlobby is None or mode in ("0", "off", "no", ""):
-        return None
-    if not (path == "b/g/ZL" or path == "b/g/PTL"
-            or path == "b/g/MJSTableInfoSub"
-            or (path.startswith("b/g/RL") and path[6:].isdigit())):
-        return None
-    member = _session_get("member_id")
-    if mode != "force" and _title_zone(member) != _JAN_CONTENT_ID:
-        return None
-    live = _live_rooms()
-    # LEARN THE ROOM KEY. Any Jan fetch is a chance to bind a key somebody
-    # asked with a moment ago to the channel they have since JOINed -- see
-    # janlobby's "learned rather than reversed" banner. Costs nothing when
-    # there is nothing pending, which is almost always.
-    try:
-        for _k, _c in janlobby.reconcile_room_keys(live):
-            log("lobby", f"  jan room key {_k:#x} LEARNED -> {_c} "
-                         f"(now {len(janlobby.learned_rooms())} known)")
-    except Exception as exc:
-        log("lobby", f"  jan room-key reconcile failed ({exc!r}) -- the room "
-                     f"list still falls back to every room's occupants")
-    try:
-        if path == "b/g/ZL":
-            blob = janlobby.zone_list_blob(live)
-            what = "%d zone(s)" % len(janlobby.topology())
-        elif path.startswith("b/g/RL"):
-            zone = int(path[6:], 10)
-            blob = janlobby.room_list_blob(zone, live)
-            if blob is None:
-                log("lobby", f"  3:0 {path!r}: zone {zone} is not in this "
-                             f"server's topology -- falling back to the stored "
-                             f"blob rather than serving an EMPTY room list, "
-                             f"which walks the client off its row table")
-                return None
-            what = "zone %d, %d room(s)" % (zone, len(janlobby.rooms_of(zone)))
-        elif path == "b/g/MJSTableInfoSub":
-            # The rules AND the member rows -- see janlobby's banner. Which
-            # table is in the fetch's subject: measured 2026-09-04, the TOP 16
-            # BITS carry the table id (subject 0x0002_003d7c0054ab while the
-            # asker sat at table 2, 0x0001_003d7c0054a8 at table 1). The low 48
-            # bits are the room-key family we still cannot decode, so the id is
-            # validated against our own tables and falls back to whichever
-            # table the ASKER is seated at -- serving the wrong table's members
-            # would be worse than serving none.
-            #
-            # THE ROOM (finding 30): those 16 bits are the BASE id every
-            # room's PTL carries, so the composite is (asker's registry
-            # room, base) -- `janseats.resolve_table`, which falls back to
-            # the seat the asker holds and last to room 0.
-            _tid = 0
-            _subj = janlobby.request_key(req_pt)
-            _known = [t for t, _c in janlobby.JAN_TABLES]
-            _base = (_subj >> 48) if (_subj >> 48) in _known else 0
-            if janseats is not None and janseats.enabled():
-                _tid = janseats.resolve_table(member, _base,
-                                              room=_jan_member_room_id(member))
-            else:
-                _tid = _base
-            _seats, _params, _voices, _values = None, None, None, None
-            if _tid:
-                _params = janlobby.table_params_text_for(_tid)
-                if janseats is not None and janseats.enabled():
-                    _by = {st: (pid, nm, _m)
-                           for _m, st, nm, pid in janseats.seats_at(_tid)}
-                    _seats = [(_by[i][0], _by[i][1]) if i in _by else None
-                              for i in range(4)]
-                    # VoiceType[seat] (+0x218): the VoiceCharaNum each
-                    # member sent at reserve time (MjPLAYREQ +0x42).
-                    _voices = [janseats.voice_of(_by[i][2]) if i in _by else 0
-                               for i in range(4)]
-                # THE RULES THE MASTER CHOSE (finding 2), or the defaults.
-                if janrules is not None:
-                    _values = janrules.values_for(_tid)
-            blob = janlobby.mjs_table_info_blob(values=_values, seats=_seats,
-                                                params=_params, voices=_voices)
-            what = ("%d rule settings%s, table %s: %s"
-                    % (janlobby.MJS_TI_COUNT,
-                       " (master's)" if (janrules is not None and _tid
-                                         and janrules.has_rules(_tid)) else
-                       " (defaults)",
-                       (janseats.table_label(_tid) if janseats is not None
-                        and _tid else (_tid or "?")),
-                       ", ".join("%d=%s" % (i, (v or ("", ""))[1] or "-")
-                                 for i, v in enumerate(_seats or []))
-                       or "no member rows"))
-        else:
-            key = janlobby.request_key(req_pt)
-            # Remember who asked with this key; the JOIN ~0.6s from now is what
-            # names it. Recorded BEFORE the lookup so the very first visit to a
-            # room still teaches us, even though it cannot be answered yet.
-            try:
-                janlobby.note_room_fetch(member, key)
-            except Exception:
-                pass
-            # WHICH ROOM (finding 30), in order: the LEARNED key; else the
-            # room the asker is JOINed to (a `<DO>` reload re-fetches from
-            # inside the room, key unlearned or not); else, last, the old
-            # shared view -- everyone in any Jan room, and ROOM 0's four
-            # tables under room 0's sequence. The tables/serial follow the
-            # same choice as the members, so a client that was placed wrong
-            # here (first-ever visit to a room: the key is unlearned and the
-            # fetch precedes the JOIN) reports room 0's serial on its next
-            # `<DR>`, which is answered against its REAL room and reloads
-            # it -- by then the JOIN has taught us the key.
-            room = janlobby.room_for_key(key)
-            if room is not None:
-                what = "room %s (key %#x)" % (room.channel, key)
-            else:
-                room = _jan_member_room(member)
-                if room is not None:
-                    what = ("room %s (key %#x unlearned; the asker is JOINed "
-                            "there)" % (room.channel, key))
-            if room is not None:
-                who = janlobby.occupants(live, room.channel)
-            else:
-                # THE FETCH PRECEDES THE JOIN -- measured, see janlobby.py. With
-                # no room named we serve everyone in any Jan room rather than
-                # nobody, and say so, because an empty member list is exactly the
-                # symptom this whole change exists to remove.
-                who = [o for r in janlobby.all_rooms()
-                       for o in janlobby.occupants(live, r.channel)]
-                what = ("room UNKNOWN (key %#x names none of ours, asker in "
-                        "no Jan channel) -- serving every Jan room's occupants "
-                        "and room 0's tables" % key)
-            me = _jan_self_occupant()
-            if me is not None and not any(o.member_id == me.member_id
-                                          for o in who):
-                # The requester is entering this room and is not in its channel
-                # yet, so they are absent from the registry at exactly the moment
-                # they are about to walk in. Their own row is the one row the
-                # member screen must never be missing.
-                who.append(me)
-            # THE ROW'S LEVEL AND PROFILE ID: "Lv%2d" from
-            # janstats -- the same level every other screen shows -- and +0x18
-            # = the Jan Content ID that View Profile sends as `<PG>`.
-            for o in who:
-                _jan_decorate_occupant(o)
-            # THE SERIAL IS THE DELTA SEQUENCE, NOT A CONSTANT. The client
-            # reports this number back in `<DR>` every ~2 s and we answer
-            # relative to it, so a blob stamped with anything else desyncs it
-            # permanently: stamp low and it is owed deltas it already holds,
-            # stamp high and `deltas_after` can only ever tell it to reload.
-            # Stamping the CURRENT sequence makes a fetch leave the client
-            # CURRENT by construction, so its next poll is the silent one --
-            # which is what stops this channel becoming the re-fetch storm it
-            # became on the Tetra Master side.
-            # THE SERIAL IS THE DELTA SEQUENCE, and the rule lives in
-            # `janlobby.blob_serial()` so a test can reach it -- it has a trap
-            # in it that is invisible from here. See its docstring.
-            blob = janlobby.ptl_blob(who, live, serial=janlobby.blob_serial(room),
-                                     room=room)
-            what += ", %d member(s): %s" % (
-                len(who), ", ".join(o.name or "?" for o in who) or "none")
-    except Exception as exc:
-        log("lobby", f"  3:0 {path!r}: live build failed ({exc!r}) -- serving "
-                     f"the stored blob instead")
-        return None
-    log("lobby", f"  3:0 {path!r}: LIVE from the room registry -- {what}")
-    return blob[:n].ljust(n, bytes(1))
-
-
-def _jan_self_occupant():
-    """The requesting member as a lobby-list row, or None."""
-    if janlobby is None:
-        return None
-    member = _session_get("member_id")
-    if not member:
-        return None
-    return _jan_decorate_occupant(
-        janlobby.Occupant(_member_display_name(member), int(member)))
-
-
-def _jan_decorate_occupant(o):
-    """Fill a PTL row's level (janstats) and profile id (the Jan Content ID)."""
-    if not o or not getattr(o, "member_id", 0):
-        return o
-    try:
-        if janstats is not None:
-            o.level = janstats.level(o.member_id)
-        if accounts is not None:
-            cid = accounts.content_id_int(_member_content_id(o.member_id,
-                                                             _JAN_CONTENT_ID))
-            o.profile_id = int(cid or 0) & 0xFFFFFFFF
-    except Exception as exc:
-        log("lobby", f"  jan row for member {o.member_id}: {exc!r} -- level/"
-                     f"profile id left at defaults")
-    return o
 
 
 def _marker_payload_z(n):
@@ -12448,7 +11683,7 @@ def _char_display_name(content_code, content_id, handle_name="", names=None):
          banner would be a fresh bug in the scene the digits bug was found in.
       4. Everything else: **empty**, which is what SE served for a character that
          does not exist. Safe because the games read the NUMERIC fields --
-         FFXI matches on +0x04/+0x08 and Janhourou logs `Chara No` / `ContentsID`
+         FFXI matches on +0x04/+0x08 and the PS2 title logs `Chara No` / `ContentsID`
          out of +0x04/+0x08; neither reads +0x18.
 
     `POL_CHAR_NAME=0` restores the digits everywhere (the pre-2026-08-23
@@ -12554,7 +11789,7 @@ def _char_record(rec, index, slot, pos, content_code, content_id="",
     (`handle_name`, from the caller's `_db_handles()`); the NUMERIC identity
     below stays the Content ID either way, which is what the ranking row match
     (+0x0C/+0x10/+0x14) compares. Scoped to TM only because what SE served at
-    +0x18 for other titles is unverified, and FFXI/Janhourou demonstrably read
+    +0x18 for other titles is unverified, and FFXI and the PS2 title demonstrably read
     only the numeric fields. `POL_CHAR_NAME_HANDLE=0` restores the digits.
     """
     out = bytearray(rec)
@@ -12616,8 +11851,8 @@ def _char_record(rec, index, slot, pos, content_code, content_id="",
     out[0x18:0x18 + 15] = raw[:15].ljust(15, b"\x00")
 
     # "the rest stays zero until something is observed reading it" -- SOMETHING
-    # NOW IS. Measured 2026-08-12 from a PCSX2 savestate taken while Janhourou sat
-    # on its black screen (work/ps2/janstate.py). The game copies a table entry
+    # NOW IS. Measured 2026-08-12 from a PCSX2 savestate taken while the PS2
+    # title sat on its black screen. The game copies a table entry
     # into its own struct at 0x00445800 and then reads exactly two fields out of
     # it, logging them as "Chara No = %d" and "ContentsID = %016lx":
     #
@@ -12663,9 +11898,9 @@ def _char_record(rec, index, slot, pos, content_code, content_id="",
     # The value comes from the BRIDGE, which is the only party that sees the
     # `0x20` record the client will compare against; see `note_world_field`
     # there. No map entry (no LSB overlay, or a character POL has never seen a
-    # char list for) leaves the Janhourou behaviour untouched.
+    # char list for) leaves the PS2 title's behaviour untouched.
     #
-    # **Per-title, deliberately.** The PS2 Janhourou measurement read these same
+    # **Per-title, deliberately.** The PS2 measurement read these same
     # table slots as "Chara No" / "ContentsID" -- and for content code 3 that may
     # well be right. Two titles, two meanings, one struct: do not unify them
     # without a second measurement.
@@ -15983,7 +15218,7 @@ def _mail_payload(n):
 #:
 #: THE FIRST SIX ARE GENERIC and the tail is per-content: TM's fields are Player
 #: Name / Card Level / Title / Average Rank / Money / Purpose (`Friend.BIN`) and
-#: jan's are its own (`JanHouRou.pex`), so a real jan/TM record will NOT have
+#: code 3's are its own, so a real code-3/TM record will NOT have
 #: FFXI's tail. This schema is FFXI's, and it is the only one measured end to end.
 _CONTENT_SCHEMA = (
     (0,  "z_phead",    8, 9), (1,  "z_ctsid",   4, 6), (2,  "z_ctid",    8, 8),
@@ -16012,7 +15247,7 @@ _CONTENT_PHEAD = 104
 #:
 #: Consequences, and they decide what is worth serving:
 #:   * A content with no PC install has no schema on the machine at all --
-#:     Janhourou is PS2-only, which is a concrete reason its click reports
+#:     code 3 is PS2-only, which is a concrete reason its click reports
 #:     incompatible content rather than rendering.
 #:   * FFXI is the ONLY content whose wire descriptor we have measured end to
 #:     end (the `profSchema` probe, polcore RVA 0x20DA0 -- `_CONTENT_SCHEMA`).
@@ -16045,17 +15280,17 @@ _CONTENT_PHEAD = 104
 #: names the probe truncated at 8 chars: `z_worldname`, `z_countryid`,
 #: `z_joblevel`.
 #:
-#: KEY: **RECORD LENGTH IS PER CONTENT** -- 280 (FFXI), 432 (TM), 432 (jan), 280
+#: KEY: **RECORD LENGTH IS PER CONTENT** -- 280 (FFXI), 432 (TM), 432 (003), 280
 #: (FMO), 240 (010), 464 (FE). We served 284 to all of them, which is the wrong
 #: length in KIND for four of the six.
 #:
 #: KEY: **THE US VIEWER SHIPS ONLY `prof_001` AND `prof_002`.** The JP Viewer ships
 #: 001/002/003/004/010/011. A content with no `prof_<code>.pib` on the machine
 #: has NO SCHEMA THERE, which is a concrete, checkable reason a click reports
-#: incompatible content -- and it means **a PC port of Janhourou must ship
+#: incompatible content -- and it means **a PC port of content 3 must ship
 #: `prof_003.pfb`/`.pib`**, which already exist in the JP Viewer install.
 #:
-#: WARNING: TM's and jan's tails are GENERIC SLOTS (`z_attrstr`, `z_attrsi0..7`,
+#: WARNING: TM's and 003's tails are GENERIC SLOTS (`z_attrstr`, `z_attrsi0..7`,
 #: `z_attrss0..7`, ...) -- the Viewer supplies numbered attributes and the TITLE
 #: names them (TM's Card Level / Title / Average Rank / Money live in
 #: `TetraMaster/data/Friend.BIN`). So knowing the schema is NOT yet knowing which
@@ -16099,7 +15334,7 @@ _CONTENT_SCHEMAS = {
         (36, 'z_attrsb4', 2, 3), (37, 'z_attrsb5', 2, 3),
         (38, 'z_attrsb6', 2, 3), (39, 'z_attrsb7', 2, 3),
     ), 432, None),
-    # prof_003.pib -- Janhourou (JP-only file) -- 40 fields, 432-byte record
+    # prof_003.pib -- content 3 (JP-only file) -- 40 fields, 432-byte record
     3: ((
         (0, 'z_phead', 8, 9), (1, 'z_ctsid', 4, 6), (2, 'z_ctid', 8, 8),
         (3, 'z_name', 16, 1), (4, 'z_purp', 1, 2), (5, 'z_rlang', 1, 2),
@@ -16175,7 +15410,7 @@ def _content_code_for_cid(cid):
             # has no `content_code` column, so the lookup silently produced None
             # for every content and every title was served FFXI's schema. Live
             # symptom, and the log said so in as many words: `code=None
-            # schema=FFXI (assumed)` while serving Janhourou, whose record is
+            # schema=FFXI (assumed)` while serving content 3, whose record is
             # 432 bytes and 40 fields against FFXI's 280 and 12.
             # The CODE lives on the link row, so read the link row.
             row = db.execute(
@@ -16221,7 +15456,7 @@ def _content_code_for_request(req_pt):
 #:     Tetra Master      Player Name 3 / Card Level 16 z_attrsi0 u32 /
 #:                       Title 24 z_attrss0 u16 / Average Rank 9 z_attrstr /
 #:                       Purpose 4
-#:     Janhourou         Player Name 3 / Level 32 / Rank 26 / Games Played 17 /
+#:     content 3         Player Name 3 / Level 32 / Rank 26 / Games Played 17 /
 #:                       Money 11 / Yakuman 25 / the five TITLE counts 27..31 /
 #:                       Purpose 4        (all generic z_attr* slots)
 #:     Front Mission     First 9 / Last 5 / Nation 7 / Zone 8
@@ -16245,39 +15480,6 @@ _FE_NAME, _FE_SEX, _FE_WORLD, _FE_NATION, _FE_CLASS, _FE_LEVEL = 3, 4, 5, 6, 7, 
 _FFXI_WORLD, _FFXI_NATION, _FFXI_ZONE = 6, 7, 8
 _FFXI_JOB, _FFXI_JOBLEVEL, _FFXI_RACE = 9, 10, 11
 _DOC_NAME, _DOC_RANK, _DOC_RANKPOINT = 4, 6, 8
-_JAN_MONEY, _JAN_GAMES, _JAN_YAKUMAN, _JAN_RANK, _JAN_LEVEL = 11, 17, 25, 26, 32
-#: The five title COUNTS ("...の数"), in `janstats.SHOGO_KEYS` order. The order
-#: is not assumed from the layout: each label names the title its counter
-#: belongs to (万雀王 Mahjong King, 百獣王 King of Beasts, 箱大将 Bust General,
-#: 浮将軍 Winnings General, 爆敗王 = the LAST-PLACE king, i.e. Wild Tile King,
-#: whose threshold `5 - last % 5` is counted off last places).
-_JAN_TITLES = (27, 28, 29, 30, 31)
-
-#: WARNING: **JANHOUROU HAS TWO RANK LADDERS WITH DIFFERENT STRIDES, and passing an
-#: index from one to the other renames every rank above the first tier.**
-#:
-#:   * THE GAME's (`janstats.RANK_*`, read out of `JanHouRou.pex`
-#:     `ReturnRoom__00364c60`): 19 tiers x **5** variants, 95 names, index
-#:     `tier*5 + variant`. Variant 4 is やる気無い ("lazy").
-#:   * THE VIEWER's (`prof_003.pfb`'s own enum table): 19 tiers x **7**, 133
-#:     values 0..132, four named variants then three 予備 ("spare") slots SE
-#:     never filled -- so the Viewer has no name for the game's variant 4, and
-#:     it lands on that tier's first spare.
-#:
-#: Both were measured, on their own file. Converting is `divmod` by the game's
-#: stride and multiplying by the Viewer's; the spare is the honest result for a
-#: variant the Viewer was never given a word for.
-_JAN_RANK_VIEWER_VARIANTS, _JAN_RANK_VIEWER_MAX = 7, 132
-
-
-def _jan_viewer_rank(idx):
-    """A `janstats.rank_index_of` value in the VIEWER's rank enum. See above."""
-    import janstats
-    tier, variant = divmod(max(0, int(idx)), janstats.RANK_VARIANTS)
-    return min(_JAN_RANK_VIEWER_MAX,
-               tier * _JAN_RANK_VIEWER_VARIANTS + variant)
-
-
 #: Front Mission's zone enum, from `prof_004.pfb`: 1 O.C.U. Headquarters,
 #: 2 O.C.U. Occupation Zone, 3 U.S.N. Headquarters, 4 U.S.N. Occupation Zone,
 #: 5 Frontline Zone, 6 Coliseum -- which is `fmo.MAPKIND_BANDS` exactly, in
@@ -16372,34 +15574,6 @@ def _content_game_fields(code, cid, member_id):
                 # real 0 has to survive and a missing key has to stay missing.
                 if fx.get(key) is not None:
                     out[slot] = int(fx[key])
-        elif code == 3 and member_id is not None:       # Janhourou
-            # KEY: THE WHOLE OF JAN'S PROFILE IS ALREADY COMPUTED, once, in
-            # `janstats` -- that module exists so a level, a rank or a title
-            # cannot disagree with itself across the save, the results screen,
-            # the rankings and the `<PO>` popup. The Viewer's profile is one
-            # more screen onto the same record, so it reads the same functions;
-            # deriving anything a second time here is exactly the drift
-            # janstats was written to end.
-            #
-            # WARNING: Level and Rank are janstats POLICY (marked PARTIAL: there): SE's
-            # server computed them and the client defines neither. These are the
-            # same placeholders every other jan screen already shows, not a new
-            # invention, and one `overrides` entry moves all of them together.
-            #
-            # A member with no games and no overrides gets NOTHING, not zeros:
-            # "has never played" is what an unset field already says.
-            import janstats
-            rec = janstats.load(member_id)
-            if int(rec.get("games_played", 0)) or rec.get("overrides"):
-                d = janstats.derive(rec)
-                out[_JAN_LEVEL] = int(d["level"])
-                out[_JAN_RANK] = _jan_viewer_rank(d["rank"])
-                out[_JAN_GAMES] = int(d["games_played"])
-                out[_JAN_MONEY] = max(0, int(d["money"]))
-                out[_JAN_YAKUMAN] = int(rec.get("yakuman") or 0)
-                titles = rec.get("titles") or {}
-                for key, slot in zip(janstats.SHOGO_KEYS, _JAN_TITLES):
-                    out[slot] = int(titles.get(key) or 0)
         elif code == 11 and member_id is not None:      # Fantasy Earth
             # Keyed `member:<id>` since the roster was split per POL member
             # (`558ec62f`); before that every player shared one `TestPlayer`
@@ -16597,7 +15771,7 @@ def _content_profile_record(size, req_pt=None):
 
     THE TAIL IS PER-CONTENT and comes from `_content_game_fields`, which is the
     ONE producer of it: FFXI's world/nation/zone/job/race, Tetra Master's card
-    level/title/average rank, Janhourou's level/rank/money/title counts, Front
+    level/title/average rank, content 3's level/rank/money/title counts, Front
     Mission's names/nation/zone, Fantasy Earth's sex/world/nation/class/level.
 
     WARNING: A FIELD WITH NO SOURCE IS STILL LEFT AT ZERO ON PURPOSE, and that rule
@@ -16671,7 +15845,7 @@ def _content_profile_record(size, req_pt=None):
     # is the character name and `<PP>` is Purpose, and those two are schema
     # fields 3 and 4 in EVERY content profile -- so they can be served without
     # knowing this content's tail. The rest of the write is stored but not
-    # served: TM's and jan's wire descriptors are unrecovered, and guessing
+    # served: TM's and 003's wire descriptors are unrecovered, and guessing
     # where their fields sit would put invented data on screen.
     stored = _content_profiles().get(str(int(cid))) if cid else None
     if stored:
@@ -16932,7 +16106,7 @@ def _identity_content_entries(db, hid):
     #
     # A content profile is rendered from `prof_<code>.pib`/`.pfb` in the
     # Viewer's own data (see `_CONTENT_SCHEMAS`), and SE shipped exactly six --
-    # FFXI, Tetra Master, Janhourou, Front Mission Online, Dirge of Cerberus and
+    # FFXI, Tetra Master, content 3, Front Mission Online, Dirge of Cerberus and
     # Fantasy Earth. A code with no such pair, like PlayOnline FriendList (14),
     # has no schema, no labels and no icon anywhere: it was never meant to
     # appear in this list, and the account holder reported exactly that -- the
@@ -18173,7 +17347,7 @@ def _rooms_local_state():
     """{chan: {"members": n, "room": row|None}} from THIS process's own memory."""
     out = {}
     for chan, members in ROOMS.snapshot().items():
-        # `who` -- WHO, not just HOW MANY. Added 2026-08-18 for Janhourou's
+        # `who` -- WHO, not just HOW MANY. Added 2026-08-18 for the PS2 title's
         # lobby lists: `b/g/PTL`'s member block draws a NAME per row
         # (roomwin__ZoneListPage_0033e2c0 reads record +0x28), and that record is
         # built in the `login` container, which can only see this file. A count
@@ -18320,40 +17494,6 @@ def _live_rooms():
         except (OSError, ValueError):
             return _ROOMS_CACHE["data"]       # torn write: last good view stands
     return _ROOMS_CACHE["data"]
-
-
-if janhourou is not None:
-    # JANHOUROU'S ROOM (finding 30). Every table id on the Jan game band is a
-    # 16-bit row id that exists in EVERY room; the room is the one Jan
-    # channel the asker is JOINed to, and this process (authsess owns the
-    # registry) is where that is known. `janhourou.member_room` reads it
-    # through this hook.
-    janhourou.LIVE_ROOMS = _live_rooms
-
-
-def _jan_member_room(member):
-    """The `janlobby.Room` `member` is JOINed to, or None.
-
-    THE ROOM-RESOLUTION RULE (finding 30): the client holds exactly one room
-    channel (`sqMgCpEnterRoom` -> DAT_003f1884; roommain.c:146-176 waits on
-    "IRC Room Part Complite" before another can be picked), so the one
-    `#MJS0R0zi` the registry has them in IS the room of every table request
-    -- MjPLAYREQ/CANCEL/GAMESTART/TBLCONFALL on the game band, the
-    `<DR>` poll and the `b/g/MJSTableInfoSub` fetch here. For `b/g/PTL`
-    it is the SECOND choice after the learned key, because that fetch
-    precedes the JOIN by ~0.6 s (see `_jan_lobby_blob`).
-    """
-    if janlobby is None or not member:
-        return None
-    try:
-        return janlobby.member_room(_live_rooms(), member)
-    except Exception:
-        return None
-
-
-def _jan_member_room_id(member):
-    r = _jan_member_room(member)
-    return r.id if r is not None else 0
 
 
 _ROOMS_RESTORED = [False]
@@ -18878,7 +18018,7 @@ def _search_payload(n, req_pt):
 
 
 #: Per-resource blobs for the 03:00 fetch, stored per account under
-#: POL_RESOURCE_DIR. Janhourou's `U/g/MJSUserData` is the first user: an all-zero
+#: POL_RESOURCE_DIR. A PS2 title's save was the first user: an all-zero
 #: reply of the requested length reads as "nothing stored yet", which is the state
 #: that makes the game run its own "User Save Data be missing. Initialize Save
 #: Data" path rather than failing to load. Once the client WRITES its data we want
@@ -19781,24 +18921,9 @@ def _resource_read_file(path, subject=0):
 
 
 #: A FRESH resource is not necessarily all zeros -- some carry a magic the client
-#: validates before it will use the blob at all.
-#:
-#: `U/g/MJSUserData` must open with the u32 **0x02030100**. Measured 2026-08-13 at
-#: JanHouRou.pex 0x002b2af0, immediately after the 976-byte read:
-#:
-#:     lw    v1, 0x00446110      ; buf+0x00
-#:     lui   v0, 0x0203
-#:     ori   v0, v0, 0x0100      ; 0x02030100
-#:     beq   v1, v0, <ok>
-#:     addiu v0, zero, -650      ; else: the "save data is corrupt" return
-#:
-#: which is exactly the error the player saw once the black screen was gone: we
-#: were serving 976 valid-length but all-zero bytes, so the check failed on the
-#: first word. Everything past it is stats and counters that a new profile can
-#: legitimately have at zero.
-RESOURCE_INIT = {
-    JAN_USERDATA_PATH: struct.pack("<I", 0x02030100),   # JanHouRou.pex 0x002b2af4
-}
+#: validates before it will use the blob at all. Each title declares its own
+#: (`titles.Title.resource_init`, merged in below); the core has none.
+RESOURCE_INIT = {}
 
 
 def _resource_stored(path, subject=0):
@@ -19815,8 +18940,8 @@ def _lobby_delay(path):
 
         POL_LOBBY_DELAY="u/account=8000"        (comma-separated path=ms)
 
-    WHY THIS EXISTS, and it is a method fix rather than a theory. Janhourou's
-    `U/g/MJSUserData` stalls with the core parked in state 5 (`sub=1 hi=2 got=0`)
+    WHY THIS EXISTS, and it is a method fix rather than a theory. A PS2 title's
+    save fetch stalled with the core parked in state 5 (`sub=1 hi=2 got=0`)
     and every attempt to say what is WRONG with that state has died on the same
     thing: there has never been a **same-phase control**. We know what a stalled
     state-5 looks like; we have never once seen a HEALTHY one, because a working
@@ -19902,75 +19027,6 @@ def _lobby_linger(conn, peer):
     log("lobby", f"{peer} linger window elapsed; closing now")
 
 
-def _jan_save_live(path, data):
-    """`U/g/MJSUserData` with the fetching member's LIVE record patched in.
-
-    Same family as `_ptl_with_live_roster`, and for the same reason: the STORED
-    file stays the base -- it holds the identity u64s and the two name strings,
-    which are not ours to reset -- and the numbers we actually track are overlaid
-    on the way out.
-
-    What it writes (all measured -- `jansave.FIELDS`): the four money lines
-    and three title counters of the record screen, level +0x238 / rank +0x23C
-    of the handle panel, the 39 per-yaku counters, and -- from the seat store
-    -- the reservation bytes +0x3C8..+0x3CA plus the REJOIN gate +0x3CB, set
-    while the member's table has a game in play (finding 29: the menu shows
-    "Rejoin" instead of "Cancel Reserve"). `games_played` alone has no home in
-    the save and is reported skipped.
-    """
-    if jansave is None or janstats is None or path != JAN_USERDATA_PATH:
-        return data
-    if os.environ.get("POL_JAN_SAVE_LIVE", "1") != "1":
-        return data
-    member = _session_get("member_id")
-    if not member:
-        # No session, no member, and NOT a failure -- the same distinction
-        # `_ptl_with_live_roster` had to learn to make.
-        return data
-    try:
-        rec = janstats.load(member)
-        vals = janstats.derive(rec)
-        out, applied, skipped = jansave.apply_live(data, vals)
-        # THE RESERVATION GOES IN THE SAVE. The client recomputes its master
-        # flag from these bytes on every fetch and from nowhere else, so a save
-        # that does not carry the seat is a save that makes everybody master.
-        # See `jansave.apply_seat`.
-        if (janseats is not None and janseats.enabled()
-                and os.environ.get("POL_JAN_SAVE_SEAT", "1") == "1"):
-            _tid = janseats.table_of(member)
-            if _tid:
-                _at = {m: (st, nm) for m, st, nm, _p in janseats.seats_at(_tid)}
-                _mine = _at.get(member)
-                _master = janseats.master_seat_of(_tid)
-                if _mine is not None and _master is not None:
-                    _playing = bool(janseats.is_in_play(_tid))
-                    # THE SAVE CARRIES THE WIRE ID (finding 30): +0x18 is
-                    # `_DAT_00446510`, which the menu compares against the
-                    # PTL row's +0x00 -- the 16-bit base, never the composite.
-                    out = jansave.apply_seat(out, seat=_mine[0],
-                                             master_seat=_master,
-                                             table_id=janseats.split_table_id(_tid)[1],
-                                             rejoin=_playing)
-                    log("lobby", f"  {path!r}: member {member} sits at "
-                                 f"{janseats.table_label(_tid)} seat {_mine[0]}, "
-                                 f"master seat {_master} -> "
-                                 f"{'MASTER' if _mine[0] == _master else 'guest'}"
-                                 f"{', game IN PLAY -> Rejoin' if _playing else ''}")
-        if applied:
-            log("lobby", f"  {path!r}: member {member}'s live record patched in -- "
-                         + ", ".join("%s %d->%d" % (k, o, nw)
-                                     for k, (o, nw) in sorted(applied.items())))
-        elif rec.get("games_played"):
-            log("lobby", f"  {path!r}: member {member} has "
-                         f"{rec['games_played']} game(s) on record and the "
-                         f"stored save already carries them")
-        return out
-    except Exception as exc:
-        log("lobby", f"  {path!r}: live record patch failed ({exc!r}) -- "
-                     f"serving the stored blob unchanged")
-        return data
-
-
 def _resource_blob(path, n, subject=0):
     """`n` bytes for this resource: stored content if we have any, else the
     shipped template for paths that have one, else a fresh one (the measured
@@ -19979,11 +19035,11 @@ def _resource_blob(path, n, subject=0):
         with open(_resource_read_file(path, subject), "rb") as f:
             data = f.read()
         # LIVE VALUES PATCHED INTO A STORED BLOB: each title's patchers (room
-        # roster, lobby counts, zone host, auction counts, per-build layouts),
-        # then Jan's save record. Every patcher is path-gated, so the order
-        # between titles does not matter; the order WITHIN a title does.
+        # roster, lobby counts, zone host, auction counts, per-build layouts,
+        # the live record overlaid on a save). Every patcher is path-gated, so
+        # the order between titles does not matter; the order WITHIN a title
+        # does.
         data = titles.resource_patch(path, data, subject)
-        data = _jan_save_live(path, data)
         return data[:n].ljust(n, b"\x00")
     except OSError:
         pass
@@ -19997,7 +19053,6 @@ def _resource_blob(path, n, subject=0):
         # served the shipped tables with a permanently EMPTY member list -- the
         # bug the roster exists to fix, reintroduced by the fallback.
         data = titles.resource_patch(path, tmpl, subject)
-        data = _jan_save_live(path, data)
         log("lobby", f"  3:0 {path!r}: no stored copy for this subject -- "
                      f"serving the shipped template ({len(tmpl)}B)")
         return data[:n].ljust(n, b"\x00")
@@ -20012,10 +19067,11 @@ def _resource_blob(path, n, subject=0):
 
     # A member with NO stored save is the case that matters most here: this is a
     # brand new player, and their record -- however short -- is the only thing
-    # that distinguishes them from the factory blob. Applied BEFORE the two
-    # experiments below so those debug levers still win when they are switched
-    # on; they deliberately overwrite content.
-    blob = bytearray(_jan_save_live(path, bytes(blob)))
+    # that distinguishes them from the factory blob, so the same live patchers
+    # run on the fresh blob. Applied BEFORE the two experiments below so those
+    # debug levers still win when they are switched on; they deliberately
+    # overwrite content.
+    blob = bytearray(titles.resource_patch(path, bytes(blob), subject))
     # ...and each title's (Tetra Master's fresh save must carry the FACTORY
     # option header rather than the zeros that read as "every volume Off").
     blob = bytearray(titles.store_patch(path, bytes(blob)))
@@ -20048,11 +19104,11 @@ def _resource_blob(path, n, subject=0):
     # have measured exactly one field, the 0x02030100 magic at +0x00.
     #
     # Filling the rest with NUL-terminated offset markers turns one launch into a
-    # map of which offsets Janhourou reads, the same way `markerz` mapped the
+    # map of which offsets the game reads, the same way `markerz` mapped the
     # u/account record. The magic is restored afterwards so the blob still passes
-    # JanHouRou.pex 0x002b2af4 and the game gets far enough to read anything.
+    # the game's header check and it gets far enough to read anything.
     #
-    #   POL_RESOURCE_MARKER="U/g/MJSUserData"     (comma-separated; "*" = all)
+    #   POL_RESOURCE_MARKER="U/g/<a save path>"   (comma-separated; "*" = all)
     marks = [s.strip() for s in
              os.environ.get("POL_RESOURCE_MARKER", "").split(",") if s.strip()]
     if marks and (("*" in marks) or (path in marks)):
@@ -20159,8 +19215,8 @@ def _mail_read_len(req_pt):
 #: here "means storing garbage and serving it back, which breaks the game more
 #: thoroughly than storing nothing" -- and that is right, so this stores only
 #: what the evidence actually covers. `O/m/` is the MESSAGE object store, which
-#: is where the 2026-08-15 write/read pair was measured. Janhourou's
-#: `U/g/MJSUserData` and every other game save is untouched until someone
+#: is where the 2026-08-15 write/read pair was measured. Every game save is
+#: untouched until someone
 #: measures one the same way.
 _RESOURCE_WRITE_PATHS = tuple(
     p.strip() for p in os.environ.get("POL_RESOURCE_WRITE_PATHS", "O/m/").split(",")
@@ -20579,12 +19635,15 @@ def _lobby_payload(op1, op2, n, req_pt=None):
     if (op1, op2) == (0x03, 0x00) and req_pt is not None:
         # ONE OPCODE, MANY RESOURCES. 03:00 is keyed by the path string, so the
         # POL_LOBBY_TAIL="3:0=acct" override below must NOT reach a non-account
-        # path -- it would hand Janhourou the account record truncated to 200
+        # path -- it would hand a game the account record truncated to 200
         # bytes, which is the same path-mixing that broke `u/s/select`.
         path = _fetch_path(req_pt)
         _lobby_delay(path)
         if path and path != "u/account":
-            live = _jan_lobby_blob(path, n, req_pt)
+            # A TITLE MAY BUILD THIS FETCH LIVE (its lobby lists from the room
+            # registry, for a member it knows is in that title) and bypass the
+            # stored copy altogether.
+            live = titles.resource_live(path, n, req_pt)
             if live is not None:
                 return live
             blob = _resource_blob(path, n, _fetch_subject(req_pt))
@@ -20787,7 +19846,7 @@ def _parse_profile_tlv(pt):
     HEADER'S SECOND DWORD, AND THE ITEM IS 8 BYTES, NOT 16.** Measured
     2026-09-12 on the first CONTENT-profile write ever captured
     (`lobby-profile-write-unparsed-2026-09-12T175202Z.bin`, a live user
-    changing Janhourou's Purpose):
+    changing a content profile's Purpose):
 
         off    id len  value
         0x38    4   8  01 43 61 73 ..   z_purp = 1  (+ "Fox" stack junk)
@@ -21009,7 +20068,7 @@ def _capture_profile_write(pt):
     BELONGS IN `handle_profile`.** Measured on prod 2026-09-12: editing a
     CONTENT profile's Purpose in the Viewer sends a **84-byte-payload 05:01**
     (124B decrypted) which this parser refuses -- `05:01 profile write did not
-    parse; nothing stored`, the live report's "I changed Purpose for jan and it
+    parse; nothing stored`, the live report's "I changed Purpose for the game and it
     didn't save". The same 84-byte form appears on 2026-09-06T23:32 from a
     different client, and **no 84-byte 05:01 has ever parsed**; the handle form
     (612B and 252B payloads in the same logs) parses fine. So the discriminator
@@ -23431,7 +22490,7 @@ def handle_lobby(conn, addr, port, stub_ip):
                     # it off unless you are running the experiment below.
                     #
                     # WHY (2026-08-15):
-                    # Janhourou's save fetch parks with a receive posted for
+                    # The PS2 title's save fetch parks with a receive posted for
                     # EXACTLY 24 bytes (slot +0x324 {buf=0x201af700, len=24})
                     # while the full 1004-byte reply sits on the console, and it
                     # never completes -- FROZEN, not spinning. If that completion
@@ -23449,7 +22508,7 @@ def handle_lobby(conn, addr, port, stub_ip):
                     # This applies to EVERY 3:0 reply, deliberately -- u/account
                     # and Tetra Master's fetches then double as controls. If they
                     # keep working, splitting is harmless; if they break, the
-                    # split itself is bad and Jan's result means nothing.
+                    # split itself is bad and the PS2 result means nothing.
                     split_ms = int(os.environ.get("POL_LOBBY_SPLIT", "0") or 0)
                     if split_ms > 0 and len(out) > 24:
                         # Without NODELAY the two writes can coalesce into one
@@ -23583,8 +22642,11 @@ def handle_world(conn, addr, port, stub_ip):
     peer = f"{addr[0]}:{addr[1]}"
     emit = os.environ.get("POL_WORLD_EMIT", "0") == "1"
     try:
-        desc = titles.describe() or "no title module loaded; capture-only"
-        log("world", f"{peer} port {port}: connected. {desc}")
+        # THE CORE'S WORLD PORT IS A CAPTURE HARNESS whatever titles are
+        # loaded (a title's world, if it has one, is its own service); the
+        # title description after it says what rides the auth band.
+        desc = titles.describe() or "no title module loaded"
+        log("world", f"{peer} port {port}: connected; capture-only here. {desc}")
         buf = _read_for(conn, seconds=8, want_crlf=False)
         if not buf:
             log("world", f"{peer} port {port}: connected but sent no data "
@@ -24535,7 +23597,9 @@ titles.bind_core(
     _room_of_member=_room_of_member, _resource_file=_resource_file,
     _resource_read_file=_resource_read_file, _resource_stored=_resource_stored,
     _fetch_subject=_fetch_subject, _peer_is_ps2=_peer_is_ps2, _self_ip=_self_ip,
-    _mail_mint=_mail_mint, _member_still_present=_member_still_present)
+    _mail_mint=_mail_mint, _member_still_present=_member_still_present,
+    _title_zone=_title_zone, _title_zone_lease=_title_zone_lease,
+    _content_profiles=_content_profiles)
 _TITLES_LOADED = titles.load()
 _FETCH_PATHLEN.update(titles.fetch_pathlen())
 RESOURCE_INIT.update(titles.resource_init())
@@ -24721,37 +23785,25 @@ def main():
     log("resp", "started " + ", ".join(started))
     _log_auth_posture()
 
-    # WARNING: GRACEFUL SHUTDOWN (2026-09-04). A container stop -- every deploy, since
-    # `pol-git-sync` restarts authsess -- used to just SIGKILL the process, and
-    # a Jan game in progress froze the console on a socket that vanished under
-    # it. Now SIGTERM flips jangame.SHUTDOWN and holds the process a few seconds:
-    # the in-game handler answers each live table's next line (the client
-    # re-acks ~every 2 s) with MjGAMEEND, so the player drops cleanly to the
-    # menu instead of hanging. Docker's default stop grace is 10 s, so the hold
-    # fits inside it. Only the authsess process has games; elsewhere `live` is 0
-    # and the hold is skipped, so login/mail restarts stay instant.
+    # WARNING: GRACEFUL SHUTDOWN (2026-09-04). A container stop -- every deploy
+    # restarts authsess -- used to just SIGKILL the process, and a game in
+    # progress froze the console on a socket that vanished under it. Now
+    # SIGTERM tells every title to begin its shutdown and holds the process a
+    # few seconds while a title reports live games: the in-game handler
+    # answers each live table's next line (the client re-acks ~every 2 s)
+    # with its end-of-game record, so the player drops cleanly to the menu
+    # instead of hanging. Docker's default stop grace is 10 s, so the hold
+    # fits inside it. Only the authsess process has games; elsewhere `live`
+    # is 0 and the hold is skipped, so login/mail restarts stay instant.
     def _graceful_shutdown(signum, _frame):
         log("resp", "SIGTERM -- graceful shutdown")
         try:
-            import jangame
-            jangame.request_shutdown()
-            games = None
-            try:
-                import janhourou
-                games = getattr(janhourou, "GAMES", None)
-            except Exception:
-                pass
-            live = sum(1 for t in list(games.tables.values())
-                       if getattr(t, "state", None) == "playing") if games else 0
-            try:
-                import janhourou as _jh
-                _jh.broadcast_server_quit()     # MjNOTICESERVERQUIT, queued
-            except Exception:
-                pass
+            titles.begin_shutdown()
+            live = titles.live_games()
             if live:
                 grace = float(os.environ.get("POL_SHUTDOWN_GRACE", "4"))
-                log("resp", f"holding {grace:.0f}s to end {live} live jan "
-                            f"game(s) with MjGAMEEND before exit")
+                log("resp", f"holding {grace:.0f}s to end {live} live "
+                            f"game(s) before exit")
                 time.sleep(grace)
         except Exception as e:
             log("resp", f"graceful-shutdown hook failed: {e!r}")
@@ -24763,27 +23815,18 @@ def main():
     except (ValueError, OSError, AttributeError) as e:
         log("resp", f"could not install SIGTERM handler: {e!r}")
 
-    # DEPLOY GATE for live Jan games (#1). The auth band is where a hanchan
-    # actually plays, so it is THIS process that a deploy must not bounce
-    # mid-game. Publish a live-games marker the way Tetra Master publishes its
-    # match marker; pol-git-sync reads it and DEFERS the authsess restart while
-    # a game is in progress (the stale-check backstop bounces it the moment the
-    # last table ends). Only authserv holds games, so only it writes the marker.
-    if "authserv" in modes:
+    # DEPLOY GATE for live games. The auth band is where a title's games
+    # actually play, so it is THIS process that a deploy must not bounce
+    # mid-game. Publish a live-games marker; a deploy script reads it and
+    # DEFERS the authsess restart while a game is in progress. Only authserv
+    # holds games, so only it writes the marker.
+    if "authserv" in modes and titles.loaded():
         try:
             import live_sessions
-            def _jan_live_count():
-                try:
-                    import janhourou
-                    g = getattr(janhourou, "GAMES", None)
-                    return sum(1 for t in g.tables.values()
-                               if getattr(t, "state", None) == "playing") if g else 0
-                except Exception:
-                    return 0
-            live_sessions.start_heartbeat("authsess-jan", _jan_live_count)
-            log("resp", "jan live-game deploy-gate heartbeat started")
+            live_sessions.start_heartbeat("authsess-titles", titles.live_games)
+            log("resp", "live-game deploy-gate heartbeat started")
         except Exception as e:
-            log("resp", f"jan live-session heartbeat not started: {e!r}")
+            log("resp", f"live-game heartbeat not started: {e!r}")
 
     # Block forever.
     while True:

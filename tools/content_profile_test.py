@@ -211,10 +211,12 @@ def game_fields(handle_id, member_id):
               "-- not Lv0", repr(f))
 
     # --- JANHOUROU -----------------------------------------------------------
-    if importlib.util.find_spec("janstats") is None:
-        print("[SKIP] JANHOUROU profile fields: the janstats title module is not present in this tree")
+    if (importlib.util.find_spec("janstats") is None
+            or importlib.util.find_spec("jantitle") is None):
+        print("[SKIP] JANHOUROU profile fields: the jantitle title module is not present in this tree")
     else:
         import janstats
+        import jantitle                 # the slot numbers are the title's
         rec = janstats.blank(member_id)
         rec["games_played"] = 7
         rec["places"] = [3, 2, 1, 1]
@@ -224,17 +226,17 @@ def game_fields(handle_id, member_id):
         rec["overrides"] = {"rank": 5}         # tier 1, variant 0 = 凡人 Commoner
         janstats.store(member_id, rec)
         f = R._content_game_fields(3, JAN_CID, member_id)
-        check(f.get(R._JAN_GAMES) == 7 and f.get(R._JAN_YAKUMAN) == 2,
+        check(f.get(jantitle._JAN_GAMES) == 7 and f.get(jantitle._JAN_YAKUMAN) == 2,
               "jan games played and yakuman come off the one janstats record",
               repr(f))
-        check([f.get(s) for s in R._JAN_TITLES] == [1, 4, 0, 3, 5],
+        check([f.get(s) for s in jantitle._JAN_TITLES] == [1, 4, 0, 3, 5],
               "the five title counters are in janstats.SHOGO_KEYS order",
-              repr([f.get(s) for s in R._JAN_TITLES]))
-        check(f.get(R._JAN_RANK) == 7,
+              repr([f.get(s) for s in jantitle._JAN_TITLES]))
+        check(f.get(jantitle._JAN_RANK) == 7,
               "the GAME's rank 5 is the VIEWER's 7 -- 5 variants per tier vs 7. "
               "Passing it through unconverted names the wrong rank from tier 1 up",
-              repr(f.get(R._JAN_RANK)))
-        check(f.get(R._JAN_LEVEL) == janstats.level_of(rec),
+              repr(f.get(jantitle._JAN_RANK)))
+        check(f.get(jantitle._JAN_LEVEL) == janstats.level_of(rec),
               "jan level is janstats' own, not a second formula")
 
     # --- DIRGE OF CERBERUS ---------------------------------------------------

@@ -37,6 +37,10 @@ os.environ["POL_TITLE_LEASE_TTL"] = "60"
 
 import responders as R                              # noqa: E402
 
+#: A title's content id, and therefore its presence zone. The lease is
+#: generic; 3 is the zone the traffic inference was first built for.
+ZONE = 3
+
 ok = True
 
 
@@ -59,20 +63,20 @@ def age(member, seconds):
 
 print("a lease is visible, renews itself, and expires")
 
-R._title_zone_lease(7, R._JAN_CONTENT_ID)
+R._title_zone_lease(7, ZONE)
 check("a leased zone reads back", R._title_zone(7), 3)
 
 # RENEWAL IS THROTTLED, or the file would be rewritten once per game message --
 # Janhourou alone logged 10,361 of them, and two containers read-modify-write it.
 first = json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))["7"]["at"]
-R._title_zone_lease(7, R._JAN_CONTENT_ID)
+R._title_zone_lease(7, ZONE)
 same = json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))["7"]["at"]
 check("an immediate re-lease does not rewrite the file", same, first)
 
 # ...but once past the refresh point, traffic renews it. This is the whole
 # mechanism: a live session holds its own lease open by being played.
 age(7, R._TITLE_ZONE_REFRESH + 1)
-R._title_zone_lease(7, R._JAN_CONTENT_ID)
+R._title_zone_lease(7, ZONE)
 renewed = json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))["7"]["at"]
 check("past the refresh point, traffic renews the lease", renewed > first, True)
 check("and the zone is still live", R._title_zone(7), 3)
@@ -87,14 +91,14 @@ check("...and the watcher's view drops it too",
 print("\nthe fast clears beat the lease, and a latch is NOT shortened by it")
 
 # 1. the Viewer reporting its return -- instant, and it deletes the key outright.
-R._title_zone_lease(8, R._JAN_CONTENT_ID)
+R._title_zone_lease(8, ZONE)
 check("leased before returning to the Viewer", R._title_zone(8), 3)
 R._publish_title_zone(8, R._PRESENCE_ZONE_VIEWER, False)
 check("the Viewer's own 4:5 clears it at once", R._title_zone(8), None)
 
 # 2. switching titles must not wait for the refresh throttle -- the friend list
 #    should follow a player from one game to another immediately.
-R._title_zone_lease(9, R._JAN_CONTENT_ID)
+R._title_zone_lease(9, ZONE)
 R._title_zone_lease(9, 2)
 check("a different zone writes through the throttle", R._title_zone(9), 2)
 
@@ -148,7 +152,7 @@ check("and the Viewer's own frame is what clears it", R._title_zone(11), None)
 
 print("\nbad input cannot take the game path down with it")
 for bad in (None, "", "nope", object()):
-    R._title_zone_lease(bad, R._JAN_CONTENT_ID)         # must not raise
+    R._title_zone_lease(bad, ZONE)         # must not raise
 check("a junk member id is ignored, not raised on", True, True)
 check("and wrote nothing",
       set(json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))) - {"7", "9", "10", "11"},

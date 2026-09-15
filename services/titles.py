@@ -82,6 +82,9 @@ class Core:
       RESOURCE_DIR                    the resource store root
       _peer_is_ps2()                  is THIS lobby connection a PS2 build
       _self_ip()                      the address this server advertises
+      _title_zone(member_id)          the content id the member is in, or None
+      _title_zone_lease(member_id, zone)   renew the member's title lease
+      _content_profiles()             the client-written content profiles, by cid
       accounts                        the account database module (or None)
       polpro                          the POLpro plaintext channel module
       _mail_mint(...)                 mint a POL Message to a member
@@ -128,6 +131,15 @@ class Core:
 
     def _member_still_present(self, remaining, member_id):
         return False
+
+    def _title_zone(self, member_id):
+        return None
+
+    def _title_zone_lease(self, member_id, zone):
+        pass
+
+    def _content_profiles(self):
+        return {}
 
     def __getattr__(self, name):
         # Only reached for names with no default and no binding.
@@ -183,6 +195,17 @@ class Title:
     def polpro_noted(self, cls, payload, target):
         """A POLpro request was answered (or not): record what it told us."""
 
+    def polpro_pushes(self, cls, payload):
+        """Framed lines to send after (or instead of) the reply to a POLpro
+        line on this title's tag: game records the player is waiting for."""
+        return []
+
+    def polpro_profile(self, cid, name, member_id):
+        """The `<PO>` fields for a `<PG>` profile request on this title's
+        tag: None, or ({value slot: value}, name, member_id) with the name
+        and member the title resolved (either may be the ones passed in)."""
+        return None
+
     def roster_sequence(self):
         """The `$SERIAL` a POLpro reply should carry for this session, or None."""
         return None
@@ -206,6 +229,18 @@ class Title:
     def session_closed(self, member_id):
         """A member's last auth connection closed."""
 
+    def session_quit(self, member_id, sid):
+        """One connection (session id `sid`) sent QUIT; the member may hold
+        others."""
+
+    def live_games(self):
+        """Games in progress in THIS process: a deploy must not bounce it
+        while this is non-zero, and a SIGTERM holds the process to end them."""
+        return 0
+
+    def begin_shutdown(self):
+        """SIGTERM: stop starting games and tell the running ones to end."""
+
     def band_role(self, cmd_txt):
         """A diagnostic label for what this in-session line says the band is."""
         return None
@@ -220,6 +255,12 @@ class Title:
     # --- the lobby band ------------------------------------------------------
     def resource_length(self, path):
         """The declared payload length for a fetch of `path`, or None."""
+        return None
+
+    def resource_live(self, path, n, req_pt):
+        """A blob built live for THIS fetch (`n` declared bytes, `req_pt` the
+        request frame), served instead of anything stored; None to fall
+        through to the stored copy / template / fresh blob."""
         return None
 
     def resource_nodata(self, path, subject):
@@ -331,6 +372,20 @@ def polpro_noted(cls, tag, payload, target):
         t.polpro_noted(cls, payload, target)
 
 
+def polpro_pushes(tag, cls, payload):
+    t = for_tag(tag)
+    if t is None:
+        return []
+    return list(t.polpro_pushes(cls, payload) or [])
+
+
+def polpro_profile(tag, cid, name, member_id):
+    t = for_tag(tag)
+    if t is None:
+        return None
+    return t.polpro_profile(cid, name, member_id)
+
+
 def roster_sequence():
     for t in _TITLES:
         s = t.roster_sequence()
@@ -370,6 +425,20 @@ def session_closed(member_id):
         t.session_closed(member_id)
 
 
+def session_quit(member_id, sid):
+    for t in _TITLES:
+        t.session_quit(member_id, sid)
+
+
+def live_games():
+    return sum(int(t.live_games() or 0) for t in _TITLES)
+
+
+def begin_shutdown():
+    for t in _TITLES:
+        t.begin_shutdown()
+
+
 def band_role(cmd_txt):
     for t in _TITLES:
         r = t.band_role(cmd_txt)
@@ -387,11 +456,27 @@ def idle_pushes(member_id, peers):
     return out
 
 
-def resource_length(path):
-    for t in _TITLES:
+def resource_length(path, zone=None):
+    """The first title's opinion, the title whose content id is `zone` (the
+    requester's title, when the core knows it) asked before the others: two
+    titles can serve the same lobby-list path at different lengths."""
+    order = list(_TITLES)
+    mine = for_code(zone) if zone is not None else None
+    if mine is not None:
+        order.remove(mine)
+        order.insert(0, mine)
+    for t in order:
         n = t.resource_length(path)
         if n is not None:
             return n
+    return None
+
+
+def resource_live(path, n, req_pt):
+    for t in _TITLES:
+        b = t.resource_live(path, n, req_pt)
+        if b is not None:
+            return b
     return None
 
 
