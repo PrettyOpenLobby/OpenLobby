@@ -1,0 +1,50 @@
+# Run the published images instead of building. Apply ON TOP of
+# docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+#
+# (or COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml in .env, then
+# plain `docker compose up -d`). The tag is OPENLOBBY_TAG (default latest; a
+# version like 0.1.0 or a sha-xxxxxxx). Needs Docker Compose 2.24 or newer
+# (the `!reset` that drops the build step).
+
+services:
+  dns:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+    build: !reset null
+  http:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  ucs:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  login:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  authsess:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  authrelay:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  gmd:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  ucs-plain:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  admin:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  patch:
+    image: ghcr.io/prettyopenlobby/openlobby:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+  ssl3web:
+    image: ghcr.io/prettyopenlobby/openlobby-ssl3:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+    build: !reset null
+  ssl3ucs:
+    image: ghcr.io/prettyopenlobby/openlobby-ssl3:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
