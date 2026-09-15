@@ -31,6 +31,24 @@ docker compose up -d --build
 All services report healthy within a minute. State (accounts, mail, logs)
 lives in named Docker volumes and survives restarts.
 
+### Without building
+
+Every push to `main` publishes the images to the GitHub Container Registry
+(`ghcr.io/prettyopenlobby/openlobby` and `openlobby-ssl3`, for amd64 and
+arm64), so a server can run without a compiler or a build step:
+
+```
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+```
+
+Put `COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml` in `.env` and
+the plain `docker compose up -d` does the same. `OPENLOBBY_TAG` picks a
+version (`latest`, a release such as `0.1.0`, or `sha-<commit>`). Needs
+Docker Compose 2.24 or newer. The title repositories have the same override
+and are applied after this one.
+
 ## Bring your own content
 
 Two directories are read-only inputs that this repository does NOT include,
