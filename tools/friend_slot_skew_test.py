@@ -4,13 +4,13 @@
 REPLAYS A LIVE FAILURE (2026-09-06). The account holder had NINE incoming
 friend requests pending and nine friends served:
 
-    2:3 friends served: slot 0='Kestra' ... slot 7='laplacier', slot 8='Heulen'
+    2:3 friends served: slot 0='Kestra' ... slot 7='laplacier', slot 8='Corvin'
     2:6 friend write: kept 9 incoming request(s) the write omitted
         [Kestra, Ironbadger, Example.gang, CredibleAsh, DeckTestNew,
          LaptopTest2, PCTest, clem, laplacier]
 
 A friend changed their profile picture. The server did everything right --
-`push: event 0 for 'Heulen' -> row repainted on 1` -- and the row never
+`push: event 0 for 'Corvin' -> row repainted on 1` -- and the row never
 changed, because the repaint resolved the slot by enumerating
 `list_friends(status=None)` RAW. The 2:3 reply drops STATUS_INVITED (an
 incoming request is a Message, not a friend-list row), so the derived index was
@@ -63,7 +63,7 @@ def build():
             ("LaptopTest2", "friend"), ("Ironbadger", "incoming"),
             ("CredibleAsh", "friend"), ("clem", "incoming"),
             ("PCTest", "friend"), ("laplacier", "incoming"),
-            ("Heulen", "friend")]
+            ("Corvin", "friend")]
     for name, role in plan:
         a = accounts.register_account(db, name, "hunter2pw")
         phid = db.execute("SELECT id FROM handle WHERE member_id = ?",
@@ -111,12 +111,12 @@ def main():
             check(f"{name!r} has no slot", got is None, f"got {got}")
 
         print("\n[the LAST friend is the one the live bug hit]")
-        # Heulen was slot 8 with 4 requests interleaved ahead of them here; a
+        # Corvin was slot 8 with 4 requests interleaved ahead of them here; a
         # raw enumeration returns 8 + (requests before them) and the client
         # drops the record. This is the exact assertion that goes red on the
         # old code.
-        got = responders._friend_slot(db, whid, peers["Heulen"][0])
-        check("Heulen resolves to the LAST served slot", got == len(expected) - 1,
+        got = responders._friend_slot(db, whid, peers["Corvin"][0])
+        check("Corvin resolves to the LAST served slot", got == len(expected) - 1,
               f"got {got}, served list has {len(expected)}")
     finally:
         db.close()
