@@ -63,6 +63,8 @@ from srvcore import (  # re-exported: responders.X is srvcore.X
     _trace_dump,
     save_capture,
     expand_ports,
+    bind_peer,
+    advertise_for,
 )
 from authtoken import (  # re-exported: responders.X is authtoken.X
     TOKEN_ALPHABET,
@@ -475,6 +477,7 @@ def handle_directory(conn, addr, node_ip, node_port, srv_name):
     # second was served the first's account.
     session_bind(_sid_for_connection(addr[0], addr[1]))
     peer = f"{addr[0]}:{addr[1]}"
+    node_ip = node_ip or _self_ip()      # per client unless POL_AUTH_IP pins it
     try:
         conn.settimeout(10)
         token = build_redirect_token(node_ip, node_port)
@@ -561,8 +564,22 @@ def handle_authcap(conn, addr, port, srv_name):
 _SELF_IP = [None]
 
 
+def _advertise_configured():
+    return bool(_SELF_IP[0] or os.environ.get("POL_ADVERTISE"))
+
+
 def _self_ip():
-    return _SELF_IP[0] or "127.0.0.1"
+    """The address to tell THIS client to dial next.
+
+    Global default = main()'s stub_ip, else POL_ADVERTISE (a container that runs
+    a responder without main(), e.g. the ucs path, used to fall through to
+    127.0.0.1 here). Then srvcore.advertise_for chooses per client: a LAN peer
+    gets the LAN address it reached us on (or POL_ADVERTISE_LAN), a tailnet peer
+    keeps the global one. Found live 2026-09-18: the real PS2 was redirected
+    from ci000 to 127.0.0.1:51241 and hung on "verifying user info".
+    """
+    base = _SELF_IP[0] or os.environ.get("POL_ADVERTISE") or "127.0.0.1"
+    return advertise_for(base)
 
 
 # --------------------------------------------------------------------------- #
@@ -6573,6 +6590,13 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
     # the socket. The client retried forever, stuck on "Connecting to
     # PlayOnline". The relay now says who it is carrying (see authrelay.py).
     addr = _front_preamble_addr(conn, addr)
+    # Re-bind the advertise peer to the REAL client: _serve_one bound the relay's
+    # loopback socket, so every address this hop hands out (the lobby handoff
+    # token) fell back to the global tailnet IP -- the real PS2 got
+    # `accept -> lobby 127.0.0.1:51220` on 2026-09-18 after the directory fix
+    # had already landed. The dialed address is unknown behind the relay;
+    # advertise_for derives it from the route to the peer.
+    bind_peer(addr[0], None)
     session_bind(_sid_for_connection(addr[0], addr[1]))
     peer = f"{addr[0]}:{addr[1]}"
     _trace_begin(peer, port)
@@ -8607,6 +8631,63 @@ _LOBBY_PAYLEN = {
     (0x04, 0x05): 32,     # KChangeMyStatus / KPutBusy -- both K classes reach this
                           # one builder. State 5 of the 0x37ddef0 machine reads
                           # 0x20. Like (4,6) it special-cases the -5314 "no data".
+    # ---- PS2-ONLY, resolved STATICALLY off the decrypted PS2 core 2026-09-18
+    # (work/ps2/polpex/polpex.c, base 0x00101000). The PC's 28 reqEncode sites
+    # never emit 4:0 or 4:1 (memory pol-lobby-handoff), which is why the PC
+    # captures could not size them and dev carried a 128/128 SWEEP that never
+    # shipped. Prod therefore served the 8-byte default, and a console with no
+    # stored handle (fresh drive) sends 4:1 as its FIRST lobby request, got
+    # 32 B on the wire, and ended the login with POL-0260 (real PS2, 2026-09-18
+    # 22:51Z). The same account on a drive that already held its handle skips
+    # 4:1 and goes 4:7 -> 4:6 -> 3:0 (127.0.0.1, 2026-09-07) -- so it only
+    # ever bit a first login, which the PCSX2 rigs had all done long ago.
+    (0x04, 0x01): 24,     # polpex_0014ae20: state 3 = header reader
+                          # polpex_00143ac8, state 4 = polpex_00143cb0(ctx, 0x18,
+                          # verify=1, buf) -- reads EXACTLY 24 payload bytes,
+                          # checksum-verified (so the signer must stay on, as for
+                          # 7:1). State 5 parses: [0] handle slot (< 0x40), [1]
+                          # present flag, [2] position (< 8), [3] == 1 flag, [4:6]
+                          # u16, [6] count (0 -> "no current handle": slot -1,
+                          # state 4), [7] byte, [8:12] and [12:16] u32. All-zero
+                          # = no current handle, which is the truthful answer
+                          # for a fresh console; the 2026-08-12 sweep value 128
+                          # worked only because the console reads 24 and the
+                          # per-request socket swallowed the surplus.
+    (0x04, 0x00): 32,     # polpex_0014b508 machine: state 3 WRITES 0x18 bytes
+                          # (polpex_00143e98), state 4 header, state 5 =
+                          # polpex_00143cb0(ctx, 0x20, verify=1, buf) -- reads
+                          # exactly 32 payload bytes. Static only; not yet seen
+                          # from the real console.
+    (0x04, 0x04): 128,    # SAME BUILDER AS 4:1 -- that is why it was never sized.
+                          # Read out of the US 1.15.05 `pol.pex` (decrypted off
+                          # the drive, module base 0x00101000). The machine at
+                          # 0x00136a98 picks the opcode from a flag:
+                          #     0x00136b4c  lb    v1, 192(s1)
+                          #     0x00136b54  addiu a2, zero, 4      <- opcode 4
+                          #     0x00136b5c  movz  a2, v0, v1       <- ...or 1
+                          #     0x00136b60  addiu a1, zero, 4      <- class 4
+                          #     0x00136b64  jal   0x0012f1e8       <- the encoder
+                          # so a console sends 4:1 or 4:4 from one state. Nobody
+                          # had seen the flag SET, so 4:4 fell to the 8-byte
+                          # default and the console hung ~98.7 s then reported
+                          # POL-0260 (PCSX2, US 1.15.05 Viewer, 2026-09-19; the
+                          # server logged `unknown opcode 4:4` both times).
+                          # That function contains exactly ONE payload read:
+                          #     0x00136bd4  addiu a1, zero, 128
+                          #     0x00136be4  jal   0x0012f530   (a2 = 1, verified)
+                          # 128 is also the class-4 status size -- 4:6
+                          # KGetMyStatus reads a hardcoded 0x80.
+                          # WARNING: UNRESOLVED: 4:1 above says 24, derived from the JP
+                          # core where that machine had a separate header reader
+                          # plus a 24-byte payload read. This US build's shared
+                          # machine has only the 128. Either the builds differ or
+                          # the JP function is a different analogue. If 4:4 at 128
+                          # does not clear the stall, that tension is the thread
+                          # to pull -- do NOT sweep sizes blindly, and do NOT use
+                          # POL_LOBBY_PAYLEN (see the 2026-08-26 note in
+                          # docker-compose.prod.yml: the env is consulted BEFORE
+                          # this table, and a stale override silently won for
+                          # weeks).
     (0x00, 0x08): 520,    # handle registration (payload 0x648 out). State 6 of the
                           # 0x37dd1f4 machine reads 0x208.
     # The four "keep-alive" opcodes are NOT keep-alives -- they are LIST fetches,
@@ -20809,7 +20890,7 @@ def _build_lobby_reply(stub_ip):
     the instant lobbydec.py --key ... reveals the real frame layout."""
     ids = [int(x) for x in os.environ.get("POL_LOBBY_CONTENT_IDS", "1,2").split(",")]
     block = contentlist.build_block(ids)                 # 192-byte content list
-    world_ip = os.environ.get("POL_WORLD_IP", stub_ip)
+    world_ip = os.environ.get("POL_WORLD_IP") or _self_ip()
     world_port = int(os.environ.get("POL_WORLD_PORT", "51330"))
     # Placeholder world-handoff record: IPv4 + big-endian port. Real layout TBD.
     handoff = socket.inet_aton(world_ip) + struct.pack(">H", world_port)
@@ -21767,8 +21848,23 @@ def _shim_log_store(body, hdrs, peer):
 #: cadence from here, so TUNE AGAINST emulog: this is working when
 #: `Bad TCP numbers received` stops appearing.
 def _ps2_band_ports():
+    # 51304 ADDED 2026-09-20 -- the PORTAL band, and the next instance of the
+    # same failure class as POL-0006 (:51300, 08-23) and the patch service
+    # (:53003, 09-03). Measured from PCSX2's own emulog while the US console
+    # browsed the FFXI page with this band UNPACED:
+    #     DEV9: TCP: Got a lot of data: 65536 using: 1414   x439
+    #     Bad TCP numbers received                          x23
+    #     DEV9: TCP: Invalid TCP state                      x120
+    # i.e. the emulated stack takes ONE MTU out of a 64 KB burst and discards
+    # the rest. The FFXI backgrounds are 90-136 KB, the largest objects on the
+    # page, so they and the menu died first -- intermittently, because it is a
+    # race against PCSX2's buffer and not a property of any file. It read for a
+    # while as "one background never renders".
+    #
+    # This is mitigation, not the cure: `EthApi = PCAP-Bridged` is the real fix
+    # on the emulator side, but it renumbers the console onto the physical LAN.
     return set(expand_ports(
-        os.environ.get("POL_PS2_BAND_PORTS", "51300").split(",")))
+        os.environ.get("POL_PS2_BAND_PORTS", "51300,51304").split(",")))
 
 
 def _is_ps2_console(hdrs):
@@ -22198,6 +22294,29 @@ def _serve_http_on_lobby(conn, first, peer, port):
                 ctype = "application/octet-stream"    # shim bundle, not a portal page
             elif cand.lower().endswith((".sha256", ".md", ".sh", ".ps1", ".ini")):
                 ctype = "text/plain"
+            # The www tree is MIXED-ENCODING and always has been. Measured
+            # 2026-09-20 over 3,900 served .pml: 2,242 are cp932, 1,499 are
+            # UTF-8, 159 are pure ASCII -- and the split is exact, no cp932 file
+            # carries a BOM and every BOM file is UTF-8.
+            #
+            # The PS2 Viewer defaults to cp932 and does NOT honour a UTF-8 BOM
+            # (ff11/index.pml had one and was still mis-decoded). A UTF-8 page
+            # served with no charset is therefore read as cp932, which corrupts
+            # the Japanese inside SE's own `<!-- -->` comments and ends them
+            # early -- leaking commented-out markup into the live document. That
+            # is what put SE's `$_IS_UPDATE_SUCCESS` debug box on screen and
+            # killed the FFXI menu, and it emitted `(Variable Error)` URLs.
+            #
+            # So sniff PER FILE. Pure ASCII needs no charset, UTF-8 must say so,
+            # cp932 keeps the default. WARNING: Do NOT blanket-declare UTF-8: it would
+            # mis-serve the 2,242 cp932 pages, i.e. most of the tree.
+            if ctype.startswith("text/x-playonline-pml") and "charset" not in ctype:
+                if any(b >= 0x80 for b in body):
+                    try:
+                        body.decode("utf-8")
+                        ctype += ";charset=UTF-8"
+                    except UnicodeDecodeError:
+                        pass          # genuinely cp932 -- the Viewer's default
             log("lobby", f"{peer}   served {cand} ({len(body)}B, {ctype})")
         fallback_hit = False
         if (body is None and pmlfallback is not None
@@ -22356,7 +22475,7 @@ def handle_lobby(conn, addr, port, stub_ip):
         # watching the client store the server's timestamp -- so the default is now
         # OFF and the field carries a real time_t. Set it to 1 only to re-run that
         # A/B deliberately.
-        world_ip = os.environ.get("POL_WORLD_IP") or stub_ip
+        world_ip = os.environ.get("POL_WORLD_IP") or _self_ip()
         f14 = socket.inet_aton(world_ip) \
             if os.environ.get("POL_LOBBY_ADDR14", "0") == "1" else None
         if emit in ("accept", "full", "derive"):
@@ -22543,7 +22662,7 @@ def handle_lobby(conn, addr, port, stub_ip):
         # IP = dword at message +0x14, gated by tag byte +1==0.
         # Override wholesale with POL_LOBBY_REPLY=<hex> while iterating (route B).
         if emit == "full" and req:
-            world_ip = os.environ.get("POL_WORLD_IP") or stub_ip
+            world_ip = os.environ.get("POL_WORLD_IP") or _self_ip()
             world_port = int(os.environ.get("POL_WORLD_PORT", "51330"))
             tmpl = os.environ.get("POL_LOBBY_TEMPLATE")
             if tmpl:
@@ -22693,6 +22812,13 @@ _CONNS = threading.Semaphore(_MAX_CONNS) if _MAX_CONNS > 0 else None
 
 
 def _serve_one(handler, conn, addr, port):
+    # Who connected and which of our addresses they reached: every address this
+    # thread hands the client comes out of _self_ip(), which reads these
+    # (srvcore.advertise_for -- a LAN console must not be sent the tailnet IP).
+    try:
+        bind_peer(addr[0], conn.getsockname()[0])
+    except OSError:
+        bind_peer(addr[0], None)
     try:
         handler(conn, addr)
     except Exception as e:                  # a handler fault is not a listener fault
@@ -23641,7 +23767,7 @@ def main():
     load_login_nicks()
     srv_name = "ci000.pol.com"
 
-    node_ip = os.environ.get("POL_AUTH_IP", stub_ip)
+    node_ip = os.environ.get("POL_AUTH_IP") or None   # None = per client (_self_ip)
     node_port = int(os.environ.get("POL_AUTH_PORT", "51241"))
     auth_ports = expand_ports(os.environ.get("POL_AUTH_PORTS", "51241-51250")
                               .split(","))
@@ -23657,7 +23783,7 @@ def main():
     if "directory" in modes:
         start(51240, lambda c, a: handle_directory(c, a, node_ip, node_port,
                                                     srv_name))
-        started.append(f"directory:51240->{node_ip}:{node_port}")
+        started.append(f"directory:51240->{node_ip or 'per-client'}:{node_port}")
     if "authcap" in modes:
         for p in auth_ports:
             start(p, lambda c, a, _p=p: handle_authcap(c, a, _p, srv_name))

@@ -81,6 +81,15 @@ dns:
     - pc002ps2.pol.com
     - pc002p2u.pol.com   # no P2U/0002 bundle yet -- needs a West PS2 source
     - pc003ps2.pol.com
+    # Janhourou on a US PS2 drive asks for the P2U name, and it was NOT
+    # here -- measured 2026-09-19: `127.0.0.1 A pc003p2u.pol.com ->
+    # forwarded`, then three `DEV9: TCP: Connect error: 10060` and
+    # POL-1160 (SE-internal title: the HDD is not mounted or is faulty --
+    # a misleading code for what is really a dead patch host). pc002 has
+    # both its ps2 and p2u names; pc003 only ever had ps2, because only a
+    # US drive running a JP title asks for this one, which nothing could
+    # do until the Viewer learned to mount JP partitions.
+    - pc003p2u.pol.com
     # FFXI on the PS2 asks for its patch host as pc001ps2 (MEASURED 2026-08-14:
     # `A pc001ps2.pol.com -> forwarded` in dns.log, seconds before the console
     # reported POL-1161). Only the two PC names were listed, so the console's
@@ -236,6 +245,11 @@ dns:
     # ps2hdd/certdb, all patchable data) or has to be patched out of the title,
     # the way console-binding and install-binding already are.
     - gate1.jp.dnas.playstation.org
+    # The US disc (SCUS-97269, "PlayOnline Viewer and Tetra Master") asks for
+    # the US gate instead -- seen 2026-09-19 from the PCSX2 installer run
+    # (`127.0.0.1 A gate1.us.dnas.playstation.org -> forwarded`, NXDOMAIN,
+    # no TCP, POL-1558 "cannot resolve"). Same treatment, same reason.
+    - gate1.us.dnas.playstation.org
     # -- Portal content hosts -------------------------------------------------
     # These were left COMMENTED so the portal would load from real SE during
     # normal play. That premise is dead in own-server mode: SE's portal no longer
