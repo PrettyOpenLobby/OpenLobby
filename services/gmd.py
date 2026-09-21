@@ -57,6 +57,14 @@ import struct
 import sys
 import time
 
+try:
+    # Per-client address (LAN / tailnet / internet-via-edge). See srvcore's
+    # "The address a client is told to dial next" and deploy/edge/README.md.
+    from srvcore import advertise_for
+except ImportError:                     # standalone use outside services/
+    def advertise_for(default, peer_ip=None, dialed_ip=None):
+        return default
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 #: WARNING: THE CIPHER IS A DEPENDENCY OF THE SERVER, NOT OF THE RULES -- and importing
@@ -590,7 +598,8 @@ class Gmd:
                 ses.dwA, ses.dwB = struct.unpack_from("<II", pt, 0x20)
                 ses.echoA, ses.echoC, ses.sctx_ready = echoA, echoC, True
                 log(f"    session dwords: {ses.dwA:08x} / {ses.dwB:08x}")
-                our_ip = CHAT_IP or self.local_ip_for(peer[0])
+                our_ip = advertise_for(CHAT_IP or self.local_ip_for(peer[0]),
+                                       peer[0])
                 rep, n = self.redirect(ses, echoA, echoC, our_ip)
                 log(f"[>] 0x201 redirect -> {our_ip}:{CHAT_PORT} (host order)")
             else:

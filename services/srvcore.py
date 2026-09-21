@@ -7,6 +7,7 @@ on it. stub.py carries a deliberate duplicate of the log rotation.
 """
 
 import datetime
+import ipaddress
 import os
 import sys
 import threading
@@ -451,3 +452,120 @@ def expand_ports(spec):
         else:
             out.append(int(item))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# The address a client is told to dial next -- per CLIENT, not per server
+# --------------------------------------------------------------------------- #
+# Every "now dial this" value the client is handed (the directory's redirect
+# token, the auth hops, the lobby handoff, the TM zone rows, the patch server's
+# download host) used to be ONE global address: POL_ADVERTISE, which on prod is
+# the box's Tailscale address 127.0.0.1. A PC on the tailnet reaches that. A
+# console on the LAN does not: a real PS2 on the LAN resolved ci000 to
+# the LAN address via the DNS split (POL_ADVERTISE_LAN, 2026-08-22), dialled
+# 127.0.0.1:51240, was greeted with "redirect to 127.0.0.1:51241" and sat on
+# "verifying user info" forever (prod login log, 2026-09-18 22:11:02Z). DNS had
+# learned to answer per network; nothing after DNS had.
+#
+# So the address is now chosen per client, from what the connection itself
+# tells us. A handler thread records who connected and which of OUR addresses
+# they reached (bind_peer, from the accept loop), and advertise_for picks:
+#
+#   1. POL_ADVERTISE_LAN, when set, for a peer inside POL_ADVERTISE_LAN_CLIENTS
+#      (default RFC1918) -- the same rule stub.py's resolver applies, so a box
+#      that configured the split for DNS gets it everywhere.
+#   2. otherwise, when the global address is OFF the LAN (tailnet, public) and
+#      an RFC1918 peer reached us on an RFC1918 address: that address. The
+#      client just dialled it, so it can dial it again. Dev is untouched by
+#      construction -- its advertise address is itself a LAN address.
+#   3. otherwise the global address, exactly as before.
+#
+# Rule 0, ahead of all of those (2026-09-21, the edge VPS -- deploy/edge): when
+# POL_ADVERTISE_PUBLIC is set, a peer with a GLOBAL address gets that. The VPS
+# forwards internet players here with their own source address intact, so "the
+# peer is an internet address" is exactly "this client came through the VPS and
+# can only dial the VPS". Overlay-network peers (the CGNAT range is not global) and LAN
+# peers fall through to the rules above, so all three ways in keep working from
+# one running stack. Unset, nothing changes.
+#
+# Loopback peers are deliberately outside both rules (unchanged behaviour for
+# the box's own monitors and walk tools).
+_RFC1918 = tuple(ipaddress.ip_network(n) for n in
+                 ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))  # generic RFC1918 ACL; polcheck: allow
+_PEER = threading.local()
+
+
+def bind_peer(peer_ip, dialed_ip):
+    """Record for THIS thread who connected and which local address they hit."""
+    _PEER.ip = peer_ip
+    _PEER.dialed = dialed_ip
+
+
+def _addr(s):
+    try:
+        return ipaddress.ip_address(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _in_rfc1918(a):
+    return a is not None and any(a in n for n in _RFC1918)
+
+
+def _lan_nets():
+    spec = os.environ.get("POL_ADVERTISE_LAN_CLIENTS") or ""
+    nets = []
+    for c in [x.strip() for x in spec.split(",") if x.strip()]:
+        try:
+            nets.append(ipaddress.ip_network(c, strict=False))
+        except ValueError:
+            pass
+    return nets or list(_RFC1918)
+
+
+def advertise_for(default, peer_ip=None, dialed_ip=None):
+    """The address to hand the client on this thread (or the given peer).
+
+    `default` is the global advertise address (POL_ADVERTISE / stub_ip). Returns
+    it unchanged unless rule 1 or 2 above applies. Never raises: an unparseable
+    or unbound peer just gets `default`.
+    """
+    if peer_ip is None:
+        peer_ip = getattr(_PEER, "ip", None)
+        dialed_ip = getattr(_PEER, "dialed", None)
+    peer = _addr(peer_ip)
+    if peer is None:
+        return default
+    if getattr(peer, "ipv4_mapped", None):
+        peer = peer.ipv4_mapped
+    public_ip = (os.environ.get("POL_ADVERTISE_PUBLIC") or "").strip()
+    if public_ip and peer.is_global:
+        return public_ip
+    lan_ip = (os.environ.get("POL_ADVERTISE_LAN") or "").strip()
+    if lan_ip and any(peer in n for n in _lan_nets()):
+        return lan_ip
+    dialed = _addr(dialed_ip)
+    if _in_rfc1918(peer) and not _in_rfc1918(_addr(default)):
+        # Behind the auth front relay the handler never sees the socket the
+        # client dialed (it sees the relay's loopback), so derive the address
+        # from the route instead: the source the kernel would use to reach the
+        # peer is the one interface the peer can reach. A UDP connect() sends
+        # nothing; it only resolves the route.
+        if dialed is None:
+            dialed = _addr(_route_source(str(peer)))
+        if _in_rfc1918(dialed):
+            return str(dialed)
+    return default
+
+
+def _route_source(peer_ip):
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((peer_ip, 9))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None

@@ -34,6 +34,11 @@ Usage:
   python polserver2.py mirrors --advertise 192.0.2.5 --check
 """
 import argparse, json, os, socket, struct, hashlib, threading, sys, re, time
+try:
+    from srvcore import advertise_for   # per-client download host (LAN vs tailnet)
+except ImportError:                     # standalone use outside services/
+    def advertise_for(default, peer_ip=None, dialed_ip=None):
+        return default
 
 # The real server never puts more than this in one cmd-4 frame, however much
 # the client asks for; measured by requesting a 6.5 MB blob in one go.
@@ -260,6 +265,14 @@ class Server:
 
     def handle(self, conn, addr):
         conn.settimeout(120)
+        # The download host in cmd 8 is chosen per client: a LAN console gets
+        # the LAN address it reached us on, a tailnet PC the global --advertise
+        # (srvcore.advertise_for). Threaded per connection, so it rides the
+        # dispatch arguments, not the shared Server.
+        try:
+            dlhost = advertise_for(self.advertise, addr[0], conn.getsockname()[0])
+        except OSError:
+            dlhost = self.advertise
         buf = b""
         try:
             while True:
@@ -292,7 +305,7 @@ class Server:
                     self.log(f"[{addr[0]}] bad checksum, dropping")
                     return
                 cmd = struct.unpack_from("<I", pkt, 12)[0]
-                reply = self.dispatch(pkt, cmd, addr)
+                reply = self.dispatch(pkt, cmd, addr, dlhost)
                 if reply is None:
                     return
                 if ps2_request(pkt, cmd):
@@ -338,7 +351,7 @@ class Server:
         except OSError:
             pass
 
-    def answer_current(self, region, prod, ver, addr):
+    def answer_current(self, region, prod, ver, addr, dlhost=None):
         """Tell a client it is already up to date, with no bundle behind it.
 
         A pin needs a tree to pin; this needs nothing, because the version it
@@ -370,9 +383,9 @@ class Server:
         if status != "registered":
             self.log(f"[{addr[0]}]   note: {latest!r} is not a well-formed "
                      f"version, so this reply may not satisfy the client")
-        return build_cmd8(DEFAULT_TOKEN, latest, self.advertise, status)
+        return build_cmd8(DEFAULT_TOKEN, latest, dlhost or self.advertise, status)
 
-    def dispatch(self, pkt, cmd, addr):
+    def dispatch(self, pkt, cmd, addr, dlhost=None):
         if cmd == 7:
             region = cstr(pkt, 0x10, 0x14).decode("latin-1")
             prod = cstr(pkt, 0x14, 0x18).decode("latin-1")
@@ -381,7 +394,7 @@ class Server:
             b = self.bundles.get((region, prod))
             if not b:
                 if (region, prod) in self.current or self.current_all:
-                    return self.answer_current(region, prod, ver, addr)
+                    return self.answer_current(region, prod, ver, addr, dlhost)
                 self.bump("reject")
                 # Log the claimed version even though we cannot answer: it is the
                 # one thing a missing bundle tells us for free, and it is exactly
@@ -395,7 +408,7 @@ class Server:
             status = version_status(ver, b.oldest)
             self.log(f"[{addr[0]}] cmd7 {region}/{prod} ver={ver.decode('latin-1')!r}"
                      f" -> {status}, latest={b.latest}")
-            return build_cmd8(b.token, b.latest, self.advertise, status)
+            return build_cmd8(b.token, b.latest, dlhost or self.advertise, status)
 
         if cmd == 1:
             region = cstr(pkt, 0x10, 0x14).decode("latin-1")
