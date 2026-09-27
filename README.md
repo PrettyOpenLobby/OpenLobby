@@ -135,6 +135,13 @@ clean checkout.
 - Login works from the server machine but not from others:
   `POL_ADVERTISE` is unset (defaults to 127.0.0.1); set it to an address the
   client can reach and restart.
+- An existing account is refused at login after an upgrade: a Viewer login
+  token only binds to an account while that account is armed. A new account
+  is armed when it is created; an account from an older install that has
+  never logged in is not. Arm it for 24 hours with
+  `docker compose exec login python accounts.py arm <POL ID or handle>`
+  (`accounts.py armed` lists which accounts can bind right now), or set
+  `POL_TOKEN_ARM=0` to turn the check off.
 
 ## What is not included, and why
 
