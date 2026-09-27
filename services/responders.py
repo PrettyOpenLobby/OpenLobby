@@ -2478,8 +2478,8 @@ def _do_send_friend_roster(chat_sess, member_id):
         want_client = _presence_cfg(
             "loadguid", "POL_FRIEND_LOAD_GUID", "client") != "handle"
         for slot, r in sorted(slot_of.items()):
-            if int(slot) >= 0x40 or not r["peer_handle"]:
-                continue
+            if not _friend_push_slot_ok(slot) or not r["peer_handle"]:
+                continue                 # past the PC table (and < 0x40)
             hg = accounts.handle_guid(int(r["peer_handle"]))
             cg = 0
             if want_client:
@@ -2519,7 +2519,38 @@ def _do_send_friend_roster(chat_sess, member_id):
         db.close()
 
 
+def _friend_push_slot_ok(slot):
+    """May a friend-row / presence push address `slot`? Only below the PC cap.
+
+    WARNING: A PC Viewer files a pushed friend row at `table + slot*0xB0` in a table
+    that holds `_LOBBY_LIST[(0x02, 0x03)][2]` (12) rows, and it does not bound
+    the slot -- so a push for slot 12+ is an OUT-OF-BOUNDS WRITE in any PC
+    session on that member. Slots 12+ exist only since the mobile 2:3 marker
+    (`_friends_cap`) serves the phone up to 64 rows, and the phone does not need
+    pushes for them: it re-reads 2:3 with the marker and uses the served online
+    byte (+0x09). So every friend push path -- the 2:3 presence burst, the
+    row/icon spool, login/logout/status presence, the accept pushes, the roster
+    load -- skips a slot this says no to, and the deliverers check it again so a
+    spool line from anywhere cannot get past.
+    """
+    try:
+        return 0 <= int(slot) < _LOBBY_LIST[(0x02, 0x03)][2]
+    except (TypeError, ValueError):
+        return False
+
+
 def _friend_slot(db, watcher_handle_id, subject_handle_id):
+    """The slot index the watcher's client assigned to `subject` in its 2:3 list,
+    or None -- including for a slot at or past the PC cap, which no push may
+    address (`_friend_push_slot_ok`).
+    """
+    slot = _friend_slot_raw(db, watcher_handle_id, subject_handle_id)
+    if slot is not None and not _friend_push_slot_ok(slot):
+        return None
+    return slot
+
+
+def _friend_slot_raw(db, watcher_handle_id, subject_handle_id):
     """The slot index the watcher's client assigned to `subject` in its 2:3 list.
 
     ASKS THE SLOT MAP FIRST -- the numbering `_list_payload` actually served (see
@@ -3353,7 +3384,14 @@ def build_field_push_record(subject_guid, slot, icon=None, name=None,
 
 
 def field_push_lines(watcher_nick, subject_guid, slot, **kw):
-    """The NOTICE line delivering one field-list record to ONE session."""
+    """The NOTICE line delivering one field-list record to ONE session.
+
+    Raises ValueError for a slot at or past the PC friend-table cap -- the last
+    line of defence for `_friend_push_slot_ok`; every caller already catches
+    ValueError and skips the record."""
+    if not _friend_push_slot_ok(slot):
+        raise ValueError(f"friend slot {slot} is past the PC table's "
+                         f"{_LOBBY_LIST[(0x02, 0x03)][2]} rows -- not pushed")
     rec = build_field_push_record(subject_guid, slot, **kw)
     if isinstance(watcher_nick, str):
         watcher_nick = watcher_nick.encode()
@@ -4170,11 +4208,13 @@ def _watcher_row_slot(db, watcher_member, subject_guid):
         hid = _member_primary_handle(db, int(watcher_member))
         for i, r in enumerate(_friend_row_order(db, hid)):
             if int(r["peer_guid"]) == int(subject_guid):
+                slot = i
                 if r["peer_handle"] is not None:
-                    served = _friend_slot(db, hid, int(r["peer_handle"]))
+                    served = _friend_slot_raw(db, hid, int(r["peer_handle"]))
                     if served is not None:
-                        return served
-                return i
+                        slot = served
+                # Past the PC cap: no row push may address it.
+                return slot if _friend_push_slot_ok(slot) else None
     except Exception as exc:
         log("authserv", f"push: slot lookup failed for member "
                         f"{watcher_member} ({exc!r})")
@@ -4351,7 +4391,11 @@ def push_friend_icons(db, watcher_member_id, rows):
     for row in rows:
         s, g, i = row[0], row[1], row[2]
         c = row[3] if len(row) > 3 else None
+        if not _friend_push_slot_ok(s):
+            continue                    # past the PC table -- see the helper
         out.append([int(s), int(g), int(i), str(c) if c else None])
+    if not out:
+        return 0
     return _push_emit({"kind": "rows", "member": int(watcher_member_id),
                        "rows": out,
                        "after": time.time() + _ROW_PUSH_DELAY}, db)
@@ -4402,7 +4446,8 @@ def push_presence_burst(db, watcher_member_id, rows):
     # log "NOT queued" while authserv was delivering it two seconds later.
     if _presence_cfg("push", "POL_PRESENCE_PUSH", "0") != "1":
         return 0
-    out = [[int(s), int(g), int(h)] for s, g, h in rows]
+    out = [[int(s), int(g), int(h)] for s, g, h in rows
+           if _friend_push_slot_ok(s)]          # past the PC table: never
     if not out:
         return 0
     _push_emit({"kind": "presencerows", "member": int(watcher_member_id),
@@ -4421,7 +4466,9 @@ def _push_deliver_presencerows(rec, db=None):
     `_broadcast_presence` it accepts from the burst.
     """
     member = int(rec.get("member", 0))
-    rows = rec.get("rows") or []
+    # A spool line may come from anywhere (an older process, a hand edit): the
+    # PC-cap rule is enforced here again, not only where rows are queued.
+    rows = [r for r in (rec.get("rows") or []) if _friend_push_slot_ok(r[0])]
     if not member or not rows:
         return 0
     wait = min(max(0.0, float(rec.get("after", 0)) - time.time()),
@@ -4675,7 +4722,8 @@ def _push_deliver_grouprows(rec, db=None):
 def _push_deliver_rows(rec):
     """Send one watcher's friend-row updates. Runs in authserv."""
     member = int(rec.get("member", 0))
-    rows = rec.get("rows") or []
+    # Same PC-cap rule as the presence burst, re-checked at delivery.
+    rows = [r for r in (rec.get("rows") or []) if _friend_push_slot_ok(r[0])]
     if not member or not rows:
         return 0
     # Honour the delay the writer asked for. Bounded, because a bad clock or a
@@ -5051,6 +5099,10 @@ def _row_fire(kv):
     sessions = [ts for ts in PRESENCE.sessions_for(member) if ts.alive]
     log("authserv", f"rowpush[fire]: member={member} slot={slot} "
                     f"guid={guid:#x} {kw} -> {len(sessions)} session(s)")
+    if not _friend_push_slot_ok(slot):
+        log("authserv", f"rowpush[fire]: slot {slot} is past the PC table -- "
+                        "refused")
+        return
     for ts in sessions:
         lines = field_push_lines(ts.nick, guid, slot,
                                  seq=next(_ROW_PUSH_SEQ), **kw)
@@ -5248,6 +5300,96 @@ def _xxl_gid(chan):
     try:
         return int(chan[4:].strip(), 16)
     except ValueError:
+        return None
+
+
+#: *** A GROUP'S CHANNEL IS FOR ITS MEMBERS. *** Without this gate nothing
+#: checks: `JOIN #XXL<gid>` lets any signed-in client in (group ids are small
+#: friend-row ids, so guessable), its NOTICE/PRIVMSG reaches every member,
+#: WHO lists their nicks and addresses, a MODE +b/+k locks real members out,
+#: and a KICK removes anyone -- none of which needs being in the room. Every
+#: command naming a `#XXL` channel passes here first:
+#:
+#:   JOIN            only an accepted member or the owner (else 473, the +i
+#:                   refusal, shaped like the 474/475 below)
+#:   WHO / MODE?     a non-member gets the end of the list and nothing else
+#:   NOTICE/PRIVMSG  only from a session that is IN the room (JOIN is gated)
+#:   TOPIC set       likewise
+#:   MODE change     master or sub-master, and only +o/-o (roles are 7:3's;
+#:                   +b/+k/+l have no use in a group channel)
+#:   KICK            master or sub-master
+#:
+#: The channel must be spelled as the client builds it (`#XXL%08X%08X`,
+#: upper case): ROOMS keys on the exact bytes, so a lower-case spelling would
+#: be a second, ungated copy of the room. POL_GROUP_GATE=0 turns it all off.
+def _xxl_gate(verb, arg, nick, srv, sess):
+    """None = carry on; a list = the whole reply (empty = say nothing)."""
+    if verb not in (b"JOIN", b"WHO", b"MODE", b"NOTICE", b"PRIVMSG", b"TOPIC", b"KICK"):
+        return None
+    chan = _chan_arg(arg)
+    gid = _xxl_gid(chan)
+    if gid is None or os.environ.get("POL_GROUP_GATE", "1") == "0":
+        return None
+    who = nick.decode("latin1", "replace")
+    refuse = [b":" + srv + b" 473 " + nick + b" " + chan + b" :Cannot join channel (+i)"]
+    if chan != b"#XXL%016X" % gid:
+        log("authserv", f"  group gate: {who} {verb.decode()} {chan.decode('latin1')} "
+                        f"-- not the canonical spelling; refused")
+        return refuse if verb == b"JOIN" else []
+    in_room = sess is not None and sess in ROOMS.members(chan)
+    if verb in (b"NOTICE", b"PRIVMSG"):
+        # In the room, or a member whose session outlived an authsess restart
+        # (it keeps talking before it re-JOINs, as it always could).
+        if in_room or _xxl_class(sess, gid) is not None:
+            return None
+        log("authserv", f"  group gate: {who} {verb.decode()} to {chan.decode('latin1')} "
+                        f"without being in it; dropped")
+        return []
+    cls = _xxl_class(sess, gid)
+    words = arg.split()
+    if verb == b"JOIN":
+        if cls is not None:
+            return None
+        log("authserv", f"  group gate: {who} refused {chan.decode('latin1')} -- "
+                        f"not a member of group {gid}")
+        return refuse
+    if verb == b"WHO" or (verb == b"MODE" and len(words) == 1):
+        if cls is not None:
+            return None
+        return ([b":" + srv + b" 315 " + nick + b" " + chan + b" :End of WHO list."]
+                if verb == b"WHO" else [])
+    if verb == b"TOPIC":
+        _, sep, _ = arg.partition(b" :")
+        return None if (not sep and cls is not None) or (sep and in_room) else []
+    if verb == b"MODE":
+        flags = words[1] if len(words) > 1 else b""
+        if cls is not None and cls >= accounts.GROUP_CLASS_SUBMASTER and \
+                flags.strip(b"+-").strip(b"o") == b"":
+            return None
+    elif verb == b"KICK":
+        if cls is not None and cls >= accounts.GROUP_CLASS_SUBMASTER:
+            return None
+    log("authserv", f"  group gate: {who} {verb.decode()} "
+                    f"{arg[:60].decode('latin1', 'replace')} refused (class {cls})")
+    return []
+
+
+def _xxl_class(sess, gid):
+    """The session member's class in group `gid`, or None (not in it, or unknown).
+
+    Fails CLOSED: no member behind the session, or a database error, is None."""
+    mid = _sess_member_id(sess) if sess is not None else None
+    if mid is None:
+        return None
+    try:
+        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        try:
+            return accounts.group_class_of(db, gid, member_id=mid)
+        finally:
+            db.close()
+    except Exception as exc:
+        log("authserv", f"  group gate: class lookup for member {mid} in {gid} "
+                        f"failed ({exc!r}); treated as not a member")
         return None
 
 
@@ -5451,6 +5593,9 @@ def _auth_session_reply(cmd_txt, nick, srv, peer_ip=b"0.0.0.0", sess=None):
         return None
     verb = parts[0].upper()
     arg = parts[1] if len(parts) > 1 else b""
+    gated = _xxl_gate(verb, arg, nick, srv, sess)
+    if gated is not None:
+        return gated or None
     if verb == b"NOTICE":
         # This is how a launched GAME talks to us -- see _game_notice_reply.
         #
@@ -9865,8 +10010,10 @@ def _lobby_paylen(op1, op2, req_pt=None):
         # payload will serve -- an empty box declares 12 (8 + 0 + 4), which is
         # exactly what SE sends for an empty mailbox.
         return _mail_paylen(len(_mailbox()))
-    if _list_count(op1, op2):
-        return _list_paylen(op1, op2, _list_count(op1, op2))
+    if _list_count(op1, op2, req_pt):
+        # req_pt reaches the count so a mobile 2:3 declares the length of the
+        # rows it will actually carry (a mismatch is POL-5135).
+        return _list_paylen(op1, op2, _list_count(op1, op2, req_pt))
     for item in os.environ.get("POL_LOBBY_PAYLEN", "").split(","):
         if "=" not in item:
             continue
@@ -10879,13 +11026,62 @@ def _db_chars():
     return out[:_CHAR_SLOTS]
 
 
-def _list_count(op1, op2):
+#: THE MOBILE FRIEND-LIST MARKER. The PC Viewer's 2:3
+#: KGetFriendList request carries an EMPTY payload (40-byte header, +4 length
+#: 0), and the reply is capped at 12 rows because that is the PC client's
+#: per-read record cap. A mobile client has no such cap and wants
+#: the whole list, so it sends these 4 ASCII bytes as the FIRST bytes of its
+#: 2:3 payload, i.e. decrypted message offset 0x28..0x2B (header is 0x28 bytes;
+#: payload +0x00). No PC/PS2 client sends a non-empty 2:3 payload, so the marker
+#: cannot appear by accident. Anything after it (a cksum32 trailer, padding) is
+#: ignored -- the server does not check request trailers.
+_FRIENDS_MOBILE_MARKER = b"MOB1"
+_LOBBY_REQ_HDR_LEN = 0x28
+
+
+def _friends_mobile_request(req_pt):
+    """True when `req_pt` is a 2:3 carrying the mobile marker and the marker is
+    enabled (POL_FRIENDS_MOBILE=0 disables it: a marked request is then served
+    exactly like the PC's)."""
+    if req_pt is None or len(req_pt) < _LOBBY_REQ_HDR_LEN + 4:
+        return False
+    if (req_pt[1], req_pt[2]) != (0x02, 0x03):
+        return False
+    if os.environ.get("POL_FRIENDS_MOBILE", "1") == "0":
+        return False
+    head = bytes(req_pt[_LOBBY_REQ_HDR_LEN:_LOBBY_REQ_HDR_LEN + 4])
+    return head == _FRIENDS_MOBILE_MARKER
+
+
+def _friends_cap(req_pt=None):
+    """The 2:3 row cap for this request: the PC's 12, or POL_FRIENDS_MOBILE_CAP
+    (default 64) for a marked mobile request.
+
+    Rows are served in the same `_db_friends` order with the same slot numbers
+    either way, so slot i is identical for a PC and a phone for i < 12 -- the
+    phone just keeps going. Clamped to 0x40: the presence/friend-load paths
+    skip slots >= 0x40, and never below the PC cap."""
+    cap = _LOBBY_LIST[(0x02, 0x03)][2]
+    if not _friends_mobile_request(req_pt):
+        return cap
+    try:
+        want = int(os.environ.get("POL_FRIENDS_MOBILE_CAP", "64"), 0)
+    except ValueError:
+        want = 64
+    return max(cap, min(want, 0x40))
+
+
+def _list_count(op1, op2, req_pt=None):
     """How many records to serve for a list opcode. POL_LOBBY_LIST="0:9=2,2:3=1".
 
     In `handles` mode the count comes from the DB instead, so registering a handle
     grows the list on the next login without touching the config.
 
     Defaults to 0, i.e. the 8-byte empty answer we have always sent.
+
+    `req_pt` is the decrypted REQUEST message. Only 2:3 reads it, for the
+    mobile marker (see `_friends_cap`); every other list ignores it, and
+    omitting it gives exactly the old behaviour.
     """
     if (op1, op2) not in _LOBBY_LIST:
         return 0
@@ -10904,7 +11100,8 @@ def _list_count(op1, op2):
         # _LOBBY_LIST[..][2] is already the client's per-read RECORD cap (12 for
         # 2:3), not a byte cap -- dividing it by the record size floored to 0.
         return min(len(_db_friends(kinds=(accounts.KIND_FRIEND,))),
-                   _LOBBY_LIST[(op1, op2)][2])
+                   _friends_cap(req_pt) if (op1, op2) == (0x02, 0x03)
+                   else _LOBBY_LIST[(op1, op2)][2])
     if _list_mode(op1, op2) == "groups" and accounts is not None:
         # *** COUNT FROM THE SAME LIST THE REPLY IS BUILT FROM. ***
         #
@@ -14577,6 +14774,21 @@ def _group_class_change(pt):
             if owner is None:
                 log("lobby", f"  group 7:3: no group row {gid}; nothing changed")
                 return b""
+            # WHO MAY. Without this, any session could move any member of
+            # any group (promote itself to master, remove the others). So:
+            # anyone may take THEMSELVES out; a master may change anyone but
+            # the owner; a sub-master may only change plain members and
+            # invitees, and not raise anyone above member. See `_xxl_gate`.
+            gate = os.environ.get("POL_GROUP_GATE", "1") != "0"
+            me_mid = _session_member_id()
+            my_cls = accounts.group_class_of(db, gid, member_id=me_mid) if me_mid else None
+            my_names = {r["handle_name"] for r in db.execute(
+                "SELECT handle_name FROM handle WHERE member_id = ?",
+                (int(me_mid or 0),))}
+            owner_name = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+                                    (int(owner["handle_id"] or 0),)).fetchone()
+            owner_name = owner_name["handle_name"] if owner_name else None
+            cls_of = {nm: int(c) for _g, nm, c in roster}
             for i in range(count):
                 off = _GROUP_CLASS_ENTRY_OFF + i * _GROUP_CLASS_ENTRY
                 target = struct.unpack_from("<Q", body, off)[0]
@@ -14588,6 +14800,17 @@ def _group_class_change(pt):
                                  f"{target:#018x} -- our roster is "
                                  f"{sorted(by_guid.values())}; skipped")
                     continue
+                if gate:
+                    self_leave = cls < accounts.GROUP_CLASS_MIN and name in my_names
+                    by_master = my_cls == accounts.GROUP_CLASS_MASTER and name != owner_name
+                    by_sub = (my_cls == accounts.GROUP_CLASS_SUBMASTER and name != owner_name
+                              and cls_of.get(name, 0) <= accounts.GROUP_CLASS_MEMBER
+                              and cls <= accounts.GROUP_CLASS_MEMBER)
+                    if not (self_leave or by_master or by_sub):
+                        log("lobby", f"  group 7:3: member {me_mid} (class {my_cls}) may "
+                                     f"not move {name!r} to class {cls} in "
+                                     f"{owner['peer_name']!r}; refused")
+                        continue
                 if cls < accounts.GROUP_CLASS_MIN:
                     # LEAVE / REMOVE. See the note above: class 1 is not a class.
                     accounts.remove_group_member(db, gid, name)
@@ -14675,7 +14898,7 @@ def _group_message(data):
     return gid, name.decode("cp932", "replace"), ("invite" if body else "accept")
 
 
-def _list_payload(op1, op2, n):
+def _list_payload(op1, op2, n, req_pt=None):
     """The count block plus `count` records.
 
     Default record content is an offset marker naming offsets WITHIN the record
@@ -14686,7 +14909,10 @@ def _list_payload(op1, op2, n):
     POL_LOBBY_CONTENT_IDS. That is the Tetra Master entitlement test.
     """
     rec, width, _cap = _LOBBY_LIST[(op1, op2)]
-    count = _list_count(op1, op2)
+    count = _list_count(op1, op2, req_pt)
+    if (op1, op2) == (0x02, 0x03) and _friends_mobile_request(req_pt):
+        log("lobby", f"  2:3 MOBILE marker: cap {_friends_cap(req_pt)}, "
+                     f"serving {count} row(s)")
     out = bytearray(n)
     if width == 1:
         out[0] = count & 0xFF
@@ -17527,10 +17753,17 @@ def _rooms_local_state():
     return out
 
 
-#: member id -> the handle name to draw, so a publish does not re-query the DB
+#: member id -> (handle name, when read), so a publish does not re-query the DB
 #: once per occupant per JOIN. Names change rarely and a stale one is a cosmetic
 #: fault; a query storm on the join path is not.
+#:
+#: BUT NOT FOREVER. Handles can be renamed by another process
+#: (accounts.rename_handle), and an entry that never expired would keep drawing
+#: the old name until authsess restarted. A miss ("" -- no such member, or a DB
+#: error) expires too, so one failed read cannot blank a player for the life of
+#: the process.
 _ROOM_NAME_CACHE = {}
+_ROOM_NAME_TTL = 60.0
 
 
 def _member_display_name(member_id):
@@ -17547,8 +17780,9 @@ def _member_display_name(member_id):
         return ""
     if mid <= 0:
         return ""
-    if mid in _ROOM_NAME_CACHE:
-        return _ROOM_NAME_CACHE[mid]
+    hit = _ROOM_NAME_CACHE.get(mid)
+    if hit is not None and time.monotonic() - hit[1] < _ROOM_NAME_TTL:
+        return hit[0]
     name = ""
     if accounts is not None:
         try:
@@ -17561,7 +17795,7 @@ def _member_display_name(member_id):
                 db.close()
         except Exception as exc:
             log("authserv", f"  room roster: cannot name member {mid} ({exc!r})")
-    _ROOM_NAME_CACHE[mid] = name
+    _ROOM_NAME_CACHE[mid] = (name, time.monotonic())
     return name
 
 
@@ -19586,6 +19820,20 @@ def _group_join_from_message(gid, gname, kind, meta):
                                  + (_mail_recipient_raw_note(db, rg) if meta else ""))
                     return
                 member_id = int(peer["id"])
+                # ONLY A MASTER OR SUB-MASTER INVITES (the PC's own rule: "You
+                # are not authorized to invite group friends"), and the server
+                # now holds it too -- an invite from anyone else stays a
+                # message and adds nobody. POL_GROUP_GATE=0 turns it off.
+                if os.environ.get("POL_GROUP_GATE", "1") != "0":
+                    me_mid = _session_member_id()
+                    inviter = accounts.group_class_of(db, int(gid), member_id=me_mid) \
+                        if me_mid else None
+                    if inviter is None or inviter < accounts.GROUP_CLASS_SUBMASTER:
+                        log("lobby", f"  group invite to {row['peer_name']!r} (id {gid}) "
+                                     f"from member {me_mid} (class {inviter}): not a "
+                                     f"master or sub-master; message delivered, "
+                                     f"nobody invited")
+                        return
             h = db.execute("SELECT handle_name FROM handle WHERE id = ?",
                            (int(member_id),)).fetchone()
             if h is None:
@@ -19621,9 +19869,16 @@ def _group_join_from_message(gid, gname, kind, meta):
                                  f"already in {row['peer_name']!r} at class "
                                  f"{already['class']}; left as is")
                 return
+            # AN ACCEPTANCE NEEDS AN INVITATION. It used to store a full member
+            # when no row existed, so an accept-shaped message naming any group
+            # id made its sender a member of that group. Now it only confirms a
+            # pending row (above). POL_GROUP_GATE=0 restores the old path.
+            if kind == "accept" and os.environ.get("POL_GROUP_GATE", "1") != "0":
+                log("lobby", f"  group accept: {h['handle_name']!r} was never invited "
+                             f"to {row['peer_name']!r} (id {gid}); nothing joined")
+                return
             # An INVITE stores a PENDING member -- visible to the owner alone
-            # until the acceptance clears the flag. An acceptance with no prior
-            # row (an invite we never saw) stores a full member directly.
+            # until the acceptance clears the flag.
             ok = accounts.add_group_member(db, int(gid), h["handle_name"],
                                            member_handle=int(member_id),
                                            cls=accounts.GROUP_CLASS_MEMBER,
@@ -19944,7 +20199,7 @@ def _lobby_payload(op1, op2, n, req_pt=None):
         return _mail_payload(n)                 # POL_LOBBY_MAIL marker probe
     if (op1, op2) == (0x03, 0x03):
         return _mailbox_payload(n)
-    lcount = _list_count(op1, op2)
+    lcount = _list_count(op1, op2, req_pt)
     if (op1, op2) == (0x02, 0x03) and not lcount \
             and _list_mode(op1, op2) == "friends":
         # AN EMPTY FRIEND LIST IS STILL AN ANSWER -- it renumbers the client's
@@ -19954,7 +20209,7 @@ def _lobby_payload(op1, op2, n, req_pt=None):
         # may since have handed to somebody else.
         _friend_slots_publish([])
     if lcount:
-        return _list_payload(op1, op2, n)
+        return _list_payload(op1, op2, n, req_pt)
     if (op1, op2) == (0x00, 0x08):
         pay = _handlereg_payload(n)
         if pay:
