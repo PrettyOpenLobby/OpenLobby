@@ -480,103 +480,234 @@ async function loadReports() {
   } catch (e) { toast(e.message, true); }
 }
 
-// ---- the GM desk: queue control, and the room ----
+// ---- the GM desk: requests, the duty switch, and the room ----
 //
-// Two halves with very different footing, and the UI is written to keep them
-// apart rather than let one borrow the other's credibility:
+// Laid out as a help desk: requests on the left, the one you picked on the
+// right with the chat under it. What is and is not proven, so nothing here
+// over-claims:
 //
-//   * the DESK is fully measured -- queue is 0x801 body +0x02, Join is flag
-//     0x40, Start is 0x20, all confirmed against a live client -- so what this
-//     sets is what a caller is told;
-//   * the CONSOLE delivers, and that is all anyone has ever observed. Nothing
-//     relayed has been seen to render, because a 'T' takes its speaker from the
-//     client's member table and no relayed speaker has been admitted to it. So
-//     the panel says "delivered", never "sent", and keeps the raw/nick probes
-//     in reach.
-let GM_TIMER = null, GM_ROOM = "", GM_SEEN = 0;
+//   * the DUTY switch is fully measured -- Join is flag 0x40, Start is 0x20,
+//     the queue is 0x801 body +0x02, all confirmed against a live client -- so
+//     what it sets is what a caller's GM Call screen shows on its next poll;
+//   * a reply RENDERS only when it goes out under the player's OWN nick
+//     ("self"): the client draws a T line only for a speaker in its member
+//     table, and no inbound record can add the GM to it. So replies default to self + a "GM: " prefix, and
+//     the old nick/raw probes live under Diagnostics;
+//   * each request has its OWN room (gmd names it #gmcallNNN from the request
+//     number and records it in the ticket), so selecting a request switches the
+//     chat to that room. Requests filed before that change were all put in the
+//     one shared room (#gmchat001), and say so. The room picker is there for
+//     the case where a client turns out to join somewhere else.
+//
+// WARNING: The poll only rebuilds a list when what it shows CHANGED. Rebuilding with
+// innerHTML every tick replaces the element under a press and the click never
+// lands.
+let GM_TIMER = null, GM_ROOM = "", GM_LOG_SIG = "", GM_LIST_SIG = "", GM_TICKET_SIG = "";
+let GM_CALLS = [], GM_SEL = null, GM_DESK = null, GM_AUTOSEL = true;
+let GM_FILTER = "open";
+try { GM_FILTER = localStorage.getItem("gmFilter") || "open"; } catch (e) {}
 
 function stopGmDesk() { if (GM_TIMER) { clearInterval(GM_TIMER); GM_TIMER = null; } }
 function startGmDesk() {
   stopGmDesk();
-  loadGmDesk();
-  // 4s: fast enough that a room reads as a conversation, slow enough that a
-  // panel left open all day is not a load. The renew below rides this tick, so
-  // an on-duty claim only expires by the tab actually going away.
-  GM_TIMER = setInterval(loadGmDesk, 4000);
+  gmTick();
+  // 4s: fast enough that the room reads as a conversation, slow enough that a
+  // panel left open all day is not a load. The on-duty renew rides this tick,
+  // so a claim only expires by the tab actually going away.
+  GM_TIMER = setInterval(gmTick, 4000);
 }
+function gmTick() { loadGmDesk(); loadGmCalls(); }
 
-const gmTime = (t) => new Date((t || 0) * 1000).toLocaleTimeString();
+const gmTime = (t) => new Date((t || 0) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const gmDay = (t) => new Date((t || 0) * 1000).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+function gmAgo(t) {
+  const s = Math.max(0, Date.now() / 1000 - t);
+  if (s < 45) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  if (s < 7 * 86400) return Math.round(s / 86400) + " d ago";
+  return gmDay(t);
+}
+const gmIso = (iso) => (Date.parse(iso || "") / 1000) || 0;
+const gmHex = (n) => "0x" + (n >>> 0).toString(16);
+function gmFlagsSay(f) {
+  const j = f & 0x40, s = f & 0x20;
+  return j && s ? "Start and Join" : j ? "Join only" : s ? "Start only, no Join"
+    : "no chat buttons";
+}
+// The ticket body comes straight off the wire and can carry control bytes
+// (ticket #3 ends in a \x07). Drop them for reading; the file keeps them.
+const gmClean = (s) => String(s ?? "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 
+// -- the desk ---------------------------------------------------------------
 async function loadGmDesk() {
   let d;
   try {
     d = await api("/api/gm-desk" + (GM_ROOM ? "?room=" + encodeURIComponent(GM_ROOM) : ""));
   } catch (e) { return; }          // a poll that fails must not toast every 4s
+  GM_DESK = d;
   GM_ROOM = d.room || GM_ROOM;
-  $("#gmRoomName").textContent = GM_ROOM || "(no room - is gmd running?)";
-
-  // The desk state, in the words the server used. `duty === null` is a THIRD
-  // state and saying "off duty" for it would be a claim nobody made.
-  const state = d.on_duty ? "a GM is on duty"
-    : d.duty === null ? "nobody has claimed the desk"
-    : "off duty";
-  $("#gmState").textContent = state;
-  $("#gmWhy").textContent = d.flags_why || "";
-  $("#gmWhy").className = "pill " + (d.join ? "open" : "used");
-  if (d.on_duty) $("#gmClearDuty").disabled = false;
-
-  const line = (k, v, hot) =>
-    `<div class="${hot ? "hot" : ""}"><span>${k}</span><span>${esc(v)}</span></div>`;
-  const hex = (n) => "0x" + (n >>> 0).toString(16);
-  // What gmd LAST TOLD a caller, beside what it would say now. They differ until
-  // the next poll, and an operator who flips a switch and sees the client not
-  // move needs that difference on screen rather than assuming it failed.
-  const sv = d.serving || {};
-  let html =
-    line("Flags now", `${hex(d.flags)} - ${d.join ? "Join" : "no Join"}, ${d.start ? "Start" : "no Start"}`) +
-    line("Last served to a caller",
-         sv.flags === undefined ? "nothing polled yet"
-           : `${hex(sv.flags)} at ${gmTime(sv.at)}`,
-         sv.flags !== undefined && sv.flags !== d.flags) +
-    line("Queue", d.pinned_queue !== null && d.pinned_queue !== undefined
-         ? `${d.pinned_queue} (pinned)`
-         : `${d.waiting} waiting (live)` + (d.env_queue ? ` - POL_GMD_QUEUE=${d.env_queue}` : ""));
-  if (d.pinned_flags !== null && d.pinned_flags !== undefined)
-    html += line("Flags pinned to", hex(d.pinned_flags), true);
-  if (d.by) html += line("Last changed by", d.by);
-  html += line("Undelivered in the spool", d.pending,
-               d.pending > 0);
-  (d.callers || []).forEach((c) => html += line(
-    `Caller ${c.peer}`,
-    (c.request_no ? `request #${c.request_no}` : "no ticket yet")
-    + `, idle ${c.idle}s` + (c.live ? "" : " - aged out")));
-  $("#gmDesk").innerHTML = html;
-
-  // The transcript. Re-rendered only when it grew, so the operator's scroll
-  // position survives a poll that changed nothing.
-  const rows = d.transcript || [];
-  if (rows.length !== GM_SEEN) {
-    GM_SEEN = rows.length;
-    const log = $("#gmLog");
-    const wasBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
-    log.innerHTML = rows.map((r) =>
-      `<div class="${r.dir === "out" ? "out" : "in"}">` +
-      `<span class="t">${esc(gmTime(r.at))}</span>` +
-      `<span class="w">${esc(r.nick || "?")}</span>` +
-      `<span class="m">${esc(r.text)}` +
-      // The raw bytes stay on screen. They are the CAPTURE -- the encoders here
-      // were corrected once already by reading a client's own record out of a
-      // log by hand, and hiding the hex would put that back the way it was.
-      `<br><span class="hexy">${esc(r.raw)}</span></span></div>`).join("")
-      || `<div><span class="m" style="color:var(--muted)">Nothing in this room yet. The client's own records land here too - its presence heartbeat should appear within a minute of it joining.</span></div>`;
-    if (wasBottom) log.scrollTop = log.scrollHeight;
-  }
-
+  gmRenderRoomPick(d);
+  gmRenderDuty(d);
+  gmRenderDiag(d);
+  gmRenderLog(d);
+  gmRenderChatState(d);
   // Hold the on-duty claim open while this tab is. It EXTENDS and never creates,
   // so a forgotten tab cannot re-open a desk somebody deliberately closed.
   if (d.on_duty) {
     try { await api("/api/gm-control", gmPost({ renew: true })); } catch (e) {}
   }
+}
+
+function gmRenderDuty(d) {
+  const on = !!d.on_duty;
+  $("#gmLight").classList.toggle("on", on);
+  $("#gmState").textContent = on ? "You're on duty"
+    : d.duty === null ? "Nobody is at the desk" : "Off duty";
+  const sv = d.serving || {};
+  const polled = sv.at ? ` · a caller last checked in ${gmAgo(sv.at)}` : "";
+  $("#gmStateSub").textContent =
+    `Callers see ${gmFlagsSay(d.flags)} · ${d.waiting} on a GM Call now${polled}`;
+  const btn = $("#gmDutyBtn");
+  btn.textContent = on ? "Go off duty" : "Go on duty";
+  btn.className = on ? "ghost" : "act";
+
+  // A pin beats the duty switch. That is exactly how the desk ended up telling
+  // every caller "no chat buttons" while showing "on duty" (09-26): flags had
+  // been pinned to 0 and nothing on the front of the tab said so.
+  const pf = d.pinned_flags, pq = d.pinned_queue;
+  const has = (v) => v !== null && v !== undefined;
+  if (has(pf) || has(pq)) {
+    const bits = [];
+    if (has(pf)) bits.push(`flags are pinned to ${gmHex(pf)}, so callers see ${gmFlagsSay(pf)} whatever the duty switch says`);
+    if (has(pq)) bits.push(`the queue count is pinned to ${pq}`);
+    $("#gmWarnText").textContent = "Heads up: " + bits.join(", and ") + ".";
+    $("#gmWarn").hidden = false;
+  } else {
+    $("#gmWarn").hidden = true;
+  }
+}
+
+function gmRenderDiag(d) {
+  const line = (k, v, hot) =>
+    `<div class="${hot ? "hot" : ""}"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
+  const sv = d.serving || {};
+  let html =
+    line("Flags now", `${gmHex(d.flags)} (${gmFlagsSay(d.flags)}): ${d.flags_why || ""}`) +
+    line("Last served to a caller",
+         sv.flags === undefined ? "nothing polled yet" : `${gmHex(sv.flags)} at ${gmTime(sv.at)}`,
+         sv.flags !== undefined && sv.flags !== d.flags) +
+    line("Queue", d.pinned_queue !== null && d.pinned_queue !== undefined
+         ? `${d.pinned_queue} (pinned)`
+         : `${d.waiting} waiting (live)` + (d.env_queue ? `, POL_GMD_QUEUE=${d.env_queue}` : ""));
+  if (d.by) html += line("Last changed by", d.by);
+  html += line("Undelivered in the spool", d.pending, d.pending > 0);
+  (d.callers || []).forEach((c) => html += line(
+    `Caller ${c.peer}`,
+    (c.request_no ? `request #${c.request_no}` : "no ticket yet")
+    + `, idle ${c.idle}s` + (c.live ? "" : " (aged out)")));
+  $("#gmDesk").innerHTML = html;
+  $("#gmClearDuty").disabled = d.duty === null;
+}
+
+// -- the room ---------------------------------------------------------------
+// Which rooms the picker offers: every room with traffic, plus the selected
+// request's own room, which has no file until someone speaks in it.
+function gmRenderRoomPick(d) {
+  const sel = $("#gmRoomPick");
+  const t = GM_CALLS.find((x) => x.id === GM_SEL);
+  const rooms = [...new Set([GM_ROOM, t && t.room, ...(d.rooms || [])].filter(Boolean))];
+  const sig = rooms.join("|") + ">" + GM_ROOM;
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    sel.innerHTML = rooms.map((r) => `<option${r === GM_ROOM ? " selected" : ""}>${esc(r)}</option>`).join("")
+      || `<option>(no room: is gmd running?)</option>`;
+  }
+  const note = $("#gmRoomNote");
+  if (t && t.room_shared && GM_ROOM === t.room) {
+    note.textContent = "This request came in before each request got its own room, "
+      + "so this is the old shared room: it holds every caller's messages.";
+    note.hidden = false;
+  } else if (t && t.room && GM_ROOM !== t.room) {
+    note.textContent = `Showing ${GM_ROOM}, not this request's room (${t.room}).`;
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
+function gmSwitchRoom(room) {
+  if (!room || room === GM_ROOM) return;
+  GM_ROOM = room;
+  GM_LOG_SIG = "";
+  $("#gmLog").innerHTML = "";
+  loadGmDesk();
+}
+$("#gmRoomPick").onchange = (e) => gmSwitchRoom(e.target.value);
+
+const gmShowTech = () => $("#gmShowTech").checked;
+
+function gmRenderLog(d) {
+  const rows = d.transcript || [];
+  const tech = gmShowTech();
+  const last = rows.length ? rows[rows.length - 1].at : 0;
+  const sig = `${rows.length}:${last}:${tech}:${d.pending}`;
+  if (sig === GM_LOG_SIG) return;
+  GM_LOG_SIG = sig;
+  const log = $("#gmLog");
+  const wasBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
+  let html = "", day = "";
+  rows.forEach((r) => {
+    const cls = (r.raw || "").slice(0, 2);           // the record's class byte, in hex
+    // 'H' is the client's presence heartbeat. It is the bulk of the log and
+    // says nothing to a GM, so it only shows with the technical view on.
+    if (cls === "48" && !tech) return;
+    const dd = gmDay(r.at);
+    if (dd !== day) { day = dd; html += `<div class="gm-day">${esc(dd)}</div>`; }
+    const hex = tech ? `<span class="gm-hex">${esc(r.raw)}</span>` : "";
+    if (cls === "54") {                               // 'T', a chat line
+      let text = r.text || "";
+      if (!tech) text = text.replace(/\s+\[head '[^']*'\]$/, "");
+      const out = r.dir === "out";
+      const who = out ? "You (GM)" : `Player${r.nick ? " · " + r.nick : ""}`;
+      html += `<div class="gm-msg ${out ? "out" : "in"}">` +
+        `<span class="gm-meta">${esc(who)} · ${esc(gmTime(r.at))}</span>` +
+        `<span class="gm-text">${esc(text)}</span>${hex}</div>`;
+    } else {
+      // 'U' membership lines read as sentences already ("Abe joined").
+      html += `<div class="gm-sys">${esc(r.text || "")} · ${esc(gmTime(r.at))}` +
+        (tech ? `<br>${hex}` : "") + `</div>`;
+    }
+  });
+  if (d.pending > 0)
+    html += `<div class="gm-sys">${d.pending} line${d.pending > 1 ? "s" : ""} queued. ` +
+      `They go out as soon as a player is in the room.</div>`;
+  log.innerHTML = html || `<div class="gm-log-empty">No messages yet. When the player ` +
+    `presses <b>Join</b> on their GM Call screen, what they type shows up here.</div>`;
+  if (wasBottom) log.scrollTop = log.scrollHeight;
+}
+
+function gmRenderChatState(d) {
+  const el = $("#gmChatState");
+  const rows = d.transcript || [];
+  let lastIn = 0;
+  for (let i = rows.length - 1; i >= 0; i--) if (rows[i].dir === "in") { lastIn = rows[i].at; break; }
+  let text, cls = "";
+  if (d.pending > 0) {
+    text = "Nobody in the room to receive your reply yet"; cls = "warn";
+  } else if (lastIn && Date.now() / 1000 - lastIn < 600) {
+    text = `Player active, last heard ${gmAgo(lastIn)}`; cls = "good";
+  } else if (!(d.flags & 0x40)) {
+    text = "Callers can't join the room until you go on duty"; cls = "warn";
+  } else {
+    text = "Nobody in the room right now";
+  }
+  el.textContent = text;
+  el.className = "gm-chat-state " + cls;
+  $("#gmComposeHint").textContent = !(d.flags & 0x40)
+    ? "Go on duty first: that is what puts a Join button on the player's GM Call screen."
+    : `Goes to ${GM_ROOM || "the room"} only. The player sees it as ` +
+      `"<their name> > ${$("#gmPrefix").value}your text".`;
 }
 
 const gmPost = (body) => ({
@@ -587,46 +718,65 @@ const gmPost = (body) => ({
 async function gmControl(body, msg) {
   try {
     const r = await api("/api/gm-control", gmPost(body));
-    if (msg) toast(msg + (r.note ? " - " + r.note : ""));
-    GM_SEEN = -1;                 // force the next poll to re-render
+    if (msg) toast(msg);
+    GM_LOG_SIG = "";
     loadGmDesk();
+    return r;
   } catch (e) { toast(e.message, true); }
 }
 
-$("#gmOnDuty").onclick = () => gmControl({ on_duty: true }, "On duty");
-$("#gmOffDuty").onclick = () => gmControl({ on_duty: false }, "Signed off");
+$("#gmDutyBtn").onclick = () => {
+  const d = GM_DESK || {};
+  if (d.on_duty) return gmControl({ on_duty: false }, "Off duty. Callers keep Start, lose Join.");
+  // Going on duty means "let callers in", so it also drops any pins that would
+  // hide the buttons. A pin is a diagnostic; leaving one in force here is how
+  // the 09-26 caller got a desk that looked open and was not.
+  const body = { on_duty: true };
+  const pinned = (d.pinned_flags ?? null) !== null || (d.pinned_queue ?? null) !== null;
+  if (pinned) { body.flags = null; body.queue = null; }
+  gmControl(body, "On duty" + (pinned ? " (pins cleared)" : "")
+    + ". Callers get Join on their next check-in.");
+};
+$("#gmWarnFix").onclick = () => gmControl({ flags: null, queue: null }, "Pins cleared");
 $("#gmClearDuty").onclick = () =>
   gmControl({ on_duty: null }, "Duty handed back to POL_GMD_STATUS_FLAGS");
 $("#gmPin").onclick = () => {
   const q = $("#gmQueue").value.trim(), f = $("#gmFlags").value.trim();
-  gmControl({ queue: q === "" ? null : q, flags: f === "" ? null : f }, "Applied");
+  gmControl({ queue: q === "" ? null : q, flags: f === "" ? null : f }, "Pins applied");
 };
 $("#gmUnpin").onclick = () => {
   $("#gmQueue").value = ""; $("#gmFlags").value = "";
   gmControl({ queue: null, flags: null }, "Pins cleared");
 };
+$("#gmShowTech").onchange = () => { GM_LOG_SIG = ""; if (GM_DESK) gmRenderLog(GM_DESK); };
 
-async function gmSay(body, clear) {
-  if (!GM_ROOM) return toast("No room - is gmd running?", true);
+async function gmSay(body) {
+  if (!GM_ROOM) { toast("No room: is gmd running?", true); return false; }
   try {
-    const r = await api("/api/gm-say", gmPost({ ...body, room: GM_ROOM,
-                                                nick: $("#gmNick").value.trim() }));
-    // DELIVERED, not sent, and pending is the honest read: it only falls when a
-    // session that is actually in that room comes round the relay loop.
-    toast(r.pending > 1 ? `Spooled - ${r.pending} waiting, is anyone in the room?`
-                        : "Spooled - delivered on the next relay pass");
-    if (clear) clear.forEach((sel) => { $(sel).value = ""; });
-    GM_SEEN = -1;
+    await api("/api/gm-say", gmPost({ ...body, room: GM_ROOM,
+      nick: $("#gmNick").value.trim() || "self" }));
+    GM_LOG_SIG = "";
     loadGmDesk();
-  } catch (e) { toast(e.message, true); }
+    return true;
+  } catch (e) { toast(e.message, true); return false; }
 }
 
-$("#gmSend").onclick = () => {
-  const t = $("#gmSay").value.trim();
-  if (!t) return toast("Nothing to say", true);
-  gmSay({ say: t }, ["#gmSay"]);
+$("#gmSend").onclick = async () => {
+  // The spool is one record per LINE, so a multi-line reply goes out as one
+  // chat line per line rather than a record with a raw newline in it.
+  const lines = $("#gmSay").value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return;
+  const prefix = $("#gmPrefix").value;
+  for (const l of lines) if (!(await gmSay({ say: prefix + l }))) return;
+  $("#gmSay").value = "";
+  // Replying is what "answered" means on a help desk; saves a click.
+  const t = GM_CALLS.find((r) => r.id === GM_SEL);
+  if (t && t.status === "open") gmSetStatus(t.id, "answered", true);
 };
-$("#gmSay").onkeydown = (e) => { if (e.key === "Enter") $("#gmSend").click(); };
+$("#gmSay").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#gmSend").click(); }
+};
+$("#gmPrefix").oninput = () => { if (GM_DESK) gmRenderChatState(GM_DESK); };
 $("#gmSendEvent").onclick = () => {
   const ev = $("#gmEvent").value;
   if (!ev) return toast("Pick an event", true);
@@ -638,43 +788,139 @@ $("#gmSendRaw").onclick = () => {
   gmSay({ raw: r });
 };
 
-// ---- GM call requests ----
-// Filed by the `gmd` service from the 0x102 the client sends on Submit. It used
-// to be gmserver.exe on the host, because the cipher was reached by mapping
-// polcore.dll; gmcrypt.py replaced that, so the GM band is now an ordinary
-// compose service writing into the shared data dir, and this just renders it.
+// -- the requests -------------------------------------------------------------
+// Filed by the `gmd` service from the 0x102 the client sends on Submit; the
+// open / answered / closed state is the desk's own, kept beside them.
+function gmBadge(rows) {
+  const n = rows.filter((r) => r.status === "open").length;
+  const b = $("#gmBadge");
+  b.textContent = n; b.hidden = !n;
+  document.title = (n ? `(${n}) ` : "") + "PlayOnline Admin";
+}
+
 async function loadGmCalls() {
-  const body = $("#gmBody");
+  let rows;
+  try { rows = await api("/api/gm-calls"); } catch (e) { return; }
+  if (!Array.isArray(rows)) return;
+  GM_CALLS = rows;
+  gmBadge(rows);
+  if (GM_AUTOSEL && !GM_SEL) {
+    // First visit: open the newest request that still needs an answer.
+    const first = rows.find((r) => r.status === "open");
+    if (first) GM_SEL = first.id;
+    GM_AUTOSEL = false;
+    gmFollowTicketRoom();
+  }
+  gmRenderList();
+  gmRenderTicket();
+}
+
+function gmRenderList() {
+  const shown = GM_CALLS.filter((r) => GM_FILTER === "all" || r.status !== "closed");
+  const sig = GM_FILTER + "|" + GM_SEL + "|" + shown.map((r) =>
+    [r.id, r.status, r.connected, gmAgo(gmIso(r.received_at))].join(",")).join(";");
+  if (sig === GM_LIST_SIG) return;
+  GM_LIST_SIG = sig;
+  document.querySelectorAll(".gm-filter button").forEach(
+    (b) => b.classList.toggle("on", b.dataset.f === GM_FILTER));
+  if (!shown.length) {
+    $("#gmList").innerHTML = `<div class="gm-none">` + (GM_CALLS.length
+      ? "Nothing open. Every request has been closed."
+      : "No GM calls yet. They appear here the moment a player submits one.") + `</div>`;
+    return;
+  }
+  $("#gmList").innerHTML = shown.map((r) =>
+    `<div class="gm-item${r.id === GM_SEL ? " sel" : ""}${r.status === "closed" ? " closed" : ""}" data-id="${esc(r.id)}">` +
+      `<div class="gm-item-top">` +
+        `<span class="gm-item-who">${r.connected ? `<span class="gm-dot" title="On a GM Call now"></span>` : ""}` +
+          `${esc(gmClean(r.handle)) || "(no handle)"}</span>` +
+        `<span class="gm-item-when">${esc(gmAgo(gmIso(r.received_at)))}</span></div>` +
+      `<div class="gm-item-subj">${esc(gmClean(r.subject)) || "(no subject)"}</div>` +
+      `<div><span class="gm-st ${esc(r.status)}">${esc(r.status)}</span></div>` +
+    `</div>`).join("");
+}
+
+$("#gmList").onclick = (e) => {
+  const it = e.target.closest(".gm-item");
+  if (!it) return;
+  GM_SEL = it.dataset.id;
+  gmRenderList();
+  gmRenderTicket();
+  gmFollowTicketRoom();
+};
+
+// Selecting a request shows ITS room. Called on a click and when the first
+// load auto-selects one, never on a plain poll, so a room the operator picked
+// by hand is not yanked away every 4 seconds.
+function gmFollowTicketRoom() {
+  const t = GM_CALLS.find((x) => x.id === GM_SEL);
+  if (t && t.room) gmSwitchRoom(t.room);
+}
+document.querySelectorAll(".gm-filter button").forEach((b) => {
+  b.onclick = () => {
+    GM_FILTER = b.dataset.f;
+    try { localStorage.setItem("gmFilter", GM_FILTER); } catch (e) {}
+    gmRenderList();
+  };
+});
+
+function gmRenderTicket() {
+  const r = GM_CALLS.find((x) => x.id === GM_SEL);
+  const sig = r ? [r.id, r.status, r.connected, gmAgo(gmIso(r.received_at))].join(",") : "";
+  if (sig === GM_TICKET_SIG) return;
+  GM_TICKET_SIG = sig;
+  $("#gmEmpty").hidden = !!r;
+  $("#gmTicket").hidden = !r;
+  if (!r) return;
+  $("#gmTWho").textContent = gmClean(r.handle) || "(no handle)";
+  $("#gmTSubj").textContent = gmClean(r.subject) || "(no subject)";
+  $("#gmTChips").innerHTML =
+    (r.connected ? `<span class="gm-st live">On a GM Call now</span>` : "") +
+    `<span class="gm-st ${esc(r.status)}">${esc(r.status)}</span>`;
+  const t = gmIso(r.received_at);
+  const meta = [
+    r.content_label || (r.content_id != null ? `content ${r.content_id}` : ""),
+    r.issue != null ? `issue type ${r.issue}` : "",
+    r.request_no != null ? `request #${r.request_no}` : "",
+    t ? `${gmDay(t)} ${gmTime(t)} (${gmAgo(t)})` : "",
+    r.peer ? `from ${String(r.peer).replace(/:\d+$/, "")}` : "",
+  ].filter(Boolean);
+  $("#gmTMeta").innerHTML = meta.map((m) => `<span>${esc(m)}</span>`).join("");
+  $("#gmTBody").textContent = gmClean(r.body).trim() || "(no message text)";
+  const btn = (st, label, cls) =>
+    `<button class="${cls}" data-st="${st}">${label}</button>`;
+  $("#gmTActions").innerHTML =
+    r.status === "open" ? btn("answered", "Mark answered", "ghost") + btn("closed", "Close", "ghost")
+    : r.status === "answered" ? btn("closed", "Close", "ghost") + btn("open", "Reopen", "ghost")
+    : btn("open", "Reopen", "ghost");
+}
+
+$("#gmTActions").onclick = (e) => {
+  const b = e.target.closest("button[data-st]");
+  if (b && GM_SEL) gmSetStatus(GM_SEL, b.dataset.st);
+};
+
+async function gmSetStatus(id, status, quiet) {
   try {
-    const rows = await api("/api/gm-calls");
-    if (rows.error) { toast(rows.error, true); return; }
-    body.innerHTML = "";
-    $("#gmDetail").style.display = "none";
-    if (!rows.length) {
-      body.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">No GM calls filed. Check that the <code>gmd</code> service is up, then submit one from the client's GM Call screen.</td></tr>`;
-      return;
-    }
-    rows.forEach((r) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML =
-        `<td style="color:var(--muted)">${esc((r.received_at || "").slice(0, 19).replace("T", " "))}</td>` +
-        `<td><code class="mono">${esc(String(r.request_no ?? " - "))}</code></td>` +
-        `<td><b>${esc(r.handle) || " - "}</b></td>` +
-        `<td>${esc(r.content_label) || esc(String(r.content_id ?? " - "))}</td>` +
-        `<td>${esc(String(r.issue ?? " - "))}</td>` +
-        `<td>${esc(r.subject) || " - "}</td>`;
-      tr.style.cursor = "pointer";
-      tr.title = "Show the full request";
-      tr.onclick = () => {
-        $("#gmWho").textContent =
-          `${r.request_no ?? "?"} - ${r.handle || "(unknown)"}: ${r.subject || ""}`;
-        $("#gmText").textContent = r.body || "(no body text)";
-        $("#gmDetail").style.display = "";
-      };
-      body.appendChild(tr);
-    });
+    await api("/api/gm-ticket", gmPost({ id, status }));
+    const r = GM_CALLS.find((x) => x.id === id);
+    if (r) r.status = status;
+    GM_LIST_SIG = GM_TICKET_SIG = "";
+    gmBadge(GM_CALLS);
+    gmRenderList();
+    gmRenderTicket();
+    if (!quiet) toast(status === "open" ? "Reopened" : `Marked ${status}`);
   } catch (e) { toast(e.message, true); }
 }
+
+// The badge keeps counting while you are on another tab, so a new call is
+// never only visible to someone who happens to be looking at this one.
+setInterval(() => { if (!GM_TIMER) loadGmCallsBadge(); }, 30000);
+async function loadGmCallsBadge() {
+  try { const rows = await api("/api/gm-calls"); if (Array.isArray(rows)) gmBadge(rows); }
+  catch (e) {}
+}
+loadGmCallsBadge();
 
 // ---- delete an account ----
 // Two-step on purpose: the server is asked what the deletion would destroy, the

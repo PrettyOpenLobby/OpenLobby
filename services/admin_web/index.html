@@ -238,20 +238,123 @@
       padding: 3px 0; }
     .inv div span:first-child { color: var(--muted); }
     .inv div.hot span:last-child { color: var(--warn); font-weight: 600; }
-    /* GM chat transcript. Monospace on purpose: half of what shows up here is
-       a record whose shape we got wrong, and alignment is how that reads. */
-    .chatlog { background: var(--panel2); border: 1px solid var(--line);
-      border-radius: 8px; padding: 10px 12px; height: 300px; overflow-y: auto;
-      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
-    .chatlog div { padding: 2px 0; display: flex; gap: 10px; }
-    .chatlog .t { color: var(--muted); flex: 0 0 auto; }
-    .chatlog .w { flex: 0 0 96px; overflow: hidden; text-overflow: ellipsis; }
-    .chatlog .m { flex: 1 1 auto; word-break: break-word; }
-    .chatlog .out .w { color: var(--warn); }
-    .chatlog .in  .w { color: var(--ok, #6cc); }
-    .chatlog .hexy { color: var(--muted); font-size: 11px; }
-    .duty { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .duty .state { font-weight: 600; }
+    /* One row per client that holds a login token: what it is on the left, its
+       own Clear button on the right. Scoped by id so the shared `.inv`
+       key/value styling stays exactly what it is everywhere else -- and so the
+       muted `span:first-child` rule does not grey out the client's name. */
+    #tokList div { align-items: center; padding: 7px 0; }
+    #tokList div + div { border-top: 1px solid var(--line); }
+    #tokList .who { display: flex; flex-direction: column; gap: 2px;
+      min-width: 0; color: var(--text); }
+    #tokList .who .sig { color: var(--muted); font-size: 11.5px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere; }
+    /* ---- GM desk ---- */
+    .gm-bar { display: flex; align-items: center; justify-content: space-between;
+      gap: 14px; flex-wrap: wrap; }
+    .gm-duty { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .gm-light { width: 12px; height: 12px; border-radius: 50%; flex: 0 0 auto;
+      background: var(--muted); box-shadow: 0 0 0 4px rgba(154,162,180,.15); }
+    .gm-light.on { background: var(--good); box-shadow: 0 0 0 4px rgba(87,211,140,.18); }
+    .gm-duty-title { font-weight: 600; font-size: 15px; }
+    .gm-duty-sub { color: var(--muted); font-size: 12.5px; }
+    .gm-warn { display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; margin: -6px 0 18px; padding: 10px 14px;
+      border-radius: 10px; border: 1px solid rgba(255,207,107,.45);
+      background: rgba(255,207,107,.1); color: var(--warn); }
+    .gm-warn[hidden] { display: none; }
+    .gm-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr);
+      gap: 18px; align-items: start; margin-bottom: 18px; }
+    @media (max-width: 900px) { .gm-grid { grid-template-columns: 1fr; } }
+    .gm-grid .panel { margin-bottom: 0; }
+    .gm-inbox { padding: 12px 0 6px; }
+    .gm-inbox-head { display: flex; justify-content: space-between;
+      align-items: center; padding: 0 14px 8px; }
+    .gm-inbox-head h2 { margin: 0; }
+    .gm-filter { display: flex; gap: 2px; background: var(--panel2);
+      border-radius: 7px; padding: 2px; }
+    .gm-filter button { background: none; border: 0; color: var(--muted);
+      padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+    .gm-filter button.on { background: var(--line); color: var(--text); }
+    #gmList { max-height: 560px; overflow-y: auto; color-scheme: dark; }
+    .gm-item { padding: 10px 14px; border-top: 1px solid var(--line);
+      cursor: pointer; display: grid; gap: 2px; }
+    .gm-item:hover { background: var(--panel2); }
+    .gm-item.sel { background: rgba(90,169,255,.12);
+      box-shadow: inset 3px 0 0 var(--accent); }
+    .gm-item-top { display: flex; justify-content: space-between; gap: 8px;
+      align-items: center; }
+    .gm-item-who { font-weight: 600; display: flex; align-items: center; gap: 6px;
+      min-width: 0; overflow: hidden; white-space: nowrap; }
+    .gm-item-when { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+    .gm-item-subj { color: var(--muted); font-size: 12.5px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .gm-item.closed .gm-item-who, .gm-item.closed .gm-item-subj { opacity: .55; }
+    .gm-none { padding: 18px 14px; color: var(--muted); font-size: 13px;
+      border-top: 1px solid var(--line); }
+    .gm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good);
+      flex: 0 0 auto; }
+    .gm-st { font-size: 10.5px; padding: 1px 8px; border-radius: 20px;
+      text-transform: uppercase; letter-spacing: .4px; font-weight: 600;
+      white-space: nowrap; }
+    .gm-st.open { background: rgba(255,207,107,.15); color: var(--warn); }
+    .gm-st.answered { background: rgba(90,169,255,.15); color: var(--accent); }
+    .gm-st.closed { background: rgba(154,162,180,.15); color: var(--muted); }
+    .gm-st.live { background: rgba(87,211,140,.15); color: var(--good); }
+    .gm-ticket-empty { color: var(--muted); padding: 6px 0 14px; }
+    .gm-ticket-head { display: flex; justify-content: space-between; gap: 12px;
+      align-items: flex-start; flex-wrap: wrap; }
+    .gm-ticket-who { font-size: 17px; font-weight: 600; }
+    .gm-ticket-subj { font-size: 14px; margin-top: 2px; overflow-wrap: anywhere; }
+    .gm-ticket-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .gm-ticket-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .gm-ticket-meta span + span::before { content: "\00b7"; margin: 0 7px; }
+    .gm-ticket-body { margin-top: 12px; padding: 12px 14px; background: var(--panel2);
+      border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap;
+      overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
+    .gm-ticket-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .gm-chat-head { display: flex; justify-content: space-between; align-items: baseline;
+      gap: 10px; flex-wrap: wrap; margin-top: 20px; padding-top: 14px;
+      border-top: 1px solid var(--line); }
+    .gm-chat-head h2 { margin: 0 0 8px; }
+    .gm-room { font: 12px 'Consolas', monospace; text-transform: none;
+      letter-spacing: 0; color: var(--muted); margin-left: 4px; width: auto;
+      padding: 2px 6px; vertical-align: baseline; }
+    .gm-room-note { font-size: 12px; color: var(--warn); margin: -2px 0 8px; }
+    .gm-room-note[hidden] { display: none; }
+    .gm-chat-state { font-size: 12.5px; color: var(--muted); }
+    .gm-chat-state.good { color: var(--good); }
+    .gm-chat-state.warn { color: var(--warn); }
+    .gm-log { background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 8px; padding: 12px; height: 340px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px; color-scheme: dark; }
+    .gm-msg { max-width: 78%; display: flex; flex-direction: column; gap: 2px;
+      align-self: flex-start; }
+    .gm-msg .gm-meta { font-size: 11px; color: var(--muted); }
+    .gm-msg .gm-text { padding: 7px 11px; border-radius: 12px;
+      background: var(--line); overflow-wrap: anywhere; white-space: pre-wrap; }
+    .gm-msg.out { align-self: flex-end; align-items: flex-end; }
+    .gm-msg.out .gm-text { background: rgba(90,169,255,.22); }
+    .gm-hex { font: 10.5px 'Consolas', monospace; color: var(--muted);
+      overflow-wrap: anywhere; }
+    .gm-sys { align-self: center; font-size: 11.5px; color: var(--muted);
+      text-align: center; overflow-wrap: anywhere; max-width: 90%; }
+    .gm-day { align-self: center; font-size: 11px; color: var(--muted);
+      border: 1px solid var(--line); border-radius: 20px; padding: 1px 10px; }
+    .gm-log-empty { margin: auto; color: var(--muted); text-align: center;
+      max-width: 380px; font-size: 13px; }
+    .gm-compose { display: flex; gap: 10px; margin-top: 10px; align-items: stretch; }
+    .gm-compose textarea { font: 14px/1.4 'Segoe UI', system-ui, sans-serif;
+      resize: none; min-height: 44px; }
+    .gm-diag summary { cursor: pointer; color: var(--muted); font-size: 13px;
+      font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+    .gm-diag[open] summary { margin-bottom: 8px; }
+    .gm-diag-h { font-size: 12px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: .5px; margin: 18px 0 4px; }
+    .navbadge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 6px;
+      border-radius: 9px; background: var(--warn); color: #1a1406; font-size: 11px;
+      font-weight: 700; line-height: 18px; text-align: center; }
+    .navbadge[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -263,7 +366,7 @@
       <button data-tab="accounts">Accounts</button>
       <button data-tab="reports">Reports</button>
       <button data-tab="issues">Issues</button>
-      <button data-tab="gmcalls">GM Calls</button>
+      <button data-tab="gmcalls">GM Calls<span class="navbadge" id="gmBadge" hidden></span></button>
       <button data-tab="news">News</button>
       <button data-tab="pml">PML Preview</button>
       <button data-tab="security">Security</button>
@@ -401,100 +504,112 @@
 
     <!-- GM CALLS -->
     <section id="tab-gmcalls" class="tab">
-      <div class="panel">
-        <h2>The GM desk</h2>
-        <p class="hint">What <code>gmd</code> tells a caller when their GM Call
-          screen polls for status. <b>Join</b> is flag <code>0x40</code> and
-          <b>Start</b> is <code>0x20</code> - both measured live, as is the
-          queue count. Changes land on the caller&rsquo;s <i>next</i> poll, not
-          instantly: the client asks on its own schedule.</p>
-        <div class="duty">
-          <span>Status:</span>
-          <span class="state" id="gmState">&hellip;</span>
-          <span class="pill" id="gmWhy"></span>
+      <div class="panel gm-bar">
+        <div class="gm-duty">
+          <span class="gm-light" id="gmLight"></span>
+          <div>
+            <div class="gm-duty-title" id="gmState">&hellip;</div>
+            <div class="gm-duty-sub" id="gmStateSub"></div>
+          </div>
         </div>
-        <div class="row" style="margin-top:12px; align-items:flex-end">
-          <div><button class="act" id="gmOnDuty">Go on duty</button></div>
-          <div><button class="ghost" id="gmOffDuty">Sign off</button></div>
-          <div><button class="ghost" id="gmClearDuty">Hand back to config</button></div>
+        <button class="act" id="gmDutyBtn">Go on duty</button>
+      </div>
+      <div class="gm-warn" id="gmWarn" hidden>
+        <span id="gmWarnText"></span>
+        <button class="ghost" id="gmWarnFix">Clear pins</button>
+      </div>
+
+      <div class="gm-grid">
+        <div class="panel gm-inbox">
+          <div class="gm-inbox-head">
+            <h2>Requests</h2>
+            <div class="gm-filter">
+              <button data-f="open" class="on">Open</button>
+              <button data-f="all">All</button>
+            </div>
+          </div>
+          <div id="gmList"></div>
         </div>
-        <div class="row" style="margin-top:14px; align-items:flex-end">
-          <div style="flex:1"><label>Pin the queue count <span class="hint" style="display:inline">(blank = live)</span></label>
+
+        <div class="panel gm-conv">
+          <div class="gm-ticket-empty" id="gmEmpty">Pick a request on the left to read it.</div>
+          <div id="gmTicket" hidden>
+            <div class="gm-ticket-head">
+              <div>
+                <div class="gm-ticket-who" id="gmTWho"></div>
+                <div class="gm-ticket-subj" id="gmTSubj"></div>
+              </div>
+              <div class="gm-ticket-chips" id="gmTChips"></div>
+            </div>
+            <div class="gm-ticket-meta" id="gmTMeta"></div>
+            <div class="gm-ticket-body" id="gmTBody"></div>
+            <div class="gm-ticket-actions" id="gmTActions"></div>
+          </div>
+
+          <div class="gm-chat-head">
+            <h2>Chat <select class="gm-room" id="gmRoomPick" title="Which chat room to show"></select></h2>
+            <span class="gm-chat-state" id="gmChatState"></span>
+          </div>
+          <div class="gm-room-note" id="gmRoomNote" hidden></div>
+          <div class="gm-log" id="gmLog"></div>
+          <div class="gm-compose">
+            <textarea id="gmSay" rows="2" maxlength="400"
+              placeholder="Reply to the player. Enter sends, Shift+Enter for a new line."></textarea>
+            <button class="act" id="gmSend">Send</button>
+          </div>
+          <div class="hint" id="gmComposeHint"></div>
+        </div>
+      </div>
+
+      <details class="panel gm-diag" id="gmDiag">
+        <summary>Diagnostics</summary>
+        <p class="hint">The queue count and the two screen flags (<b>Join</b>
+          <code>0x40</code>, <b>Start</b> <code>0x20</code>) are measured live.
+          A pin here <i>overrides</i> the duty switch until it is cleared.</p>
+        <div class="inv" id="gmDesk" style="margin-top:10px"></div>
+        <div class="row" style="margin-top:14px">
+          <div><label>Pin the queue count <span class="hint" style="display:inline">(blank = live)</span></label>
             <input type="text" id="gmQueue" class="mono" placeholder="live" autocomplete="off"></div>
-          <div style="flex:1"><label>Pin the flags <span class="hint" style="display:inline">(blank = from the status above)</span></label>
+          <div><label>Pin the flags <span class="hint" style="display:inline">(blank = from duty)</span></label>
             <input type="text" id="gmFlags" class="mono" placeholder="e.g. 0x60" autocomplete="off"></div>
-          <div><button class="act" id="gmPin">Apply</button></div>
-          <div><button class="ghost" id="gmUnpin">Clear pins</button></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="act" id="gmPin">Apply pins</button></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmUnpin">Clear pins</button></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmClearDuty">Hand duty back to config</button></div>
         </div>
-        <div class="inv" id="gmDesk" style="margin-top:14px"></div>
-      </div>
 
-      <div class="panel">
-        <h2>GM chat - <span id="gmRoomName" class="mono"></span></h2>
-        <p class="hint"><b>Delivered is not rendered.</b> A line here really does
-          reach the client - authserv relays it and logs it - but
-          nothing we send has yet been seen to <i>draw</i>. A <code>T</code> takes
-          its speaker from the client&rsquo;s member table and no relayed speaker
-          has ever been admitted to it (FACTS &sect;&ldquo;GM CHAT, THE ROOM
-          ITSELF&rdquo;). So the raw and nick boxes are the point, not a debug
-          leftover: the encoders are written against the client&rsquo;s parsers
-          with no surviving capture to check them against, and this is where a
-          wrong guess costs one line instead of a rebuild.</p>
-        <div class="chatlog" id="gmLog"></div>
-        <div class="row" style="margin-top:12px; align-items:flex-end">
-          <div style="flex:3"><label>Say</label>
-            <input type="text" id="gmSay" placeholder="Hello, how can I help?" autocomplete="off"></div>
-          <div style="flex:1"><label>As nick <span class="hint" style="display:inline">(blank = the GM)</span></label>
+        <h3 class="gm-diag-h">Chat records</h3>
+        <label class="chip" style="display:inline-flex; margin:4px 0 0">
+          <input type="checkbox" id="gmShowTech"> Show presence heartbeats and raw bytes</label>
+        <div class="row" style="margin-top:6px">
+          <div><label>Send as nick <span class="hint" style="display:inline">(blank = the player's own nick, the only one that renders today)</span></label>
             <input type="text" id="gmNick" class="mono" placeholder="self" autocomplete="off"></div>
-          <div><button class="act" id="gmSend">Send</button></div>
+          <div><label>Reply prefix</label>
+            <input type="text" id="gmPrefix" class="mono" value="GM: " autocomplete="off"></div>
         </div>
-        <details style="margin-top:12px">
-          <summary class="hint" style="cursor:pointer">Membership events and raw records</summary>
-          <div class="row" style="margin-top:10px; align-items:flex-end">
-            <div style="flex:1"><label>Event</label>
-              <select id="gmEvent">
-                <option value=""> - </option>
-                <option value="S">S - started</option>
-                <option value="G">G - joined</option>
-                <option value="E">E - left</option>
-                <option value="A">A - suspended</option>
-                <option value="R">R - resumed</option>
-              </select></div>
-            <div style="flex:1"><label>About</label>
-              <input type="text" id="gmEventWho" class="mono" placeholder="Lex" autocomplete="off"></div>
-            <div><button class="ghost" id="gmSendEvent">Send event</button></div>
-          </div>
-          <label style="margin-top:12px">Raw record <span class="hint" style="display:inline">(<code>\xNN</code> escapes work)</span></label>
-          <div class="row" style="align-items:flex-end">
-            <div style="flex:3"><input type="text" id="gmRaw" class="mono"
-              placeholder="T\x07literally these bytes" autocomplete="off"></div>
-            <div><button class="ghost" id="gmSendRaw">Send raw</button></div>
-          </div>
-          <p class="hint" style="margin-top:8px">Nick <code>self</code>
-            attributes a record to the receiving client&rsquo;s <i>own</i> nick.
-            That is the probe that separates &ldquo;the record is
-            malformed&rdquo; from &ldquo;the speaker did not resolve&rdquo; - if a line renders as <code>self</code> and not as the GM, the
-            record is fine and the member table is the problem.</p>
-        </details>
-      </div>
-
-      <div class="panel">
-        <h2>GM Call requests</h2>
-        <p class="hint">Submitted from the Viewer's <b>GM Call</b> screen and
-          filed by the <code>gmd</code> service, which answers the GM Call UDP
-          band on 51112 and drops each decoded request into
-          <code>data/gm-calls/</code>. Read-only: this is the ticket, and
-          <code>gmd</code> answers the handshake, the queue count and the room
-          redirect on its own. Nothing here replies - the chat itself rides
-          the auth band (<code>#gmchat001</code>) and is still conducted by hand.</p>
-        <table><thead><tr><th>Received</th><th>Req No.</th><th>Handle</th>
-          <th>Title</th><th>Issue</th><th>Subject</th></tr></thead>
-          <tbody id="gmBody"></tbody></table>
-      </div>
-      <div class="panel" id="gmDetail" style="display:none">
-        <h2>Request <span id="gmWho"></span></h2>
-        <pre id="gmText" style="white-space:pre-wrap; overflow-x:auto"></pre>
-      </div>
+        <div class="row" style="margin-top:6px">
+          <div><label>Membership event</label>
+            <select id="gmEvent">
+              <option value=""> - </option>
+              <option value="S">S - started</option>
+              <option value="G">G - joined</option>
+              <option value="E">E - left</option>
+              <option value="A">A - suspended</option>
+              <option value="R">R - resumed</option>
+            </select></div>
+          <div><label>About</label>
+            <input type="text" id="gmEventWho" class="mono" placeholder="Abe" autocomplete="off"></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmSendEvent">Send event</button></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div style="flex:3"><label>Raw record <span class="hint" style="display:inline">(<code>\xNN</code> escapes work)</span></label>
+            <input type="text" id="gmRaw" class="mono" placeholder="T\x07literally these bytes" autocomplete="off"></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmSendRaw">Send raw</button></div>
+        </div>
+        <p class="hint">Replies go out under the player's own nick because the
+          client only draws a <code>T</code> line whose speaker is in its member
+          table, and nothing we send can add the GM to it. A line sent as <code>GM</code> is
+          delivered and draws nothing.</p>
+      </details>
     </section>
 
     <!-- NEWS -->
