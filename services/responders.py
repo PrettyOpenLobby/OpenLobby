@@ -28,8 +28,16 @@ import sys
 import time
 import threading
 
-import titles                   # the title-plugin seam (services/titles.py)
-import titles as _titles_mod    # for functions that keep a local named `titles`
+# ONE COPY OF THIS MODULE. The containers run `python responders.py`, so the
+# running copy is `__main__`, and a late `import responders` (a title plugin's
+# helper, polbridge) would otherwise load a SECOND full copy whose module-level
+# code re-runs -- including titles.bind_core/load, which rebinds every title's
+# core names to that copy, whose per-thread markers no connection ever sets.
+if __name__ == "__main__":
+    sys.modules.setdefault("responders", sys.modules[__name__])
+
+import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
+import titles as _titles_mod    # for functions that keep a local named `titles`  # noqa: E402
 
 try:
     import yaml
@@ -7310,7 +7318,13 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
     handle_authresume can run the SAME loop on a re-made socket. One copy is the
     whole point: an in-session fix must never apply to a fresh login and not to
     a resumed one. Returns everything the client sent, for the caller's log.
+
+    WARNING: THE BUILD MARKER IS SET HERE TOO. `_peer_build` is per-THREAD and the
+    lobby handler sets it on the lobby connection, which is not this one: a
+    title's game band rides the auth session, and a title that shapes its
+    records by client build reads the marker from this thread.
     """
+    _peer_build.ip = addr[0] if addr else None
     ping_seq = 0
     extra = b""
     # The observe window is NOT passive. Live 2026-08-11: creating a chat room
@@ -7457,7 +7471,12 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                                     f"for >{os.environ.get('POL_PUSH_FRESH', '25')}s "
                                     f"(stale/zombie socket; the live connection "
                                     f"will drain instead)")
-                if _fresh and titles.loaded() and room_sess is not None:
+                # A title that sets `idle_push_when_quiet` is asked even on a
+                # quiet connection: its client may wait for a record in
+                # silence, so silence is not evidence of a zombie socket for
+                # it (the title pins delivery to the live session itself).
+                if (titles.loaded() and room_sess is not None
+                        and (_fresh or titles.any_push_when_quiet())):
                     # WARNING: A POP IS NOT A DELIVERY. idle_pushes forgets what it
                     # hands over, and this band never resends -- so a failed
                     # send here used to drop match-critical bodies (@StartData/
@@ -19303,6 +19322,12 @@ _RESOURCE_WRITE_PATHS = tuple(
     p.strip() for p in os.environ.get("POL_RESOURCE_WRITE_PATHS", "O/m/").split(",")
     if p.strip())
 
+#: Exact object length required of a write, for paths whose reader asks for a
+#: fixed size (a title declares these in `Title.resource_write_len`; the paths
+#: are then writable too). A different length is a different build or a
+#: different file, and is not stored.
+_RESOURCE_WRITE_LEN = {}
+
 
 def _capture_resource_write(pt, op=None):
     """Persist a 03:02 object write, so a later 03:00 can read it back.
@@ -19368,6 +19393,11 @@ def _capture_resource_write(pt, op=None):
     if not data:
         log("lobby", f"  {op or '3:x'} write: {path[:48]!r} carried an EMPTY object; "
                      "nothing stored")
+        return
+    _want = _RESOURCE_WRITE_LEN.get(path)
+    if _want is not None and len(data) != _want:
+        log("lobby", f"  {op or '3:x'} write: {path[:48]!r} is {len(data)}B, its "
+                     f"reader wants {_want}B -- NOT stored")
         return
     if _mail_name(path):
         try:
@@ -22417,6 +22447,7 @@ def handle_lobby(conn, addr, port, stub_ip):
         # ...and the same byte decides the SHAPE of some replies, not just the
         # send cadence -- a title's ranking header is 24 bytes here and 28 on the PC.
         _peer_build.ps2 = (variant == 0x00)
+        _peer_build.ip = addr[0]
         # +0x09 identifies the CLIENT: 0xfa = PC Viewer, 0x00 = PS2 Viewer.
         # Worth surfacing -- it is the only field seen so far that tells the two
         # apart on this channel, and the two do not speak it identically.
@@ -23725,10 +23756,14 @@ titles.bind_core(
     _fetch_subject=_fetch_subject, _peer_is_ps2=_peer_is_ps2, _self_ip=_self_ip,
     _mail_mint=_mail_mint, _member_still_present=_member_still_present,
     _title_zone=_title_zone, _title_zone_lease=_title_zone_lease,
-    _content_profiles=_content_profiles)
+    _content_profiles=_content_profiles, _peer_build=_peer_build,
+    CLIENT_BUILDS_PATH=CLIENT_BUILDS_PATH)
 _TITLES_LOADED = titles.load()
 _FETCH_PATHLEN.update(titles.fetch_pathlen())
 RESOURCE_INIT.update(titles.resource_init())
+_RESOURCE_WRITE_LEN.update(titles.resource_write_len())
+_RESOURCE_WRITE_PATHS = _RESOURCE_WRITE_PATHS + tuple(
+    p for p in _RESOURCE_WRITE_LEN if not p.startswith(_RESOURCE_WRITE_PATHS))
 if polpro is not None:
     polpro.EXTRA_SPEC_FILES.extend(titles.polpro_spec_files())
 
