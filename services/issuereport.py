@@ -333,9 +333,16 @@ def _tokens(meta: dict, peer: str):
     WARNING: THE PEER IS LAST AND IS EXPECTED TO BE USELESS ON PROD -- see the module
     banner. It is included because it IS discriminating on a LAN deployment and
     on the PS2 path, and because a token that matches everything is visible as
-    such in the manifest's per-token counts, where a missing one is not."""
+    such in the manifest's per-token counts, where a missing one is not.
+
+    `session` FIRST: the public CrystalMod shim has no credential vault, so it
+    sends no polid -- it sends the POL session id instead ("u" + 16 hex,
+    poltoken.cpp), which authserv logs as `session <sid>` at login and the
+    lobbies log as `bound to session <sid> (member=N)`. It is the one token that
+    names exactly this player's launch, including behind a relay where every
+    public peer shares one address."""
     toks = []
-    for key in ("handle", "polid", "host"):
+    for key in ("session", "handle", "polid", "host"):
         v = (meta.get(key) or "").strip()
         if len(v) >= 3:
             toks.append((key, v))

@@ -634,18 +634,14 @@ try:
     import issuereport
 except ImportError:
     issuereport = None
+try:
+    # THE PER-LOGIN CONTENT AUTH VALUE minted on 4:5 -- see contentauth.py.
+    # Optional like the rest: absent, 4:5 echoes exactly as it always has.
+    import contentauth
+except ImportError:
+    contentauth = None
 K0_IV = bytes.fromhex("4f5f4d4661d9c59f")   # = SE modulus[0:8], recovered
 _P0, _S0 = sessioncrypt.bf_setkey(b"\x00" * 8)
-
-
-def sess_dec(line_bytes):
-    """Decrypt one IRC line (OFB resets from IV each line)."""
-    return sessioncrypt.ofb_apply(_P0, _S0, K0_IV, line_bytes)
-
-
-def sess_enc(content):
-    """Encrypt one IRC line body (no CRLF); caller appends literal \\r\\n."""
-    return sessioncrypt.ofb_apply(_P0, _S0, K0_IV, content)
 
 
 class NoPad(bytes):
@@ -6151,77 +6147,7 @@ def _auth_session_reply(cmd_txt, nick, srv, peer_ip=b"0.0.0.0", sess=None):
         return [b"ERROR :Closing Link: " + nick]
     return None
 
-# POL's Blowfish (custom schedule: md5-expand the 8-byte key to fill P/S).
-_M32 = 0xFFFFFFFF
-
-
-def _bf_setkey(key):
-    import hashlib
-    buf = bytearray(key)
-    while len(buf) < 4096:
-        buf += hashlib.md5(bytes(buf)).digest()
-    buf = bytes(buf)
-    P = [int.from_bytes(buf[i:i+4], "big") for i in range(18)]
-    S = [[int.from_bytes(buf[b*1024 + j*4: b*1024 + j*4+4], "big")
-          for j in range(256)] for b in range(4)]
-    return P, S
-
-
-def _bf_encrypt(P, S, L, R):
-    for i in range(16):
-        L ^= P[i]
-        f = (((S[0][(L >> 24) & 0xff] + S[1][(L >> 16) & 0xff]) & _M32)
-             ^ S[2][(L >> 8) & 0xff]) & _M32
-        f = (f + S[3][L & 0xff]) & _M32
-        R ^= f
-        L, R = R, L
-    L, R = R, L
-    R ^= P[16]
-    L ^= P[17]
-    return L & _M32, R & _M32
-
-
-def _bf_decrypt(P, S, L, R):
-    for i in range(17, 1, -1):
-        L ^= P[i]
-        f = (((S[0][(L >> 24) & 0xff] + S[1][(L >> 16) & 0xff]) & _M32)
-             ^ S[2][(L >> 8) & 0xff]) & _M32
-        f = (f + S[3][L & 0xff]) & _M32
-        R ^= f
-        L, R = R, L
-    L, R = R, L
-    R ^= P[1]
-    L ^= P[0]
-    return L & _M32, R & _M32
-
-
-def _bf_enc_block(P, S, b8, order):
-    v = int.from_bytes(b8, "little" if order == "le" else "big")
-    L2, R2 = _bf_encrypt(P, S, v >> 32, v & _M32)
-    return ((L2 << 32) | R2).to_bytes(8, "little" if order == "le" else "big")
-
-
-def _bf_dec_block(P, S, b8, order):
-    v = int.from_bytes(b8, "little" if order == "le" else "big")
-    L2, R2 = _bf_decrypt(P, S, v >> 32, v & _M32)
-    return ((L2 << 32) | R2).to_bytes(8, "little" if order == "le" else "big")
-
-
-def _k0_check(blob):
-    """Inline: if blob is a NICK encrypted under K=0, confirm and derive IV."""
-    if len(blob) < 16:
-        return "blob<16B, not a NICK hop"
-    crib = b"NICK UH5GRSV86 "
-    ks = bytes(crib[j] ^ blob[j] for j in range(len(crib)))
-    P, S = _bf_setkey(b"\x00" * 8)
-    for order in ("le", "big"):
-        pred = _bf_enc_block(P, S, ks[0:8], order)
-        if pred[:7] == ks[8:15]:
-            iv = _bf_dec_block(P, S, ks[0:8], order)
-            return (f"K=0 CONFIRMED (order={order}); "
-                    f"ks[0:15]={ks.hex()}; IV={iv.hex()}")
-    return (f"K=0 NOT confirmed; ks[0:15]={ks.hex()} "
-            f"(token!=0 hop, or schedule differs)")
+# POL's Blowfish lives in sessioncrypt.py (bf_setkey / ofb_apply / recover_iv).
 
 
 def _read_for(conn, seconds, want_crlf=False, minlen=0):
@@ -7337,8 +7263,8 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
     #
     # Two framing details, both verified against the captured AWAY line:
     #   * OFB resets from the IV each line, so every line uses this connection's
-    #     recovered `iv`. NOT sess_dec(), which hardcodes K0_IV and would have
-    #     decrypted this connection to garbage.
+    #     recovered `iv`, never the fixed K0_IV, which would decrypt this
+    #     connection to garbage.
     #   * The client appends the 4-char checksum but does NOT transmit the pad
     #     byte it checksums over, so the command text is line[:-4].
     #     frame_line("AWAY", pad=NUL) reproduces the captured "USDV" exactly.
@@ -7487,7 +7413,8 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                     _tp_due, _tp_sent = [], 0
                     try:
                         _tp_mid = _session_get("member_id")
-                        _tp_due = (titles.idle_pushes(_tp_mid, game_peers)
+                        _tp_due = (titles.idle_pushes(_tp_mid, game_peers,
+                                                      quiet=not _fresh)
                                    if _tp_mid is not None else [])
                         for _title, _peer, _body in _tp_due:
                             _line = NoPad(_game_notice_line(
@@ -19830,6 +19757,33 @@ def _lobby_payload(op1, op2, n, req_pt=None):
         # rather than inferring the change from the reply checksum. Cheap, and it
         # is the only place the decrypted state is in hand.
         log("lobby", f"  4:5 state: {echo.hex()}")
+        # THE CONTENT AUTH VALUE (contentauth.py). SE's reply carries
+        # a fresh 16-byte random value in its first 16 bytes -- the bytes this
+        # echo has always filled with the request's zeros -- and polcore keys the
+        # title with it (FMO: TCP RC4 key = value + our 0x0322 tail). Minting one
+        # per login is what lets FMO name the member from the key instead of the
+        # address. Only zones in POL_CONTENT_AUTH_ZONES; every other title gets
+        # the unchanged echo.
+        _zf = _status_frame_zone(echo)
+        if (contentauth is not None and _zf is not None
+                and _zf[0] in contentauth.ZONES):
+            _mid = _session_get("member_id")
+            if _mid is None:
+                log("lobby", f"  4:5 content auth: zone {_zf[0]} but NO member "
+                             f"bound to this session -- echoing zeros; the title "
+                             f"falls back to the address")
+            elif not contentauth.enabled_for(_mid):
+                pass        # rollout gate (content-auth-members.txt): unchanged echo
+            else:
+                _cv = contentauth.mint()
+                try:
+                    contentauth.publish(_mid, _session_get("peer_ip"), _zf[0], _cv)
+                    echo = _cv + echo[contentauth.LEN:]
+                    log("lobby", f"  4:5 content auth: zone {_zf[0]} member {_mid} "
+                                 f"-> value {_cv.hex()[:8]}.. in reply bytes 0..15")
+                except (OSError, ValueError) as exc:
+                    log("lobby", f"  4:5 content auth: cannot publish ({exc}) -- "
+                                 f"echoing zeros so the key stays one FMO can read")
         # AND ACT ON IT: +19 is "inside a title", u16 at +20 the content id
         # (1000 = the Viewer). This is the only place we learn it, and the
         # presence push in the other container reads it back via _title_zone.
