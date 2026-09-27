@@ -135,8 +135,51 @@ print("\nSessions end, and the door closes with them")
 accounts.close_sessions(c, bob)
 c.commit()
 check("bob logged out: refused", R._mail_login_allowed("bob", HERE, "x")[0], False)
-check("unknown mailbox is refused when nothing vouches for it (not strict -> allowed as before)",
-      R._mail_login_allowed("ghost", HERE, "x")[0], True)
+check("unknown mailbox is refused, strict or not",
+      R._mail_login_allowed("ghost", HERE, "x")[0], False)
+
+print("\nA PlayOnline-type account (POP 51260) logs in as the POL ID")
+# `APOP <POLID> <digest>`, digest = MD5(banner + MAIL password).
+primary = accounts.member_by_polid(c, "MAILPOLID")
+local = primary["mail_address"].split("@", 1)[0]
+accounts.set_mail_password(c, primary["id"], "mailpw-51260")
+c.commit()
+check("POL ID resolves to its primary member's mailbox",
+      R._pop3_mailbox_user("MAILPOLID"), local)
+check("a mail name is left alone", R._pop3_mailbox_user("bob"), "bob")
+check("a lowercase name is never taken as a POL ID (mail names are lowercase)",
+      R._pop3_mailbox_user("mailpolid"), "mailpolid")
+check("an unknown uppercase name is left alone", R._pop3_mailbox_user("NOSUCHID"), "NOSUCHID")
+check("twin: the raw POL ID is still 'no such mailbox' without the resolver",
+      R._pop3_check_apop("MAILPOLID", BANNER, apop("mailpw-51260"), ELSEWHERE)[0], False)
+check("APOP as the POL ID with the mail password is accepted",
+      R._pop3_check_apop(R._pop3_mailbox_user("MAILPOLID"), BANNER,
+                         apop("mailpw-51260"), ELSEWHERE)[0])
+check("APOP as the POL ID with a wrong password is refused",
+      R._pop3_check_apop(R._pop3_mailbox_user("MAILPOLID"), BANNER,
+                         apop("nope"), ELSEWHERE)[0], False)
+check("a wrong APOP digest does not log 'verified'",
+      R._pop3_check_apop(local, BANNER, apop("nope"), ELSEWHERE)[1] == "verified", False)
+
+print("\n...and SENDS as <POLID>@pol.com (SMTP 51261)")
+check("MAIL FROM the POL ID, no live session: refused",
+      R._smtp_sender_allowed(f"MAILPOLID@{DOM}", ELSEWHERE)[0], False)
+accounts.open_session(c, primary["id"], nick="Pri", peer_ip=ELSEWHERE)
+c.commit()
+check("MAIL FROM the POL ID from its member's live session: allowed",
+      R._smtp_sender_allowed(f"MAILPOLID@{DOM}", ELSEWHERE)[0])
+check("twin: a lowercase POL ID as sender is still refused",
+      R._smtp_sender_allowed(f"mailpolid@{DOM}", ELSEWHERE)[0], False)
+before = len(accounts.list_mail(c, primary["mail_address"]))
+R._smtp_deliver([f"MAILPOLID@{DOM}"], b"From: x@pol.com\r\nSubject: re\r\n\r\nhi\r\n", "test")
+R._smtp_deliver([f"mailpolid@{DOM}"], b"From: x@pol.com\r\nSubject: re2\r\n\r\nhi\r\n", "test")
+check("mail TO <POLID>@pol.com (either case) lands in that member's real mailbox",
+      len(accounts.list_mail(c, primary["mail_address"])) - before, 2)
+check("...and no phantom box named after the POL ID",
+      len(accounts.list_mail(c, f"mailpolid@{DOM}")), 0)
+R._smtp_deliver([f"bob@{DOM}"], b"From: x@pol.com\r\nSubject: b\r\n\r\nhi\r\n", "test")
+check("a real mailbox is untouched by the POL ID rule",
+      len(accounts.list_mail(c, BOB)), 1)
 
 c.close()
 print()

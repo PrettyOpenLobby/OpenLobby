@@ -297,13 +297,44 @@ async function loadAccounts() {
         `<td>${play}</td>` +
         `<td style="color:var(--muted)">${esc((r.created_at || "").slice(0, 19).replace("T", " "))}</td>` +
         `<td style="text-align:right"><button class="ghost">Password</button> ` +
+        `<button class="ghost">Tokens</button> ` +
+        `<button class="${r.ext_mail ? "act" : "ghost"}" ` +
+          `title="Mail to and from the internet as ${esc(outsideAddr(r))}">` +
+          `Ext mail: ${r.ext_mail ? "on" : "off"}</button> ` +
         `<button class="danger">Delete</button></td>`;
-      const [pwBtn, delBtn] = tr.querySelectorAll("button");
+      const [pwBtn, tokBtn, extBtn, delBtn] = tr.querySelectorAll("button");
       pwBtn.onclick = () => askPassword(r.polid);
+      tokBtn.onclick = () => askTokens(r.polid);
+      extBtn.onclick = () => toggleExtMail(r, extBtn);
       delBtn.onclick = () => askDelete(r.polid);
       body.appendChild(tr);
     });
   } catch (e) { toast(e.message, true); }
+}
+
+// ---- outside mail ----
+// Per account and OFF by default: sign-up may be open, and an enabled account
+// can mail anyone on the internet from the server's outside domain
+// (POL_EXT_MAIL_DOMAIN). services/extmail.py has the rest.
+function outsideAddr(r) {
+  return r.ext_addr || "(no outside address - no mail name, or POL_EXT_MAIL_DOMAIN unset)";
+}
+async function toggleExtMail(r, btn) {
+  const on = !r.ext_mail;
+  if (on && !confirm(`Let ${r.polid} send and receive mail outside PlayOnline as ` +
+                     `${outsideAddr(r)}?`)) return;
+  btn.disabled = true;
+  try {
+    const res = await api("/api/account-extmail", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polid: r.polid, enabled: on })
+    });
+    r.ext_mail = res.ext_mail;
+    btn.textContent = "Ext mail: " + (res.ext_mail ? "on" : "off");
+    btn.className = res.ext_mail ? "act" : "ghost";
+    toast(`Outside mail ${res.ext_mail ? "ON" : "off"} for ${res.polid}`);
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; }
 }
 
 // ---- tester issue reports ----
