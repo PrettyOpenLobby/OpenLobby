@@ -1357,8 +1357,8 @@ class Handler(BaseHTTPRequestHandler):
             out = []
             for r in rows:
                 pol = r["polid"]
-                mem = db.execute("SELECT id FROM member WHERE polid=?",
-                                 (pol,)).fetchone()
+                mem = db.execute("SELECT * FROM member WHERE polid=? "
+                                 "ORDER BY member_no LIMIT 1", (pol,)).fetchone()
                 contents = []
                 linked = []
                 handle = None
@@ -1400,6 +1400,10 @@ class Handler(BaseHTTPRequestHandler):
                             "linked": linked,
                             "unlinked": sorted(set(contents) - set(linked)),
                             "clients": clients,
+                            "mail": (mem["mail_address"] if mem else None),
+                            "ext_addr": _ext_addr(mem),
+                            "ext_mail": bool(mem and "ext_mail" in mem.keys()
+                                             and mem["ext_mail"]),
                             "contents_label": _content_label(
                                 ",".join(str(c) for c in contents))})
         except Exception as exc:   # schema drift shouldn't 500 the whole panel

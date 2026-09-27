@@ -619,6 +619,10 @@ try:
 except ImportError:
     pmlfallback = None
 try:
+    import extmail              # mail to/from the internet; inert until configured
+except ImportError:
+    extmail = None
+try:
     import accounts             # account DB; optional -- absent = old stateless behaviour
 except ImportError:
     accounts = None
@@ -23073,6 +23077,50 @@ def _pop3_messages(user):
         db.close()
 
 
+def _pop3_mailbox_user(user):
+    """The mailbox local part a POP3 login name refers to.
+
+    A PlayOnline-type mail account (POP 51260) logs in as the POL ID --
+    `APOP ABCD1234 <digest>` -- not as the mail name, and its digest is made
+    with the member's MAIL password (MD5(banner + mail_pw_plain)).
+    member_by_mail cannot resolve a POL ID, and "no such mailbox" is always
+    refused, so without this every such login would be turned away.
+
+    Only an UPPERCASE name is tried as a POL ID. Mail names are lowercase-only
+    (accounts.check_mail_local), so a member who picks the mail name `abcd1234`
+    can never capture ABCD1234's login. Returns `user` unchanged otherwise.
+    """
+    if not user or user == user.lower():
+        return user
+    db = _mail_db()
+    if db is None:
+        return user
+    try:
+        row = _mail_polid_member(db, user)
+        addr = (row["mail_address"] if row is not None else None) or ""
+        local = addr.split("@", 1)[0]
+        return local or user
+    finally:
+        db.close()
+
+
+def _mail_polid_member(db, name, any_case=False):
+    """The member whose POL ID is the local part of `name`, or None.
+
+    The PlayOnline-type account uses the POL ID on the wire for all three:
+    the POP3 login, `MAIL FROM: ABCD1234@pol.com` on SMTP 51261, and so the
+    From that other members reply to. By default only an
+    UPPERCASE name is tried, for the reason _pop3_mailbox_user gives;
+    `any_case` is for a RECIPIENT typed by another member, and callers use it
+    only after member_by_mail found no mailbox of that name, so a real
+    mailbox always wins.
+    """
+    local = (name or "").split("@", 1)[0]
+    if not local or (local == local.lower() and not any_case):
+        return None
+    return accounts.member_by_polid(db, local.upper())
+
+
 def _mail_session_allowed(db, row, peer_ip, why):
     """The fallback when NO secret can be checked: the dialling address must hold
     the mailbox owner's LIVE session.
@@ -23113,7 +23161,11 @@ def _mail_login_allowed(user, peer_ip, password):
     try:
         row = accounts.member_by_mail(db, user)
         if row is None:
-            return (not strict, "no such mailbox")
+            # ALWAYS a refusal, strict or not. No client of ours asks for a
+            # mailbox that has no account: accepting it let a peer name
+            # anything and be told yes, and it seeded a welcome message into a
+            # box nobody owns.
+            return False, "no such mailbox"
         keys = row.keys()
         secret = row["mail_pw_plain"] if "mail_pw_plain" in keys else None
         if secret:
@@ -23124,6 +23176,17 @@ def _mail_login_allowed(user, peer_ip, password):
         if pw_hash:
             ok = accounts.check_password(password or "", pw_hash, row["mail_pw_salt"])
             return ok, ("password verified (hash)" if ok else "wrong password")
+        # NO MAIL PASSWORD ON FILE -- but the ACCOUNT password is one we can
+        # check, and a sign-up path may have set the mail password from it in
+        # the first place. So
+        # try it before falling back to the session rule: it turns the accounts
+        # that predate mail passwords from unverifiable into verifiable, which
+        # is what POL_MAIL_STRICT=1 needs before it can be turned on.
+        acct_hash = row["pw_hash"] if "pw_hash" in keys else None
+        if acct_hash and password:
+            salt = row["pw_salt"] if "pw_salt" in keys else None
+            if accounts.check_password(password, acct_hash, salt):
+                return True, "verified against the account password"
         if strict:
             return False, "no mail password stored (POL_MAIL_STRICT)"
         return _mail_session_allowed(db, row, peer_ip, "no mail password stored")
@@ -23155,6 +23218,11 @@ def _smtp_sender_allowed(sender, peer_ip):
                            f"as <name>@{MAIL_DOMAIN}")
         row = accounts.member_by_mail(db, sender)
         if row is None:
+            row = _mail_polid_member(db, sender)
+            if row is not None:
+                return _mail_session_allowed(db, row, peer_ip,
+                                             "sender is a member's POL ID")
+        if row is None:
             return False, "no member owns this address"
         return _mail_session_allowed(db, row, peer_ip, "sender is a member")
     finally:
@@ -23179,7 +23247,7 @@ def _pop3_check_apop(user, banner, digest, peer_ip=None):
     try:
         row = accounts.member_by_mail(db, user)
         if row is None:
-            return (not strict, "no such mailbox")
+            return False, "no such mailbox"          # see _mail_login_allowed
         secret = row["mail_pw_plain"] if "mail_pw_plain" in row.keys() else None
         if not secret:
             if strict:
@@ -23187,7 +23255,12 @@ def _pop3_check_apop(user, banner, digest, peer_ip=None):
             return _mail_session_allowed(db, row, peer_ip,
                                          "no plaintext mail password stored")
         calc = hashlib.md5((banner + secret).encode("utf-8")).hexdigest()
-        return (secrets.compare_digest(calc, (digest or "").lower()), "verified")
+        ok = secrets.compare_digest(calc, (digest or "").lower())
+        # The Viewer keeps its OWN copy of the mail password (given to it at
+        # sign-up), so a mismatch after a Membership change is the usual case.
+        return ok, ("verified" if ok else
+                    "wrong password -- the Viewer's saved mail password "
+                    "differs from the one on file")
     finally:
         db.close()
 
@@ -23308,7 +23381,7 @@ def handle_pop3(conn, addr, port=110):
             if cmd == "CAPA":
                 f.write(b"+OK\r\nUSER\r\nUIDL\r\nTOP\r\n.\r\n")
             elif cmd == "USER":
-                user = arg.split("@", 1)[0] or "unknown"
+                user = _pop3_mailbox_user(arg.split("@", 1)[0]) or "unknown"
                 f.write(b"+OK\r\n")
             elif cmd == "PASS":
                 ok, why = _mail_login_allowed(user, addr[0], arg)
@@ -23325,7 +23398,7 @@ def handle_pop3(conn, addr, port=110):
                 # `APOP <name> <md5(banner + mail password)>` -- what the
                 # PlayOnline account preset sends (auth mode 1).
                 name, _, digest = arg.partition(" ")
-                user = name.split("@", 1)[0] or "unknown"
+                user = _pop3_mailbox_user(name.split("@", 1)[0]) or "unknown"
                 ok, why = _pop3_check_apop(user, banner, digest.strip(), addr[0])
                 if not ok:
                     log("mail", f"{peer} POP3 APOP {user!r} REJECTED ({why})")
@@ -23518,9 +23591,21 @@ def _smtp_deliver(rcpts, body, peer):
                 _archive_report(r, local, sender, subject, body, peer)
                 continue
             dom = r.split("@", 1)[1].lower() if "@" in r else MAIL_DOMAIN
+            if extmail is not None and dom == extmail.domain():
+                # `<name>@<outside domain>` from inside the game is
+                # `<name>@pol.com`: the outside name of a local mailbox.
+                r, dom = f"{r.split('@', 1)[0]}@{MAIL_DOMAIN}", MAIL_DOMAIN.lower()
             if dom != MAIL_DOMAIN.lower():
                 remote.append(r)
                 continue
+            if accounts.member_by_mail(db, r) is None:
+                # `<POLID>@pol.com` is the From a PlayOnline-type account sends
+                # with, so it is what a reply comes back to.
+                owner = _mail_polid_member(db, r, any_case=True)
+                if owner is not None and owner["mail_address"]:
+                    log("mail", f"{peer} SMTP {r} is a POL ID -> "
+                                f"{owner['mail_address']}")
+                    r = owner["mail_address"]
             accounts.deliver_mail(db, r, bytes(body), sender=sender,
                                   subject=subject)
             done += 1
@@ -23595,6 +23680,76 @@ def _archive_report(rcpt, local, sender, subject, body, peer):
                     "is still in the mailbox")
 
 
+def _smtp_is_outside(to):
+    """True for a recipient that would leave the server: not our domain, not
+    the outside-domain name of a local box, not an alias."""
+    dom = to.split("@", 1)[1].lower() if "@" in to else MAIL_DOMAIN.lower()
+    if dom == MAIL_DOMAIN.lower() or to.strip().lower() in _mail_aliases():
+        return False
+    return not (extmail is not None and dom == extmail.domain())
+
+
+def _smtp_sender_row(db, mail_from):
+    row = accounts.member_by_mail(db, mail_from) if mail_from else None
+    return row if row is not None or not mail_from \
+        else _mail_polid_member(db, mail_from)
+
+
+def _ext_rcpt_check(mail_from, n_outside):
+    """(ok, smtp reply, why) for one more OUTSIDE recipient.
+
+    Accepting an outside recipient with `250` and dropping it at DATA would
+    show the player a sent message nobody receives, so it is refused at RCPT,
+    visibly, unless the sender
+    is a member the admin panel has enabled for outside mail and still has
+    room under today's cap.
+    """
+    if extmail is None or accounts is None:
+        return False, b"550 5.7.1 mail outside PlayOnline is not available\r\n", "no extmail"
+    db = _mail_db()
+    if db is None:
+        return False, b"451 4.3.0 try again later\r\n", "no account DB"
+    try:
+        row = _smtp_sender_row(db, mail_from)
+        if not extmail.enabled(row):
+            return False, (b"550 5.7.1 this account cannot mail outside PlayOnline\r\n"
+                           ), "sender not enabled for outside mail"
+        if not extmail.outbound_configured():
+            return False, (b"550 5.7.1 mail outside PlayOnline is not available\r\n"
+                           ), "POL_EXT_MAIL_KEY not set"
+        if not extmail.outside_address(row):
+            return False, b"550 5.7.1 this account has no mail name\r\n", "no mail name"
+        if n_outside >= extmail.MAX_RCPTS:
+            return False, b"452 4.5.3 too many outside recipients\r\n", "recipient limit"
+        if extmail.room_today(db, row["id"], "out") <= n_outside:
+            return False, (b"550 5.7.1 daily limit for outside mail reached\r\n"
+                           ), "daily cap"
+        return True, b"250 OK\r\n", "outside, enabled"
+    finally:
+        db.close()
+
+
+def _ext_relay(mail_from, remote, body, peer):
+    """(ok, detail): send the outside recipients through the provider."""
+    db = _mail_db()
+    if db is None:
+        return False, "no account DB"
+    try:
+        row = _smtp_sender_row(db, mail_from)
+        if not extmail.enabled(row):                 # re-checked: RCPT was earlier
+            return False, "sender not enabled"
+        frm, subject, text = extmail.outbound_parts(body, row)
+        ok, detail = extmail.send(frm, remote, subject, text,
+                                  extmail.outside_address(row))
+        for r in remote:
+            extmail.note(db, row["id"], "out", r, ok, detail)
+        log("mail", f"{peer} SMTP outside {'SENT' if ok else 'FAILED'} as {frm!r} "
+                    f"to {remote} ({detail})")
+        return ok, detail
+    finally:
+        db.close()
+
+
 def handle_smtp(conn, addr, port=25):
     """A minimal SMTP server. Mail addressed to our own domain is DELIVERED into
     the recipient's mailbox (so PlayOnline members can mail each other, and
@@ -23635,6 +23790,14 @@ def handle_smtp(conn, addr, port=25):
                 to = _smtp_addr(text)
                 if not to:
                     f.write(b"501 bad recipient\r\n")
+                elif _smtp_is_outside(to):
+                    ok, reply, why = _ext_rcpt_check(
+                        mail_from, sum(1 for r in rcpts if _smtp_is_outside(r)))
+                    log("mail", f"{peer} SMTP RCPT {to!r} outside: "
+                                f"{'accepted' if ok else 'REFUSED'} ({why})")
+                    if ok:
+                        rcpts.append(to)
+                    f.write(reply)
                 else:
                     rcpts.append(to)
                     f.write(b"250 OK\r\n")
@@ -23684,10 +23847,16 @@ def handle_smtp(conn, addr, port=25):
                     f.flush()
                     continue
                 done, remote = _smtp_deliver(rcpts, body, peer)
-                if remote:
-                    log("mail", f"{peer} SMTP NOT relayed (off-domain): {remote}")
                 rcpts = []
-                f.write(f"250 OK stored ({done} local)\r\n".encode("ascii"))
+                if remote:
+                    # Only recipients that passed _ext_rcpt_check reach here.
+                    ok, detail = _ext_relay(mail_from, remote, body, peer)
+                    if not ok:
+                        f.write(b"554 5.4.0 could not deliver outside PlayOnline\r\n")
+                        f.flush()
+                        continue
+                f.write(f"250 OK stored ({done} local, {len(remote)} outside)\r\n"
+                        .encode("ascii"))
             elif up.startswith(b"RSET"):
                 mail_from, rcpts = "", []
                 f.write(b"250 OK\r\n")
@@ -23729,11 +23898,16 @@ def _log_auth_posture():
             "grants, and a known HANDLE logs in AS that account (no password is "
             "checked anywhere on this path: the client's digest is not one we can "
             "yet derive). POL_ACCOUNTS_ENFORCE=1 rejects unknown NICKs")
-    if not mail_strict:
+    if not mail_strict and os.environ.get("POL_MAIL_SESSION_CHECK", "1") != "1":
         open_bits.append(
-            "any POP3 login reads the mailbox it names (APOP is verified only for "
-            "accounts holding a plaintext mail password). POL_MAIL_STRICT=1 "
-            "refuses the unverifiable ones")
+            "any POP3 login reads the mailbox it names -- POL_MAIL_SESSION_CHECK "
+            "is OFF, so an unverifiable login is simply accepted. Turn it on")
+    elif not mail_strict:
+        open_bits.append(
+            "a POP3 login for an account with NO mail password falls back to "
+            "'the dialling address holds that member's live session' (the "
+            "account password is tried first). POL_MAIL_STRICT=1 refuses those "
+            "outright instead, once every account has a mail password")
     log("resp", "auth posture: THIS SERVER IS OPEN -- " + "; ".join(open_bits)
                 + ". Fine on a private LAN; not something to expose.")
 
