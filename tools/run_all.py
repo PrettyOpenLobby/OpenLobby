@@ -259,6 +259,8 @@ SUITES = [
     # The mobile 2:3 marker lifts the 12-row cap; the PC reply is unchanged.
     ("friends_mobile", [sys.executable, "friends_mobile_cap_test.py"], TOOLS, {}),
     ("contentauth",   [sys.executable, "contentauth.py"], SERVICES, {}),
+    # The shared event calendar the title plugins' tournaments read.
+    ("eventcal",      [sys.executable, "eventcal.py", "--selftest"], SERVICES, {}),
     # The Viewer password, checked through the NICK digest, and the arm gate on
     # binding a login token (trust-on-first-use).
     ("login_digest",  [sys.executable, "login_digest_test.py"], TOOLS, {}),

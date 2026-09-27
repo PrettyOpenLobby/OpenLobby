@@ -1,0 +1,61 @@
+{
+  "_doc": "Event calendar read by services/eventcal.py. Times are UTC. TM runs SESSIONS: a weekly or holiday occurrence is a season (Fri 12:00 + 72 h, or the day from 12:00) and the tournaments are the one-hour sessions inside it at 19:00 and 02:00 UTC (European and American evenings), each with its own rankings and prizes. An event that overlaps a weekly occurrence replaces that whole occurrence; one event at a time per game. TM missions are 'type:count': 0 combos (more than N), 1 perfect wins, 2 wins in a row, 3 Rotating Block conversions (more than N), 4 ties, 5 wins acting first, 6 Chance Block conversions (more than N); 7 (vs a Defense Up card) is not counted and is never set. TM prizes: money for 1st/2nd/3rd, cards for 1st/2nd/3rd, pack = PackPrm record for the cards.",
+  "tm": {
+    "weekly": {
+      "key": "chocobo-cup",
+      "name": "Chocobo Cup",
+      "dow": 4, "hour": 0, "hours": 72,
+      "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28", "season_hour": 12, "season_hours": 72},
+      "guide": "Win matches to move your chocobo up the track!|Clear the three missions for extra prizes.",
+      "ticker": "The Chocobo Cup is under way! Advance your chocobo and go for the gold!",
+      "missions": "rotate",
+      "prizes": {"money": [50000, 30000, 10000], "cards": [3, 2, 1], "pack": 20, "mission_money": 5000}
+    },
+    "events": [
+      {"key": "new-year-cup", "name": "New Year's Cup", "yearly": "01-01", "days": 1, "hour": 12,
+       "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
+       "guide": "Happy New Year! Start the year at the top of the track!|Clear all three missions.",
+       "ticker": "Happy New Year! The New Year's Cup has begun!",
+       "missions": "0:3,1:1,5:2",
+       "prizes": {"money": [80000, 50000, 20000], "cards": [4, 3, 2], "pack": 20, "mission_money": 8000}},
+      {"key": "valentines-cup", "name": "Valentine's Cup", "yearly": "02-14", "days": 1, "hour": 12,
+       "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
+       "guide": "Share the love of cards! Win together, tie together.|Ties count for a mission today.",
+       "ticker": "The Valentine's Cup is on! Tie a game and share the love!",
+       "missions": "4:2,2:2,5:1",
+       "prizes": {"money": [60000, 40000, 20000], "cards": [3, 2, 1], "pack": 20, "mission_money": 6000}},
+      {"key": "ffix-anniversary-cup", "name": "FFIX Anniversary Cup", "yearly": "07-07", "days": 1, "hour": 12,
+       "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
+       "guide": "Celebrate Final Fantasy IX's anniversary!|Prizes come from the FFIX Celebrity Pack.",
+       "ticker": "Happy anniversary, FFIX! The Anniversary Cup has begun!",
+       "missions": "1:2,0:4,3:2",
+       "prizes": {"money": [100000, 60000, 30000], "cards": [5, 3, 2], "pack": 24, "mission_money": 10000}},
+      {"key": "halloween-cup", "name": "Halloween Cup", "yearly": "10-31", "days": 1, "hour": 12,
+       "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
+       "guide": "A spooky night at the card tables!|Chance Blocks play tricks tonight.",
+       "ticker": "Trick or treat! The Halloween Cup has begun!",
+       "missions": "6:2,3:1,2:3",
+       "prizes": {"money": [70000, 40000, 20000], "cards": [4, 2, 1], "pack": 21, "mission_money": 7000}},
+      {"key": "holiday-cup", "name": "Holiday Cup", "yearly": "12-24", "days": 3, "hour": 12,
+       "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
+       "guide": "Happy holidays! Win matches to climb to the top!|Clear all three missions for extra gifts.",
+       "ticker": "Happy holidays! The Holiday Cup has begun!",
+       "missions": "0:4,1:2,6:3",
+       "prizes": {"money": [100000, 60000, 30000], "cards": [5, 3, 2], "pack": 20, "mission_money": 10000}}
+    ]
+  },
+  "jan": {
+    "weekly": {"key": "weekend-cup", "name": "Weekend Cup, week {week}", "dow": 4, "hour": 0, "hours": 72},
+    "events": [
+      {"key": "shogatsu-cup", "name": "Shogatsu Cup", "yearly": "01-02", "days": 3},
+      {"key": "setsubun-cup", "name": "Setsubun Cup", "yearly": "02-01", "days": 3},
+      {"key": "golden-week-cup", "name": "Golden Week Cup", "yearly": "04-29", "days": 7},
+      {"key": "mahjong-day-cup", "name": "Mahjong Day Cup", "yearly": "08-01", "days": 3,
+       "_note": "Mahjong Day is Aug 1 (8-1 = pa-i, a tile), set by the national mahjong parlour federation and registered with the Japan Anniversary Association"},
+      {"key": "tsukimi-cup", "name": "Tsukimi Cup",
+       "dates": {"2027": "09-14", "2028": "10-02", "2029": "09-21", "2030": "09-11"}, "days": 3,
+       "_note": "jugoya = the 15th night of the 8th lunar month (2027-09-15, 2028-10-03, 2029-09-22, 2030-09-12); the window is the day before to the day after. Add years before 2031"},
+      {"key": "year-end-cup", "name": "Year-End Cup", "yearly": "12-28", "days": 4}
+    ]
+  }
+}
