@@ -810,6 +810,95 @@ $("#pwGo").onclick = async () => {
   finally { btn.disabled = false; }
 };
 
+// ---- login tokens, one per client ----
+// The lobby's trust-on-first-use is keyed (account x client build): one recorded
+// token per machine and build. So being locked out is normally ONE row gone
+// stale -- a console and an emulator present the same signature and re-seed each
+// other's -- and the fix is to clear THAT row. The Password dialog's checkbox
+// clears the account token, which drops every client row with it, so unsticking
+// the PS2 that way makes the PC re-seed too.
+//
+// Every string in here is escaped: a client signature is 21 bytes off the NICK
+// line, which is to say off the wire.
+let TOK_POLID = null;
+
+function askTokens(polid) {
+  TOK_POLID = polid;
+  $("#tokPolid").textContent = polid;
+  $("#tokList").innerHTML = `<div><span>Reading…</span></div>`;
+  $("#tokModal").classList.add("show");
+  renderTokens();
+}
+
+function closeTokens() {
+  $("#tokModal").classList.remove("show");
+  TOK_POLID = null;
+}
+
+async function renderTokens() {
+  const polid = TOK_POLID, list = $("#tokList");
+  let r;
+  try { r = await api("/api/account-clients?polid=" + encodeURIComponent(polid)); }
+  catch (e) { list.innerHTML = ""; return toast(e.message, true); }
+  if (TOK_POLID !== polid) return;          // the dialog moved on while we asked
+  list.innerHTML = "";
+  if (!r.clients.length) {
+    // Not an error: an account that has never signed in to the lobby, or
+    // one whose tokens were just cleared, legitimately has no rows.
+    list.innerHTML = `<div><span>Nothing recorded - no client has signed in ` +
+      `to the lobby on this account yet, so there is nothing to clear.</span></div>`;
+    if (!r.legacy_token && !r.armed) {
+      list.innerHTML += `<div class="hot"><span>Next sign-in</span>` +
+        `<span>reads as this account's first ever - arm it first ` +
+        `(accounts.py arm)</span></div>`;
+    }
+    return;
+  }
+  r.clients.forEach((c) => {
+    const row = document.createElement("div");
+    const who = document.createElement("span");
+    who.className = "who";
+    // A signature we have not identified is shown RAW rather than guessed at.
+    // `last_seen` is what separates two rigs that share one.
+    who.innerHTML =
+      `<span><b>${esc(c.known ? c.label + " Viewer" : "Unrecognised client")}</b>` +
+      `<span style="color:var(--muted)"> - last seen ` +
+      `${esc((c.last_seen || "").slice(0, 19).replace("T", " ")) || "never"}</span></span>` +
+      `<span class="sig">${esc(c.client_sig)}</span>`;
+    const btn = document.createElement("button");
+    btn.className = "danger";
+    btn.textContent = "Clear";
+    btn.onclick = () => clearToken(polid, c.client_sig, btn);
+    row.append(who, btn);
+    list.append(row);
+  });
+}
+
+async function clearToken(polid, sig, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api("/api/account-clear-token", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polid, client_sig: sig })
+    });
+    // `rearm_needed` is the trap: nothing recorded anywhere reads to the lobby
+    // as this account's FIRST login, and the arm gate refuses that unless the
+    // account is armed. Say so rather than reporting a flat success.
+    toast(r.rearm_needed
+      ? `Cleared - but nothing is recorded now, so the next sign-in needs this `
+        + `account armed (accounts.py arm)`
+      : `Cleared ${r.label} on ${r.polid} - its next sign-in records a fresh token`,
+      !!r.rearm_needed);
+    renderTokens();
+  } catch (e) { btn.disabled = false; toast(e.message, true); }
+}
+
+$("#tokClose").onclick = closeTokens;
+$("#tokModal").onclick = (e) => { if (e.target === $("#tokModal")) closeTokens(); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#tokModal").classList.contains("show")) closeTokens();
+});
+
 function grantChecks() {
   return [...document.querySelectorAll("#grantChips input")];
 }

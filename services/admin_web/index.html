@@ -736,6 +736,29 @@
     </div>
   </div>
 
+  <!-- Login tokens, one row per client. The lobby records the NICK token per
+       (account x client build), so being locked out is normally ONE row gone
+       stale -- the PS2's, when a console and an emulator share a signature and
+       re-seed each other. Clearing that row leaves the other clients, and the
+       account's own token, alone; the Password dialog's checkbox is the blunt
+       version that drops all of them. -->
+  <div class="modal" id="tokModal">
+    <div class="card">
+      <h3>Login tokens for <code class="mono" id="tokPolid"></code></h3>
+      <p class="hint">The <b>lobby</b> records the NICK token once per client and
+        refuses that client for ever if it changes - which reads on the
+        console as <i>&ldquo;incorrect PlayOnline ID or password&rdquo;</i> while
+        the same account still works on the PC. Clear the row for the client that
+        is locked out: its next sign-in is trusted on sight and records a fresh
+        token. The other clients, the account token and the password are all
+        untouched.</p>
+      <div class="inv" id="tokList"></div>
+      <div class="foot">
+        <button class="ghost" id="tokClose">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
   <script src="/static/pml.js"></script>
   <script src="/static/app.js"></script>

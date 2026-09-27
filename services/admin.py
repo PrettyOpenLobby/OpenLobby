@@ -623,19 +623,34 @@ def _rand_code(groups=5, glen=4):
                     for _ in range(groups))
 
 
-#: NICK-blob head+pad signatures we have actually observed, mapped to a name
-#: for the panel. MEASURED, not decoded -- an unknown signature is shown raw
-#: rather than guessed at, because inventing a platform name for bytes we have
-#: not read is how a wrong reading gets written down as a fact.
-_CLIENT_SIGS = {
-    "TTTTTAISTTTTTTTTTTTTT": "PC",
-    "TTTTTAITTTTTTTTTTTTTT": "PC",
-    "TTTTT7ITTTGaItbIQ8nHA": "PS2",
-}
+#: Observed client signatures -> "PC"/"PS2". Lives in accounts.py; an unknown
+#: signature is shown raw here.
+_CLIENT_SIGS = accounts.CLIENT_SIGS
 
 
 def _client_label(sig):
-    return _CLIENT_SIGS.get(sig, sig)
+    return accounts.client_label(sig)
+
+
+def _ext_addr(mem):
+    """This member's outside mail address, or None when outside mail is not
+    configured (POL_EXT_MAIL_DOMAIN) or the member has no mail name."""
+    try:
+        import extmail
+    except ImportError:
+        return None
+    return extmail.outside_address(mem) if mem is not None else None
+
+
+def _member_row(db, who):
+    """Resolve an account from a POL ID, a login name or a login alias.
+
+    The same three lookups the auth path itself tries, in the same order: what
+    an operator has in front of them is whichever one they were given.
+    """
+    return (accounts.get_member(db, who)
+            or accounts.member_by_polid(db, who)
+            or accounts.member_by_alias(db, who))
 
 
 def _content_label(codes_csv):
@@ -829,6 +844,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._codes_list()
         if path == "/api/accounts":
             return self._accounts_list()
+        if path == "/api/account-clients":
+            return self._account_clients()
         if path == "/api/account-footprint":
             return self._account_footprint()
         if path == "/api/content-names":
@@ -887,10 +904,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._gm_control()
         if path == "/api/gm-say":
             return self._gm_say()
+        if path == "/api/gm-ticket":
+            return self._gm_ticket()
         if path == "/api/account-create":
             return self._account_create()
         if path == "/api/account-password":
             return self._account_password()
+        if path == "/api/account-clear-token":
+            return self._account_clear_token()
+        if path == "/api/account-extmail":
+            return self._account_extmail()
         if path == "/api/account-delete":
             return self._account_delete()
         if path == "/api/news":
@@ -1490,9 +1513,7 @@ class Handler(BaseHTTPRequestHandler):
             if pw:
                 row = accounts.set_account_password(db, who, pw)
             else:
-                row = (accounts.get_member(db, who)
-                       or accounts.member_by_polid(db, who)
-                       or accounts.member_by_alias(db, who))
+                row = _member_row(db, who)
             if row is None:
                 return self._send(404, {"error": "no such account"})
             if body.get("reset_token"):
@@ -1513,6 +1534,144 @@ class Handler(BaseHTTPRequestHandler):
                          "login_name": row["login_name"],
                          "changed": bool(pw),
                          "token_reset": bool(body.get("reset_token"))})
+
+    def _account_extmail(self):
+        """Allow or stop one account's mail to and from the internet
+        (`member.ext_mail`, see services/extmail.py). Off by default: sign-up
+        may be open, and this is what keeps a spammer off the outside domain."""
+        body = self._json_body()
+        who = (body.get("polid") or "").strip()
+        if not who:
+            return self._send(400, {"error": "polid required"})
+        on = 1 if body.get("enabled") else 0
+        db = _db()
+        try:
+            row = _member_row(db, who)
+            if row is None:
+                return self._send(404, {"error": "no such account"})
+            db.execute("UPDATE member SET ext_mail = ? WHERE id = ?", (on, row["id"]))
+            db.commit()
+            mail = row["mail_address"]
+        finally:
+            db.close()
+        op = (self._session() or {}).get("user") or "open-panel"
+        print(f"[admin] {op} turned outside mail {'ON' if on else 'OFF'} for "
+              f"{row['polid']!r} ({mail})", flush=True)
+        self._send(200, {"ok": True, "polid": row["polid"], "ext_mail": bool(on),
+                         "mail": mail})
+
+    # -- login tokens, per client -------------------------------------------- #
+    def _account_clients(self):
+        """Which clients hold a recorded login token for this account.
+
+        The lobby's trust-on-first-use is keyed (member, client_sig) -- one row
+        per machine AND per build, because that is what the 21-char NICK head
+        varies with. It is listed a row at a time because a lockout is a row at
+        a time: the account's own token is fine, one client's recorded token no
+        longer matches what that client sends, and only that client is refused.
+
+        The token itself is NOT returned. It is a password-free admission (the
+        lobby accepts whoever presents the recorded value) and nothing on this
+        screen needs to read it -- `last_seen` is what tells two rigs apart.
+        """
+        from urllib.parse import urlsplit, parse_qs
+        pol = (parse_qs(urlsplit(self.path).query).get("polid") or [""])[0].strip()
+        if not pol:
+            return self._send(400, {"error": "polid required"})
+        db = _db()
+        try:
+            row = _member_row(db, pol)
+            if row is None:
+                return self._send(404, {"error": "no such account"})
+            out = {
+                "polid": row["polid"],
+                "login_name": row["login_name"],
+                "clients": [{"client_sig": t["client_sig"],
+                             # An unknown signature is shown RAW. Naming the
+                             # platform of bytes nobody has decoded is how a
+                             # guess gets written down as a measurement, so
+                             # `_CLIENT_SIGS` holds only the ones we have seen
+                             # identified and everything else stays verbatim.
+                             "label": _client_label(t["client_sig"]),
+                             "known": t["client_sig"] in _CLIENT_SIGS,
+                             "first_seen": t["first_seen"],
+                             "last_seen": t["last_seen"]}
+                            for t in accounts.list_client_tokens(db, row["id"])],
+                "legacy_token":
+                    accounts.get_login_token(db, row["id"]) is not None,
+                "armed": accounts.login_token_armed(db, row["id"]),
+            }
+        except Exception as exc:          # pre-migration DB, schema drift
+            return self._send(500, {"error": str(exc)})
+        finally:
+            db.close()
+        self._send(200, out)
+
+    def _account_clear_token(self):
+        """Forget ONE client's recorded login token -- the PS2's, usually.
+
+        This is the lockout escape hatch at the granularity the failure has. A
+        console that is refused with "incorrect PlayOnline ID or password" while
+        the same account works on the PC is not a password problem at all: it is
+        this one row holding a token that client no longer sends.
+
+        `member.login_token` is deliberately left ALONE, and so is every other
+        client's row:
+
+          * the scoped row is what the lobby checks first when it can tell the
+            client apart, so clearing it is what actually unsticks that client;
+          * the Password dialog's token reset is the blunt instrument --
+            `clear_login_token` drops the account token AND every client row, so
+            using it to unstick the PS2 makes the PC re-seed as well;
+          * and an account left with no rows and a NULL account token reads to
+            the next login as its FIRST EVER, which is the case the arm gate
+            refuses (responders.resolve_account). Leaving the account token set
+            keeps that gate out of the way.
+
+        The next login from THIS signature is then trusted on sight and records
+        a fresh token, which is the whole point -- and the reason the request has
+        to name a signature rather than clearing whatever it finds.
+        """
+        body = self._json_body()
+        pol = (body.get("polid") or "").strip()
+        sig = body.get("client_sig") or ""
+        if not pol:
+            return self._send(400, {"error": "polid required"})
+        if not sig:
+            # A blanket clear already exists -- it is the Password dialog's
+            # token reset -- so an unnamed signature here is a bug in the
+            # caller, not a shortcut to it.
+            return self._send(400, {"error": "client_sig required"})
+        db = _db()
+        try:
+            row = _member_row(db, pol)
+            if row is None:
+                return self._send(404, {"error": "no such account"})
+            n = accounts.clear_client_tokens(db, row["id"], sig)
+            if not n:
+                return self._send(404, {"error": "no token is recorded for "
+                                                 "that client on this account"})
+            left = accounts.list_client_tokens(db, row["id"])
+            legacy = accounts.get_login_token(db, row["id"]) is not None
+            armed = accounts.login_token_armed(db, row["id"])
+        except Exception as exc:
+            return self._send(500, {"error": str(exc)})
+        finally:
+            db.close()
+        op = (self._session() or {}).get("user") or "open-panel"
+        print(f"[admin] {op} cleared the login token of {row['polid']!r} for "
+              f"client {sig!r} ({_client_label(sig)}) -- "
+              f"{len(left)} client row(s) left", flush=True)
+        self._send(200, {"ok": True, "polid": row["polid"], "client_sig": sig,
+                         "label": _client_label(sig), "cleared": n,
+                         "remaining": len(left),
+                         # ADVISORY, and it is the trap this dialog exists to
+                         # keep an operator out of: with nothing recorded at all
+                         # the next login is the account's first ever, and the
+                         # gate refuses an unarmed account.
+                         # `responders.resolve_account` owns the real decision --
+                         # this only reports the inputs it reads.
+                         "rearm_needed": not (left or legacy or armed)})
 
     def _account_delete(self):
         """Erase an account. The POL ID must be repeated in the body.

@@ -253,6 +253,20 @@ SUITES = [
     ("regcode_case",  [sys.executable, "regcode_case_test.py"], TOOLS, {}),
     ("mailident",     [sys.executable, "mailident_test.py"], TOOLS, {}),
     ("mail_auth",     [sys.executable, "mail_auth_test.py"], TOOLS, {}),
+    ("extmail",       [sys.executable, "extmail_test.py"], TOOLS, {}),
+    # Group channels and group requests are for the group's members.
+    ("group_gate",    [sys.executable, "group_gate_test.py"], TOOLS, {}),
+    # The mobile 2:3 marker lifts the 12-row cap; the PC reply is unchanged.
+    ("friends_mobile", [sys.executable, "friends_mobile_cap_test.py"], TOOLS, {}),
+    ("contentauth",   [sys.executable, "contentauth.py"], SERVICES, {}),
+    # The Viewer password, checked through the NICK digest, and the arm gate on
+    # binding a login token (trust-on-first-use).
+    ("login_digest",  [sys.executable, "login_digest_test.py"], TOOLS, {}),
+    ("login_token_arm", [sys.executable, "login_token_arm_test.py"], TOOLS, {}),
+    # The sign-up wizard's code mode (drives ucscgi over HTTP) and its limits.
+    ("signup_mode",   [sys.executable, "signup_mode_test.py"], TOOLS, {}),
+    ("signup_limit",  [sys.executable, "signup_limit_test.py"], TOOLS, {}),
+    ("polserver2_slim", [sys.executable, "polserver2_slim_test.py"], TOOLS, {}),
     ("group_check",   [sys.executable, "group_check.py"],     TOOLS, {}),
     # The client's "N/M in chat" counter has two inputs served by two different
     # containers -- the 7:12 member total and the IRC roster -- so neither can
