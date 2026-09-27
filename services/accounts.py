@@ -57,9 +57,12 @@ CLI:
     python accounts.py DB list
 """
 import argparse
+import base64
 import binascii
 import datetime
 import hashlib
+import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -436,10 +439,34 @@ CREATE TABLE IF NOT EXISTS login_token_client (
     PRIMARY KEY (member_id, client_sig)
 );
 
+-- Every message that crossed the outside-mail boundary, both ways. It is the
+-- daily cap's counter (services/extmail.py) and the trail for "who sent that".
+CREATE TABLE IF NOT EXISTS ext_mail_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    member_id  INTEGER REFERENCES member(id) ON DELETE CASCADE,
+    direction  TEXT NOT NULL,          -- 'out' | 'in'
+    peer_addr  TEXT,
+    at         TEXT NOT NULL,
+    ok         INTEGER NOT NULL,
+    detail     TEXT
+);
+
+-- CLIENT BUILDS WHOSE NICK DIGEST HAS BEEN PROVEN. The digest formula
+-- (md5(greeting[:40] + password), see login_digest_ok) was measured on the PC
+-- Viewer; a build only has a wrong password REFUSED on the digest once one real
+-- login from it has matched. Until then a mismatch falls back to the token check,
+-- so a build that salts differently cannot lock its players out.
+CREATE TABLE IF NOT EXISTS login_digest_client (
+    client_sig  TEXT PRIMARY KEY,
+    member_id   INTEGER,
+    proven_at   TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_member_polid   ON member(polid);
 CREATE INDEX IF NOT EXISTS idx_content_member ON content(member_id);
 CREATE INDEX IF NOT EXISTS idx_session_member ON session(member_id);
 CREATE INDEX IF NOT EXISTS idx_mail_box       ON mail(box, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_ext_mail_log   ON ext_mail_log(member_id, direction, at);
 """
 
 
@@ -592,6 +619,31 @@ _MIGRATIONS = {
         # real password check without our having reversed the derivation. Kept
         # separate from pw_hash (which the registration flow sets) on purpose.
         ("login_token", "TEXT"),
+        # WHEN THIS ACCOUNT MAY BIND A LOGIN TOKEN (ISO-8601 UTC, NULL = never).
+        #
+        # The token is trust-on-first-use: the first login of a client records
+        # whatever it presents, because the token is a function of the password
+        # we have not reversed and so cannot precompute. That is fine for a
+        # private LAN and wrong on a public server -- an account that has never
+        # been played is one crafted NICK away from being taken over by anyone
+        # who knows its POL ID, and the real owner would never know.
+        #
+        # So binding is only allowed while the account is ARMED, and what arms
+        # it is a password proof: creating the account, or an operator running
+        # `accounts.py arm` for a player who has shown they know the password.
+        # `arm_login_token` writes it; `login_token_armed` reads it.
+        ("token_arm_until", "TEXT"),
+        # May this member mail the INTERNET (and be mailed from it) through the
+        # outside-mail domain? Set only from the admin panel; see services/extmail.py.
+        ("ext_mail", "INTEGER NOT NULL DEFAULT 0"),
+        # THE LOGIN PASSWORD, SEALED (reversible, never plaintext at rest).
+        # The NICK line's 32-hex field is md5(greeting token + password), with
+        # the per-connection greeting FIRST -- so a one-way hash cannot check
+        # it and the lobby needs the password itself. Same reason as
+        # mail_pw_plain above (APOP). Written wherever a password is set or
+        # proven (register, passwd, a servlet sign-in); read only by
+        # responders.resolve_account. See seal_login_password.
+        ("login_pw_sealed", "TEXT"),
     ],
     "handle": [
         # WHAT THIS CLIENT CALLS ITSELF. A client knows its PEERS by the guids we
@@ -1181,6 +1233,7 @@ def add_member(conn, polid, login_name, password, member_no=None,
         "INSERT INTO member (polid, member_no, login_name, pw_hash, pw_salt,"
         " access_level, created_at) VALUES (?,?,?,?,?,?,?)",
         (polid, member_no, login_name, pw_hash, pw_salt, access_level, _now()))
+    set_login_password_copy(conn, cur.lastrowid, password, commit=False)
     conn.commit()
     return cur.lastrowid
 
@@ -1689,6 +1742,18 @@ def register_account(conn, handle, password, code=None, profile=None,
         raise RegistrationError(
             "That handle was taken while you were registering. "
             "Please choose another.") from exc
+    # ARM THE NEW ACCOUNT. Whoever created it proved the password by choosing
+    # it, and this is the one primitive every creation path goes through (the
+    # in-client wizard, the admin panel, the CLI), so arming here covers them all.
+    # See the token_arm_until note in _MIGRATIONS.
+    try:
+        arm_login_token(conn, member_id)
+    except Exception:                            # noqa: BLE001 -- never fail a signup
+        pass
+    try:
+        set_login_password_copy(conn, member_id, password)
+    except Exception:                            # noqa: BLE001 -- never fail a signup
+        pass
     return {"polid": polid, "member_id": member_id, "handle": handle,
             "contents": granted, "mail": f"{local}@pol.com"}
 
@@ -2536,6 +2601,10 @@ def set_member_password(conn, login_name, password):
             "UPDATE polid SET pw_hash = ?, pw_salt = ?, updated_at = ?"
             " WHERE polid = (SELECT polid FROM member WHERE login_name = ?)",
             (pw_hash, pw_salt, _now(), login_name))
+        row = conn.execute("SELECT id FROM member WHERE login_name = ?",
+                           (login_name,)).fetchone()
+        if row is not None:
+            set_login_password_copy(conn, row["id"], password, commit=False)
     return cur.rowcount
 
 
@@ -2575,6 +2644,7 @@ def set_account_password(conn, ident, password):
         conn.execute("UPDATE polid SET pw_hash = ?, pw_salt = ?, updated_at = ?"
                      " WHERE polid = ?",
                      (pw_hash, pw_salt, _now(), row["polid"]))
+        set_login_password_copy(conn, row["id"], password, commit=False)
     return get_member(conn, row["login_name"])
 
 
@@ -2605,6 +2675,173 @@ def clear_login_token(conn, member_id):
 
 
 # --------------------------------------------------------------------------- #
+# the login password copy, and the NICK digest it checks
+# --------------------------------------------------------------------------- #
+# The NICK line is `NICK <nick>:<32-hex>:<blob>`, and the 32-hex IS the password
+# check SE did:
+#
+#     digest = md5(greeting_token[:40] + password)
+#
+# where greeting_token is the base-32 string we sent in this hop's first `300 *`
+# line, without its 4-char tail. The formula comes from Project Crystal Server
+# (SqCrypto.GeneratePOLPasswordMD5, AGPL; reimplemented here, not copied).
+# Without it the lobby can check only the 11-char blob token, which is per
+# (handle x client build) and not per password.
+#
+# The salt comes FIRST, so pw_hash (PBKDF2) cannot verify it: we keep the
+# password sealed under a server key. POL_LOGIN_PW_KEY sets the key; otherwise it
+# is generated once into `login-pw.key` beside the database. Stdlib only:
+# HMAC-SHA256 in counter mode for the stream, HMAC-SHA256 tag over nonce+ct.
+
+_PW_SEAL_VER = "v1"
+_PW_KEY_CACHE = {}
+
+
+def _db_file(conn):
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main":
+                return row[2] or None
+    except sqlite3.Error:
+        pass
+    return None
+
+
+def _pw_seal_key(conn):
+    env = os.environ.get("POL_LOGIN_PW_KEY", "")
+    if env:
+        return hashlib.sha256(env.encode("utf-8")).digest()
+    dbf = _db_file(conn)
+    path = os.environ.get("POL_LOGIN_PW_KEYFILE") or (
+        os.path.join(os.path.dirname(os.path.abspath(dbf)), "login-pw.key")
+        if dbf else None)
+    if path is None:                         # in-memory DB (tests): per process
+        return _PW_KEY_CACHE.setdefault(None, secrets.token_bytes(32))
+    if path in _PW_KEY_CACHE:
+        return _PW_KEY_CACHE[path]
+    try:
+        # O_EXCL: two processes racing to create it must not end up with two keys.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(32) + "\n")
+    except FileExistsError:
+        pass
+    except OSError:
+        pass                                 # read-only /data: read what is there
+    with open(path, encoding="ascii") as f:
+        key = bytes.fromhex(f.read().strip())
+    if len(key) != 32:
+        raise ValueError(f"{path}: expected 32 hex-encoded bytes")
+    _PW_KEY_CACHE[path] = key
+    return key
+
+
+def _pw_stream(key, nonce, n):
+    out = b""
+    ctr = 0
+    while len(out) < n:
+        out += hmac.new(key, b"stream" + nonce + ctr.to_bytes(4, "big"),
+                        hashlib.sha256).digest()
+        ctr += 1
+    return out[:n]
+
+
+def seal_login_password(conn, password):
+    key = _pw_seal_key(conn)
+    pw = password.encode("utf-8") if isinstance(password, str) else password
+    nonce = secrets.token_bytes(16)
+    ct = bytes(a ^ b for a, b in zip(pw, _pw_stream(key, nonce, len(pw))))
+    tag = hmac.new(key, b"tag" + nonce + ct, hashlib.sha256).digest()[:16]
+    return _PW_SEAL_VER + ":" + base64.b64encode(nonce + ct + tag).decode("ascii")
+
+
+def unseal_login_password(conn, sealed):
+    """The password, or None if absent / sealed under a different key."""
+    if not sealed or not sealed.startswith(_PW_SEAL_VER + ":"):
+        return None
+    try:
+        raw = base64.b64decode(sealed[len(_PW_SEAL_VER) + 1:])
+    except (ValueError, binascii.Error):
+        return None
+    if len(raw) < 32:
+        return None
+    key = _pw_seal_key(conn)
+    nonce, ct, tag = raw[:16], raw[16:-16], raw[-16:]
+    want = hmac.new(key, b"tag" + nonce + ct, hashlib.sha256).digest()[:16]
+    if not hmac.compare_digest(tag, want):
+        return None
+    pw = bytes(a ^ b for a, b in zip(ct, _pw_stream(key, nonce, len(ct))))
+    return pw.decode("utf-8", "replace")
+
+
+def set_login_password_copy(conn, member_id, password, commit=True):
+    """Keep a sealed copy of the login password for the NICK digest check.
+
+    POL_LOGIN_PW_STORE=0 turns the capture off (existing copies stay)."""
+    if os.environ.get("POL_LOGIN_PW_STORE", "1") != "1" or password is None:
+        return False
+    conn.execute("UPDATE member SET login_pw_sealed = ? WHERE id = ?",
+                 (seal_login_password(conn, password), int(member_id)))
+    if commit:
+        conn.commit()
+    return True
+
+
+def get_login_password(conn, member_id):
+    row = conn.execute("SELECT login_pw_sealed FROM member WHERE id = ?",
+                       (int(member_id),)).fetchone()
+    return unseal_login_password(conn, row["login_pw_sealed"] if row else None)
+
+
+def login_digest(salt, password):
+    """md5(salt + password) as the client sends it (lower-case hex)."""
+    if isinstance(salt, bytes):
+        salt = salt.decode("ascii", "replace")
+    return hashlib.md5((salt[:40] + password).encode("latin-1", "replace")
+                       ).hexdigest()
+
+
+def login_digest_ok(digest, salts, password):
+    """The salt that reproduces `digest`, or None. `salts` = candidate greeting
+    tokens, likeliest first (see responders.handle_authserv)."""
+    if not digest or password is None:
+        return None
+    digest = digest.decode("ascii", "replace") if isinstance(
+        digest, bytes) else digest
+    digest = digest.strip().lower()
+    for salt in salts:
+        if hmac.compare_digest(login_digest(salt, password), digest):
+            return salt
+    return None
+
+
+def digest_client_proven(conn, client_sig):
+    if not client_sig:
+        return False
+    return conn.execute("SELECT 1 FROM login_digest_client WHERE client_sig = ?",
+                        (client_sig,)).fetchone() is not None
+
+
+def prove_digest_client(conn, client_sig, member_id):
+    """Record that `client_sig` salts the digest the way we compute it. Returns
+    True the first time (worth a log line)."""
+    if not client_sig:
+        return False
+    cur = conn.execute("INSERT OR IGNORE INTO login_digest_client"
+                       " (client_sig, member_id, proven_at) VALUES (?,?,?)",
+                       (client_sig, int(member_id), _now()))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def login_password_status(conn):
+    """(member_id, login_name, has_copy) for every active member."""
+    rows = conn.execute("SELECT id, login_name, login_pw_sealed FROM member"
+                        " WHERE status = 'active' ORDER BY id").fetchall()
+    return [(r["id"], r["login_name"], bool(r["login_pw_sealed"])) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
 # reads
 # --------------------------------------------------------------------------- #
 def get_member(conn, login_name):
@@ -2617,6 +2854,45 @@ def get_login_token(conn, member_id):
     row = conn.execute("SELECT login_token FROM member WHERE id = ?",
                        (member_id,)).fetchone()
     return row["login_token"] if row else None
+
+
+#: How long a fresh account may bind its first login token. A player who
+#: registers and then does not play in time is re-armed with `accounts.py arm`.
+TOKEN_ARM_DAYS = int(os.environ.get("POL_TOKEN_ARM_DAYS", "14"))
+
+
+def arm_login_token(conn, member_id, hours=None, days=None):
+    """Allow this account to bind a login token until now + the window.
+
+    Called where the PASSWORD has just been proved, such as account creation.
+    Extends rather than shortens an existing window, so a login
+    never takes away time that registration granted.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    span = datetime.timedelta(hours=hours) if hours is not None else \
+        datetime.timedelta(days=days if days is not None else TOKEN_ARM_DAYS)
+    until = (now + span).strftime("%Y-%m-%dT%H:%M:%SZ")
+    row = conn.execute("SELECT token_arm_until FROM member WHERE id = ?",
+                       (int(member_id),)).fetchone()
+    have = (row["token_arm_until"] if row else None) or ""
+    if have >= until:                       # ISO-8601 compares as a string
+        return have
+    conn.execute("UPDATE member SET token_arm_until = ? WHERE id = ?",
+                 (until, int(member_id)))
+    conn.commit()
+    return until
+
+
+def login_token_armed(conn, member_id, now=None):
+    """True while this account may bind a login token."""
+    row = conn.execute("SELECT token_arm_until FROM member WHERE id = ?",
+                       (int(member_id),)).fetchone()
+    until = (row["token_arm_until"] if row else None) or ""
+    if not until:
+        return False
+    now = now or datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    return until > now
 
 
 def set_login_token(conn, member_id, token):
@@ -2674,6 +2950,28 @@ def list_client_tokens(conn, member_id):
         "SELECT client_sig, token, first_seen, last_seen"
         " FROM login_token_client WHERE member_id = ?"
         " ORDER BY last_seen DESC", (member_id,)).fetchall()
+
+
+#: NICK-blob head+pad signatures we have actually observed, mapped to a name
+#: for the admin panel. MEASURED, not decoded -- an unknown
+#: signature has no entry rather than a guessed one, because inventing a
+#: platform name for bytes we have not read is how a wrong reading gets written
+#: down as a fact.
+CLIENT_SIGS = {
+    "TTTTTAISTTTTTTTTTTTTT": "PC",
+    "TTTTTAITTTTTTTTTTTTTT": "PC",
+    "TTTTT7ITTTGaItbIQ8nHA": "PS2",
+    # A real console and PCSX2 both present this one, and re-seed each other's
+    # row -- the failure the per-client token dialog exists for. One name for
+    # both because both are the PS2 Viewer; the signature does not say which
+    # machine it is.
+    "TTTTT7ISTTSt6L0zkUB@X": "PS2",
+}
+
+
+def client_label(sig, default=None):
+    """"PC", "PS2", or `default` (the raw signature when not given)."""
+    return CLIENT_SIGS.get(sig, sig if default is None else default)
 
 
 def clear_client_tokens(conn, member_id, client_sig=None):
@@ -2802,6 +3100,15 @@ def verify_member(conn, login_name, password):
                           (row["polid"],)).fetchone()
     if parent is None or parent["status"] != "active":
         return None
+    # A PROVEN password is the capture point for accounts made before the NICK
+    # digest check existed: the ucs-cgi servlet sign-in comes through here, so
+    # one sign-in there is what lets the lobby check the Viewer's password.
+    # Never let it fail the login it rides on.
+    try:
+        if get_login_password(conn, row["id"]) != password:
+            set_login_password_copy(conn, row["id"], password)
+    except Exception:                            # noqa: BLE001
+        pass
     return row
 
 
@@ -4258,6 +4565,17 @@ def main(argv=None):
     p = sub.add_parser("group-members", help="show one group's membership, or "
                        "every group's when no group is named")
     p.add_argument("handle"); p.add_argument("group", nargs="?")
+
+    p = sub.add_parser("arm", help="let an account bind a Viewer login token "
+                       "for a while (it is otherwise refused once its window "
+                       "has lapsed -- see token_arm_until)")
+    p.add_argument("ident", help="POL ID, login name or handle")
+    p.add_argument("--hours", type=float, default=24.0)
+
+    sub.add_parser("pwcopy", help="which accounts the lobby can check the "
+                                  "Viewer password for (NICK digest)")
+    p = sub.add_parser("armed", help="show which accounts may bind a login "
+                       "token right now, and which hold no token at all")
 
     args = ap.parse_args(argv)
     conn = connect(args.db)

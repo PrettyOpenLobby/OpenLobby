@@ -6300,8 +6300,30 @@ def _warn_stranded_registration(db, nick, peer_ip):
                                  for r in rows))
 
 
+def login_digest_salts(peer_ip, sent_greetings):
+    """Greeting tokens the NICK digest may be salted with, likeliest first.
+
+    This hop's own greetings (newest first), then every session token we issued
+    this address -- the IV search already knows a client can key from an older
+    dial's token (key_candidates), and it salts from the same one. md5 is cheap,
+    so there is no cap; a false match needs a 128-bit collision.
+    """
+    out = []
+    for g in reversed(sent_greetings or []):
+        if g not in out:
+            out.append(g)
+    _stamps_refresh()
+    with _STAMPS_LOCK:
+        history = list(_STAMPS.get(peer_ip, []))
+    for old, _at in reversed(history):
+        g = build_session_token(old)
+        if g not in out:
+            out.append(g)
+    return out
+
+
 def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
-                    client_sig=None):
+                    client_sig=None, digest=None, salts=()):
     """Resolve the login NICK to an account row, or None.
 
     Permissive by default: an unknown NICK is auto-provisioned (accounts
@@ -6318,6 +6340,16 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
     POL_ACCOUNTS_ENFORCE_PW=1 to check passwords without also gating unknown
     nicks). With enforcement off it is logged but allowed, so the token can be
     seeded across a fleet of existing accounts before the gate goes live.
+
+    `digest` is the NICK line's 32-hex field, md5(greeting[:40] + password),
+    and `salts` the greetings it may be salted with (login_digest_salts). When
+    the account holds a sealed password copy this is the REAL password check
+    (without it, any password logs in). A wrong digest is refused
+    only on a client build that has already matched once (login_digest_client),
+    so a build that salts differently degrades to the token check instead of
+    locking its players out. POL_LOGIN_DIGEST=0 turns the check off;
+    POL_LOGIN_DIGEST_ENFORCE=all refuses on unproven builds too, =off never
+    refuses (log only).
 
     Returns (conn, member_row, reject) -- `reject` is None when nothing was
     refused, else the SE status byte to send back (REJECT_UNKNOWN_ID /
@@ -6363,6 +6395,41 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
             # player -- this ID cannot log in -- and it is honest about what we
             # actually observed.
             return None, None, REJECT_UNKNOWN_ID
+        # THE PASSWORD CHECK: the NICK digest against the sealed password copy.
+        pw_proven = False
+        if digest and os.environ.get("POL_LOGIN_DIGEST", "1") == "1":
+            try:
+                pw = accounts.get_login_password(db, member["id"])
+            except Exception as exc:         # a key fault must not unseat the login
+                log("accounts", f"{peer_ip} {nick!r}: password copy unreadable "
+                                f"({exc!r}) -- token check only")
+                pw = None
+            mode = os.environ.get("POL_LOGIN_DIGEST_ENFORCE", "proven")
+            if pw is None:
+                log("accounts", f"{peer_ip} {nick!r}: no password copy held, so "
+                                "the typed password is NOT checked (token only) -- "
+                                "a servlet sign-in or password change stores it")
+            elif accounts.login_digest_ok(digest, salts, pw) is not None:
+                pw_proven = True
+                if accounts.prove_digest_client(db, client_sig, member["id"]):
+                    log("accounts", f"{peer_ip} NICK digest formula PROVEN for "
+                                    f"client build {client_sig!r} -- wrong "
+                                    "passwords from it are refused from now on")
+                log("accounts", f"{peer_ip} {nick!r}: password verified (NICK "
+                                "digest)")
+            elif mode != "off" and (
+                    mode == "all" or accounts.digest_client_proven(db, client_sig)):
+                log("accounts", f"{peer_ip} REJECT {nick!r}: wrong password "
+                                f"(NICK digest, client {client_sig!r})")
+                db.close()
+                return None, None, REJECT_BAD_PASSWORD
+            else:
+                log("accounts", f"{peer_ip} WARN {nick!r}: NICK digest did not "
+                                f"match over {len(salts)} salt(s) and client "
+                                f"build {client_sig!r} is not proven "
+                                f"(POL_LOGIN_DIGEST_ENFORCE={mode}) -- falling "
+                                "back to the token check. Wrong password, or "
+                                "this build salts differently.")
         # PASSWORD CHECK (trust-on-first-use on the stable NICK token).
         #
         # SCOPED BY CLIENT BUILD. The token is a function of (account x client),
@@ -6390,6 +6457,37 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
             else:
                 stored = legacy
             if stored is None:
+                # WARNING: BINDING IS A PASSWORD-FREE ADMISSION, so it is gated.
+                #
+                # Trust-on-first-use cannot check anything: the token is a
+                # function of the password we have not reversed. On a public
+                # server that means an account nobody has played yet can be
+                # taken by whoever knows its POL ID -- so the account has to be
+                # ARMED, and what arms it (registering, or an operator running
+                # `accounts.py arm`) follows a real password proof.
+                #
+                # A SECOND CLIENT on an account that already holds tokens is a
+                # different risk with a different cost: the signature changes
+                # per machine and per build (one account can hold several), so
+                # gating it would refuse people who are simply on a new PC.
+                # It is therefore allowed by default and only logged;
+                # POL_TOKEN_ARM_CLIENTS=1 gates it too.
+                first_ever = legacy is None and not accounts.list_client_tokens(
+                    db, member["id"])
+                gate = os.environ.get("POL_TOKEN_ARM", "1") == "1" and (
+                    first_ever or
+                    os.environ.get("POL_TOKEN_ARM_CLIENTS", "0") == "1")
+                if (gate and not pw_proven
+                        and not accounts.login_token_armed(db, member["id"])):
+                    log("accounts",
+                        f"{peer_ip} REJECT {nick!r}: this account is not armed "
+                        f"to bind a login token"
+                        + (" (it has never been played)" if first_ever else
+                           f" for a new client {client_sig!r}")
+                        + ". Run `accounts.py arm` to arm it for a while. "
+                        "POL_TOKEN_ARM=0 disables this.")
+                    db.close()
+                    return None, None, REJECT_BAD_PASSWORD
                 if scoped:
                     accounts.set_client_token(db, member["id"], client_sig, cred)
                     known = accounts.list_client_tokens(db, member["id"])
@@ -6403,6 +6501,14 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                         log("accounts",
                             f"{peer_ip} recorded login token for {nick!r} "
                             f"(first login -- trust-on-first-use)")
+            elif stored != cred and pw_proven and scoped:
+                # The password was checked for real, so a moved token is not a
+                # wrong password -- it is the console and PCSX2 sharing one
+                # signature, or a token that moved with the network path.
+                accounts.set_client_token(db, member["id"], client_sig, cred)
+                log("accounts", f"{peer_ip} {nick!r}: login token moved for "
+                                f"client {client_sig!r}; re-bound (password "
+                                "verified)")
             elif stored != cred:
                 log("accounts", f"{peer_ip} {'REJECT' if enforce_pw else 'WARN'} "
                                 f"{nick!r}: wrong password (token mismatch"
@@ -6567,6 +6673,9 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         else:
             greeting = build_redirect_token(_self_ip(), next_port)
             _trace("greet redirect-token", "no session stamp on this hop")
+        # Every greeting this hop sends, newest last: the NICK digest is
+        # md5(greeting[:40] + password), so these are its salt candidates.
+        sent_greetings = [greeting]
         conn.sendall(f"{prefix} 300 * {greeting}\r\n".encode())
         user, rest = _recv_line(conn, timeout=20 if stamp is None else 4)
         if stamp is not None and not user:
@@ -6589,8 +6698,8 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             _trace("re-greet redirect", f"dropped stamp {stamp:#010x} after 4s "
                                         "of silence")
             stamp = None
-            conn.sendall(f"{prefix} 300 * "
-                         f"{build_redirect_token(_self_ip(), next_port)}\r\n".encode())
+            sent_greetings.append(build_redirect_token(_self_ip(), next_port))
+            conn.sendall(f"{prefix} 300 * {sent_greetings[-1]}\r\n".encode())
             user, rest = _recv_line(conn)
         elif stamp is not None:
             log("authserv", f"{peer} client accepted the SESSION token "
@@ -6804,9 +6913,10 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # Resolve the NICK to an account. Permissive unless POL_ACCOUNTS_ENFORCE=1;
         # a rejection here means "no such account" OR a wrong password, and we now
         # SAY SO on the wire instead of hanging up (see the reject block below).
-        acct_db, member, reject = resolve_account(nick, addr[0], iv,
-                                                  cred=cred,
-                                                  client_sig=client_sig)
+        acct_db, member, reject = resolve_account(
+            nick, addr[0], iv, cred=cred, client_sig=client_sig,
+            digest=nick_fields[1].strip() if len(nick_fields) > 2 else None,
+            salts=login_digest_salts(addr[0], sent_greetings))
         _trace("account resolved",
                ("member %s (id %s)" % (member["login_name"], member["id"]))
                if member is not None else
