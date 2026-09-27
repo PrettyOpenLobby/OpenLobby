@@ -103,6 +103,18 @@ used to emit resolved `pml` as an authority component and loaded nothing.
     POL_UCS_SKIN=ucs-jp     the JP kit; only present on a JP install
     POL_UCS_SKIN=flat       the pre-art chrome, for comparison
 
+## The registration code is a knob
+
+    POL_SIGNUP_MODE=code        default -- SE's flow: no code, no account
+    POL_SIGNUP_MODE=permissive  the code is OPTIONAL; an empty step 3 goes
+                                through and grants POL_SIGNUP_CONTENTS
+                                (default: every title the server offers)
+    POL_SIGNUP_ANY_CODE=1       any typed code is accepted without being
+                                redeemed, and grants every title offered
+
+A code that is typed is checked and redeemed in BOTH modes. `SIGNUP_MODE` has
+the detail, including why an unrecognised value means `code`.
+
 Usage:
     python ucscgi.py                 # TLS on the configured port (51305)
     python ucscgi.py --plain         # plain HTTP (behind a TLS terminator)
@@ -117,6 +129,7 @@ import secrets
 import ssl
 import subprocess
 import sys
+import ipaddress
 import threading
 import time
 import traceback
@@ -1147,25 +1160,132 @@ def page_step2(tok):
         "Accept the terms to continue.", scroll=False))
 
 
+#: HOW THE SIGN-UP WIZARD TREATS THE REGISTRATION CODE.
+#:
+#:   POL_SIGNUP_MODE=code        default, and SE's own flow: step 3 will not let
+#:                               anyone past without a code this server issued.
+#:   POL_SIGNUP_MODE=permissive  the code becomes OPTIONAL. Leave the boxes empty
+#:                               and the wizard goes on to step 4, granting
+#:                               POL_SIGNUP_CONTENTS instead.
+#:
+#: There is no third state, and an unrecognised value is `code` -- a typo in a
+#: compose file must not be what opens registration up.
+#:
+#: A code that IS typed is still checked in both modes (unless
+#: POL_SIGNUP_ANY_CODE=1, see `_signup_open`), and still wins: nobody
+#: who has a real code should have it silently swallowed, and a mistyped one is
+#: worth saying so about rather than quietly handing out the default set.
+#: Redeeming a code on an EXISTING account (kinou 31) is untouched by this -- that
+#: screen exists to spend a code, so a code is the whole point of it.
+SIGNUP_MODE = (os.environ.get("POL_SIGNUP_MODE") or "code").strip().lower()
+SIGNUP_CODE_REQUIRED = SIGNUP_MODE != "permissive"
+
+#: What a code-free sign-up grants: POL_SIGNUP_CONTENTS, or every title this
+#: server offers when that is empty. Only read when the code is optional.
+def _signup_contents():
+    raw = (os.environ.get("POL_SIGNUP_CONTENTS") or "").replace(" ", "")
+    if not raw:
+        return _all_content_codes()
+    return tuple(int(x) for x in raw.split(",") if x.isdigit()) or (1,)
+
+
+#: HOW MANY ACCOUNTS THE WIZARD WILL MINT.
+#:
+#: The registration code used to be the only gate on this path, and taking it
+#: away (POL_SIGNUP_MODE=permissive or POL_SIGNUP_ANY_CODE=1) left none at all,
+#: on a port a public server exposes to the internet. These limits put a bound
+#: on how many accounts one address, and the whole service, can mint in a day.
+#:
+#: TWO limits, because the address here cannot always be trusted to mean a
+#: person. The plain-HTTP route reaches this process with the player's own
+#: address, but the TLS route arrives from the terminator on loopback, where
+#: EVERY caller looks the same. Keying only on the address would then either do
+#: nothing or lock out the whole world on the fourth sign-up. So:
+#:
+#:   POL_SIGNUP_PER_DAY  a cap on the whole service, applied always (default 50)
+#:   POL_SIGNUP_PER_IP   per address, applied ONLY to a caller that is genuinely
+#:                       remote -- loopback and private addresses are exempt,
+#:                       because there they are the terminator, not a person
+SIGNUP_PER_DAY = int(os.environ.get("POL_SIGNUP_PER_DAY") or "50")
+SIGNUP_PER_IP = int(os.environ.get("POL_SIGNUP_PER_IP") or "3")
+SIGNUP_DAY = 86400
+
+_MADE = []                      # (unix time, peer address) of each account made
+_MADE_LOCK = threading.Lock()
+
+
+def _countable_peer(addr):
+    """The address to count sign-ups against, or None when it names no person.
+
+    Loopback and private addresses are the TLS terminator or the LAN, not a
+    player: counting them would pool unrelated people under one identity.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return None
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return None
+    return str(ip)
+
+
+def signup_over_limit(peer, now=None):
+    """None, or a displayable reason to refuse this sign-up."""
+    now = now or time.time()
+    who = _countable_peer(peer)
+    with _MADE_LOCK:
+        _MADE[:] = [(t, a) for t, a in _MADE if now - t < SIGNUP_DAY]
+        if SIGNUP_PER_DAY > 0 and len(_MADE) >= SIGNUP_PER_DAY:
+            return ("PlayOnline is busy right now. "
+                    "Please try registering again tomorrow.")
+        if who and SIGNUP_PER_IP > 0 \
+                and sum(1 for _, a in _MADE if a == who) >= SIGNUP_PER_IP:
+            return ("This connection has already registered %d times today."
+                    % SIGNUP_PER_IP)
+    return None
+
+
+def note_signup(peer, now=None):
+    """Record a SUCCESSFUL sign-up. Failures are not counted, so a player who
+    mistypes a handle three times can still finish."""
+    with _MADE_LOCK:
+        _MADE.append((now or time.time(), _countable_peer(peer)))
+        if len(_MADE) > 20000:                   # bounded, whatever happens
+            del _MADE[:-1000]
+
+
 def page_step3(tok, error=None):
     """Registration code. Positions are the ones that already render well; the
     copy is shortened to fit the box it is in -- the first line needed 608px of
     a 600px box, so it wrapped and lost the word "package" off the bottom."""
     st = _store_get(_SIGNUP, tok) or {}
+    # In permissive mode the screen must SAY the boxes can be left empty. A
+    # screen headed "Entering Registration Code" that silently accepts nothing
+    # reads as broken, and on a controller nobody experiments with Submit.
+    lead = ("Enter the registration code from your software package."
+            if SIGNUP_CODE_REQUIRED else
+            "Have a registration code? Enter it here.")
+    second = ("Upper or lower case is fine."
+              # NOT "the code is case-sensitive" -- SE's wording, and it is
+              # false of our codes (see accounts.normalise_regcode).
+              if SIGNUP_CODE_REQUIRED else
+              "Leave it empty if you have none. Upper or lower case is fine.")
+    footnote = ("* You only need to enter this code once."
+                if SIGNUP_CODE_REQUIRED else
+                "* You do not need a code to play here.")
     fields = (
-        _line(20, "Enter the registration code from your software package.")
-        # NOT "the code is case-sensitive" any more -- SE's wording, and it
-        # was false of our codes even when we compared them exactly (see
-        # accounts.normalise_regcode). A player read it, was refused for
-        # typing lower case, and had to retype: prod 2026-08-29 15:28.
-        + _line(42, "Upper or lower case is fine.")
+        _line(20, lead)
+        + _line(42, second)
         + _codefields(110, st)
-        + _bottom(("note", "* You only need to enter this code once."),
+        + _bottom(("note", footnote),
                   ("note", error)))
     return _page("PlayOnline registration", _wizard(
         3, 6, "Entering Registration Code", _form(fields, 4, tok),
         [("Submit", SUBMIT), ("Exit", "tologin:")],
-        "Enter your registration code.", scroll=False),
+        "Enter your registration code." if SIGNUP_CODE_REQUIRED
+        else "Enter a code, or just press Submit.", scroll=False),
         extra_head=_formaction(_upath(4, tok)))
 
 
@@ -2039,8 +2159,11 @@ def page_mailpw(tok, ret_url, sess, error=None):
 
 def page_mailpw_done(ret_url):
     inner = (_line(TOP, "Your mail password has been changed.", indent=0)
-             + _bottom(("hint", "Use it in your mail client, not at the "
-                                "PlayOnline login."), indent=0))
+             # The Viewer keeps its own copy (given to it at sign-up) and
+             # nothing here updates it, so say so: a player who changes it
+             # here and not there is refused at the mail server.
+             + _bottom(("hint", "Enter it in your Mail account settings "
+                                "too."), indent=0))
     return _page("PlayOnline", _chrome(
         "", TITLE_MAILPW, inner, [("Exit", _ret_ok(ret_url))],
         "Mail password changed.", scroll=False))
@@ -2627,20 +2750,22 @@ class Handler(BaseHTTPRequestHandler):
             # through without a code".
             if accounts is not None:
                 code = st.get("code")
-                if not code:
+                if not code and SIGNUP_CODE_REQUIRED:
                     return page_step3(tok, error="Please enter your "
                                                  "registration code.")
-                db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                     accounts.DEFAULT_DB))
-                try:
-                    if _signup_open():
-                        pass            # any code opens the door; see _signup_open
-                    elif accounts.check_regcode(db, code) is None:
-                        return page_step3(tok, error="That registration code is "
-                                                     "not valid or has already "
-                                                     "been used.")
-                finally:
-                    db.close()
+                # A code that was TYPED is checked in both modes: permissive
+                # means "you do not need one", not "whatever you type is
+                # ignored". Only an empty one walks past, and only here.
+                if code and not _signup_open():
+                    db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
+                                                         accounts.DEFAULT_DB))
+                    try:
+                        if accounts.check_regcode(db, code) is None:
+                            return page_step3(tok, error="That registration code is "
+                                                         "not valid or has already "
+                                                         "been used.")
+                    finally:
+                        db.close()
             return page_step4(tok)
         if step == 5:
             # Validate password + handle on the way out of the info page.
@@ -3051,6 +3176,15 @@ class Handler(BaseHTTPRequestHandler):
         if accounts is None:
             return page_message("PlayOnline", "Account database unavailable.")
         done = st.get("account")
+        # Checked BEFORE the idempotency shortcut below would be reached by a
+        # NEW token, but after it for one that already holds an account: a
+        # retried fetch of a sign-up that already succeeded must keep showing
+        # the same ID rather than turn into a refusal.
+        if not done:
+            why = signup_over_limit(self.client_address[0])
+            if why:
+                log(f"sign-up refused for {self.client_address[0]}: {why}")
+                return page_step4(tok, error=why)
         if done:
             log(f"step 6 re-served for {done['polid']} (account already issued)")
             return page_step6(tok, done["polid"], done["handle"],
@@ -3067,12 +3201,22 @@ class Handler(BaseHTTPRequestHandler):
                 # accounts.register_account. A failure here leaves nothing
                 # behind, so the user can fix the problem and try again. No
                 # `profile=` any more: we do not collect the contact fields.
+                # `contents` is the fallback register_account grants when no
+                # code is redeemed, and its own default is FFXI alone. In code
+                # mode the code is what grants the titles and nothing here may
+                # change that, so the wider set is passed ONLY when the code is
+                # optional -- otherwise a code-mode sign-up whose code was
+                # redeemed in the seconds since step 3 would quietly come out
+                # with every title instead of being refused.
                 if _signup_open():
+                    # any typed code opens the door; nothing is redeemed
                     acct = accounts.register_account(
                         db, handle, pw, contents=_all_content_codes())
                 else:
-                    acct = accounts.register_account(db, handle, pw,
-                                                     code=st.get("code"))
+                    acct = accounts.register_account(
+                        db, handle, pw, code=st.get("code") or None,
+                        **({} if SIGNUP_CODE_REQUIRED
+                           else {"contents": _signup_contents()}))
             except accounts.RegistrationError as exc:
                 log(f"registration refused: {exc}")
                 return page_step4(tok, error=str(exc))
@@ -3089,6 +3233,7 @@ class Handler(BaseHTTPRequestHandler):
             st["account"] = {"polid": acct["polid"], "handle": acct["handle"],
                              "contents": acct["contents"], "mail": acct["mail"],
                              "pw": pw, "mail_pw": pw}
+            note_signup(self.client_address[0])
             can_rdt = rdt_representable(pw, acct["mail"], acct["polid"])
             if not can_rdt:
                 # See RDT_UNREPRESENTABLE: a value here would be truncated by
