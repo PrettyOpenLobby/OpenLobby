@@ -130,6 +130,16 @@ def game_fields(handle_id, member_id):
     check(not R._content_game_fields(1, CTID, member_id),
           "no id map -> FFXI tail stays UNSET, not zeroed")
 
+    # JAN_CID is the subject of the captured content write below, and it must
+    # resolve to content 3 whether or not any title module is present. The mint
+    # hands out ids in the same range, so free the id first.
+    db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    db.execute("DELETE FROM handle_content WHERE CAST(content_id AS INTEGER) = ?",
+               (JAN_CID,))
+    accounts.link_content_to_handle(db, handle_id, 3, str(JAN_CID))
+    db.commit()
+    db.close()
+
     # --- FRONT MISSION ONLINE ------------------------------------------------
     if importlib.util.find_spec("fmo") is None:
         print("[SKIP] FRONT MISSION ONLINE profile fields: the fmo title module is not present in this tree")

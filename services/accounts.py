@@ -1790,6 +1790,62 @@ def delete_handle(conn, member_id, handle_name):
     return True
 
 
+def rename_handle(conn, member_id, handle_id, new_name):
+    """Give one of a member's handles a new name, in place. Returns the old name.
+
+    Raises ValueError with a message fit to show the player.
+
+    IN PLACE, NOT DELETE + ADD. The handle id is what everything else hangs on:
+    its Content IDs (handle_content), its profile, its guid on the wire, and the
+    `peer_handle` / `member_handle` of every friend and group row that points at
+    it. Keeping the id keeps all of those.
+
+    Two copies of the NAME are rewritten as well. `friend.peer_name` and
+    `group_member.member_name` are part of those tables' unique keys, so a copy
+    left at the old name would let a later add under the new name create a
+    second row for the same person.
+
+    The OLD name is tombstoned for this member exactly as `delete_handle` does,
+    because a Viewer that was open before the rename still holds the old name in
+    its cached handle table and volunteers it on 0:8; without the tombstone the
+    lobby would capture it straight back as a second handle.
+    """
+    new_name = (new_name or "").strip()
+    bad = check_handle_policy(new_name)
+    if bad:
+        raise ValueError(bad)
+    row = conn.execute("SELECT id, handle_name FROM handle WHERE id = ? AND member_id = ?",
+                       (int(handle_id), int(member_id))).fetchone()
+    if row is None:
+        raise ValueError("That handle was not found.")
+    old = row["handle_name"]
+    if new_name == old:
+        raise ValueError("That is already this handle's name.")
+    if conn.execute("SELECT 1 FROM handle WHERE handle_name = ? AND id != ?",
+                    (new_name, int(handle_id))).fetchone():
+        raise ValueError(f"The handle {new_name!r} is already in use. "
+                         "Please choose another.")
+    try:
+        with conn:
+            conn.execute("UPDATE handle SET handle_name = ? WHERE id = ?",
+                         (new_name, int(handle_id)))
+            conn.execute("UPDATE friend SET peer_name = ? WHERE peer_handle = ?",
+                         (new_name, int(handle_id)))
+            conn.execute("UPDATE group_member SET member_name = ? WHERE member_handle = ?",
+                         (new_name, int(handle_id)))
+            conn.execute("DELETE FROM deleted_handle WHERE member_id = ? AND handle_name = ?",
+                         (int(member_id), new_name))
+            conn.execute("INSERT OR IGNORE INTO deleted_handle (member_id, handle_name,"
+                         " deleted_at) VALUES (?,?,?)", (int(member_id), old, _now()))
+    except sqlite3.IntegrityError:
+        # Somebody's list already holds an unlinked entry under the new name.
+        raise ValueError(f"The handle {new_name!r} cannot be used right now. "
+                         "Please choose another.")
+    print(f"[accounts] renamed handle {int(handle_id)} of member {int(member_id)}:"
+          f" {old!r} -> {new_name!r}", flush=True)
+    return old
+
+
 def _account_ids(conn, polid):
     """(member ids, handle ids, handle names) belonging to `polid`."""
     members = [int(r["id"]) for r in conn.execute(
@@ -1942,12 +1998,60 @@ def delete_polid(conn, polid, release_codes=False):
         conn.execute("DELETE FROM polid WHERE polid = ?", (polid,))
 
     footprint["released_codes"] = footprint["regcodes"] if release_codes else []
+    footprint["files"] = purge_member_files(members)
     print(f"[accounts] deleted {polid!r}: {len(footprint['members'])} member(s), "
           f"{len(footprint['handles'])} handle(s), {footprint['mail']} message(s), "
-          f"{footprint['referenced_by']} entry/entries on other people's lists"
+          f"{footprint['referenced_by']} entry/entries on other people's lists, "
+          f"{len(footprint['files'])} game file(s)"
           + (f"; released {len(footprint['regcodes'])} code(s)" if release_codes
              else ""), flush=True)
     return footprint
+
+
+def member_resource_dir():
+    """The per-member game state directory, resolved as janstats.stats_dir and
+    tetramaster._collection_dir resolve it."""
+    root = os.environ.get("POL_RESOURCE_DIR")
+    if not root:
+        root = os.path.join(os.environ.get("POL_DATA_DIR", "/data"), "resources")
+    return root
+
+
+def purge_member_files(member_ids, root=None):
+    """Delete every `<member>.*` file in the resource directory. Returns the names.
+
+    THE GAMES KEEP THEIR OWN STATE OUTSIDE THIS DATABASE -- the Jan record, the
+    TM collection and prizes, every save the client stored -- and all of it is
+    named `<member id>.<what>` (responders._resource_file scopes a stored path
+    to the session's member; shared lobby lists are `s<hex>.` and mail is `m.`,
+    so neither matches). Deleting the account without these leaves a deleted
+    player on a title's ranking boards with a blank name, because a rank list
+    is built from the files.
+
+    A directory that cannot be read or a file that cannot be removed is logged
+    and skipped; the account itself is already gone by the time this runs.
+    """
+    root = root or member_resource_dir()
+    prefixes = tuple("%d." % int(m) for m in member_ids)
+    if not prefixes:
+        return []
+    try:
+        names = os.listdir(root)
+    except OSError as exc:
+        print(f"[accounts] cannot list {root!r} to purge game files ({exc!r})",
+              flush=True)
+        return []
+    gone = []
+    for name in sorted(names):
+        if not name.startswith(prefixes):
+            continue
+        try:
+            os.remove(os.path.join(root, name))
+            gone.append(name)
+        except OSError as exc:
+            print(f"[accounts] could not remove game file {name!r} ({exc!r})",
+                  flush=True)
+    return gone
 
 
 #: Every handle belonging to the member who owns this handle, the handle itself
@@ -2349,16 +2453,27 @@ FFXI_CONTENT_CODE = 1
 #: sells anything and a player who makes a second character and cannot log into
 #: it has no way to tell that from a bug (they get POL-0001, which says nothing).
 #:
-#: WARNING: EIGHT IS THE CLIENT'S CEILING FOR WHAT A HANDLE CAN *SHOW*, NOT FOR WHAT IT
-#: CAN HOLD. The 1:3 record binds a character to a handle through a 3-bit
-#: position into the 8-byte array at handle_slot+0x20 (SE string 26069, "You can
-#: link up to eight Content IDs to a handle"), so only eight per handle appear in
-#: the handle's Content ID list. The 64-slot character table the launch gate and
-#: FFXI's world lookup actually read has no such limit -- see
-#: `responders._char_record`, which serves the overflow UNBOUND: present and
-#: playable, absent from the profile view. Content IDs can also be moved between
-#: handles (`link_content_to_handle`) if a player wants them visible.
-FFXI_CHARACTER_SLOTS = max(1, int(os.environ.get("POL_FFXI_CHARACTER_SLOTS", "4")))
+#: WARNING: DEFAULT 1, AND EIGHT PER HANDLE IS A HARD CEILING. The ninth and
+#: later ids cannot be served "unbound but playable": the Viewer reads a
+#: present-but-unbound Content ID as one that still needs a handle and walks the
+#: player into the assign-a-handle flow, which dead-ends on that very ceiling:
+#: SE string 26069, "The handle "%s" is already linked to 8 Content IDs." FFXI
+#: then becomes unreachable from a handle where it worked.
+#:
+#: A handle holds one link per TITLE and there are eight titles, so 1 is the only
+#: value that cannot collide with a later title grant. Raising it is safe only on
+#: a deployment that grants fewer titles: `ensure_content_slots` clamps the mint
+#: to CONTENT_IDS_PER_HANDLE and `responders._db_chars` truncates the wire, but a
+#: title granted AFTER the extra ids exist still pushes them out -- and an FFXI
+#: character sitting on a pushed-out id is POL-0001 with no explanation.
+FFXI_CHARACTER_SLOTS = max(1, int(os.environ.get("POL_FFXI_CHARACTER_SLOTS") or 1))
+
+#: Content IDs one handle may hold, ever, across every game. SE's own limit
+#: (string 26069) and the shape of the wire record: the binding is one byte per
+#: position in the 8 bytes at handle_slot+0x20 and the record's position field is
+#: three bits. `responders._CHAR_PER_HANDLE` enforces the same number on the
+#: wire; this one stops us WRITING a ninth in the first place.
+CONTENT_IDS_PER_HANDLE = 8
 
 
 def content_slot_count(conn, handle_id, content_code, active_only=True):
@@ -2368,6 +2483,53 @@ def content_slot_count(conn, handle_id, content_code, active_only=True):
     if active_only:
         q += " AND status = 'active'"
     return int(conn.execute(q, (handle_id, int(content_code))).fetchone()["n"])
+
+
+#: The bridge's charid -> Content ID map. Same default as
+#: `responders._FFXI_IDMAP`; POL_FFXI_IDMAP overrides both.
+FFXI_IDMAP = os.environ.get("POL_FFXI_IDMAP", "/lsb/ffxi_idmap.json")
+
+
+def ffxi_ids_in_use(path=None):
+    """`{Content ID (str): character name}` for every FFXI character the bridge
+    has paired. Raises OSError or ValueError if the map cannot be read.
+
+    WARNING: **A FAILURE HERE IS NOT "NOTHING IS IN USE".** This is the check that
+    stands between an operator and deactivating the Content ID a live character
+    is named after -- that character then misses POL's table and is POL-0001 at
+    select, for ever, with nothing on screen to explain it. So it RAISES rather
+    than returning an empty dict, and `trim-ffxi-slots` refuses to write when it
+    does.
+
+    Both on-disk shapes `lsb/ffxi_bridge.save_idmap` has used are read: the
+    original flat `{"<charid>": <ContentID>}` and the current
+    `{"<charid>": {"content_id": N, "name": "Lex", ...}}`. An entry in neither
+    shape raises too -- a map we cannot parse is a map we cannot vouch for.
+    """
+    with open(path or FFXI_IDMAP, "r", encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if not isinstance(raw, dict):
+        raise ValueError("%s: expected an object, got %s"
+                         % (path or FFXI_IDMAP, type(raw).__name__))
+    out = {}
+    for charid, val in raw.items():
+        if isinstance(val, dict):
+            out[str(int(val["content_id"]))] = val.get("name") or ("charid " + str(charid))
+        else:
+            out[str(int(val))] = "charid " + str(charid)
+    return out
+
+
+def handle_link_count(conn, handle_id):
+    """How many Content IDs this handle holds across ALL games, any status.
+
+    Any status on purpose: an inactive row still owns a minted Content ID and
+    still occupies its slot number, so it counts against the ceiling exactly like
+    an active one (see CONTENT_IDS_PER_HANDLE).
+    """
+    return int(conn.execute(
+        "SELECT COUNT(*) AS n FROM handle_content WHERE handle_id = ?",
+        (int(handle_id),)).fetchone()["n"])
 
 
 def ensure_content_slots(conn, handle_id, content_code, want, status="active"):
@@ -2393,6 +2555,13 @@ def ensure_content_slots(conn, handle_id, content_code, want, status="active"):
     would hand the title to everybody.
     """
     have = content_slot_count(conn, handle_id, content_code, active_only=False)
+    # THE HANDLE'S HARD CEILING, and it is not this game's business alone: a
+    # ninth Content ID on a handle is not a bonus that hides in the profile view,
+    # it is a dialog that makes the title unreachable (see FFXI_CHARACTER_SLOTS).
+    # Clamp rather than refuse -- a handle with room for
+    # one more gets one, which is what a deployment granting fewer titles wants.
+    room = max(0, CONTENT_IDS_PER_HANDLE - handle_link_count(conn, handle_id))
+    want = min(want, have + room)
     if have == 0 or have >= want:
         return 0
     row = conn.execute(
@@ -4560,6 +4729,25 @@ def main(argv=None):
     p = sub.add_parser("link-all", help="link every member's active content to "
                        "their primary handle (mints provisional Content IDs)")
 
+    p = sub.add_parser("trim-ffxi-slots", help="deactivate the EXTRA FFXI "
+                       "Content IDs (slot <> 0) that push a handle past its "
+                       "ceiling of %d, which makes the Viewer refuse to open "
+                       "FFXI from it at all (string 26069). Reports by default; "
+                       "--apply writes. Skips any id a character is already on"
+                       % CONTENT_IDS_PER_HANDLE)
+    p.add_argument("--apply", action="store_true",
+                   help="actually write; without it this only reports")
+    p.add_argument("--handle", help="just this handle (name), not every one")
+    p.add_argument("--idmap", help="path to the bridge's ffxi_idmap.json "
+                                   "(default POL_FFXI_IDMAP, else /lsb/ffxi_idmap.json)")
+    p.add_argument("--force", action="store_true",
+                   help="write even when the idmap is unreadable, or when a "
+                        "character IS on an id. That character becomes "
+                        "unplayable (POL-0001 at select). Say so out loud first")
+    p.add_argument("--restore", action="store_true",
+                   help="put back what a previous --apply deactivated "
+                        "(reads handle_content_trimmed)")
+
     # Friend commands. These exist because the friendship loop had NO operator
     # entry point at all -- every friend row in this database was hand-written
     # SQL -- and because they are the only way to exercise the loop without two
@@ -4788,6 +4976,122 @@ def main(argv=None):
             total += k
             print(f"  member {m['login_name']}: linked {k} content(s)")
         print(f"linked {total} content(s) across all members")
+    elif args.cmd == "trim-ffxi-slots":
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS handle_content_trimmed ("
+            " handle_id INTEGER NOT NULL, content_code INTEGER NOT NULL,"
+            " slot INTEGER NOT NULL, content_id TEXT, prev_status TEXT,"
+            " trimmed_at TEXT)")
+        if args.restore:
+            n = 0
+            for r in conn.execute("SELECT * FROM handle_content_trimmed").fetchall():
+                n += conn.execute(
+                    "UPDATE handle_content SET status = ? WHERE handle_id = ?"
+                    " AND content_code = ? AND slot = ?",
+                    (r["prev_status"], r["handle_id"], r["content_code"],
+                     r["slot"])).rowcount
+            conn.execute("DELETE FROM handle_content_trimmed")
+            conn.commit()
+            print("restored %d row(s)" % n)
+            raise SystemExit(0)
+
+        # WHAT IS ON THESE IDS COMES FIRST. A row here is only safe to
+        # deactivate if no character is named after its Content ID -- see
+        # ffxi_ids_in_use, which raises rather than shrugging.
+        inuse, why = {}, None
+        try:
+            inuse = ffxi_ids_in_use(args.idmap)
+        except Exception as exc:
+            why = "%s: %s" % (exc.__class__.__name__, exc)
+            print("WARNING: could not read the FFXI id map (%s)" % why)
+            print("  so this cannot tell which ids have a character on them.")
+
+        q = ("SELECT h.id AS hid, h.handle_name, c.slot, c.content_id, c.status"
+             "  FROM handle_content c JOIN handle h ON h.id = c.handle_id"
+             " WHERE c.content_code = ? AND c.slot <> 0")
+        params = [FFXI_CONTENT_CODE]
+        if args.handle:
+            q += " AND h.handle_name = ?"
+            params.append(args.handle)
+        rows = conn.execute(q + " ORDER BY h.id, c.slot", params).fetchall()
+        if not rows:
+            print("no extra FFXI Content IDs: every handle is already at one")
+            raise SystemExit(0)
+
+        free, skipped = 0, 0
+        for r in rows:
+            who = inuse.get(str(r["content_id"]))
+            if r["status"] == "active":
+                skipped += 1 if who else 0
+                free += 0 if who else 1
+            print("  handle %3d %-16s slot %d  id %-10s %-8s %s"
+                  % (r["hid"], r["handle_name"], r["slot"], r["content_id"],
+                     r["status"], ("<-- %s IS ON THIS ID" % who) if who else ""))
+        over = sum(1 for hid in set(r["hid"] for r in rows)
+                   if handle_link_count(conn, hid) > CONTENT_IDS_PER_HANDLE)
+        print("%d extra row(s); %d active and free to trim, %d active with a "
+              "character on them, %d handle(s) over the ceiling of %d"
+              % (len(rows), free, skipped, over, CONTENT_IDS_PER_HANDLE))
+
+        if not args.apply:
+            print("report only -- pass --apply to write")
+            raise SystemExit(0)
+        if why and not args.force:
+            raise SystemExit("REFUSING to write: the id map could not be read, so "
+                             "a trim could silently kill a live character. Fix the "
+                             "path (--idmap / POL_FFXI_IDMAP) or pass --force.")
+        now = _now()
+        n = 0
+        for r in rows:
+            if r["status"] != "active":
+                continue
+            if inuse.get(str(r["content_id"])) and not args.force:
+                continue
+            conn.execute(
+                "INSERT INTO handle_content_trimmed (handle_id, content_code,"
+                " slot, content_id, prev_status, trimmed_at) VALUES (?,?,?,?,?,?)",
+                (r["hid"], FFXI_CONTENT_CODE, r["slot"], r["content_id"],
+                 r["status"], now))
+            n += conn.execute(
+                "UPDATE handle_content SET status = 'inactive' WHERE handle_id = ?"
+                " AND content_code = ? AND slot = ?",
+                (r["hid"], FFXI_CONTENT_CODE, r["slot"])).rowcount
+        conn.commit()
+        print("deactivated %d row(s); `trim-ffxi-slots --restore` puts them back" % n)
+        print("read live per request -- do NOT restart anything to apply it")
+    elif args.cmd == "arm":
+        row = conn.execute(
+            "SELECT m.* FROM member m WHERE m.polid = ? OR m.login_name = ?"
+            " OR m.id IN (SELECT member_id FROM handle WHERE handle_name = ?)",
+            (args.ident, args.ident, args.ident)).fetchone()
+        if row is None:
+            raise SystemExit(f"no account matches {args.ident!r}")
+        until = arm_login_token(conn, row["id"], hours=args.hours)
+        print(f"{row['polid']} may bind a login token until {until}")
+    elif args.cmd == "armed":
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        for r in conn.execute(
+                "SELECT id, polid, token_arm_until, login_token FROM member"
+                " WHERE status = 'active' ORDER BY id"):
+            tokens = len(list_client_tokens(conn, r["id"]))
+            if r["login_token"]:
+                tokens = max(tokens, 1)
+            until = r["token_arm_until"] or ""
+            state = "ARMED until " + until if until > now else \
+                ("armed window lapsed " + until if until else "never armed")
+            print(f"  {r['polid']}  {tokens} token(s)  {state}")
+    elif args.cmd == "pwcopy":
+        have = 0
+        for mid, login, ok in login_password_status(conn):
+            have += ok
+            print(f"  {mid:>4}  {login:<16}  "
+                  + ("password copy held" if ok else
+                     "NO COPY -- the typed password is not checked until a "
+                     "servlet sign-in or password change stores it"))
+        print(f"  {have} with a copy; builds proven: "
+              + (", ".join(r["client_sig"] for r in conn.execute(
+                  "SELECT client_sig FROM login_digest_client")) or "none yet"))
     elif args.cmd.startswith("friend"):
         def _hid(name):
             row = conn.execute("SELECT id FROM handle WHERE handle_name = ?",
