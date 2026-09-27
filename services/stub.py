@@ -262,6 +262,17 @@ def dns_parse_question(pkt):
         return None, None
 
 
+def dns_refused(query):
+    """REFUSED, echoing the question and nothing else. It is never longer than
+    the query it answers, so sending it to a forged source amplifies nothing."""
+    i = 12
+    while query[i] != 0:
+        i += 1 + query[i]
+    question = query[12:i + 1 + 4]
+    return (query[:2] + b"\x81\x05" + b"\x00\x01\x00\x00\x00\x00\x00\x00"
+            + question)
+
+
 def dns_build_answer(query, ip):
     """A-record answer echoing the question, TTL 60."""
     tid = query[:2]
@@ -306,9 +317,44 @@ def run_dns():
             except ValueError:
                 log("dns", f"ignoring unparseable lan-client range {c!r}")
 
+    # THE PUBLIC FRONT DOOR. POL_ADVERTISE_PUBLIC is the address internet players
+    # reach this host on (see srvcore.advertise_for, rule 0), so that is the one
+    # address worth giving them. It assumes udp/53 arrives with the player's
+    # real source address.
+    public_ip = (os.environ.get("POL_ADVERTISE_PUBLIC") or "").strip()
+    # POL_DNS_PUBLIC=1 lets clients OUTSIDE dns.clients ask, on these terms:
+    # they are answered for the redirected names and for nothing else. No
+    # forwarding, so this is not an open resolver; anything else draws a
+    # REFUSED no longer than the question. A PlayStation 2 asks for nothing but
+    # the game's own names, so that is all it needs. Off, outsiders are ignored
+    # exactly as before.
+    public_mode = os.environ.get("POL_DNS_PUBLIC", "0") == "1" and bool(public_ip)
+    public_rate = int(os.environ.get("POL_DNS_PUBLIC_RATE", "60"))   # per source, per 10 s
+    public_seen = {}             # source -> [window start, count]
+
+    def is_global(client_ip):
+        try:
+            return ipaddress.ip_address(client_ip).is_global
+        except ValueError:
+            return False
+
+    def public_over_limit(client_ip):
+        now = time.monotonic()
+        slot = public_seen.get(client_ip)
+        if slot is None or now - slot[0] >= 10:
+            if len(public_seen) > 50000:         # bounded, whatever is thrown at it
+                public_seen.clear()
+            public_seen[client_ip] = [now, 1]
+            return False
+        slot[1] += 1
+        return slot[1] > public_rate
+
     def answer_ip(client_ip):
-        """The A-record address for this client: the LAN IP for a LAN-sourced
-        query when POL_ADVERTISE_LAN is set, else the global advertise IP."""
+        """The A-record address for this client: the public front address for
+        an internet client, the LAN IP for a LAN-sourced query when POL_ADVERTISE_LAN is
+        set, else the global advertise IP."""
+        if public_ip and is_global(client_ip):
+            return public_ip
         if lan_ip and lan_nets:
             try:
                 a = ipaddress.ip_address(client_ip)
@@ -426,6 +472,9 @@ def run_dns():
             if fwd is not None:
                 fwd.close()
 
+    if public_mode:
+        log("dns", f"PUBLIC mode: internet clients get {public_ip} for the "
+                   f"redirected names, REFUSED for anything else, never a forward")
     log("dns", f"listening on udp/53; zones {zones} -> {ip}"
                 f"{f' (LAN {lan_ip} for {lan_spec})' if lan_ip and lan_nets else ''}; "
                 f"upstream {upstream}; forward="
@@ -442,6 +491,27 @@ def run_dns():
             data, addr = sock.recvfrom(4096)
         except Exception as e:  # pragma: no cover
             log("dns", f"recv error: {e}")
+            continue
+        # A packet with QR set is a RESPONSE. Answering one is how two resolvers
+        # get bounced off each other for ever by a single forged packet.
+        if len(data) < 12 or data[2] & 0x80:
+            continue
+        if not allowed(addr[0]) and public_mode and is_global(addr[0]):
+            if len(data) > 512 or public_over_limit(addr[0]):
+                continue
+            qname, qtype = dns_parse_question(data)
+            if not qname:
+                continue
+            try:
+                if not matches(qname):
+                    sock.sendto(dns_refused(data), addr)
+                elif qtype == 1:
+                    sock.sendto(dns_build_answer(data, public_ip), addr)
+                    log("dns", f"{addr[0]} A {qname} -> {public_ip} (public)")
+                else:                            # AAAA and the rest: NOERROR, empty
+                    sock.sendto(dns_refused(data)[:3] + b"\x80" + dns_refused(data)[4:], addr)
+            except Exception as e:
+                log("dns", f"public answer error for {qname}: {e}")
             continue
         if not allowed(addr[0]):
             n = refused.get(addr[0], 0) + 1
@@ -698,6 +768,13 @@ class StubHandler(BaseHTTPRequestHandler):
         rp = ([region] if region else [])
         keys += [os.path.join(*(rp + [host_only, bare])),
                  os.path.join(host_only, bare), bare]       # region-flat fallback
+        try:
+            from srvcore import shim_build_hidden
+        except ImportError:                     # standalone use outside services/
+            shim_build_hidden = lambda peer, rel: False     # noqa: E731
+        if shim_build_hidden(self.client_address[0], bare):
+            log("http", f"  /{bare}: shim build hidden from an internet peer")
+            return False                        # falls through to the ordinary 404
         for rel in keys:
             candidate = self._safe_under(WWW_DIR, rel)
             if candidate and os.path.isfile(candidate):
@@ -899,17 +976,35 @@ def run_http():
         connected at all. That ambiguity cost a login round; now a refused
         handshake says so."""
         scheme = "http"
+        # The default backlog is 5. On a public address scanners alone fill that.
+        request_queue_size = 128
+        #: seconds a client gets to complete the TLS handshake
+        HANDSHAKE_TIMEOUT = 10
 
         def get_request(self):
-            try:
-                conn, addr = super().get_request()
-            except ssl.SSLError as e:
-                log("http", f"TLS handshake FAILED from a client on "
-                            f"{self.server_address[1]}: {e} -- the Viewer is "
-                            "rejecting our self-signed cert")
-                raise
+            # WARNING: NO TLS HANDSHAKE HERE. This runs in the ONE accept loop. With
+            # handshake-on-accept, a client that connects to 443 and then sends
+            # nothing blocks accept() for ever, the backlog fills, and the door is
+            # dead for everyone. The handshake happens in the per-connection thread
+            # (process_request_thread), under a timeout, so a stalled client costs
+            # one thread for ten seconds.
+            conn, addr = super().get_request()
             log("http", f"{self.scheme} connect from {addr[0]}:{addr[1]}")
             return conn, addr
+
+        def process_request_thread(self, request, client_address):
+            if self.scheme == "https":
+                try:
+                    request.settimeout(self.HANDSHAKE_TIMEOUT)
+                    request.do_handshake()
+                    request.settimeout(None)
+                except (ssl.SSLError, OSError) as e:
+                    log("http", f"TLS handshake FAILED from "
+                                f"{client_address[0]} on "
+                                f"{self.server_address[1]}: {e}")
+                    self.shutdown_request(request)
+                    return
+            super().process_request_thread(request, client_address)
 
         def handle_error(self, request, client_address):
             log("http", f"handler error from {client_address}: "
@@ -930,7 +1025,8 @@ def run_http():
         for port in https_ports:
             srv = LoggingHTTPServer(("0.0.0.0", port), StubHandler)
             srv.scheme = "https"
-            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True,
+                                         do_handshake_on_connect=False)
             t = threading.Thread(target=srv.serve_forever, daemon=True)
             t.start()
             threads.append(t)

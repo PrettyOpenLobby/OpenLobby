@@ -63,15 +63,25 @@ def cstr(d, off, end):
     return d[off:(e if e >= 0 else end)]
 
 
+#: Every PlayStation 2 region tag.  WARNING: 'PS2' IS ONLY THE JAPANESE ONE: the US
+#: console says **P2U** (see version_state(): "unknown on P2U (which starts
+#: 20031006_0)").  Matching 'PS2' alone leaves every US console UNPACED, and a
+#: large title list sent in one unpaced burst is POL-0006: the console loops
+#: cmd7/cmd1 without fetching a file, while small lists arrive fine.
+#: X2U/XB2 are Xbox and are deliberately NOT here: the collapse is the PS2's
+#: TCP stack, and no Xbox transfer has been measured.
+PS2_REGIONS = (b"PS2", b"P2U")
+
+
 def ps2_request(pkt, cmd):
-    """True when this frame came from a PS2 client (region tag 'PS2').
+    """True when this frame came from a PS2 client (region tag PS2_REGIONS).
 
     The region rides in every request -- 0x10 for cmd 7/1, 0x18 for cmd 3 --
     so each reply can be gated without per-connection state.  PC clients say
     W2U/W20 and must never be paced.
     """
     off = 0x18 if cmd == 3 else 0x10
-    return len(pkt) >= off + 4 and cstr(pkt, off, off + 4) == b"PS2"
+    return len(pkt) >= off + 4 and cstr(pkt, off, off + 4) in PS2_REGIONS
 
 
 def paced_send(conn, data):
@@ -97,6 +107,37 @@ def paced_send(conn, data):
         wait = deadline - time.monotonic()
         if wait > 0:
             time.sleep(wait)
+
+
+def tcp_report(conn):
+    """One-line kernel view of a connection: what the CLIENT actually took.
+
+    The server log alone says only that cmd 1 was ANSWERED, never whether the
+    list arrived, which is what a POL-0006 on a patch list needs to know.
+    Linux TCP_INFO does: bytes_acked is how much the console's stack
+    acknowledged, snd_wnd its advertised receive window, rwnd_limited the time
+    the send stalled on that window.  Offsets are struct tcp_info as of Linux
+    5.x (include/uapi/linux/tcp.h); an older kernel returns a shorter struct
+    and the missing fields are simply left out.  Logging only -- never let a
+    failure here touch the reply."""
+    try:
+        raw = conn.getsockopt(socket.IPPROTO_TCP, getattr(socket, "TCP_INFO", 11), 256)
+    except (OSError, AttributeError):
+        return "tcp_info n/a"
+    def u32(off):
+        return struct.unpack_from("<I", raw, off)[0] if len(raw) >= off + 4 else None
+    def u64(off):
+        return struct.unpack_from("<Q", raw, off)[0] if len(raw) >= off + 8 else None
+    rtt = u32(68)
+    parts = [f"rtt={rtt / 1000:.0f}ms" if rtt is not None else "rtt=?",
+             f"acked={u64(120)}", f"unacked={u32(24)}", f"retrans={u32(100)}",
+             f"cwnd={u32(80)}", f"mss={u32(16)}"]
+    rwl = u64(176)
+    if rwl is not None:
+        parts.append(f"rwnd_limited={rwl / 1e6:.2f}s")
+    if u32(228) is not None:
+        parts.append(f"snd_wnd={u32(228)}")
+    return " ".join(parts)
 
 
 def size_on_disk(path):
@@ -274,6 +315,10 @@ class Server:
         except OSError:
             dlhost = self.advertise
         buf = b""
+        # A PS2 cmd 1 on this connection: (t_sent, list size), so the close
+        # line can say whether the console took the whole list before leaving.
+        list_sent = None
+        why = "closed by client"
         try:
             while True:
                 # HEADER FIRST, then the body. The length check below used to sit
@@ -309,12 +354,28 @@ class Server:
                 if reply is None:
                     return
                 if ps2_request(pkt, cmd):
-                    paced_send(conn, reply)
+                    t0 = time.monotonic()
+                    if cmd == 1:
+                        list_sent = (t0, len(reply))
+                    try:
+                        paced_send(conn, reply)
+                    finally:
+                        if cmd == 1:
+                            self.log(f"[{addr[0]}:{addr[1]}] cmd1 send "
+                                     f"{len(reply)} B returned after "
+                                     f"{time.monotonic() - t0:.2f}s "
+                                     f"{tcp_report(conn)}")
                 else:
                     conn.sendall(reply)
-        except (OSError, struct.error):
-            pass
+        except socket.timeout:
+            why = "idle timeout"
+        except (OSError, struct.error) as e:
+            why = f"{type(e).__name__}: {e}"
         finally:
+            if list_sent:
+                self.log(f"[{addr[0]}:{addr[1]}] cmd1 conn end "
+                         f"+{time.monotonic() - list_sent[0]:.2f}s after a "
+                         f"{list_sent[1]} B list ({why}) {tcp_report(conn)}")
             try:
                 conn.close()
             except OSError:
@@ -581,7 +642,7 @@ def apply_list_caps(bundles, specs):
     Pair this with the matching `--pin`: the pin stops cmd 8 advertising a newer
     build, this stops cmd 1 describing one. Either alone is a partial measure.
     """
-    from slc import slc_decompress, slc_compress_literal
+    from slc import slc_decompress, slc_compress
     for spec in specs:
         spec = spec.strip()
         if not spec:
@@ -598,7 +659,7 @@ def apply_list_caps(bundles, specs):
         if not dropped:
             print(f"[*] list cap {region}/{prod}: nothing newer than {cap}")
             continue
-        b.patchlist = slc_compress_literal(capped)
+        b.patchlist = slc_compress(capped)
         print(f"[*] list cap {region}/{prod}: dropped {dropped} row(s) newer "
               f"than {cap} ({len(plain)} -> {len(capped)} B plaintext)")
         # AND LOWER WHAT CMD 8 ADVERTISES, or the two halves disagree: the
@@ -666,6 +727,81 @@ def cap_patchlist(plain, cap):
     return "\n".join(out).encode("latin-1"), dropped
 
 
+def apply_slim_lists(bundles, specs):
+    """Leave the disc's own files out of a bundle's cmd-1 list.
+
+    A PS2 can give up on a large list a few seconds after asking for it
+    (POL-0006), and for some PS2 titles the list is mostly the retail DISC
+    catalogue, sent again on every check though no console ever fetches
+    those files.  This drops each `file` block whose rows are ALL at or below BASE,
+    i.e. files never changed since the disc.  A block with any newer row is
+    kept WHOLE, base row included, so every file we have ever patched reads
+    exactly as before.  The blobs stay servable; only the list shrinks.
+
+    BASE defaults to the oldest row in the list (the disc build).  Naming a
+    later one also hides the files that version touched, from a console still
+    on the disc -- only do that knowing no console sits below it.
+    """
+    from slc import slc_decompress, slc_compress
+    for spec in specs:
+        spec = spec.strip()
+        if not spec:
+            continue
+        target, _, base = spec.partition("=")
+        region, _, prod = target.strip().partition("/")
+        b = bundles.get((region.strip(), prod.strip()))
+        if not b:
+            raise SystemExit(f"--slim-list {spec}: no such bundle")
+        plain = slc_decompress(b.patchlist)
+        # NOT b.oldest: the synthesised PS2 bundles set oldest_version to
+        # 00000000_0 on purpose (any claimed build reads "registered"), which
+        # would make the slim a silent no-op.  The oldest ROW is the disc.
+        base = base.strip() or min(
+            (ln.split(" ", 1)[0] for ln in plain.decode("latin-1").split("\n")
+             if re.fullmatch(r"\d{8}_\w", ln.split(" ", 1)[0])), default="")
+        if not re.fullmatch(r"\d{8}_\w", base):
+            raise SystemExit(f"--slim-list {spec}: {base!r} is not a version "
+                             f"(YYYYMMDD_X)")
+        slim, blocks, kept = slim_patchlist(plain, base)
+        if not blocks:
+            print(f"[*] slim list {region}/{prod}: no file is base-only at {base}")
+            continue
+        b.patchlist = slc_compress(slim)
+        print(f"[*] slim list {region}/{prod}: left out {blocks} disc-only "
+              f"file(s) at <= {base}, kept {kept} "
+              f"({len(plain)} -> {len(slim)} B plaintext, "
+              f"{len(b.patchlist)} B on the wire)")
+
+
+def slim_patchlist(plain, base):
+    """Drop every `file` block whose rows are all <= `base`.
+
+    Returns (list, blocks dropped, blocks kept).  Same block grammar as
+    cap_patchlist; anything outside a block (the trailing `end`) passes
+    through untouched."""
+    out, block, rows = [], None, []
+    dropped = kept = 0
+    for line in plain.decode("latin-1").split("\n"):
+        if line.startswith("file ") and line.rstrip().endswith("{"):
+            block, rows = line, []
+        elif block is not None and line.strip() == "}":
+            vers = [r.split(" ", 1)[0] for r in rows]
+            vers = [v for v in vers if re.fullmatch(r"\d{8}_\w", v)]
+            if vers and max(vers) <= base:
+                dropped += 1
+            else:
+                out.append(block)
+                out.extend(rows)
+                out.append(line)
+                kept += 1
+            block, rows = None, []
+        elif block is not None:
+            rows.append(line)
+        else:
+            out.append(line)
+    return "\n".join(out).encode("latin-1"), dropped, kept
+
+
 def port_for_product(prod):
     """The POLP port a product is served on: 53000 + content id, except the
     Viewer itself (product 1000), which every region shares on 54000."""
@@ -722,6 +858,12 @@ def main():
                     help="drop every cmd-1 catalogue row newer than VERSION, so "
                          "a client cannot walk past a --pin. $POLP_LIST_CAP takes "
                          "a comma-separated list. Use WITH the matching --pin.")
+    ap.add_argument("--slim-list", action="append", default=[],
+                    metavar="REGION/PROD[=BASE]",
+                    help="leave files unchanged since BASE (default: the "
+                         "list's oldest row, the disc build) out of the "
+                         "cmd-1 list. $POLP_SLIM_LIST takes a comma-separated "
+                         "list. For PS2 titles whose list is mostly the disc.")
     ap.add_argument("--current", action="append", default=[], metavar="REGION/PROD",
                     help="answer cmd 7 for a tree we do NOT have by echoing the "
                          "client's own version back as newest, so it concludes it "
@@ -750,6 +892,8 @@ def main():
                                     os.environ.get("POLP_PIN", "").split(",") if p.strip()])
     apply_list_caps(bundles, args.list_cap + [c for c in
                     os.environ.get("POLP_LIST_CAP", "").split(",") if c.strip()])
+    apply_slim_lists(bundles, args.slim_list + [s for s in
+                     os.environ.get("POLP_SLIM_LIST", "").split(",") if s.strip()])
 
     if args.check:
         print(f"[*] {len(bundles)} bundle(s) under {args.root}:")

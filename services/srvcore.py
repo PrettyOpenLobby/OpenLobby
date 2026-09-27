@@ -558,6 +558,36 @@ def advertise_for(default, peer_ip=None, dialed_ip=None):
     return default
 
 
+#: THE SHIM BUILD IN www/shim/dist IS THE OPERATOR'S OWN, and both doors serve
+#: it to anyone who asks: early CrystalMod installers fetch
+#: <server>/shim/dist/PolHook.dll before they install. An operator whose www/
+#: holds a private or development build can set POL_SHIM_PRIVATE=1 to hide the
+#: BUILD from peers with a global address. It is still served to the LAN and to
+#: overlay-network peers, and everything else under /shim/ (runtime DLLs,
+#: message tables) stays public. A front door that forwards traffic must keep
+#: the player's source address for "global" to mean "came from the internet".
+#: Off by default: an operator who hosts a build for their players wants it seen.
+SHIM_BUILD_FILES = frozenset((
+    "polhook.dll", "polhook.dll.sha256", "polshimsetup.exe", "install.sh",
+    "install-polhookproxy.ps1", "polshim.ini", "sha256sums"))
+
+
+def shim_build_hidden(peer_ip, rel):
+    """True when `rel` (a path under www/, no leading slash) is the shim build
+    and this peer must not be given it. Never raises."""
+    if (os.environ.get("POL_SHIM_PRIVATE") or "").strip() not in ("1", "true", "yes"):
+        return False
+    parts = [x for x in (rel or "").replace("\\", "/").lower().split("/") if x]
+    if len(parts) < 2 or parts[0] != "shim" or parts[-1] not in SHIM_BUILD_FILES:
+        return False
+    peer = _addr(peer_ip)
+    if peer is None:
+        return False
+    if getattr(peer, "ipv4_mapped", None):
+        peer = peer.ipv4_mapped
+    return bool(peer.is_global)
+
+
 def _route_source(peer_ip):
     import socket
     try:
