@@ -10983,25 +10983,29 @@ def _db_chars():
     the slot number 0:9 gives the same handle -- the two lists MUST agree or the
     binding lands on the wrong handle (see `_char_record`).
 
-    **`bind` IS THE OVERFLOW RULE, AND IT IS WHY A HANDLE CAN NOW HOLD MORE THAN
-    EIGHT CONTENT IDS.** A handle's binding array is eight bytes at
-    handle_slot+0x20 and the record's position field is three bits, so only eight
-    of a handle's Content IDs can be *bound* to it -- that is SE's own limit
-    (string 26069). It is not a limit on the 64-slot character table: the 1:3
-    consumer loop sets the present bit for EVERY record and only writes the
-    binding `when +0x04 is non-zero`, and both things that actually gate play --
-    the launch gate at app.dll+0x199093 and FFXI's world lookup FUN_100FFE00 --
-    read the table, never the binding. So the ninth and later Content IDs are
-    served UNBOUND: present, launchable, playable, and simply absent from the
-    handle's Content ID list in the profile view.
+    WARNING: **NEVER SERVE A HANDLE A NINTH RECORD. `_CHAR_PER_HANDLE` IS A HARD
+    CEILING, AND THIS TRUNCATION IS THE ONLY THING ENFORCING IT.** A handle's
+    binding array is eight bytes at handle_slot+0x20 and the record's position
+    field is three bits, so only eight of a handle's Content IDs can be bound --
+    SE's own limit, string 26069. This function used to serve the rest UNBOUND
+    (`bind=False`) on the reasoning that the two things which gate play (the
+    launch gate at app.dll+0x199093 and FFXI's world lookup FUN_100FFE00) read
+    the 64-slot table and never the binding. Both really do. Both are irrelevant,
+    because a THIRD consumer decides it: the Viewer reads a present-but-unbound
+    Content ID as one that still needs a handle and opens the assign-a-handle
+    flow, which dead-ends on the same ceiling -- 26069 "The handle "%s" is
+    already linked to 8 Content IDs.", then 15083 "Which handle should this be
+    copied to?", and the title is unreachable from that handle. Every record
+    this returns is BOUND.
 
-    WARNING: Which ones overflow is chosen, not incidental. Positions go to every game's
-    **slot 0 first**, in content-code order, and only then to a game's extra
-    slots. Ordering by (content_code, slot) alone would have given FFXI's four
-    character slots positions 0-3 and pushed Fantasy Earth, the Friend List and
-    the FFXI Test Server out of the profile view -- trading a visible regression
-    on three titles for a cosmetic gap on extra FFXI characters that the player
-    knows they created. `_CHAR_PER_HANDLE` bounds the BINDING, not the list.
+    WARNING: Which ones are dropped is chosen, not incidental. Positions go to every
+    game's **slot 0 first**, in content-code order, and only then to a game's
+    extra slots, so what falls off the end is an extra FFXI character slot and
+    never a whole TITLE. It should not happen at all -- `accounts.FFXI_CHARACTER_SLOTS`
+    defaults to 1 and `ensure_content_slots` clamps the mint to eight per handle
+    -- so the drop is LOGGED: a handle that reaches here over the ceiling has an
+    id no client can see, and if a character is bound to it that character is
+    POL-0001 with no explanation.
     """
     handles = _db_handles()
     if not handles or accounts is None:
@@ -11014,10 +11018,17 @@ def _db_chars():
                 links = accounts.handle_content_list(db, hid)
                 primary = [l for l in links if int(l.get("slot", 0)) == 0]
                 extra = [l for l in links if int(l.get("slot", 0)) != 0]
-                for pos, link in enumerate(primary + extra):
+                order = primary + extra
+                if len(order) > _CHAR_PER_HANDLE:
+                    dropped = [(int(l["content_code"]), int(l.get("slot", 0)))
+                               for l in order[_CHAR_PER_HANDLE:]]
+                    log("lobby", f"  handle {hid} holds {len(order)} Content IDs,"
+                                 f" over the ceiling of {_CHAR_PER_HANDLE}:"
+                                 f" dropping (content_code, slot) {dropped}")
+                    order = order[:_CHAR_PER_HANDLE]
+                for pos, link in enumerate(order):
                     out.append((slot, pos, int(link["content_code"]),
-                                link["content_id"] or "",
-                                pos < _CHAR_PER_HANDLE))
+                                link["content_id"] or "", True))
         finally:
             db.close()
     except Exception as exc:
