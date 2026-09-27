@@ -223,6 +223,19 @@ def _po_kind(index):
     return "int"
 
 
+def _plain_float(v):
+    """A decimal with no exponent and no trailing zeros: 7.0 -> "7", 2.5 ->
+    "2.5", 2500000.0 -> "2500000".
+
+    `%g` is SIX SIGNIFICANT DIGITS AND SCIENTIFIC NOTATION, so a scaled rating
+    would leave as the literal `7e+06` and anything longer than six digits
+    would be silently rounded.
+    """
+    t = "%.6f" % float(v or 0)
+    t = t.rstrip("0").rstrip(".")
+    return t or "0"
+
+
 def po_values(fields=None):
     """The 71 positional values of a `<PO>` reply, as strings.
 
@@ -247,7 +260,13 @@ def po_values(fields=None):
         elif kind == "u64":
             out.append("0x%016X" % (int(v or 0) & 0xFFFFFFFFFFFFFFFF))
         elif kind == "float":
-            out.append("%g" % float(v or 0))
+            # `%g` IS SIX SIGNIFICANT DIGITS AND SCIENTIFIC NOTATION.
+            # A title may hand these over already scaled x1e6, so they
+            # are whole numbers on the wire, and `%g` would turn 7.0e6
+            # into the literal `7e+06` and round anything past six
+            # significant digits. Emit the digits the client's own
+            # writer would.
+            out.append(_plain_float(v))
         else:
             out.append(str(int(v or 0)))
     return out

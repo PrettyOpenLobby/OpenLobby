@@ -40,8 +40,14 @@ import urllib.request
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import sqlite3
+
 import discordlink
 import polboards
+try:
+    import polgateway           # Gateway presence; shipped with the board bots
+except ImportError:
+    polgateway = None
 
 DISCORD_API = polboards.DISCORD_API
 _UA = "DiscordBot (https://playonline.invalid/polbridge, 1) polbridge"
@@ -561,6 +567,46 @@ def build_parser():
 ARGS = build_parser().parse_args([])
 
 
+def pol_online():
+    """How many members have a live PlayOnline session. This is the POL-level
+    population -- the Viewer and the portal -- not any one title's, which is
+    exactly what the bridge is about.
+
+    Its own read-only connection rather than responders.accounts: this runs
+    every few seconds for a status line and must never take the write lock the
+    rest of the server needs.
+    """
+    path = os.environ.get("POL_ACCOUNTS_DB", "/data/accounts.db")
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2.0)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT member_id) FROM session WHERE expires_at > ?",
+                (datetime.datetime.now(datetime.timezone.utc)
+                 .strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except Exception:                                  # noqa: BLE001
+        return None            # unknown, so the status clears rather than lies
+
+
+def start_presence():
+    """The bridge's own Gateway session, so it shows a count like the board
+    bots do. It had none: presence lives in polgateway and only polboards was
+    wired to it, which is why this bot alone sat blank."""
+    off = ("off", "0", "no", "false")
+    if polgateway is None:
+        return None
+    if (os.environ.get("POL_BRIDGE_PRESENCE", "on") or "").strip().lower() in off:
+        return None
+    return polgateway.Presence(
+        "bridge", ARGS.token,
+        status_fn=lambda: polgateway.count_text(
+            "", n=pol_online(), one="player on PlayOnline",
+            many="players on PlayOnline")).start()
+
+
 def main(argv=None):
     global ARGS
     ARGS = build_parser().parse_args(argv)
@@ -574,6 +620,7 @@ def main(argv=None):
         threading.Thread(target=register_commands, name="polbridge-commands",
                          daemon=True).start()
         threading.Thread(target=watch, name="polbridge-watch", daemon=True).start()
+        start_presence()
     while True:
         time.sleep(3600)
 
