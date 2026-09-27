@@ -7,3 +7,6 @@ __pycache__/
 /logs/
 *.db
 *.log
+
+# Private keys and certificate chains supplied by the operator; never commit them.
+secrets/

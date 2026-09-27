@@ -67,6 +67,12 @@ services:
       dockerfile: Dockerfile.ssl3
     image: openlobby-ssl3:latest
     restart: unless-stopped
+    environment:
+      # Each terminator issues its own leaf (same CA, shared via pol-certs):
+      # a 2002-era stack that checks only the CN cannot be served two hosts
+      # by one certificate.
+      SSL3_CN: "wh000.pol.com"
+      SSL3_CERT: "/certs/ssl3-web.pem"
     ports:
       - "443:443"
     volumes:
@@ -81,6 +87,7 @@ services:
     restart: unless-stopped
     environment:
       SSL3_CN: "ucs.pol.com"
+      SSL3_CERT: "/certs/ssl3-ucs.pem"
     volumes:
       - ./services/stunnel-ucs.conf:/etc/stunnel/stunnel.conf:ro
       - pol-certs:/certs
@@ -95,6 +102,10 @@ services:
       # "1": the in-client wizard accepts any registration code and grants
       # every title the server offers (see .env.example)
       POL_SIGNUP_ANY_CODE: "${POL_SIGNUP_ANY_CODE:-}"
+      # POL_SIGNUP_MODE=permissive makes the code optional; an empty code then
+      # grants POL_SIGNUP_CONTENTS (default: every title offered). See .env.example.
+      POL_SIGNUP_MODE: "${POL_SIGNUP_MODE:-}"
+      POL_SIGNUP_CONTENTS: "${POL_SIGNUP_CONTENTS:-}"
     ports:
       - "51305:51305"
     volumes:
@@ -110,6 +121,16 @@ services:
     <<: *app
     entrypoint: ["python", "responders.py"]
     command: directory,lobby,world,mail
+    environment:
+      <<: *appenv
+      # Mail to and from the internet (services/extmail.py). Inert unless both
+      # the key and the domain are set, and then only for members enabled on
+      # the admin panel. See .env.example.
+      POL_EXT_MAIL_PROVIDER: "${POL_EXT_MAIL_PROVIDER:-}"
+      POL_EXT_MAIL_KEY: "${POL_EXT_MAIL_KEY:-}"
+      POL_EXT_MAIL_DOMAIN: "${POL_EXT_MAIL_DOMAIN:-}"
+      POL_EXT_MAIL_DAILY_OUT: "${POL_EXT_MAIL_DAILY_OUT:-}"
+      POL_EXT_MAIL_DAILY_IN: "${POL_EXT_MAIL_DAILY_IN:-}"
     ports:
       # 51272 and 51305 are deliberately absent: 51272 belongs to a game
       # title's own service and 51305 to the ucs service.
@@ -178,6 +199,10 @@ services:
     environment:
       <<: *appenv
       POL_SIGNUP_ANY_CODE: "${POL_SIGNUP_ANY_CODE:-}"
+      # POL_SIGNUP_MODE=permissive makes the code optional; an empty code then
+      # grants POL_SIGNUP_CONTENTS (default: every title offered). See .env.example.
+      POL_SIGNUP_MODE: "${POL_SIGNUP_MODE:-}"
+      POL_SIGNUP_CONTENTS: "${POL_SIGNUP_CONTENTS:-}"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -190,6 +215,9 @@ services:
   admin:
     <<: *app
     entrypoint: ["python", "admin.py"]
+    environment:
+      <<: *appenv
+      POL_EXT_MAIL_DOMAIN: "${POL_EXT_MAIL_DOMAIN:-}"
     ports:
       - "127.0.0.1:8090:8090"
     healthcheck: *pyhc
@@ -207,6 +235,9 @@ services:
       # Set it to 0 (and list trees in POLP_CURRENT) for strict behaviour.
       POLP_CURRENT_ALL: "${POLP_CURRENT_ALL:-1}"
       POLP_CURRENT: "${POLP_CURRENT:-}"
+      # REGION/PROD[=BASE],...: leave files unchanged since the disc out of a
+      # PS2 title's cmd-1 list (polserver2.py --slim-list). Empty = off.
+      POLP_SLIM_LIST: "${POLP_SLIM_LIST:-}"
     entrypoint: ["sh", "-c", "exec python polserver2.py /mirrors --advertise \"${POL_ADVERTISE:-127.0.0.1}\""]
     ports:
       - "54000:54000"
