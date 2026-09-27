@@ -105,3 +105,80 @@ def slc_compress_literal(payload):
     if acc[1]:
         bits.append(acc[0])
     return b"\x02" + struct.pack("<I", 9 * len(payload)) + bytes(bits)
+
+
+#: The envelope SE's own method-2 encoder stays inside, measured on the lists it
+#: served: P2U-1000 (US PS2 consoles) lengths 3..85, W2U-1000 3..97, FFXI 3..88,
+#: distances up to 65535, and never a match that overlaps its own output. The
+#: length cap is the PS2 one, so a console never sees a match longer than one
+#: SE's server sent it.
+LZ_MIN, LZ_MAX, LZ_WINDOW, LZ_CHAIN = 3, 85, 65535, 48
+
+
+def slc_compress(payload):
+    """`payload` -> a method-2 .slc container with real LZSS matches.
+
+    Replaces slc_compress_literal for the cmd-1 patch list. All-literal costs
+    +12% over the plain text; SE's encoder lands at 25-33%, and this one within
+    ~5% of SE's on FFXI's 6.3 MB list. The size matters on a console: a PS2
+    can drop a ~1.9 MB all-literal list part way through (POL-0006), and the
+    same list is about 0.4 MB here.
+
+    Greedy longest match over hash chains of 3-byte prefixes. Deterministic.
+    """
+    data = bytes(payload)
+    n = len(data)
+    out = bytearray()
+    acc = nacc = nbits = 0
+
+    def put(v, k):
+        nonlocal acc, nacc, nbits
+        acc |= v << nacc
+        nacc += k
+        nbits += k
+        while nacc >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            nacc -= 8
+
+    head = {}
+    prev = [-1] * n
+    i = 0
+    while i < n:
+        best_len = best_dist = 0
+        if i + LZ_MIN <= n:
+            limit = min(LZ_MAX, n - i)
+            j = head.get(data[i:i + 3], -1)
+            depth = 0
+            while j >= 0 and depth < LZ_CHAIN:
+                dist = i - j
+                if dist > LZ_WINDOW:
+                    break
+                cap = min(limit, dist)          # no overlap, as SE never does
+                if cap > best_len and data[j + best_len] == data[i + best_len]:
+                    ln = 0
+                    while ln < cap and data[j + ln] == data[i + ln]:
+                        ln += 1
+                    if ln > best_len:
+                        best_len, best_dist = ln, dist
+                        if ln == limit:
+                            break
+                j = prev[j]
+                depth += 1
+        if best_len >= LZ_MIN:
+            put(1, 1)
+            put(best_dist, 16)
+            put(best_len, 8)
+            step = best_len
+        else:
+            put(0, 1)
+            put(data[i], 8)
+            step = 1
+        for k in range(i, min(i + step, n - 2)):
+            key = data[k:k + 3]
+            prev[k] = head.get(key, -1)
+            head[key] = k
+        i += step
+    if nacc:
+        out.append(acc & 0xFF)
+    return bytes([2]) + struct.pack("<I", nbits) + bytes(out)

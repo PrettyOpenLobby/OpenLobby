@@ -34,7 +34,19 @@
 set -eu
 
 SSL=/opt/ssl3/bin/openssl
-CERT=/certs/ssl3.pem
+# PER-SERVICE LEAF, SHARED CA. ssl3ucs and ssl3web mount the same /certs volume
+# so they share ONE CA (good -- the client's store needs only that one root),
+# but they must NOT share one leaf: a 2002 stack that only checks CN cannot be
+# served both ucs.pol.com and wh000.pol.com by a single certificate, and with a
+# shared /certs the old single /certs/ssl3.pem meant whichever container booted
+# first fixed the CN for both. Each service now sets SSL3_CERT to its own path
+# (default keeps the historical single-file layout for the plain `ssl3` service
+# and any dev compose that never sets it).
+CERT="${SSL3_CERT:-/certs/ssl3.pem}"
+CERT_KEY="${CERT%.pem}.key"
+CERT_CRT="${CERT%.pem}.crt"
+CERT_CSR="${CERT%.pem}.csr"
+CERT_EXT="${CERT%.pem}.ext"
 CA_KEY=/certs/pol-ca.key
 CA_CRT=/certs/pol-ca.pem
 CN="${SSL3_CN:-*.pol.com}"
@@ -79,27 +91,30 @@ if [ ! -f "$CA_CRT" ]; then
         -subj "/C=US/O=PlayOnline Revival/OU=PlayOnline Revival Root CA" \
         -addext "basicConstraints=CA:TRUE" 2>/dev/null
     chmod 600 "$CA_KEY"
-    # The server cert must be reissued from the new CA, so drop any old one.
-    rm -f "$CERT" /certs/ssl3.key /certs/ssl3.crt
+    # Every leaf must be reissued from the new CA, so drop them all -- across all
+    # per-service names (ssl3.pem, ssl3-ucs.pem, ssl3-web.pem, ...). The dnas.*
+    # certs are managed elsewhere and deliberately left alone.
+    rm -f /certs/ssl3*.pem /certs/ssl3*.key /certs/ssl3*.crt /certs/ssl3*.csr
 fi
 
 if [ ! -f "$CERT" ]; then
-    echo "issuing server cert for CN=$CN from the CA"
+    echo "issuing server cert for CN=$CN ($CERT) from the CA"
     $SSL req -newkey rsa:1024 -nodes -sha1 \
-        -keyout /certs/ssl3.key -out /certs/ssl3.csr \
+        -keyout "$CERT_KEY" -out "$CERT_CSR" \
         -subj "/C=US/O=PlayOnline Revival/CN=$CN" 2>/dev/null
-    # SAN covers the hosts the client actually dials; CN carries the wildcard
-    # for any stack that only looks there.
+    # CN is the exact host this terminator answers for (SSL3_CN), because a 2002
+    # stack cannot be relied on to match a wildcard CN. SAN still lists every
+    # host we serve for any stack that does read it.
     # Nothing marked critical, and no extendedKeyUsage. The roots this client
     # already trusts are X.509 v1 with no extensions at all, so the less it has
     # to understand in order to accept ours, the better.
-    cat > /certs/ssl3.ext <<EOF
+    cat > "$CERT_EXT" <<EOF
 basicConstraints=CA:FALSE
-subjectAltName=DNS:*.pol.com,DNS:pol.com,DNS:ucs.pol.com,DNS:userctl.pol.com,DNS:usercte.pol.com,DNS:*.playonline.com,DNS:*.square-enix.com,DNS:gate1.jp.dnas.playstation.org,DNS:*.jp.dnas.playstation.org,DNS:*.dnas.playstation.org
+subjectAltName=DNS:*.pol.com,DNS:pol.com,DNS:wh000.pol.com,DNS:ucs.pol.com,DNS:userctl.pol.com,DNS:usercte.pol.com,DNS:*.playonline.com,DNS:*.square-enix.com,DNS:gate1.jp.dnas.playstation.org,DNS:*.jp.dnas.playstation.org,DNS:*.dnas.playstation.org
 EOF
-    $SSL x509 -req -in /certs/ssl3.csr -CA "$CA_CRT" -CAkey "$CA_KEY" \
-        -CAcreateserial -out /certs/ssl3.crt -days "$DAYS" -sha1 \
-        -extfile /certs/ssl3.ext 2>/dev/null
+    $SSL x509 -req -in "$CERT_CSR" -CA "$CA_CRT" -CAkey "$CA_KEY" \
+        -CAcreateserial -out "$CERT_CRT" -days "$DAYS" -sha1 \
+        -extfile "$CERT_EXT" 2>/dev/null
     # Key first, then the LEAF ONLY -- deliberately NOT the CA.
     #
     # We used to append the root, which made the server send a 2-certificate
@@ -112,11 +127,11 @@ EOF
     #
     # The client already has our root -- that is what tools/certstate.py
     # verifies -- so sending it again buys nothing and risks exactly this.
-    cat /certs/ssl3.key /certs/ssl3.crt > "$CERT"
+    cat "$CERT_KEY" "$CERT_CRT" > "$CERT"
     chmod 600 "$CERT"
-    echo "  issuer:  $($SSL x509 -in /certs/ssl3.crt -noout -issuer)"
-    echo "  subject: $($SSL x509 -in /certs/ssl3.crt -noout -subject)"
-    $SSL verify -CAfile "$CA_CRT" /certs/ssl3.crt || \
+    echo "  issuer:  $($SSL x509 -in "$CERT_CRT" -noout -issuer)"
+    echo "  subject: $($SSL x509 -in "$CERT_CRT" -noout -subject)"
+    $SSL verify -CAfile "$CA_CRT" "$CERT_CRT" || \
         echo "  WARNING: the chain does not verify against its own CA"
 fi
 
@@ -148,12 +163,22 @@ if [ ! -f /certs/dnas.pem ]; then
     chmod 600 /certs/dnas.pem
 fi
 
-if [ -n "${SSL3_CONNECT_HOST:-}" ]; then
-    sed "s/^\( *connect *= *\)[^:]*:/\1${SSL3_CONNECT_HOST}:/" "$CONF" \
-        > /tmp/stunnel.conf
+# A rewrite is needed if either the backend host must change (host networking)
+# or this service uses a non-default leaf path (SSL3_CERT). The baked configs
+# hardcode `cert = /certs/ssl3.pem`; only that exact line is retargeted, so the
+# separate `cert = /certs/dnas.pem` DNAS section in stunnel-web.conf is untouched.
+if [ -n "${SSL3_CONNECT_HOST:-}" ] || [ "$CERT" != /certs/ssl3.pem ]; then
+    cp "$CONF" /tmp/stunnel.conf
+    if [ -n "${SSL3_CONNECT_HOST:-}" ]; then
+        sed -i "s/^\( *connect *= *\)[^:]*:/\1${SSL3_CONNECT_HOST}:/" /tmp/stunnel.conf
+        echo "connect hosts rewritten to ${SSL3_CONNECT_HOST}:"
+    fi
+    if [ "$CERT" != /certs/ssl3.pem ]; then
+        sed -i "s#^\( *cert *= *\)/certs/ssl3\.pem *\$#\1${CERT}#" /tmp/stunnel.conf
+        echo "leaf cert rewritten to ${CERT}"
+    fi
     CONF=/tmp/stunnel.conf
-    echo "connect hosts rewritten to ${SSL3_CONNECT_HOST}:"
-    grep '^ *connect' "$CONF" | sed 's/^/    /'
+    grep -E '^ *(connect|cert)' "$CONF" | sed 's/^/    /'
 fi
 
 echo "ssl3 terminator: $($SSL version) (conf: ${STUNNEL_CONF:-/etc/stunnel/stunnel.conf})"

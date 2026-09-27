@@ -44,6 +44,7 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None
 
+from srvcore import shim_build_hidden  # noqa: E402
 from srvcore import (  # re-exported: responders.X is srvcore.X
     CONFIG_PATH,
     LOG_DIR,
@@ -21925,11 +21926,15 @@ def _ua_lang(ua):
     User-Agent DOES settle. Short codes are widened to the full tag the page
     tree is keyed by.
 
-    **The PS2 says `[jp]`, not `[ja]`** -- measured 2026-08-15 from a live
-    console: `PlayOnline-PML-Viewer/1.00 [jp] (Play Station 2)`, where the PC
-    sends `[en] (Windows Vista)`. `jp` is not a language tag at all, so without
-    this it fell through unmapped and every lookup went to a `_lang/jp/` that
-    can never exist. Note `$_LANG` on that same console reports `ja`; the two
+    **The tag tracks the VIEWER BUILD's region, not the platform.** The JP
+    Viewer sends `PlayOnline-PML-Viewer/1.00 [jp] (Play Station 2)` and the US
+    Viewer sends `[en] (PlayStation 2)`, so a US console resolves to
+    `_lang/en-US` exactly like a PC does, and an English console page IS
+    reachable and only has to be authored.
+
+    **`jp` is not a language tag at all**, so without the mapping below it fell
+    through unmapped and every JP-Viewer lookup went to a `_lang/jp/` that can
+    never exist. Note `$_LANG` on that same console reports `ja`; the two
     spellings are not consistent even within one client."""
     m = re.search(r"\[([A-Za-z-]{2,5})\]", ua or "")
     if not m:
@@ -22566,6 +22571,11 @@ def _serve_http_on_lobby(conn, first, peer, port):
         # mapping, still confined to www/ by _under.
         if rel.split("/", 1)[0] == "shim":
             probe = os.path.normpath(os.path.join(www, rel))
+            if shim_build_hidden(peer.rsplit(":", 1)[0], rel):
+                # answered as absent: the v0.1.0 installers treat a missing
+                # .sha256 as "no update here" and install what they carry
+                log("lobby", f"{peer}   /{rel}: shim build hidden from an internet peer")
+                probe = os.path.join(www, "shim", ".hidden-from-internet")
             if _under(www, probe) and os.path.isfile(probe):
                 cand, root_label = probe, "www"
         for root, label in ([] if cand else roots):

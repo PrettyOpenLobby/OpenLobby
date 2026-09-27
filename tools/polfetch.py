@@ -26,6 +26,7 @@ import argparse
 import os
 import re
 import socket
+import ssl
 import sys
 import time
 
@@ -49,6 +50,26 @@ def _headers(host, uri, lang, auth=None):
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
 
 
+def _tls_ctx():
+    """SE's SSL bands are Apache/1.3.26 Ben-SSL/1.48 -- TLSv1 at best, and the
+    cipher suites predate every modern default. Python refuses them outright
+    unless the security level is dropped, so this is deliberately permissive:
+    it is a read-only archive fetch against a 23-year-old server, and the
+    certificate is not a trust anchor for anything we do."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1
+    except (AttributeError, ValueError):
+        pass
+    try:
+        ctx.set_ciphers("ALL:@SECLEVEL=0")
+    except ssl.SSLError:
+        ctx.set_ciphers("ALL")
+    return ctx
+
+
 class Session(object):
     """A persistent keep-alive connection that mimics the Viewer: one 401 to
     acquire a nonce, then every later /pml/ request pre-signed on the SAME
@@ -56,10 +77,12 @@ class Session(object):
     old behaviour) tripped SE's per-source connection limit after ~15 fetches;
     this holds one connection open the way the client does."""
 
-    def __init__(self, host, ip, port, user, secret, lang="en-US", timeout=20):
+    def __init__(self, host, ip, port, user, secret, lang="en-US", timeout=20,
+                 tls=False):
         self.host, self.ip, self.port = host, ip, port
         self.user, self.secret, self.lang = user, secret, lang
         self.timeout = timeout
+        self.tls = tls
         self.sock = None
         self.nonce = None
 
@@ -69,9 +92,12 @@ class Session(object):
                 self.sock.close()
             except OSError:
                 pass
-        self.sock = socket.socket()
-        self.sock.settimeout(self.timeout)
-        self.sock.connect((self.ip, self.port))
+        sock = socket.socket()
+        sock.settimeout(self.timeout)
+        sock.connect((self.ip, self.port))
+        if self.tls:
+            sock = _tls_ctx().wrap_socket(sock, server_hostname=self.host)
+        self.sock = sock
 
     def _recv(self):
         buf = b""
@@ -171,6 +197,9 @@ def main():
     ap.add_argument("--host", default="wh000.pol.com")
     ap.add_argument("--ip", help="override DNS (the project's resolver points pol.com at the local stub)")
     ap.add_argument("--port", type=int, default=51300)
+    ap.add_argument("--tls", action="store_true",
+                    help="wrap the connection in TLS -- SE's SSL bands are 51301/51305, "
+                         "and /polapps/ (the Q&A app) is 403 over plain http")
     ap.add_argument("--user", default=os.environ.get("POL_USER"))
     ap.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
     ap.add_argument("--limit", type=int, help="stop after N fetches (for a trial run)")
@@ -186,7 +215,7 @@ def main():
 
     paths = [l.strip() for l in open(a.list, encoding="utf-8")]
     paths = [p for p in paths if p and not p.startswith("#")]
-    sess = Session(a.host, ip, a.port, a.user, secret)
+    sess = Session(a.host, ip, a.port, a.user, secret, tls=a.tls)
     got = miss = skip = fail = streak = 0
     try:
         for p in paths:
