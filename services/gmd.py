@@ -138,6 +138,15 @@ FLAGS_OFF_DUTY = int(os.environ.get("POL_GMD_FLAGS_OFF_DUTY", "0x20"), 0)
 QUEUE_OVERRIDE = os.environ.get("POL_GMD_QUEUE", "").strip()
 CHAT_ROOM = os.environ.get("POL_GMD_CHAT_ROOM", "").encode()
 CHAT_KEY = os.environ.get("POL_GMD_CHAT_KEY", "").encode()
+#: ONE ROOM PER REQUEST. CHAT_ROOM used to be handed to every caller, so every
+#: request shared one transcript and one spool -- a GM's reply went to whichever
+#: session in the room drained the spool first. Once a caller has filed a ticket
+#: (their `req_no` exists) the 0x801 names `<prefix><req_no:03d>` instead, e.g.
+#: `#gmcall004`; before that they still get CHAT_ROOM. The request counter
+#: survives restarts (gm-state.txt), so a room name is never reused.
+#: WARNING: The prefix must keep starting with gmchat.PREFIX ("#gm") or authserv will
+#: not treat the room as GM chat. Empty = the old single shared room.
+ROOM_PER_REQUEST = os.environ.get("POL_GMD_ROOM_PER_REQUEST", "#gmcall").encode()
 TICKET_DIR = os.environ.get("POL_GMD_TICKET_DIR", "/data/gm-calls")
 #: The operator's live desk, written by the admin panel (or tools/gmctl.py) and
 #: read here on every 0x801. A FILE, for the same reason a GM chat line is a file
@@ -265,6 +274,13 @@ def effective_flags(ctl, now=None):
     return STATUS_FLAGS, "POL_GMD_STATUS_FLAGS (nobody has said otherwise)"
 
 
+def room_for(ses):
+    """The chat room this caller is told to join. See ROOM_PER_REQUEST."""
+    if ROOM_PER_REQUEST and CHAT_ROOM and ses is not None and ses.req_no:
+        return (ROOM_PER_REQUEST + b"%03d" % ses.req_no)[:R_NAME_LEN - 1]
+    return CHAT_ROOM
+
+
 def checksum(buf, length):
     """FUN_037cdcd0. `length` is the message's own length field, not the wire one."""
     b = bytearray(buf)
@@ -351,6 +367,7 @@ class Gmd:
             with open(self.sess_path, "w") as f:
                 json.dump([{"peer": s.peer, "dwA": s.dwA, "dwB": s.dwB,
                             "req_no": s.req_no, "ready": s.sctx_ready,
+                            "room": room_for(s).decode("latin1") or None,
                             "at": s.last_seen} for s in self.sessions], f)
         except OSError as e:
             log(f"** could not persist the session table: {e}")
@@ -505,8 +522,9 @@ class Gmd:
         if body_edit:
             body_edit(m)
         if rooms:
-            m[R_ROOM_A:R_ROOM_A + len(CHAT_ROOM)] = CHAT_ROOM[:R_NAME_LEN - 1]
-            m[R_ROOM_B:R_ROOM_B + len(CHAT_ROOM)] = CHAT_ROOM[:R_NAME_LEN - 1]
+            room = room_for(ses)[:R_NAME_LEN - 1]
+            m[R_ROOM_A:R_ROOM_A + len(room)] = room
+            m[R_ROOM_B:R_ROOM_B + len(room)] = room
             if CHAT_KEY:
                 m[R_KEY_A:R_KEY_A + len(CHAT_KEY)] = CHAT_KEY[:R_KEY_LEN - 1]
                 m[R_KEY_B:R_KEY_B + len(CHAT_KEY)] = CHAT_KEY[:R_KEY_LEN - 1]
@@ -527,6 +545,11 @@ class Gmd:
             "subject": s(0x50, 64),
             "body": s(0x90, 320),
             "peer": peer,
+            # Recorded, not re-derived: the panel shows this room's transcript
+            # for this request, and the naming rule may change later.
+            "room": (ROOM_PER_REQUEST + b"%03d" % req_no).decode("latin1")
+                    if (ROOM_PER_REQUEST and CHAT_ROOM)
+                    else (CHAT_ROOM.decode("latin1") or None),
         }
         try:
             os.makedirs(TICKET_DIR, exist_ok=True)
@@ -549,7 +572,9 @@ class Gmd:
         flags, why = effective_flags(ctl)
         log(f"listening on 0.0.0.0:{PORT}/udp  flags={flags:#x} ({why}) "
             f"queue={ctl['queue'] if ctl.get('queue') is not None else (QUEUE_OVERRIDE or 'live')} "
-            f"room={CHAT_ROOM.decode() or '(none)'}")
+            f"room={CHAT_ROOM.decode() or '(none)'}"
+            + (f", then {ROOM_PER_REQUEST.decode()}NNN per request"
+               if ROOM_PER_REQUEST and CHAT_ROOM else ""))
         log(f"desk control file: {CONTROL_PATH}"
             + ("" if os.path.exists(CONTROL_PATH) else " (absent -- env defaults)"))
         self.load_sessions()
@@ -630,7 +655,9 @@ class Gmd:
                         struct.pack_into("<H", m, 0x1A, q)         # body +0x02
                         struct.pack_into("<I", m, 0x24, flags)     # body +0x0C
                 rep, n = self.generic(ses, rtype_out, echoA, echoC, edit)
-                log(f"[>] {rtype:#06x} -> {rtype_out:#06x} (total {n:#x})")
+                log(f"[>] {rtype:#06x} -> {rtype_out:#06x} (total {n:#x})"
+                    + (f" room {room_for(ses).decode('latin1')}"
+                       if rtype_out == 0x801 and CHAT_ROOM else ""))
 
             w = wire_len(n)
             # The plaintext head is logged so a live `msgbuf` read (0x038639bc,

@@ -1090,28 +1090,96 @@ class Handler(BaseHTTPRequestHandler):
     # Filed by pol-shim's gmserver.exe from the 0x102 the client sends when the
     # GM Call form is submitted. Measured layout: content id at body +0x04,
     # issue at +0x06, handle at +0x40, subject at +0x50, body at +0x90.
+    #
+    # WARNING: gmd keeps its OWN state in this directory too (gm-control.json,
+    # gm-serving.json, gm-sessions.json). Reading "every .json" would parse
+    # gm-sessions.json -- a LIST -- as a ticket, `rec.get` would raise, and the
+    # whole endpoint would fail. Only gmd's ticket names count, and only dicts.
+    _TICKET_NAME = re.compile(r"gm-\d{8}T\d{6}-\d+\.json")
+    _GM_TICKET_LOCK = threading.Lock()
+
+    #: The operator's own bookkeeping on a ticket (open / answered / closed),
+    #: kept apart from the tickets themselves: gmd writes those, and a second
+    #: writer on the same file would race it. Not a ticket name, so the list
+    #: above never mistakes it for one.
+    GM_TICKET_STATE = os.path.join(GM_CALL_DIR, "gm-tickets.json")
+    GM_TICKET_STATUSES = ("open", "answered", "closed")
+
+    def _gm_ticket_state(self):
+        try:
+            with open(self.GM_TICKET_STATE, encoding="utf-8") as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return st if isinstance(st, dict) else {}
+
     def _gm_calls_list(self):
         out = []
         try:
             names = sorted(os.listdir(GM_CALL_DIR), reverse=True)
         except OSError:
             names = []                       # none filed yet is not an error
+        names = [n for n in names if self._TICKET_NAME.fullmatch(n)]
+        state = self._gm_ticket_state()
+        # Which callers are on the GM band RIGHT NOW. gmd keys a session by the
+        # request number it filed, and the peer IP must agree too: request
+        # numbers restart with gmd, so an old ticket can share one with a new
+        # caller.
+        _c, desk = self._gm_state()
+        live = {(c["request_no"], c["peer"].rsplit(":", 1)[0])
+                for c in desk["callers"] if c["live"] and c["request_no"]}
+        # Requests filed before gmd gave each one its own room were all handed
+        # the one shared room, so that is where their conversation is.
+        shared = (desk.get("serving") or {}).get("room") or "#gmchat001"
         for name in names[:500]:
-            if not name.endswith(".json"):
-                continue
             try:
                 with open(os.path.join(GM_CALL_DIR, name), encoding="utf-8",
                           errors="replace") as f:
                     rec = json.load(f)
             except (OSError, ValueError):
                 continue                     # a torn file must not hide the rest
+            if not isinstance(rec, dict):
+                continue
             cid = rec.get("content_id")
             # _content_label takes a CSV STRING, not a list -- passing a list
             # stringifies to "[2]" and shows that on screen.
             rec["content_label"] = _content_label(cid if cid is not None else "")
             rec["id"] = name[:-len(".json")]
+            mine = state.get(rec["id"]) or {}
+            rec["status"] = mine.get("status") or "open"
+            rec["status_by"], rec["status_at"] = mine.get("by"), mine.get("at")
+            rec["connected"] = (rec.get("request_no"),
+                                (rec.get("peer") or "").rsplit(":", 1)[0]) in live
+            rec["room_shared"] = not rec.get("room") or rec["room"] == shared
+            rec["room"] = rec.get("room") or shared
             out.append(rec)
         self._send(200, out)
+
+    def _gm_ticket(self):
+        """Mark a ticket open / answered / closed. Bookkeeping only: nothing
+        here reaches the client, which has no message for it."""
+        body = self._json_body()
+        tid, status = (body.get("id") or "").strip(), body.get("status")
+        if not self._TICKET_NAME.fullmatch(tid + ".json"):
+            return self._send(400, {"error": "no such ticket"})
+        if status not in self.GM_TICKET_STATUSES:
+            return self._send(400, {"error": "status must be open, answered "
+                                             "or closed"})
+        if not os.path.exists(os.path.join(GM_CALL_DIR, tid + ".json")):
+            return self._send(404, {"error": "no such ticket"})
+        who = (self._session() or {}).get("user") or "operator"
+        with self._GM_TICKET_LOCK:
+            st = self._gm_ticket_state()
+            st[tid] = {"status": status, "by": who, "at": time.time()}
+            tmp = self.GM_TICKET_STATE + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(st, f, indent=1)
+                os.replace(tmp, self.GM_TICKET_STATE)
+            except OSError as exc:
+                return self._send(500, {"error": f"could not save: {exc}"})
+        print(f"[admin] {who} marked GM call {tid} {status}", flush=True)
+        self._send(200, {"ok": True, "id": tid, "status": status})
 
     # -- the GM desk: queue control, and the room ----------------------------- #
     #
