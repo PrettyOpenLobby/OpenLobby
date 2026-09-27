@@ -3542,6 +3542,40 @@ def confirm_group_member(conn, gid, member_name):
     return cur.rowcount > 0
 
 
+def group_class_of(conn, gid, member_id=None, handle_ids=None):
+    """The class a MEMBER holds in group `gid`, or None when they are not in it.
+
+    The gate every group action asks (JOIN of `#XXL<gid>`, talking in it,
+    inviting, changing a class): only an accepted member -- or the owner --
+    may. The owner is class 5 whether or not a row was stored for them (a
+    pre-7:1 group has none; 7:12 re-adds them). A pending invitee is not in
+    the group yet: None.
+
+    Asked by member (every handle of the account counts: authserv does not
+    know which handle is active) or by an explicit set of handle ids.
+    """
+    if handle_ids is None:
+        handle_ids = [int(r["id"]) for r in conn.execute(
+            "SELECT id FROM handle WHERE member_id = ?", (int(member_id),))]
+    ids = {int(h) for h in handle_ids if h}
+    if not ids:
+        return None
+    g = conn.execute("SELECT handle_id FROM friend WHERE id = ? AND kind = ?",
+                     (int(gid), KIND_GROUP)).fetchone()
+    if g is None:
+        return None
+    if int(g["handle_id"]) in ids:
+        return GROUP_CLASS_MASTER
+    marks = ",".join("?" * len(ids))
+    names = {r["handle_name"] for r in conn.execute(
+        f"SELECT handle_name FROM handle WHERE id IN ({marks})", tuple(ids))}
+    for r in conn.execute("SELECT member_handle, member_name, class FROM group_member "
+                          "WHERE group_id = ? AND pending = 0", (int(gid),)):
+        if (r["member_handle"] and int(r["member_handle"]) in ids) or r["member_name"] in names:
+            return int(r["class"])
+    return None
+
+
 def remove_group_member(conn, gid, member_name):
     conn.execute("DELETE FROM group_member WHERE group_id = ? AND member_name = ?",
                  (int(gid), member_name))
