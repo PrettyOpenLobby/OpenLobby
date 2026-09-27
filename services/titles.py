@@ -82,6 +82,9 @@ class Core:
       RESOURCE_DIR                    the resource store root
       _peer_is_ps2()                  is THIS lobby connection a PS2 build
       _self_ip()                      the address this server advertises
+      _peer_build                     thread-local: .ps2 and .ip of THIS connection
+                                      (set on the lobby band and the auth band)
+      CLIENT_BUILDS_PATH              the per-address client build record file
       _title_zone(member_id)          the content id the member is in, or None
       _title_zone_lease(member_id, zone)   renew the member's title lease
       _content_profiles()             the client-written content profiles, by cid
@@ -173,6 +176,13 @@ class Title:
     resource_init = {}
     #: extra POLpro reply-template files (merged after /config/polpro.json)
     polpro_spec_files = ()
+    #: `path -> exact length` of client WRITES (3:2) this title accepts; the
+    #: core stores an object at such a path only when it has that length
+    resource_write_len = {}
+    #: True = ask `idle_pushes` even on a connection that has been quiet past
+    #: the freshness window. For a title whose client waits for a record in
+    #: silence; the title must then pin delivery to the live session itself.
+    idle_push_when_quiet = False
 
     def core_bound(self):
         """The core handle has just been (re)bound; refresh any aliases."""
@@ -447,12 +457,29 @@ def band_role(cmd_txt):
     return None
 
 
-def idle_pushes(member_id, peers):
-    """[(title, peer_nick, body)] across every title."""
+def idle_pushes(member_id, peers, quiet=False):
+    """[(title, peer_nick, body)] across every title. With `quiet` (the
+    connection has not heard its client lately) only titles that set
+    `idle_push_when_quiet` are asked."""
     out = []
     for t in _TITLES:
+        if quiet and not t.idle_push_when_quiet:
+            continue
         for peer, body in t.idle_pushes(member_id, peers) or []:
             out.append((t, peer, body))
+    return out
+
+
+def any_push_when_quiet():
+    """True when some loaded title wants idle pushes on a quiet connection."""
+    return any(t.idle_push_when_quiet for t in _TITLES)
+
+
+def resource_write_len():
+    """`path -> exact length` of client writes, merged across titles."""
+    out = {}
+    for t in _TITLES:
+        out.update(t.resource_write_len or {})
     return out
 
 
