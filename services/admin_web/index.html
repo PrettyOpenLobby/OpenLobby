@@ -2,7 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#1c1f28">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="OpenLobby Admin">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <title>OpenLobby Admin</title>
   <style>
     :root {
@@ -13,13 +21,17 @@
     * { box-sizing: border-box; }
     body { margin: 0; font: 14px/1.45 'Segoe UI', system-ui, sans-serif;
       background: var(--bg); color: var(--text); }
-    header { padding: 14px 20px; border-bottom: 1px solid var(--line);
-      display: flex; align-items: center; gap: 16px; background: var(--panel); }
+    header { padding: 10px 20px; border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 16px; background: var(--panel);
+      position: sticky; top: 0; z-index: 30; }
     header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
     header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); }
-    nav { display: flex; gap: 4px; }
-    nav button { background: none; border: 0; color: var(--muted); padding: 7px 14px;
-      border-radius: 7px; cursor: pointer; font-size: 14px; }
+    nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none;
+      min-width: 0; flex: 1 1 auto; }
+    nav::-webkit-scrollbar { display: none; }
+    nav button { background: none; border: 0; color: var(--muted); padding: 7px 12px;
+      border-radius: 7px; cursor: pointer; font-size: 14px; white-space: nowrap; }
+    nav button:hover { color: var(--text); }
     nav button.active { background: var(--panel2); color: var(--text); }
     main { padding: 20px; max-width: 1200px; margin: 0 auto; }
     .tab { display: none; } .tab.active { display: block; }
@@ -355,6 +367,247 @@
       border-radius: 9px; background: var(--warn); color: #1a1406; font-size: 11px;
       font-weight: 700; line-height: 18px; text-align: center; }
     .navbadge[hidden] { display: none; }
+    .navbadge.info { background: var(--accent); color: #04121f; }
+    [hidden] { display: none !important; }
+    .permchip { display: inline-block; font-size: 11px; padding: 1px 8px; margin: 1px 3px 1px 0;
+      border-radius: 20px; background: rgba(90,169,255,.13); color: var(--accent); }
+    #modPerms label { display: flex; gap: 8px; align-items: center; margin: 0;
+      color: var(--text); font-size: 13px; cursor: pointer; }
+    #modPerms input { accent-color: var(--accent); }
+    .audit-bad td { color: var(--bad); }
+    .gm-bar-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+    .chiprow { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    .gamechip { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+      padding: 6px 10px; font-size: 12.5px; }
+    .gamechip b { font-size: 15px; margin-right: 4px; }
+    .gamechip.stale { color: var(--muted); }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 8px; background: var(--muted); vertical-align: middle; }
+    .dot.ok { background: var(--good); } .dot.bad { background: var(--bad); }
+    .dot.warn { background: var(--warn); }
+    .modal .card.wide { max-width: 860px; }
+    .acct-head { display: flex; justify-content: space-between; gap: 12px;
+      align-items: flex-start; margin-bottom: 12px; }
+    .acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 700px) { .acct-grid { grid-template-columns: 1fr; } }
+    .acct-sec { background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+    .acct-sec h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .5px;
+      text-transform: uppercase; color: var(--muted); font-weight: 600; }
+    .acct-sec .kv { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+    .acct-sec .kv span:first-child { color: var(--muted); }
+    .acct-sec ul { margin: 0; padding-left: 16px; }
+    .acct-sec .none { color: var(--muted); }
+    a.acct-link { color: var(--accent); cursor: pointer; text-decoration: none; }
+    a.acct-link:hover { text-decoration: underline; }
+
+    /* ---- shared bits added with the Overview tab ---- */
+    button:disabled { opacity: .55; cursor: default; }
+    button:focus-visible, input:focus-visible, select:focus-visible,
+    textarea:focus-visible { outline: 2px solid rgba(90,169,255,.55); outline-offset: 1px; }
+    .tablewrap { overflow-x: auto; }
+    tbody tr:hover td { background: rgba(255,255,255,.02); }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      margin-bottom: 8px; }
+    .toolbar .grow { flex: 1 1 200px; }
+    .toolbar input[type=search] { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px;
+      font: inherit; width: 100%; color-scheme: dark; }
+    .toolbar .count { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+    .seg { display: inline-flex; gap: 2px; background: var(--panel2);
+      border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+    .seg button { background: none; border: 0; color: var(--muted); padding: 5px 11px;
+      border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+    .seg button.on { background: var(--line); color: var(--text); }
+    button.sm { padding: 4px 10px; font-size: 12px; border-radius: 7px; }
+    .copy { background: none; border: 0; color: var(--muted); cursor: pointer;
+      padding: 2px 5px; border-radius: 5px; font-size: 12px; vertical-align: middle; }
+    .copy:hover { color: var(--text); background: var(--line); }
+    .rowacts { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+    .rowacts button { padding: 4px 10px; font-size: 12px; border-radius: 7px; }
+    .clients { color: var(--muted); font-size: 12px; }
+    .muted { color: var(--muted); }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+    .grid2 > .panel { margin-bottom: 18px; }
+    @media (max-width: 960px) { .grid2 { grid-template-columns: 1fr; } }
+    .flash { animation: flash 1.2s ease-out; }
+    @keyframes flash { from { box-shadow: 0 0 0 3px rgba(90,169,255,.6); } to { box-shadow: none; } }
+    header .tools { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+    #installBtn[hidden] { display: none; }
+    /* Installed on a notched phone the page runs edge to edge (viewport-fit),
+       so keep the header and the content clear of the notch and home bar. */
+    header { padding-top: max(10px, env(safe-area-inset-top));
+      padding-left: max(20px, env(safe-area-inset-left));
+      padding-right: max(20px, env(safe-area-inset-right)); }
+    main { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+    .toast { bottom: max(20px, env(safe-area-inset-bottom)); }
+    /* An installed app has no browser chrome, so tap highlights and
+       overscroll bounce read as glitches. */
+    @media (display-mode: standalone) {
+      body { -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
+    }
+    header .tools .who { margin-left: 0; }
+    #refreshBtn { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+      padding: 5px 10px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+    .kbd { font: 11px 'Consolas', monospace; border: 1px solid var(--line);
+      border-radius: 4px; padding: 0 5px; color: var(--muted); }
+
+    /* Overview */
+    .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 12px; margin-bottom: 18px; }
+    .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 14px 16px; cursor: pointer; text-align: left; color: var(--text);
+      font: inherit; display: flex; flex-direction: column; gap: 2px; }
+    .stat:hover { border-color: #4b5468; }
+    .stat .lab { color: var(--muted); font-size: 12px; text-transform: uppercase;
+      letter-spacing: .5px; font-weight: 600; }
+    .stat .num { font-size: 26px; font-weight: 600; line-height: 1.2;
+      font-variant-numeric: tabular-nums; }
+    .stat .sub { color: var(--muted); font-size: 12px; }
+    .stat.warn .num { color: var(--warn); }
+    .stat.good .num { color: var(--good); }
+    .feed { list-style: none; margin: 0; padding: 0; }
+    .feed li { display: flex; justify-content: space-between; gap: 12px;
+      padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; cursor: pointer; }
+    .feed li:first-child { border-top: 0; }
+    .feed li:hover .t1 { color: var(--accent); }
+    .feed .t1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .feed .t2 { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .feed li.empty { cursor: default; color: var(--muted); }
+    .quick { display: flex; gap: 8px; flex-wrap: wrap; }
+    #newCodes { margin-top: 12px; }
+    #newCodes[hidden] { display: none; }
+    #newCodes .codes { font: 13px/1.8 'Consolas', monospace; background: var(--panel2);
+      border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+      max-height: 180px; overflow: auto; white-space: pre; }
+    /* Button rows: size to the buttons instead of sharing the width out. */
+    .row > div.btn { flex: 0 0 auto; min-width: 0; }
+
+    /* On a phone a wide table becomes one card per row; each cell is
+       labelled with its column (data-label, filled from the <th> by app.js). */
+    @media (max-width: 700px) {
+      table.cards thead { display: none; }
+      table.cards, table.cards tbody, table.cards tr, table.cards td { display: block; width: 100%; }
+      table.cards tr { border: 1px solid var(--line); border-radius: 9px;
+        padding: 8px 12px; margin-bottom: 10px; background: var(--panel2); }
+      table.cards td { border: 0; padding: 4px 0; display: flex; gap: 12px;
+        justify-content: space-between; align-items: center; text-align: right; }
+      table.cards td::before { content: attr(data-label); color: var(--muted);
+        font-size: 12px; text-align: left; flex: 0 0 auto; }
+      table.cards td[data-label=""]::before { content: none; }
+      table.cards td[colspan] { justify-content: flex-start; text-align: left; }
+      table.cards .rowacts { justify-content: flex-start; width: 100%; }
+      table.cards td:last-child:has(.rowacts), table.cards td:last-child:has(button) {
+        justify-content: flex-start; padding-top: 8px; }
+      .toolbar .seg { flex-wrap: wrap; }
+    }
+    @media (max-width: 700px) {
+      header { flex-wrap: wrap; gap: 8px 12px; padding: max(10px, env(safe-area-inset-top))
+        max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); }
+      header nav { order: 3; flex-basis: 100%; }
+      header .tools { margin-left: auto; }
+      main { padding: 16px; }
+      .panel { padding: 14px; }
+    }
+
+    /* ---- PML preview: layout ---- */
+    body.wide main { max-width: none; }
+    .pv { display: grid; grid-template-columns: 300px minmax(0, 1fr) auto; gap: 16px;
+      align-items: start; }
+    .pv .panel { margin-bottom: 12px; }
+    .pv-side { padding: 12px; position: sticky; top: 70px; max-height: calc(100vh - 90px);
+      display: flex; flex-direction: column; gap: 8px; }
+    .pv-side input[type=search] { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font: inherit;
+      width: 100%; color-scheme: dark; }
+    .pv-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .pv-filters summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+    .pv-filters label { margin: 8px 0 3px; }
+    .pv-filters select { padding: 6px 8px; }
+    .pv-list { overflow-y: auto; flex: 1 1 auto; min-height: 120px; margin: 0 -12px;
+      border-top: 1px solid var(--line); color-scheme: dark; }
+    .pv-item { padding: 7px 12px; cursor: pointer; border-bottom: 1px solid rgba(51,57,73,.5); }
+    .pv-item:hover { background: var(--panel2); }
+    .pv-item.active { background: rgba(90,169,255,.14); box-shadow: inset 3px 0 0 var(--accent); }
+    .pv-item .t { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pv-item .p { font: 11px 'Consolas', monospace; color: var(--muted); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+    .pv-item .k { font-size: 10.5px; color: var(--muted); margin-left: 6px; }
+    .pv-more { padding: 10px 12px; color: var(--muted); font-size: 12px; }
+    .pv-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; flex-wrap: wrap; }
+    .pv-title { flex: 1 1 200px; min-width: 0; }
+    .pv-title > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #pvTitle { font-weight: 600; }
+    #pvPath { font: 11.5px 'Consolas', monospace; }
+    #pvInspect.on { background: rgba(90,169,255,.2); border-color: var(--accent); }
+    .pv-stagebox { background: #000; border: 1px solid var(--line); border-radius: 10px;
+      padding: 10px; overflow: auto; }
+    .pv-stagescale { transform-origin: 0 0; width: 640px; height: 480px; }
+    .pv-note { color: var(--muted); font-size: 12.5px; margin: 8px 2px; line-height: 1.6; }
+    .pv-note b { color: var(--text); font-weight: 600; }
+    .pv-note .warn { color: var(--warn); }
+    .pv-inspector { padding: 10px 12px; font-size: 12.5px; }
+    .pv-inspector .kv { display: grid; grid-template-columns: 120px 1fr; gap: 2px 10px; margin-top: 6px; }
+    .pv-inspector .kv span:nth-child(odd) { color: var(--muted); font-family: 'Consolas', monospace; }
+    .pv-inspector .kv span:nth-child(even) { font-family: 'Consolas', monospace; overflow-wrap: anywhere; }
+    .pv-source { width: 460px; padding: 10px 12px; position: sticky; top: 70px; }
+    .pv-editor { display: flex; border: 1px solid var(--line); border-radius: 7px;
+      background: var(--panel2); height: calc(100vh - 190px); min-height: 300px; overflow: hidden; }
+    .pv-gutter { margin: 0; padding: 8px 6px; min-width: 42px; text-align: right;
+      font: 12.5px/1.5 'Consolas', monospace; color: var(--muted); background: rgba(0,0,0,.18);
+      overflow: hidden; user-select: none; }
+    .pv-editor textarea { border: 0; border-radius: 0; background: transparent; height: 100%;
+      padding: 8px 10px; font: 12.5px/1.5 'Consolas', monospace; white-space: pre;
+      overflow: auto; resize: none; }
+    @media (max-width: 1300px) {
+      .pv { grid-template-columns: 260px minmax(0, 1fr); }
+      .pv-source { grid-column: 1 / -1; width: auto; position: static; }
+      .pv-editor { height: 420px; }
+    }
+    @media (max-width: 800px) {
+      .pv { grid-template-columns: 1fr; }
+      .pv-side { position: static; max-height: 420px; }
+    }
+
+    /* ---- PML preview: what the renderer draws ---- */
+    .pml-stage { position: relative; }
+    .pml-root, .pml-el { position: absolute; }
+    .pml-root { inset: 0; }
+    .pml-sheet, .pml-scrollarea, .pml-systembg, .pml-td, .pml-textbox, .pml-img { overflow: hidden; }
+    .pml-scroll { overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
+    .pml-noscroll { overflow: hidden; }
+    .pml-area { position: relative; }
+    .pml-text { display: block; position: absolute; left: 0; top: 0; }
+    .pml-img > img { display: block; position: absolute; left: 0; top: 0; }
+    .pml-img > canvas { z-index: 1; }
+    .pml-widget { box-shadow: inset 0 0 0 1px rgba(255,255,255,.35); border-radius: 3px; }
+    .pml-button { border-radius: 10px; background: rgba(255,255,255,.12); }
+    .pml-select::after { content: "\25BE"; position: absolute; right: 5px; top: 50%;
+      transform: translateY(-50%); color: rgba(255,255,255,.7); font-size: 11px; }
+    .pml-skinned { box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+    /* Art the mirror does not have: a quiet hatched plate, so the page stays
+       readable; "Missing art" in the toolbar turns them red to find them. */
+    .pml-missing { background: repeating-linear-gradient(135deg,
+        rgba(255,255,255,.07) 0 6px, rgba(255,255,255,.02) 6px 12px);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); }
+    .pml-show-missing .pml-missing { outline: 1px dashed rgba(255,110,110,.9);
+      outline-offset: -1px; background: rgba(255,110,110,.14); }
+    .pml-inline-missing { display: none; }
+    .pml-show-missing .pml-inline-missing { display: block; }
+    #pvMissingBtn.on { background: rgba(255,110,110,.18); border-color: rgba(255,110,110,.7); }
+    .pml-unresolved { outline: 1px dotted rgba(255,207,107,.8); outline-offset: -1px; }
+    .pml-link { cursor: pointer; }
+    .pml-inline-link { position: absolute; }
+    .pml-inspect .pml-el:hover { outline: 1px solid rgba(90,169,255,.9); outline-offset: -1px; }
+    .pml-inspect .pml-link { cursor: crosshair; }
+    .pml-picked { outline: 2px solid #5aa9ff !important; outline-offset: -2px; }
+    .pml-doc { position: absolute; inset: 0; overflow: auto; padding: 14px 18px;
+      background: #f4f1ea; }
+    .pml-doc-label { font: 10px 'Consolas', monospace; letter-spacing: .06em;
+      text-transform: uppercase; color: #8a8272; margin: 14px 0 4px;
+      border-bottom: 1px solid #ddd6c8; }
+    .pml-doc-body { position: relative; }
+    .pml-doc-body .pml-text { position: relative; }
   </style>
 </head>
 <body>
@@ -362,53 +615,142 @@
     <span class="dot"></span>
     <h1>OpenLobby Admin</h1>
     <nav>
-      <button data-tab="codes" class="active">Codes</button>
+      <button data-tab="overview" class="active">Overview</button>
       <button data-tab="accounts">Accounts</button>
-      <button data-tab="reports">Reports</button>
-      <button data-tab="issues">Issues</button>
+      <button data-tab="codes">Codes</button>
+      <button data-tab="reports">Reports<span class="navbadge info" id="reportsBadge" hidden></span></button>
+      <button data-tab="issues">Issues<span class="navbadge info" id="issuesBadge" hidden></span></button>
       <button data-tab="gmcalls">GM Calls<span class="navbadge" id="gmBadge" hidden></span></button>
       <button data-tab="news">News</button>
       <button data-tab="pml">PML Preview</button>
       <button data-tab="security">Security</button>
     </nav>
-    <div class="who" id="who"></div>
+    <div class="tools">
+      <button id="installBtn" class="act sm" hidden title="Install the panel as an app">Install app</button>
+      <button id="refreshBtn" title="Reload this tab's data (R)">Refresh</button>
+      <div class="who" id="who"></div>
+    </div>
   </header>
 
   <main>
-    <!-- CODES -->
-    <section id="tab-codes" class="tab active">
+    <!-- OVERVIEW -->
+    <section id="tab-overview" class="tab active">
+      <div class="stats" id="ovStats"></div>
+      <div class="grid2">
+        <div class="panel">
+          <h2>Online now</h2>
+          <div id="ovGames" class="chiprow"></div>
+          <ul class="feed" id="ovOnline"></ul>
+        </div>
+        <div class="panel" data-owner>
+          <h2>Services</h2>
+          <ul class="feed" id="ovHealth"></ul>
+          <div class="hint" id="ovHealthFoot"></div>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="panel" data-perm="accounts_view">
+          <h2>Newest accounts</h2>
+          <ul class="feed" id="ovAccounts"></ul>
+        </div>
+        <div class="panel">
+          <h2>Needs attention</h2>
+          <ul class="feed" id="ovAttention"></ul>
+        </div>
+      </div>
       <div class="panel">
-        <h2>Generate a registration code</h2>
+        <h2>Quick actions</h2>
+        <div class="quick">
+          <button class="act" data-go="accounts:newHandle" data-owner>Create an account</button>
+          <button class="ghost" data-go="codes:code" data-perm="codes">Make registration codes</button>
+          <button class="ghost" data-go="accounts:grantPol" data-owner>Grant content</button>
+          <button class="ghost" data-go="gmcalls" data-perm="gm">Open the GM desk</button>
+          <button class="ghost" data-go="news" data-owner>Write an announcement</button>
+        </div>
+        <p class="hint">Shortcuts: <span class="kbd">/</span> search the current list,
+          <span class="kbd">R</span> refresh, <span class="kbd">1</span>-<span class="kbd">9</span>
+          switch tabs, <span class="kbd">Esc</span> close a dialog.</p>
+      </div>
+    </section>
+
+    <!-- CODES -->
+    <section id="tab-codes" class="tab">
+      <div class="panel">
+        <h2>Generate registration codes</h2>
         <div class="row">
           <div style="flex:2">
             <label>Code (blank = random)</label>
             <input type="text" id="code" placeholder="PLAY-NINE-REVA-GAME-FFXI"
                    maxlength="24" autocomplete="off" spellcheck="false" class="mono">
-            <p class="hint" id="codeHint">Five groups of four - dashes are
-              inserted as you type.</p>
+            <p class="hint" id="codeHint">Format XXXX-XXXX-XXXX-XXXX-XXXX. Leave blank for a random code.</p>
           </div>
-          <div><button class="ghost" id="randBtn">Random</button></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="randBtn">Random</button></div>
+          <div style="flex:0 0 110px; min-width:0"><label>How many</label>
+            <input type="text" id="codeCount" value="1" inputmode="numeric" maxlength="2"
+                   title="1-50. More than one always uses random codes."></div>
         </div>
         <label>Grants content</label>
         <div class="chips" id="contentChips"></div>
-        <label>Note (optional)</label>
-        <input type="text" id="note" placeholder="e.g. launch giveaway">
+        <div class="row">
+          <div style="flex:3"><label>Note (optional)</label>
+            <input type="text" id="note" placeholder="e.g. launch giveaway"></div>
+          <div style="flex:1"><label>Expires after (days)</label>
+            <input type="text" id="codeExpire" inputmode="numeric" maxlength="4" placeholder="never"></div>
+        </div>
         <div style="margin-top:14px"><button class="act" id="createBtn">Create code</button></div>
+        <div id="newCodes" hidden>
+          <div class="toolbar" style="margin-bottom:6px">
+            <span class="count" id="newCodesCount"></span>
+            <button class="ghost sm" id="newCodesCopy">Copy all</button>
+          </div>
+          <div class="codes" id="newCodesList"></div>
+        </div>
       </div>
       <div class="panel">
         <h2>Existing codes</h2>
-        <table><thead><tr><th>Code</th><th>Grants</th><th>Note</th><th>Status</th></tr></thead>
-          <tbody id="codesBody"></tbody></table>
+        <div class="toolbar">
+          <div class="seg" id="codeFilter">
+            <button data-f="unused" class="on">Unused</button>
+            <button data-f="used">Redeemed</button>
+            <button data-f="all">All</button>
+          </div>
+          <div class="grow"><input type="search" id="codeSearch" data-search
+               placeholder="Search code, note, content or who redeemed it"></div>
+          <span class="count" id="codeCountLbl"></span>
+          <button class="ghost sm" id="codeCopyShown">Copy shown</button>
+          <button class="danger sm" id="codeVoidShown" data-owner>Void shown</button>
+          <button class="ghost sm" id="codeCsv">Export CSV</button>
+        </div>
+        <p class="hint" id="codeLimitHint" hidden></p>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Code</th><th>Grants</th><th>Note</th>
+          <th>Created</th><th>Made by</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+          <tbody id="codesBody"></tbody></table></div>
       </div>
     </section>
 
     <!-- ACCOUNTS -->
     <section id="tab-accounts" class="tab">
       <div class="panel">
+        <h2>Accounts</h2>
+        <div class="toolbar">
+          <div class="grow"><input type="search" id="accSearch" data-search
+               placeholder="Search PlayOnline ID, handle, content or client"></div>
+          <div class="seg" id="accFilter">
+            <button data-f="all" class="on">All</button>
+            <button data-f="unlinked" title="Owns content the launcher cannot see">Not playable</button>
+            <button data-f="nocontent">No content</button>
+          </div>
+          <span class="count" id="accCount"></span>
+          <button class="ghost sm" id="accCsv">Export CSV</button>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>PlayOnline ID</th><th>Handle</th><th>Content</th>
+          <th>Playable</th><th>Clients</th><th>Created</th><th></th></tr></thead>
+          <tbody id="accountsBody"></tbody></table></div>
+      </div>
+      <div class="grid2" id="acctForms" data-owner>
+      <div class="panel" id="grantPanel">
         <h2>Grant content to an account</h2>
-        <p class="hint">No registration code needed - this grants the titles
-          outright and links them to the account&rsquo;s handle, which is what the
-          client actually reads when it decides whether the Play button works.</p>
+        <p class="hint">Adds titles to an account directly, without a registration code.</p>
         <div class="row">
           <div style="flex:1"><label>PlayOnline ID</label>
             <input type="text" id="grantPol" placeholder="AB-1234567" list="polidList">
@@ -417,22 +759,17 @@
         <label>Content <span class="hint" style="display:inline">(pick any number)</span></label>
         <div class="chips" id="grantChips"></div>
         <div class="row" style="margin-top:12px; align-items:center">
-          <div><button class="act" id="grantBtn">Grant</button></div>
-          <div><button class="danger" id="revokeBtn">Revoke</button></div>
-          <div><button class="ghost" id="grantAllBtn">Select all</button></div>
-          <div><button class="ghost" id="grantNoneBtn">Clear</button></div>
+          <div class="btn"><button class="act" id="grantBtn">Grant</button></div>
+          <div class="btn"><button class="danger" id="revokeBtn"
+               style="padding:9px 14px; font-size:14px; border-radius:8px">Revoke</button></div>
+          <div class="btn" style="margin-left:auto"><button class="ghost" id="grantAllBtn">Select all</button></div>
+          <div class="btn"><button class="ghost" id="grantNoneBtn">Clear</button></div>
         </div>
-        <p class="hint">Revoke cancels the picked content on this account and
-          removes its character from the launcher (the client returns to
-          &ldquo;Create character&rdquo;). Reversible - a later Grant
-          restores the same Content ID.</p>
+        <p class="hint">Revoke removes the ticked titles and their characters from the launcher. Granting them again restores the same Content ID.</p>
       </div>
-      <div class="panel">
+      <div class="panel" id="createPanel">
         <h2>Create an account</h2>
-        <p class="hint">Exactly what the in-client sign-up does - one
-          transaction for the PlayOnline ID, member, handle, content and mailbox.
-          The password is shown <b>once</b>, here; only its hash is stored, so
-          there is nowhere to read it back from.</p>
+        <p class="hint">Creates a PlayOnline ID with a handle, mailbox and the ticked content. The password is shown once.</p>
         <div class="row">
           <div style="flex:1"><label>Handle <span class="hint" style="display:inline">(blank = Player####)</span></label>
             <input type="text" id="newHandle" maxlength="15" autocomplete="off" spellcheck="false"></div>
@@ -447,10 +784,6 @@
         <div style="margin-top:14px"><button class="act" id="newBtn">Create account</button></div>
         <div class="inv" id="newResult" style="display:none; margin-top:14px"></div>
       </div>
-      <div class="panel">
-        <h2>Accounts</h2>
-        <table><thead><tr><th>PlayOnline ID</th><th>Handle</th><th>Content</th><th>Playable</th><th>Created</th><th></th></tr></thead>
-          <tbody id="accountsBody"></tbody></table>
       </div>
     </section>
 
@@ -458,17 +791,13 @@
     <section id="tab-reports" class="tab">
       <div class="panel">
         <h2>User reports</h2>
-        <p class="hint">Filed from the Viewer's <b>Report User</b> dialog, which
-          submits a real SMTP mail to <code>tos@&hellip;playonline.com</code>. Those
-          addresses are aliased to the local <b id="reportsBox">tos</b> mailbox, so
-          every report is also readable as ordinary mail. The client attaches its
-          own chat transcript - the reporter pastes nothing.</p>
-        <table><thead><tr><th>Received</th><th>Reported</th><th>Where</th>
+        <p class="hint">Sent from the Viewer's <b>Report User</b> dialog. Click a row to read the chat log attached to the report.</p>
+        <table class="cards"><thead><tr><th>Received</th><th>Reported</th><th>Where</th>
           <th>Reporter</th><th>Explanation</th></tr></thead>
           <tbody id="reportsBody"></tbody></table>
       </div>
       <div class="panel" id="reportLogPanel" style="display:none">
-        <h2>Attached transcript - <span id="reportLogWho"></span></h2>
+        <h2>Attached chat log: <span id="reportLogWho"></span></h2>
         <pre id="reportLog" style="white-space:pre-wrap; overflow-x:auto"></pre>
       </div>
     </section>
@@ -481,11 +810,8 @@
     <section id="tab-issues" class="tab">
       <div class="panel">
         <h2>Issue reports</h2>
-        <p class="hint">Filed by a tester pressing the report chord in-game. Each
-          bundle carries the client's own logs <em>and</em> the same minutes cut
-          from this server's logs, so it still means something after everything
-          it was cut from has rolled. Click a row to open it.</p>
-        <table><thead><tr><th>Received</th><th>Who</th><th>Title</th>
+        <p class="hint">Bug reports sent from the in-game report shortcut, with the client logs and the matching server logs. Click a row to open one.</p>
+        <table class="cards"><thead><tr><th>Received</th><th>Who</th><th>Title</th>
           <th>What they said</th><th>Correlated</th></tr></thead>
           <tbody id="issuesBody"></tbody></table>
       </div>
@@ -494,7 +820,7 @@
         <p class="hint" id="issueWarn" style="display:none; color:var(--warn,#c80)"></p>
         <pre id="issueDesc" style="white-space:pre-wrap"></pre>
         <div id="issueShot"></div>
-        <p class="hint">Files - client is theirs, server is the window we cut:</p>
+        <p class="hint">Files:</p>
         <div id="issueFiles" class="mono" style="line-height:1.9"></div>
         <h3 id="issueViewName" class="mono" style="display:none"></h3>
         <pre id="issueView" style="white-space:pre-wrap; overflow-x:auto;
@@ -512,7 +838,10 @@
             <div class="gm-duty-sub" id="gmStateSub"></div>
           </div>
         </div>
-        <button class="act" id="gmDutyBtn">Go on duty</button>
+        <div class="gm-bar-acts">
+          <button class="ghost" id="gmAlertBtn" title="Get a notification on this device when a GM call comes in">Alerts: off</button>
+          <button class="act" id="gmDutyBtn">Go on duty</button>
+        </div>
       </div>
       <div class="gm-warn" id="gmWarn" hidden>
         <span id="gmWarnText"></span>
@@ -563,9 +892,7 @@
 
       <details class="panel gm-diag" id="gmDiag">
         <summary>Diagnostics</summary>
-        <p class="hint">The queue count and the two screen flags (<b>Join</b>
-          <code>0x40</code>, <b>Start</b> <code>0x20</code>) are measured live.
-          A pin here <i>overrides</i> the duty switch until it is cleared.</p>
+        <p class="hint">Values sent to callers' GM Call screens. A pin overrides the duty switch until it is cleared.</p>
         <div class="inv" id="gmDesk" style="margin-top:10px"></div>
         <div class="row" style="margin-top:14px">
           <div><label>Pin the queue count <span class="hint" style="display:inline">(blank = live)</span></label>
@@ -581,7 +908,7 @@
         <label class="chip" style="display:inline-flex; margin:4px 0 0">
           <input type="checkbox" id="gmShowTech"> Show presence heartbeats and raw bytes</label>
         <div class="row" style="margin-top:6px">
-          <div><label>Send as nick <span class="hint" style="display:inline">(blank = the player's own nick, the only one that renders today)</span></label>
+          <div><label>Send as nick <span class="hint" style="display:inline">(blank = self)</span></label>
             <input type="text" id="gmNick" class="mono" placeholder="self" autocomplete="off"></div>
           <div><label>Reply prefix</label>
             <input type="text" id="gmPrefix" class="mono" value="GM: " autocomplete="off"></div>
@@ -589,12 +916,12 @@
         <div class="row" style="margin-top:6px">
           <div><label>Membership event</label>
             <select id="gmEvent">
-              <option value=""> - </option>
-              <option value="S">S - started</option>
-              <option value="G">G - joined</option>
-              <option value="E">E - left</option>
-              <option value="A">A - suspended</option>
-              <option value="R">R - resumed</option>
+              <option value="">-</option>
+              <option value="S">S: started</option>
+              <option value="G">G: joined</option>
+              <option value="E">E: left</option>
+              <option value="A">A: suspended</option>
+              <option value="R">R: resumed</option>
             </select></div>
           <div><label>About</label>
             <input type="text" id="gmEventWho" class="mono" placeholder="Sam" autocomplete="off"></div>
@@ -605,10 +932,7 @@
             <input type="text" id="gmRaw" class="mono" placeholder="T\x07literally these bytes" autocomplete="off"></div>
           <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmSendRaw">Send raw</button></div>
         </div>
-        <p class="hint">Replies go out under the player's own nick because the
-          client only draws a <code>T</code> line whose speaker is in its member
-          table, and nothing we send can add the GM to it. A line sent as <code>GM</code> is
-          delivered and draws nothing.</p>
+        <p class="hint">Replies are sent under the player's own nick, which is the only speaker the client displays.</p>
       </details>
     </section>
 
@@ -616,25 +940,18 @@
     <section id="tab-news" class="tab">
       <div class="panel">
         <h2>Announcements</h2>
-        <p class="hint">One entry feeds every news surface the Viewer has: the
-          <b>login-screen ticker</b> (<code class="mono">latestnews.pml</code> - by far the most-requested file on the server), the <b>Information
-          section</b>&rsquo;s per-category lists
-          (<code class="mono">news&lt;N&gt;.pml</code>), a <b>detail page</b> per
-          story that the ticker headline links straight to
-          (<code class="mono">&lt;serial&gt;.pml</code>), and our own substitute
-          Information page. Saving only writes the store; nothing reaches a client
-          until you <b>Publish</b>.</p>
+        <p class="hint">Announcements appear on the login-screen ticker, in the Information section, and on a detail page for each story. <b>Save</b> keeps your changes; <b>Publish</b> makes them visible to players.</p>
         <div id="newsState" class="note" style="display:none"></div>
         <div id="newsDraftNote" class="note" style="display:none"></div>
         <div class="row" style="align-items:center">
-          <div><button class="act" id="newsAddBtn">New announcement</button></div>
-          <div style="flex:0 0 auto"><button class="ghost" id="newsSaveBtn">Save</button>
+          <div class="btn"><button class="act" id="newsAddBtn">New announcement</button></div>
+          <div class="btn"><button class="ghost" id="newsSaveBtn">Save</button>
             <span class="hint" id="newsDraftHint"
                   style="margin:0 0 0 8px; display:inline"
                   title="Edits are kept in this browser as you type, so a refresh does not lose them. Only Save writes the store."></span></div>
-          <div><button class="act" id="newsPublishBtn">Publish</button></div>
-          <div><button class="ghost" id="newsDryBtn">What would change?</button></div>
-          <div class="grow"><span class="hint" id="newsStoreHint" style="margin:0"></span></div>
+          <div class="btn"><button class="act" id="newsPublishBtn">Publish</button></div>
+          <div class="btn"><button class="ghost" id="newsDryBtn">Preview changes</button></div>
+          <div style="flex:1 1 200px; min-width:0"><span class="hint" id="newsStoreHint" style="margin:0; overflow-wrap:anywhere"></span></div>
         </div>
       </div>
 
@@ -644,7 +961,7 @@
             <div id="newsList" class="filelist" style="max-height:210px"></div>
             <div id="newsForm" style="margin-top:14px">
               <div class="row">
-                <div style="flex:2"><label>Date <span class="hint" style="display:inline">(shown verbatim - the client never parses it)</span></label>
+                <div style="flex:2"><label>Date <span class="hint" style="display:inline">(displayed as written)</span></label>
                   <div class="datefield">
                     <input type="text" id="nDate" spellcheck="false"
                            placeholder="Aug. 20, 2026 19:00 [UTC]">
@@ -656,33 +973,31 @@
                   <p class="hint" id="nDateHint" style="margin-top:6px"></p></div>
                 <div style="flex:0 0 auto"><label>Serial</label>
                   <input type="text" id="nSerial" class="mono" readonly
-                         style="width:90px" title="Identity, not a sequence - it names the detail file."></div>
+                         style="width:90px" title="Used as the detail page file name."></div>
               </div>
               <label>Headline <span class="hint" style="display:inline">(this is all the ticker shows)</span></label>
               <input type="text" id="nTitle" spellcheck="false">
 
-              <label>Kind <span class="hint" style="display:inline">(files the story under a category, and picks the marker beside it)</span></label>
+              <label>Kind <span class="hint" style="display:inline">(sets the category and list icon)</span></label>
               <div class="pickstrip" id="nKindStrip"></div>
 
-              <label>Service <span class="hint" style="display:inline">(SE&rsquo;s content id - it IS the ticker badge, and it decides which Information pages carry the story)</span></label>
+              <label>Service <span class="hint" style="display:inline">(sets the ticker badge and which Information pages list it)</span></label>
               <div class="pickstrip" id="nContentStrip"></div>
               <p class="hint" id="nIconHint" style="margin-top:6px"></p>
 
               <div class="row">
-                <div style="flex:1"><label>External link <span class="hint" style="display:inline">(optional - replaces the detail page)</span></label>
+                <div style="flex:1"><label>External link <span class="hint" style="display:inline">(optional; replaces the detail page)</span></label>
                   <input type="text" id="nLink" spellcheck="false" class="mono"
-                         placeholder="http://… - must end in ? or &amp;"></div>
+                         placeholder="http://... (must end in ? or &amp;)"></div>
               </div>
               <label style="display:flex; align-items:center; gap:8px">
                 <input type="checkbox" id="nStatus" style="width:auto; margin:0">
                 <span>Show in the Status / Maintenance panel</span></label>
-              <p class="hint" style="margin-top:2px">That panel says &ldquo;current or
-                recently resolved&rdquo;, so it is opt-in - an old outage should
-                not sit there forever claiming to be live.</p>
+              <p class="hint" style="margin-top:2px">Use for current or recently resolved issues.</p>
 
               <div class="effect" id="nEffect"></div>
 
-              <label>Body <span class="hint" style="display:inline">(blank line = new paragraph; blank body = a headline with no detail page)</span></label>
+              <label>Body <span class="hint" style="display:inline">(a blank line starts a new paragraph; leave empty for a headline without a detail page)</span></label>
               <textarea id="nBody" spellcheck="true" style="min-height:190px"></textarea>
               <div class="row" style="margin-top:10px">
                 <div><button class="ghost" id="nUpBtn">Move up</button></div>
@@ -709,82 +1024,120 @@
             </div>
           </div>
         </div>
-        <p class="hint">The rendered view draws our substitute Information page,
-          which is self-contained. The data files
-          (<code class="mono">latestnews.pml</code>,
-          <code class="mono">news&lt;N&gt;.pml</code>,
-          <code class="mono">&lt;serial&gt;.pml</code>) carry no markup of their own - they are arrays SE&rsquo;s pages read - so those show as PML.
-          To see the real Information section, publish and then open
-          <code class="mono">wh000.pol.com/pml/info/index.pml</code> in the PML
-          Preview tab.</p>
+        <p class="hint"><b>Rendered</b> previews the Information page. The other files are data and are shown as PML.</p>
       </div>
     </section>
 
     <!-- PML PREVIEW -->
     <section id="tab-pml" class="tab">
-      <div class="panel">
-        <h2>PML editor &amp; live preview</h2>
-        <div class="browsepanel">
-          <div class="browsebar">
-            <div><label>Location</label><select id="fHost"></select></div>
-            <div><label>Game</label><select id="fGame"></select></div>
-            <div><label>Locale</label><select id="fLocale"></select></div>
-            <div><label>Show</label><select id="fKind">
-              <option value="page">Complete pages</option>
-              <option value="draws">Pages + anything that draws</option>
-              <option value="layout">&nbsp;&nbsp; - layout fragments</option>
-              <option value="content">&nbsp;&nbsp; - text content</option>
-              <option value="data">&nbsp;&nbsp; - data only</option>
-              <option value="">Everything</option>
-            </select></div>
-            <div><label>Sort</label><select id="fSort">
-              <option value="path">Path</option>
-              <option value="name">Name</option>
-            </select></div>
-            <div class="grow"><label>Search <span id="pmlCount" class="hint" style="margin:0"></span></label>
-              <input type="text" id="fSearch" spellcheck="false" style="width:100%"
-                     placeholder="filter by path or filename…"></div>
-            <div><span id="pmlKind" class="hint" style="margin:0"></span></div>
+      <div class="pv">
+        <!-- page browser -->
+        <aside class="pv-side panel">
+          <input type="search" id="fSearch" data-search spellcheck="false"
+                 placeholder="Search pages by title or path">
+          <div class="pv-row">
+            <div class="seg" id="fKindSeg">
+              <button data-f="page" class="on">Pages</button>
+              <button data-f="draws">Anything that draws</button>
+              <button data-f="">All files</button>
+            </div>
           </div>
-          <div id="fileList" class="filelist"></div>
-        </div>
-        <div class="edtoolbar">
-          <div>
-            <label>…or load a live wizard page</label>
-            <select id="liveKinou">
-              <option value="20">20 - registration</option>
-              <option value="25">25 - list content IDs</option>
-              <option value="31">31 - redeem code</option>
+          <details class="pv-filters">
+            <summary>Filters <span id="pmlCount" class="muted"></span></summary>
+            <label>Site</label><select id="fHost"></select>
+            <label>Game</label><select id="fGame"></select>
+            <label>Language</label><select id="fLocale"></select>
+            <label>Sort</label>
+            <select id="fSort"><option value="title">Title</option><option value="path">Path</option></select>
+            <select id="fKind" hidden>
+              <option value="page">page</option><option value="draws">draws</option>
+              <option value="layout">layout</option><option value="content">content</option>
+              <option value="data">data</option><option value="">all</option>
             </select>
+          </details>
+          <div id="fileList" class="pv-list"></div>
+          <details class="pv-filters">
+            <summary>Registration wizard pages</summary>
+            <div class="pv-row" style="margin-top:8px">
+              <select id="liveKinou">
+                <option value="20">Registration</option>
+                <option value="25">Content IDs</option>
+                <option value="31">Redeem code</option>
+              </select>
+              <select id="liveStep" style="width:80px">
+                <option>1</option><option>2</option><option>3</option><option>4</option>
+                <option>5</option><option>6</option><option>7</option>
+              </select>
+              <button class="ghost sm" id="loadBtn">Open</button>
+            </div>
+          </details>
+        </aside>
+
+        <!-- the stage -->
+        <div class="pv-main">
+          <div class="panel pv-bar">
+            <button class="ghost sm" id="pvBack" title="Back (Alt+Left)">&#8592;</button>
+            <button class="ghost sm" id="pvFwd" title="Forward (Alt+Right)">&#8594;</button>
+            <div class="pv-title">
+              <div id="pvTitle">PML preview</div>
+              <div id="pvPath" class="muted"></div>
+            </div>
+            <div class="seg" id="pvZoom">
+              <button data-z="fit" class="on">Fit</button>
+              <button data-z="1">1x</button>
+              <button data-z="2">2x</button>
+            </div>
+            <button class="ghost sm" id="pvMissingBtn" title="Highlight images the mirror does not have">Missing art</button>
+            <button class="ghost sm" id="pvInspect" title="Click an element to see its settings and source line">Inspect</button>
+            <button class="ghost sm" id="pvSourceBtn">Source</button>
           </div>
-          <div><label>Step</label>
-            <select id="liveStep">
-              <option>1</option><option>2</option><option>3</option><option>4</option>
-              <option>5</option><option>6</option><option>7</option>
-            </select>
+          <div class="pv-stagebox" id="pvStageBox">
+            <div class="pv-stagescale" id="pvStageScale">
+              <div id="stage" class="pml-stage"></div>
+            </div>
           </div>
-          <div><button class="ghost" id="loadBtn">Load</button></div>
-          <div><button class="act" id="renderBtn">Render</button></div>
+          <div id="stageLayers" class="stagelayers"></div>
+          <div id="stageNote" class="pv-note"></div>
+          <div id="pvInspector" class="panel pv-inspector" hidden></div>
+          <div id="stageRefs" class="stagerefs"></div>
         </div>
-        <div class="editwrap">
-          <div>
-            <textarea id="pml" spellcheck="false" placeholder="Paste or edit PML here - it renders live as you type."></textarea>
-            <div class="hint">Renders as you type. Templates (<code class="mono">define</code>/<code class="mono">for</code>/<code class="mono">if</code>/<code class="mono">include</code>) are run server-side first; art resolves against the open file's own host tree, and <code class="mono">.ang</code> sprites show as a plate. Only about one file in twenty is a whole page - the line under the stage says what this one is. This is a layout preview, not the client's exact bitmap fonts.</div>
+
+        <!-- source -->
+        <div class="pv-source panel" id="pvSource" hidden>
+          <div class="pv-row" style="justify-content:space-between">
+            <b style="font-size:13px">Source</b>
+            <span id="pmlKind" class="muted" style="font-size:12px"></span>
+            <button class="ghost sm" id="renderBtn" title="Redraw now">Redraw</button>
           </div>
-            <div class="stagewrap">
-            <div class="cap">Client viewport - 640&times;480</div>
-            <div id="stage" class="pml-stage"></div>
-            <div id="stageLayers" class="stagelayers"></div>
-            <div id="stageNote" class="stagenote"></div>
-            <div id="stageRefs" class="stagerefs"></div>
+          <div class="pv-editor">
+            <pre class="pv-gutter" id="pvGutter" aria-hidden="true"></pre>
+            <textarea id="pml" spellcheck="false" wrap="off"
+                      placeholder="Paste or edit PML here."></textarea>
           </div>
+          <div class="hint">Edits redraw as you type. They are not saved to the server.</div>
         </div>
       </div>
     </section>
+
     <!-- SECURITY -->
     <section id="tab-security" class="tab">
-      <div class="panel narrow">
-        <h2>Admin sign-in</h2>
+      <!-- A moderator's own password. The owner's is the panel below. -->
+      <div class="panel narrow" id="mePanel" hidden>
+        <h2>Your password</h2>
+        <div class="note" id="meState"></div>
+        <label>Current password</label>
+        <input type="password" id="meCurrent" autocomplete="current-password">
+        <label>New password</label>
+        <input type="password" id="meNew" autocomplete="new-password">
+        <label>Confirm new password</label>
+        <input type="password" id="meNew2" autocomplete="new-password">
+        <div style="margin-top:16px"><button class="act" id="meSave">Change password</button></div>
+        <div class="hint">At least 8 characters. Changing it signs out your other
+          browsers.</div>
+      </div>
+
+      <div class="panel narrow" data-owner>
+        <h2>Operator sign-in</h2>
         <div id="secState"></div>
         <label>Username</label>
         <input type="text" id="secUser" autocomplete="username" placeholder="admin">
@@ -797,9 +1150,86 @@
         <label>Confirm new password</label>
         <input type="password" id="secNew2" autocomplete="new-password">
         <div style="margin-top:16px"><button class="act" id="secSave">Save credentials</button></div>
-        <div class="hint">At least 8 characters; any characters are allowed. Saving
-          signs out every other session, including this panel open in another
-          browser.</div>
+        <div class="hint">At least 8 characters. Saving signs out your other browsers;
+          moderators stay signed in.</div>
+      </div>
+      <div class="panel" id="modsPanel" data-owner>
+        <h2>Moderators</h2>
+        <p class="hint">Additional logins with limited access. A moderator can only use the areas ticked for them. Account management, news, PML and this tab remain owner-only.</p>
+        <div class="toolbar">
+          <button class="act sm" id="modAdd">Add moderator</button>
+          <span class="count" id="modCount"></span>
+        </div>
+        <div class="inv" id="modResult" hidden></div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Username</th>
+          <th>Allowed</th><th>Codes / 24 h</th><th>Status</th><th>Last active</th>
+          <th></th></tr></thead>
+          <tbody id="modsBody"></tbody></table></div>
+      </div>
+
+      <div class="panel" id="alertsPanel" data-owner>
+        <h2>GM call alerts</h2>
+        <p class="hint">New GM calls are posted to a Discord channel and sent to every
+          device that turned alerts on from the GM Calls tab.</p>
+        <div class="row">
+          <div style="flex:3"><label>Discord webhook URL <span class="hint" id="discordHint" style="display:inline"></span></label>
+            <input type="text" id="discordUrl" autocomplete="off" spellcheck="false"
+                   placeholder="https://discord.com/api/webhooks/..."></div>
+          <div style="flex:2"><label>Panel address <span class="hint" style="display:inline">(optional, linked in alerts)</span></label>
+            <input type="text" id="panelUrl" autocomplete="off" spellcheck="false"
+                   placeholder="https://admin.example.ts.net"></div>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <button class="act sm" id="alertsSave">Save</button>
+          <button class="ghost sm" id="discordTest">Send test to Discord</button>
+          <button class="danger sm" id="discordClear">Remove webhook</button>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Device with alerts</th>
+          <th>Login</th><th>Added</th><th>Last delivered</th></tr></thead>
+          <tbody id="alertDevices"></tbody></table></div>
+        <details style="margin-top:12px">
+          <summary class="hint" style="cursor:pointer">Recent alerts</summary>
+          <ul class="feed" id="alertRecent" style="margin-top:8px"></ul>
+        </details>
+      </div>
+
+      <div class="panel" id="checksPanel" data-owner>
+        <h2>Service checks</h2>
+        <p class="hint">Shown on the Overview. One per line: a name and a port, or a
+          name and <code class="mono">host:port</code>.</p>
+        <div class="row">
+          <div style="flex:3"><label>Checks</label>
+            <textarea id="healthTargets" rows="8" spellcheck="false"></textarea></div>
+          <div style="flex:1"><label>Default host</label>
+            <input type="text" id="healthHost" spellcheck="false"></div>
+        </div>
+        <div style="margin-top:12px"><button class="act sm" id="checksSave">Save checks</button></div>
+      </div>
+
+      <div class="panel" id="auditPanel" data-owner>
+        <h2>Activity</h2>
+        <p class="hint">Changes made through the panel, newest first. Passwords are never recorded.</p>
+        <div class="toolbar">
+          <div style="flex:0 0 200px"><select id="auditActor"><option value="">Everyone</option></select></div>
+          <div class="grow"><input type="search" id="auditSearch" data-search
+               placeholder="Filter what was done or to what"></div>
+          <span class="count" id="auditCount"></span>
+        </div>
+        <div class="tablewrap" style="max-height:480px; overflow-y:auto"><table class="cards">
+          <thead><tr><th>When</th><th>Who</th><th>Did</th><th>To</th><th>Detail</th></tr></thead>
+          <tbody id="auditBody"></tbody></table></div>
+      </div>
+
+      <div class="panel">
+        <h2>Signed-in browsers</h2>
+        <p class="hint">Browsers currently signed in. Remembered sign-ins last 30 days; others end when the browser closes or after 12 idle hours.</p>
+        <div class="toolbar">
+          <span class="count" id="sessCount"></span>
+          <button class="ghost sm" id="sessOthers">Sign out all others</button>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Browser</th><th>From</th>
+          <th>Signed in</th><th>Last active</th><th>Kind</th><th></th></tr></thead>
+          <tbody id="sessBody"></tbody></table></div>
       </div>
     </section>
   </main>
@@ -809,8 +1239,7 @@
   <div class="modal" id="delModal">
     <div class="card">
       <h3>Delete <code class="mono" id="delPolid"></code>?</h3>
-      <p>This erases the account and everything below. There is no undo and no
-         backup - take one first if this account matters.</p>
+      <p>This deletes the account and everything listed below. It cannot be undone.</p>
       <div class="inv" id="delInv"></div>
       <label>Type <code class="mono" id="delEcho"></code> to confirm</label>
       <input type="text" id="delConfirm" spellcheck="false" autocomplete="off">
@@ -832,18 +1261,11 @@
       <h3>Password for <code class="mono" id="pwPolid"></code></h3>
       <label>New password</label>
       <input type="text" id="pwNew" maxlength="15" spellcheck="false" autocomplete="off" class="mono">
-      <div class="hint">8-15 characters, no spaces - the limits of the
-        client&rsquo;s own entry field. Shown in the clear because you have to read
-        it out to somebody.</div>
+      <div class="hint">8-15 characters, no spaces.</div>
       <label class="chip" style="margin-top:14px; display:inline-flex">
         <input type="checkbox" id="pwResetToken"> Also reset the login token
       </label>
-      <p class="hint" style="margin-top:8px">The password above is checked by the
-        <b>in-client account screens</b>. The <b>lobby login</b> checks something
-        else - the NICK token it recorded the first time this account signed
-        in - and changing the password does not touch it. Tick the box only
-        if they are locked out of the lobby: it makes the next client to connect
-        as this account trusted on sight.</p>
+      <p class="hint" style="margin-top:8px">The lobby also checks a login token recorded on first sign-in. Reset it only if the player cannot get into the lobby; the next client to sign in is then trusted.</p>
       <div class="foot">
         <button class="ghost" id="pwCancel">Cancel</button>
         <button class="act" id="pwGo">Save password</button>
@@ -857,16 +1279,48 @@
        re-seed each other. Clearing that row leaves the other clients, and the
        account's own token, alone; the Password dialog's checkbox is the blunt
        version that drops all of them. -->
+  <!-- One account, everything about it. -->
+  <div class="modal" id="acctModal">
+    <div class="card wide">
+      <div class="acct-head">
+        <div>
+          <h3 id="acctTitle"></h3>
+          <div class="hint" id="acctSub" style="margin:0"></div>
+        </div>
+        <button class="ghost sm" id="acctClose">Close</button>
+      </div>
+      <div id="acctBody"></div>
+      <div class="foot" id="acctActions" data-owner></div>
+    </div>
+  </div>
+
+  <!-- Add or edit a moderator. -->
+  <div class="modal" id="modModal">
+    <div class="card">
+      <h3 id="modTitle">Add a moderator</h3>
+      <label>Username</label>
+      <input type="text" id="modUser" autocomplete="off" spellcheck="false" maxlength="64">
+      <label>Allowed to</label>
+      <div id="modPerms" style="display:grid; gap:6px"></div>
+      <label>Registration codes per 24 hours <span class="hint" style="display:inline">(blank = no limit)</span></label>
+      <input type="text" id="modLimit" inputmode="numeric" maxlength="5" placeholder="no limit">
+      <label>Codes may grant <span class="hint" style="display:inline">(none ticked = any title)</span></label>
+      <div class="chips" id="modTitles"></div>
+      <div id="modPwWrap">
+        <label>Password <span class="hint" style="display:inline">(blank = generated and shown once)</span></label>
+        <input type="text" id="modPw" autocomplete="new-password" spellcheck="false" class="mono">
+      </div>
+      <div class="foot">
+        <button class="ghost" id="modCancel">Cancel</button>
+        <button class="act" id="modSave">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal" id="tokModal">
     <div class="card">
       <h3>Login tokens for <code class="mono" id="tokPolid"></code></h3>
-      <p class="hint">The <b>lobby</b> records the NICK token once per client and
-        refuses that client for ever if it changes - which reads on the
-        console as <i>&ldquo;incorrect PlayOnline ID or password&rdquo;</i> while
-        the same account still works on the PC. Clear the row for the client that
-        is locked out: its next sign-in is trusted on sight and records a fresh
-        token. The other clients, the account token and the password are all
-        untouched.</p>
+      <p class="hint">One entry per device that has signed in to the lobby. If one device is refused with &ldquo;incorrect PlayOnline ID or password&rdquo; while others work, clear its entry. Its next sign-in records a new token.</p>
       <div class="inv" id="tokList"></div>
       <div class="foot">
         <button class="ghost" id="tokClose">Close</button>

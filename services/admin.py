@@ -36,6 +36,7 @@ Stdlib only (matches the other services). Serves its single-page UI from
     POL_ADMIN_SESSION_TTL default 43200 (12h)
 """
 import collections
+import hashlib
 import http.cookies
 import json
 import os
@@ -70,6 +71,13 @@ import gmchat  # noqa: E402  -- the GM chat record language and its spool
 #: that here is how the panel ends up telling an operator something the caller
 #: was never told. Importing it binds no socket -- `serve()` does that.
 import gmd  # noqa: E402
+import sqlite3  # noqa: E402
+#: Moderator logins, the audit log and code origins. Its own data/admin.db,
+#: so nothing here makes prod restart login/authsess (see its docstring).
+import adminusers  # noqa: E402
+#: GM-call alerts, code expiry, and the Overview's status probes.
+import adminops  # noqa: E402
+import webpush  # noqa: E402
 
 try:
     # TESTER ISSUE REPORTS. Imported for its LAYOUT, the same way gmd is
@@ -123,16 +131,26 @@ CGI = os.environ.get("POL_ADMIN_CGI", "http://ucs-plain:8080")
 # With neither set the panel is OPEN -- its first-run state, safe only on the
 # loopback bind, since it mints codes and accounts.
 #
-# Sessions are cookies held in THIS PROCESS only. A restart logs everyone out,
-# which for a single-operator panel beats persisting session state; it also
-# means "restart the container" is a hard revoke. Basic auth was replaced
-# outright because it has no logout: browsers replay cached credentials for the
-# origin, so changing the password under Basic left the old one wedged in the
-# browser with no server-side way to clear it.
+# Sessions are cookies. An ordinary sign-in is held in THIS PROCESS only and its
+# cookie dies with the browser, so a restart logs it out. A "keep me signed in"
+# sign-in is also written to SESSION_STORE (as a SHA-256 of the token, never the
+# token itself), so it survives a restart and lasts REMEMBER_TTL, sliding. Every
+# session records which credential minted it, and one minted under a password
+# that has since changed is dropped -- including a change made by the offline
+# CLI in another process, which the running panel notices within
+# _CRED_RECHECK seconds. The Security tab lists and revokes sessions one by one.
+#
+# Basic auth was replaced outright because it has no logout: browsers replay
+# cached credentials for the origin, so changing the password under Basic left
+# the old one wedged in the browser with no server-side way to clear it.
 ADMIN_USER = os.environ.get("POL_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("POL_ADMIN_PASSWORD", "")
 SESSION_COOKIE = "poladmin"
 SESSION_TTL = float(os.environ.get("POL_ADMIN_SESSION_TTL", 12 * 3600))
+REMEMBER_TTL = float(os.environ.get("POL_ADMIN_REMEMBER_DAYS", 30)) * 86400
+SESSION_STORE = os.environ.get(
+    "POL_ADMIN_SESSION_STORE",
+    os.path.join(os.environ.get("POL_DATA_DIR", "/data"), "admin-sessions.json"))
 #: Failed logins per client address before that address is locked out. The panel
 #: may be bound to a tailnet IP, where a password is the only thing in the way.
 LOCKOUT_AFTER = 10
@@ -219,11 +237,19 @@ _MIME = {
     ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg",
     ".gif": "image/gif", ".ang": "application/octet-stream",
     ".ico": "image/x-icon", ".svg": "image/svg+xml",
+    ".webmanifest": "application/manifest+json",
 }
+
+#: What an installed-app launcher fetches WITHOUT the session cookie: browsers
+#: request the manifest and icons with credentials omitted, and the service
+#: worker has to live at the root to control the whole panel. None of it says
+#: anything about the server, so it is served to anyone who can reach the port.
+_PUBLIC = {"/manifest.webmanifest": "manifest.webmanifest", "/sw.js": "sw.js",
+           "/favicon.ico": "icons/icon-32.png"}
 
 
 #: Cached .pml file listing (walking the bind mount is slow). Warmed at startup.
-_PML_CACHE = {"files": None, "shapes": {}, "graph": None, "at": 0.0}
+_PML_CACHE = {"files": None, "shapes": {}, "graph": None, "at": 0.0, "titles": {}}
 _PML_LOCK = threading.Lock()          # guards the cache dict
 _PML_SCAN_LOCK = threading.Lock()     # admits one scanner at a time
 _PML_REFRESHING = threading.Event()
@@ -261,6 +287,20 @@ def _pml_shape(text):
     return "data"
 
 
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+
+
+def _pml_title(text):
+    """A page's own <title>, for the file browser. Unevaluated expressions and
+    empty titles give None."""
+    m = _TITLE_RE.search(pmleval._strip_comments(text or ""))
+    if not m:
+        return None
+    t = re.sub(r"<[^>]+>|&[a-z]+=[^;]*;|&[a-z]+;", " ", m.group(1))
+    t = " ".join(t.split())
+    return t[:90] if t and "$" not in t else None
+
+
 def _pml_scan(root):
     files, shapes, texts = [], {}, {}
     for dirpath, _dirs, names in os.walk(root):
@@ -280,6 +320,8 @@ def _pml_scan(root):
     # The reference graph, off the same decode -- reading 3,499 files twice to
     # build it separately would double the only expensive part of the scan.
     graph = pmlrefs.build(_Site(root, texts), files)
+    titles = {rel: t for rel in files if (t := _pml_title(texts.get(rel)))}
+    _PML_CACHE["titles"] = titles
     return files, shapes, graph
 
 
@@ -336,6 +378,48 @@ class _Site:
         out = pmleval.expand(self.texts.get(rel) or "",
                              resolve_include=resolve, base=start)
         return out, hit
+
+
+def _ang_split(blob):
+    """(base_png or None, [frame PNGs]) for an `@ANG1B` sprite, leniently.
+
+    newsgen.ang_frames is strict on purpose (it guards the login ticker), and
+    refuses the 11 sprites in the mirror whose layout differs -- FFXI's
+    `ic01s.ang` among them, used on dozens of pages, which drew as broken
+    buttons. Those carry one more pixel image than the header's frame count,
+    and it is the FIRST one, with a palette of its own: the header's `one`
+    field (0x10). Read as a BASE drawn under every sequence it makes sense of
+    all eleven -- `ic01s`' default sequence names a nearly empty frame, and the
+    arrow it shows is the base. Inferred from the files, not yet from the
+    client.
+
+    Frames without a palette take the shared one from the palette record, as
+    in newsgen.ang_frames."""
+    if not blob.startswith(b"@ANG1B"):
+        raise ValueError("not an @ANG1B container")
+    declared = int.from_bytes(blob[0x14:0x18], "little")
+    sig = b"\x89PNG\r\n\x1a\n"
+    starts, at = [], blob.find(sig)
+    while at >= 0:
+        starts.append(at)
+        at = blob.find(sig, at + 1)
+    shared, pixel = {}, []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(blob)
+        chunks = newsgen._png_chunks(blob[start:end])
+        if not any(t == b"IDAT" and d for t, d in chunks):
+            shared.update({t: d for t, d in chunks if t in (b"PLTE", b"tRNS") and d})
+            continue
+        own = any(t == b"PLTE" and d for t, d in chunks)
+        pixel.append((own, newsgen._png_build(
+            [(t, shared.get(t, d) if not d else d) for t, d in chunks])))
+    base = None
+    if len(pixel) == declared + 1 and pixel and pixel[0][0]:
+        base = pixel.pop(0)[1]
+    frames = [png for _own, png in pixel]
+    if not frames:
+        raise ValueError("no frames")
+    return base, frames
 
 
 def _pml_files(force=False):
@@ -476,10 +560,17 @@ def _db():
 # --------------------------------------------------------------------------- #
 # operator sessions
 # --------------------------------------------------------------------------- #
-_SESSIONS = {}                      # token -> {"user": str, "expires": float}
-_SESSION_LOCK = threading.Lock()
+#: sid -> session dict. The sid is sha256(cookie token), so neither this table
+#: nor the file it is persisted to holds anything a browser could present.
+_SESSIONS = {}
+_SESSION_LOCK = threading.RLock()
 _FAILS = {}                         # client addr -> {"n": int, "first": float}
 _FAIL_LOCK = threading.Lock()
+#: How often a live session re-reads which credentials are current, and how
+#: often a remembered one re-writes its sliding expiry to disk.
+_CRED_RECHECK = 30.0
+_PERSIST_EVERY = 600.0
+_FP_CACHE = {"at": 0.0, "fps": frozenset()}
 
 
 def _ct_eq(a, b):
@@ -487,43 +578,210 @@ def _ct_eq(a, b):
     return secrets.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
 
 
-def _session_new(user):
+def _sid(tok):
+    return hashlib.sha256(str(tok).encode("utf-8")).hexdigest()
+
+
+def _env_fp():
+    """Fingerprint of the break-glass pair, so changing it retires its sessions."""
+    return "env:" + hashlib.sha256(
+        f"{ADMIN_USER}\0{ADMIN_PASSWORD}".encode("utf-8")).hexdigest()[:16]
+
+
+def _current_fps(force=False):
+    """Fingerprints of every credential that can sign in right now. Cached for
+    _CRED_RECHECK seconds so an authenticated request normally costs no DB work."""
+    now = time.time()
+    if not force and now - _FP_CACHE["at"] < _CRED_RECHECK:
+        return _FP_CACHE["fps"]
+    fps = set()
+    row = _stored_cred()
+    if row is not None:
+        fps.add("db:" + str(row["updated_at"]))
+    if ADMIN_PASSWORD:
+        fps.add(_env_fp())
+    _FP_CACHE.update(at=now, fps=frozenset(fps))
+    return _FP_CACHE["fps"]
+
+
+def _persist_sessions():
+    """Write the remembered sessions to SESSION_STORE. Atomic; never raises --
+    a panel that cannot write its session file still works, it just forgets
+    remembered sign-ins on restart."""
+    with _SESSION_LOCK:
+        keep = {sid: {k: v for k, v in s.items() if k != "persisted"}
+                for sid, s in _SESSIONS.items() if s.get("remember")}
+        now = time.time()
+        for s in _SESSIONS.values():
+            if s.get("remember"):
+                s["persisted"] = now
+    try:
+        parent = os.path.dirname(SESSION_STORE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = SESSION_STORE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(keep, f, indent=1)
+        os.replace(tmp, SESSION_STORE)
+    except OSError as exc:
+        print(f"[admin] could not save remembered sessions to "
+              f"{SESSION_STORE}: {exc}", flush=True)
+
+
+#: uid -> (fetched_at, moderator row or None). A moderator's session is
+#: re-checked against their row this often, so a disable, delete or password
+#: reset takes effect within seconds even for a session already open.
+_MOD_CACHE = {}
+_MOD_RECHECK = 5.0
+
+
+def _mod_row(uid, force=False):
+    now = time.time()
+    hit = _MOD_CACHE.get(uid)
+    if hit and not force and now - hit[0] < _MOD_RECHECK:
+        return hit[1]
+    try:
+        db = adminusers.connect()
+        try:
+            row = adminusers.get_mod(db, uid)
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return hit[1] if hit else None        # a locked DB is not a revocation
+    _MOD_CACHE[uid] = (now, row)
+    return row
+
+
+def _session_valid(s, fps):
+    """Is this session's credential still the current one?
+
+    An owner session names the owner credential that minted it (see
+    _current_fps). A moderator session names its moderator row and that row's
+    password stamp, so a disable, a delete or a reset ends it."""
+    if s.get("role") == "mod":
+        row = _mod_row(s.get("uid"))
+        return bool(row) and not row["disabled"] \
+            and s.get("cred") == adminusers.fingerprint(row)
+    return not fps or s.get("cred") in fps
+
+
+def _perms_for(s):
+    if s.get("role") != "mod":
+        return sorted(adminusers.PERMS)
+    row = _mod_row(s.get("uid"))
+    return adminusers.perms_of(row) if row else []
+
+
+def _load_sessions():
+    """Bring back remembered sign-ins after a restart. A session whose
+    credential has since changed, or that has expired, is left behind."""
+    try:
+        with open(SESSION_STORE, encoding="utf-8") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(saved, dict):
+        return 0
+    now, fps, n = time.time(), _current_fps(force=True), 0
+    with _SESSION_LOCK:
+        for sid, s in saved.items():
+            if not isinstance(s, dict) or not s.get("remember"):
+                continue
+            if (s.get("expires") or 0) <= now or not _session_valid(s, fps):
+                continue
+            s["persisted"] = now
+            _SESSIONS[sid] = s
+            n += 1
+    if n != len(saved):
+        _persist_sessions()          # drop what was left behind from the file
+    return n
+
+
+def _session_new(user, remember=False, addr="", ua="", cred="",
+                 role="owner", uid=None):
     tok = secrets.token_urlsafe(32)
     now = time.time()
     with _SESSION_LOCK:
         for t, s in list(_SESSIONS.items()):          # opportunistic sweep
             if s["expires"] <= now:
                 del _SESSIONS[t]
-        _SESSIONS[tok] = {"user": user, "expires": now + SESSION_TTL}
+        _SESSIONS[_sid(tok)] = {
+            "user": user, "remember": bool(remember), "cred": cred,
+            "role": role, "uid": uid,
+            "created": now, "seen": now, "addr": addr, "ua": (ua or "")[:200],
+            "expires": now + (REMEMBER_TTL if remember else SESSION_TTL)}
+    if remember:
+        _persist_sessions()
     return tok
 
 
 def _session_get(tok):
-    """The live session for `tok`, sliding its expiry, or None."""
+    """The live session for `tok`, sliding its expiry, or None. The answer
+    carries `perms`, read fresh, so a permission change applies at once."""
     if not tok:
         return None
+    sid = _sid(tok)
     now = time.time()
     with _SESSION_LOCK:
-        s = _SESSIONS.get(tok)
+        s = _SESSIONS.get(sid)
+        snap = dict(s) if s else None
+    if not snap:
+        return None
+    # Validated OUTSIDE the lock: it can read a database.
+    if snap["expires"] <= now or not _session_valid(snap, _current_fps()):
+        _session_drop_sid(sid)
+        return None
+    with _SESSION_LOCK:
+        s = _SESSIONS.get(sid)
         if not s:
             return None
-        if s["expires"] <= now:
-            del _SESSIONS[tok]
-            return None
-        s["expires"] = now + SESSION_TTL
-        return dict(s)
+        s["expires"] = now + (REMEMBER_TTL if s.get("remember") else SESSION_TTL)
+        s["seen"] = now
+        save = s.get("remember") and now - s.get("persisted", 0) > _PERSIST_EVERY
+        out = dict(s, sid=sid)
+    if save:
+        _persist_sessions()
+    out.setdefault("role", "owner")
+    out["perms"] = _perms_for(out)
+    return out
+
+
+def _mod_forget(uid):
+    _MOD_CACHE.pop(uid, None)
 
 
 def _session_drop(tok):
-    with _SESSION_LOCK:
-        _SESSIONS.pop(tok, None)
+    _session_drop_sid(_sid(tok) if tok else "")
 
 
-def _sessions_clear():
-    """Revoke every session. Run after a credential change, so a session minted
-    under the OLD password cannot outlive it."""
+def _session_drop_sid(sid):
     with _SESSION_LOCK:
-        _SESSIONS.clear()
+        s = _SESSIONS.pop(sid, None)
+    if s and s.get("remember"):
+        _persist_sessions()
+    return s is not None
+
+
+def _sessions_drop_where(pred, keep_sid=None):
+    """Revoke every session `pred(session)` picks, except `keep_sid`."""
+    with _SESSION_LOCK:
+        gone = [sid for sid, x in _SESSIONS.items()
+                if sid != keep_sid and pred(x)]
+        for sid in gone:
+            del _SESSIONS[sid]
+    if gone:
+        _persist_sessions()
+    return len(gone)
+
+
+def _sessions_clear(keep_sid=None):
+    """Revoke every session (but `keep_sid`). Run after a credential change, so
+    a session minted under the OLD password cannot outlive it -- on disk too."""
+    with _SESSION_LOCK:
+        for sid in list(_SESSIONS):
+            if sid != keep_sid:
+                del _SESSIONS[sid]
+    _persist_sessions()
 
 
 def _stored_cred():
@@ -548,17 +806,23 @@ def _verify_login(user, pw):
     Both are tried in full rather than short-circuiting, so the work done is the
     same whichever one matches. Returns the accepted username, or None.
     """
-    ok = None
+    return _verify_login_fp(user, pw)[0]
+
+
+def _verify_login_fp(user, pw):
+    """(accepted username, fingerprint of the credential that matched), or
+    (None, None). The fingerprint is what ties a session to its password."""
+    ok = fp = None
     row = _stored_cred()
     if row is not None and _ct_eq(user, row["username"]) \
             and accounts.check_password(pw, row["pw_hash"], row["pw_salt"]):
-        ok = row["username"]
+        ok, fp = row["username"], "db:" + str(row["updated_at"])
     # Break-glass: a non-empty POL_ADMIN_PASSWORD always logs in, which is the
     # documented way back after a forgotten password (set it, restart, log in,
     # change the stored one, clear it again).
     if ADMIN_PASSWORD and _ct_eq(user, ADMIN_USER) and _ct_eq(pw, ADMIN_PASSWORD):
-        ok = ADMIN_USER
-    return ok
+        ok, fp = ADMIN_USER, _env_fp()
+    return ok, fp
 
 
 def _lockout_left(addr):
@@ -666,6 +930,65 @@ def _content_label(codes_csv):
     return ", ".join(out)
 
 
+#: Which moderator permission lets a request through. Anything NOT listed is
+#: the owner's alone -- that is the safe default for every future endpoint.
+#: "any" = any signed-in user (their own sessions, their own password, the
+#: panel's page and script, which are not secret from a moderator).
+_GET_PERMS = {
+    "/": "any", "/api/content-names": "any", "/api/sessions": "any",
+    "/api/gm-calls": "gm", "/api/gm-desk": "gm",
+    "/api/codes": "codes",
+    "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
+    "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
+    "/api/online": "any", "/api/push/key": "gm",
+}
+_POST_PERMS = {
+    "/api/sessions/revoke": "any", "/api/me/password": "any",
+    "/api/codes": "codes", "/api/codes/random": "codes",
+    "/api/gm-control": "gm", "/api/gm-say": "gm", "/api/gm-ticket": "gm",
+    "/api/push/subscribe": "gm", "/api/push/test": "gm",
+    "/api/push/unsubscribe": "any",
+}
+
+#: What the audit log calls each change. A POST not named here is not logged
+#: (the PML preview and the random-code button change nothing).
+_AUDIT_ACTIONS = {
+    "/api/credentials": "changed the owner login",
+    "/api/codes": "made a code", "/api/codes/void": "voided a code",
+    "/api/sessions/revoke": "signed out a session",
+    "/api/grant": "granted content", "/api/revoke": "revoked content",
+    "/api/gm-control": "changed the GM desk", "/api/gm-say": "wrote in GM chat",
+    "/api/gm-ticket": "set a GM call's status",
+    "/api/account-create": "created an account",
+    "/api/account-password": "changed an account password",
+    "/api/account-clear-token": "cleared a login token",
+    "/api/account-extmail": "changed outside mail",
+    "/api/account-delete": "deleted an account",
+    "/api/news": "saved announcements", "/api/news/publish": "published announcements",
+    "/api/mods": "moderator", "/api/me/password": "changed their own password",
+    "/api/alerts": "changed alert settings",
+    "/api/push/subscribe": "turned on GM call alerts",
+    "/api/push/unsubscribe": "turned off GM call alerts",
+}
+#: Never written to the audit log, whatever the endpoint.
+_AUDIT_SECRET = {"password", "current", "pw", "token", "confirm",
+                 "discord_webhook", "subscription", "endpoint"}
+_AUDIT_TARGETS = ("polid", "code", "username", "id", "room")
+
+
+def _audit(actor, role, action, target=None, detail=None, ok=True, addr=None):
+    """Append to the audit log. Never raises: a full disk or a locked DB must
+    not turn an operator's action into an error."""
+    try:
+        db = adminusers.connect()
+        try:
+            adminusers.audit(db, actor, role, action, target, detail, ok, addr)
+        finally:
+            db.close()
+    except Exception as exc:                   # pragma: no cover
+        print(f"[admin] audit write failed: {exc}", flush=True)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "poladmin"
 
@@ -675,7 +998,9 @@ class Handler(BaseHTTPRequestHandler):
     # -- helpers ------------------------------------------------------------- #
     def _send(self, code, body, ctype="application/json; charset=utf-8",
               headers=()):
+        self._status = code
         if isinstance(body, (dict, list)):
+            self._resp = body
             body = json.dumps(body).encode("utf-8")
         elif isinstance(body, str):
             body = body.encode("utf-8")
@@ -689,13 +1014,19 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _json_body(self):
+        """The request's JSON body. Cached: the audit hook reads it again after
+        the handler has, and a request body can only be read once."""
+        if getattr(self, "_jb", None) is not None:
+            return self._jb
         n = int(self.headers.get("Content-Length", 0) or 0)
-        if not n:
-            return {}
-        try:
-            return json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
-            return {}
+        body = {}
+        if n:
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except ValueError:
+                body = {}
+        self._jb = body if isinstance(body, dict) else {}
+        return self._jb
 
     def _cookie(self):
         raw = self.headers.get("Cookie", "")
@@ -709,20 +1040,55 @@ class Handler(BaseHTTPRequestHandler):
         m = jar.get(SESSION_COOKIE)
         return m.value if m else None
 
-    def _set_cookie(self, tok):
+    def _set_cookie(self, tok, remember=False):
         """Session cookie headers. HttpOnly so page script can't read the token;
         SameSite=Strict so another origin can't ride the session. NOT Secure --
         the panel is plain http on a loopback/tailnet bind, and a Secure cookie
-        would simply never be stored."""
+        would simply never be stored.
+
+        A remembered sign-in gets a Max-Age and so outlives the browser; an
+        ordinary one gets none, which makes it a browser-session cookie that
+        goes when the browser closes."""
         if tok is None:
             return [("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; Max-Age=0; "
                                    "HttpOnly; SameSite=Strict")]
-        return [("Set-Cookie", f"{SESSION_COOKIE}={tok}; Path=/; "
-                               f"Max-Age={int(SESSION_TTL)}; HttpOnly; "
-                               "SameSite=Strict")]
+        age = f"Max-Age={int(REMEMBER_TTL)}; " if remember else ""
+        return [("Set-Cookie", f"{SESSION_COOKIE}={tok}; Path=/; {age}"
+                               "HttpOnly; SameSite=Strict")]
+
+    def _addr(self):
+        return self.client_address[0] if self.client_address else "?"
 
     def _session(self):
-        return _session_get(self._cookie())
+        # Once per request: it slides the expiry and may read the moderator row.
+        if not hasattr(self, "_sess_cache"):
+            self._sess_cache = _session_get(self._cookie())
+        return self._sess_cache
+
+    def _caller(self):
+        """(user, role, perms). An OPEN panel (no credential at all) is the
+        owner's first run, so it is treated as the owner."""
+        s = self._session()
+        if s:
+            return s["user"], s.get("role") or "owner", s.get("perms") or []
+        return "open-panel", "owner", sorted(adminusers.PERMS)
+
+    def _is_owner(self):
+        return self._caller()[1] == "owner"
+
+    def _permit(self, path, table):
+        """Owner: everything. Moderator: only what `table` gives their perms."""
+        user, role, perms = self._caller()
+        if role == "owner":
+            return True
+        need = table.get(path)
+        if path.startswith("/static/") and table is _GET_PERMS:
+            need = "any"
+        if need == "any" or (need and need in perms):
+            return True
+        self._send(403, {"error": "You don't have permission to do that.",
+                         "forbidden": True})
+        return False
 
     def _authed(self, path):
         """Gate every request. True = may proceed.
@@ -756,15 +1122,84 @@ class Handler(BaseHTTPRequestHandler):
         out = {"auth_required": bool(ADMIN_PASSWORD) or _stored_cred() is not None,
                "authenticated": bool(s),
                "user": s["user"] if s else None}
+        headers = ()
+        user, role, perms = self._caller() if (s or not out["auth_required"]) \
+            else (None, None, [])
+        out["role"], out["perms"] = role, perms
+        if s or not out["auth_required"]:
+            out["perm_labels"] = adminusers.PERMS
+        if s and role == "mod":
+            row = _mod_row(s.get("uid"))
+            out["code_limit"] = row["code_limit"] if row else None
+            out["titles"] = adminusers.titles_of(row) if row else []
+            out["remember"] = bool(s.get("remember"))
+            out["expires"] = s.get("expires")
+            if s.get("remember"):
+                headers = self._set_cookie(self._cookie(), remember=True)
+            return self._send(200, out, headers=headers)
         if s:
             row = _stored_cred()
             out["credential_set"] = row is not None
             out["updated_at"] = row["updated_at"] if row else None
             out["env_override"] = bool(ADMIN_PASSWORD)
-        self._send(200, out)
+            out["remember"] = bool(s.get("remember"))
+            out["expires"] = s.get("expires")
+            # The server-side expiry slides; the cookie's Max-Age was fixed at
+            # sign-in. Topping the cookie up whenever the panel loads keeps the
+            # two in step, so a panel used weekly never signs itself out.
+            if s.get("remember"):
+                headers = self._set_cookie(self._cookie(), remember=True)
+        self._send(200, out, headers=headers)
+
+    def _sessions_list(self):
+        """Every signed-in browser, newest activity first. The id is a prefix of
+        the session's hash: enough to revoke it by, useless as a credential."""
+        cur = (self._session() or {}).get("sid")
+        now = time.time()
+        mine = self._own_session_pred()
+        with _SESSION_LOCK:
+            rows = [dict(s, sid=sid) for sid, s in _SESSIONS.items()
+                    if s["expires"] > now and mine(s)]
+        rows.sort(key=lambda s: -(s.get("seen") or 0))
+        self._send(200, [{"id": s["sid"][:16], "user": s.get("user"),
+                          "remember": bool(s.get("remember")),
+                          "created": s.get("created"), "seen": s.get("seen"),
+                          "expires": s.get("expires"), "addr": s.get("addr"),
+                          "ua": s.get("ua"), "current": s["sid"] == cur,
+                          "role": s.get("role") or "owner"}
+                         for s in rows])
+
+    def _own_session_pred(self):
+        """Which sessions this caller may see and revoke: the owner, all of
+        them; a moderator, only their own."""
+        s = self._session() or {}
+        if s.get("role") != "mod":
+            return lambda x: True
+        uid = s.get("uid")
+        return lambda x: x.get("role") == "mod" and x.get("uid") == uid
+
+    def _sessions_revoke(self):
+        """Sign out one browser ({"id": ...}) or every other one ({"others": true})."""
+        body = self._json_body()
+        cur = (self._session() or {}).get("sid")
+        mine = self._own_session_pred()
+        if body.get("others"):
+            n = _sessions_drop_where(mine, keep_sid=cur)
+            return self._send(200, {"ok": True, "revoked": n})
+        want = str(body.get("id") or "")
+        if len(want) < 8:
+            return self._send(400, {"error": "id required"})
+        with _SESSION_LOCK:
+            hits = [sid for sid, x in _SESSIONS.items()
+                    if sid.startswith(want) and mine(x)]
+        if len(hits) != 1:
+            return self._send(404, {"error": "no such session"})
+        _session_drop_sid(hits[0])
+        self._send(200, {"ok": True, "revoked": 1,
+                         "was_current": hits[0] == cur})
 
     def _login(self):
-        addr = self.client_address[0] if self.client_address else "?"
+        addr = self._addr()
         left = _lockout_left(addr)
         if left:
             return self._send(429, {"error": f"Too many failed attempts. Try "
@@ -772,16 +1207,40 @@ class Handler(BaseHTTPRequestHandler):
         body = self._json_body()
         user = str(body.get("username") or "")
         pw = str(body.get("password") or "")
-        who = _verify_login(user, pw)
+        who, fp = _verify_login_fp(user, pw)
+        role, uid = "owner", None
+        if not who and _auth_required():
+            # A moderator -- only once an owner credential exists, or a
+            # moderator login would be a way into a panel that is open anyway.
+            try:
+                db = adminusers.connect()
+                try:
+                    row = adminusers.check_login(db, user, pw)
+                finally:
+                    db.close()
+            except sqlite3.Error:
+                row = None
+            if row is not None:
+                who, fp, role, uid = (row["username"], adminusers.fingerprint(row),
+                                      "mod", row["id"])
+                _mod_forget(uid)
         if not who:
             _note_fail(addr)
+            _audit(user[:64] or "?", "?", "failed sign-in", ok=False, addr=addr)
             # Deliberately vague: which half was wrong is not the caller's
             # business, and a slow reply blunts online guessing.
             time.sleep(0.5)
             return self._send(401, {"error": "Incorrect username or password."})
         _clear_fails(addr)
-        tok = _session_new(who)
-        self._send(200, {"ok": True, "user": who}, headers=self._set_cookie(tok))
+        remember = bool(body.get("remember"))
+        tok = _session_new(who, remember=remember, addr=addr,
+                           ua=self.headers.get("User-Agent", ""), cred=fp,
+                           role=role, uid=uid)
+        _audit(who, role, "signed in", detail={"remember": remember}, addr=addr)
+        print(f"[admin] {who} ({role}) signed in from {addr}"
+              + (" (remembered)" if remember else ""), flush=True)
+        self._send(200, {"ok": True, "user": who, "remember": remember},
+                   headers=self._set_cookie(tok, remember))
 
     def _logout(self):
         _session_drop(self._cookie())
@@ -808,6 +1267,17 @@ class Handler(BaseHTTPRequestHandler):
                 _note_fail(addr)
                 time.sleep(0.5)
                 return self._send(403, {"error": "Current password is wrong."})
+        try:
+            mdb = adminusers.connect()
+            try:
+                clash = adminusers.find_mod(mdb, username)
+            finally:
+                mdb.close()
+        except sqlite3.Error:
+            clash = None
+        if clash is not None:
+            return self._send(400, {"error": "A moderator already uses that "
+                                             "username."})
         db = _db()
         try:
             username = accounts.set_admin_cred(db, username, password)
@@ -816,24 +1286,498 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": str(exc)})
         finally:
             db.close()
-        # Every existing session was minted under the old credential, so drop
+        # Every OWNER session was minted under the old credential, so drop
         # them all -- then hand THIS caller a fresh one, so the operator who
         # just changed the password is not bounced to the login page.
-        _sessions_clear()
-        tok = _session_new(username)
+        # Moderators have their own passwords and are left signed in.
+        remember = bool(s and s.get("remember"))
+        _sessions_drop_where(lambda x: x.get("role") != "mod")
+        _current_fps(force=True)
+        row = _stored_cred()
+        tok = _session_new(username, remember=remember, addr=self._addr(),
+                           ua=self.headers.get("User-Agent", ""),
+                           cred="db:" + str(row["updated_at"]) if row else "")
         print(f"[admin] operator credential changed; user={username!r}, "
-              f"all sessions revoked", flush=True)
+              f"owner sessions revoked", flush=True)
         self._send(200, {"ok": True, "user": username,
                          "env_override": bool(ADMIN_PASSWORD)},
-                   headers=self._set_cookie(tok))
+                   headers=self._set_cookie(tok, remember))
+
+    # -- moderators (owner only; see adminusers) -------------------------------- #
+    def _mods_list(self):
+        now = time.time()
+        with _SESSION_LOCK:
+            live = [dict(x) for x in _SESSIONS.values()
+                    if x.get("role") == "mod" and x["expires"] > now]
+        db = adminusers.connect()
+        try:
+            rows = []
+            for r in adminusers.list_mods(db):
+                mine = [x for x in live if x.get("uid") == r["id"]]
+                rows.append({
+                    "id": r["id"], "username": r["username"],
+                    "perms": adminusers.perms_of(r), "code_limit": r["code_limit"],
+                    "titles": adminusers.titles_of(r),
+                    "disabled": bool(r["disabled"]), "created_at": r["created_at"],
+                    "created_by": r["created_by"],
+                    "codes_24h": adminusers.codes_made_since(db, r["username"],
+                                                             now - 86400),
+                    "sessions": len(mine),
+                    "last_seen": max((x.get("seen") or 0 for x in mine), default=None),
+                })
+        finally:
+            db.close()
+        self._send(200, {"mods": rows, "perm_labels": adminusers.PERMS,
+                         "owner_ready": _auth_required()})
+
+    def _mods_change(self):
+        """One endpoint, `action` says what: create / update / password /
+        delete / signout. A generated password is returned ONCE."""
+        body = self._json_body()
+        act = body.get("action")
+        me = self._caller()[0]
+        if not _auth_required():
+            return self._send(409, {"error": "Set an owner password before "
+                                             "adding moderators."})
+        gen = None
+        pw = str(body.get("password") or "")
+        if act in ("create", "password") and not pw:
+            gen = pw = secrets.token_urlsafe(12)
+        try:
+            mid = int(body.get("id") or 0)
+        except (TypeError, ValueError):
+            mid = 0
+        db = adminusers.connect()
+        try:
+            if act == "create":
+                owner = _stored_cred()
+                row = adminusers.create_mod(
+                    db, body.get("username"), pw, body.get("perms") or [],
+                    body.get("code_limit"), by=me, titles=body.get("titles"),
+                    reserved=[owner["username"] if owner else None,
+                              ADMIN_USER if ADMIN_PASSWORD else None])
+            elif act == "update":
+                kw = {}
+                if "perms" in body:
+                    kw["perms"] = body.get("perms") or []
+                if "code_limit" in body:
+                    kw["code_limit"] = body.get("code_limit")
+                if "disabled" in body:
+                    kw["disabled"] = bool(body.get("disabled"))
+                if "titles" in body:
+                    kw["titles"] = body.get("titles") or []
+                row = adminusers.update_mod(db, mid, **kw)
+            elif act == "password":
+                row = adminusers.set_password(db, mid, pw)
+            elif act in ("delete", "signout"):
+                row = adminusers.get_mod(db, mid)
+                if row is None:
+                    return self._send(404, {"error": "No such moderator."})
+                if act == "delete":
+                    adminusers.delete_mod(db, mid)
+            else:
+                return self._send(400, {"error": "unknown action"})
+        except adminusers.ModError as exc:
+            return self._send(400, {"error": str(exc)})
+        finally:
+            db.close()
+        uid = row["id"]
+        _mod_forget(uid)
+        # Anything that takes access away takes it away NOW, not at the next
+        # re-check: those sessions are dropped outright.
+        if act in ("delete", "signout", "password") or \
+                (act == "update" and body.get("disabled")):
+            _sessions_drop_where(lambda x: x.get("role") == "mod"
+                                 and x.get("uid") == uid)
+        print(f"[admin] {me} moderator {act}: {row['username']!r}", flush=True)
+        out = {"ok": True, "id": uid, "username": row["username"], "action": act}
+        if gen:
+            out["password"] = gen
+        self._send(200, out)
+
+    def _me_password(self):
+        """A moderator changes their own password (the owner uses Security)."""
+        s = self._session()
+        if not s or s.get("role") != "mod":
+            return self._send(400, {"error": "Use Save credentials to change "
+                                             "the owner password."})
+        body = self._json_body()
+        db = adminusers.connect()
+        try:
+            if not adminusers.check_login(db, s["user"], str(body.get("current") or "")):
+                _note_fail(self._addr())
+                time.sleep(0.5)
+                return self._send(403, {"error": "Current password is wrong."})
+            row = adminusers.set_password(db, s["uid"], str(body.get("password") or ""))
+        except adminusers.ModError as exc:
+            return self._send(400, {"error": str(exc)})
+        finally:
+            db.close()
+        _mod_forget(row["id"])
+        _sessions_drop_where(lambda x: x.get("role") == "mod"
+                             and x.get("uid") == row["id"])
+        tok = _session_new(row["username"], remember=bool(s.get("remember")),
+                           addr=self._addr(), ua=self.headers.get("User-Agent", ""),
+                           cred=adminusers.fingerprint(row), role="mod", uid=row["id"])
+        self._send(200, {"ok": True, "username": row["username"]},
+                   headers=self._set_cookie(tok, bool(s.get("remember"))))
+
+    def _audit_list(self):
+        from urllib.parse import urlsplit, parse_qs
+        q = parse_qs(urlsplit(self.path).query)
+        actor = (q.get("actor") or [""])[0].strip() or None
+        try:
+            limit = int((q.get("limit") or ["200"])[0])
+        except ValueError:
+            limit = 200
+        db = adminusers.connect()
+        try:
+            rows = [dict(r) for r in adminusers.audit_list(db, limit, actor)]
+            actors = adminusers.audit_actors(db)
+        finally:
+            db.close()
+        self._send(200, {"rows": rows, "actors": actors})
+
+    def _audit_post(self, path):
+        """Log a change after its handler ran, with what it answered."""
+        action = _AUDIT_ACTIONS.get(path)
+        if not action:
+            return
+        body = dict(self._jb or {})
+        if path == "/api/gm-control" and set(body) <= {"renew"}:
+            return                              # the desk's 4 s heartbeat
+        if path == "/api/mods":
+            action = "moderator: %s" % (body.get("action") or "?")
+        if path == "/api/news/publish" and body.get("dry_run"):
+            action = "previewed a news publish"
+        resp = getattr(self, "_resp", None)
+        resp = resp if isinstance(resp, dict) else {}
+        target = next((body.get(k) for k in _AUDIT_TARGETS if body.get(k)), None) \
+            or next((resp.get(k) for k in ("username", "code", "polid")
+                     if resp.get(k)), None)
+        if path == "/api/mods" and resp.get("username"):
+            target = resp["username"]           # a name, not a row number
+        detail = {k: v for k, v in body.items()
+                  if k not in _AUDIT_SECRET and k not in _AUDIT_TARGETS}
+        if isinstance(detail.get("items"), list):
+            detail["items"] = "%d item(s)" % len(detail["items"])
+        status = getattr(self, "_status", 0)
+        if status >= 400 and resp.get("error"):
+            detail["error"] = resp["error"]
+        user, role, _p = self._caller()
+        _audit(user, role, action, target, detail or None,
+               ok=200 <= status < 300, addr=self._addr())
+
+    # -- who is on, service health, account detail ----------------------------- #
+    def _online(self):
+        """Live game counts for anyone signed in; the signed-in accounts for
+        those who may look accounts up (addresses for the owner only)."""
+        user, role, perms = self._caller()
+        out = {"games": adminops.live_counts(_DATA), "accounts": None}
+        if role == "owner" or "accounts_view" in perms:
+            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            db = _db()
+            try:
+                rows = db.execute(
+                    "SELECT m.polid, s.nick, s.peer_ip, s.created_at, s.expires_at,"
+                    " (SELECT handle_name FROM handle h WHERE h.member_id = m.id"
+                    "  ORDER BY h.is_primary DESC, h.id LIMIT 1) AS handle"
+                    " FROM session s JOIN member m ON m.id = s.member_id"
+                    " WHERE s.expires_at > ? ORDER BY s.created_at DESC", (now,)).fetchall()
+            except sqlite3.Error:
+                rows = []
+            finally:
+                db.close()
+            seen, accts = set(), []
+            for r in rows:
+                if r["polid"] in seen:
+                    continue
+                seen.add(r["polid"])
+                accts.append({"polid": r["polid"], "handle": r["handle"],
+                              "since": r["created_at"],
+                              "addr": r["peer_ip"] if role == "owner" else None})
+            out["accounts"] = accts
+        self._send(200, out)
+
+    _HEALTH_CACHE = {"at": 0.0, "out": None}
+
+    def _health(self):
+        from urllib.parse import urlsplit, parse_qs
+        fresh = (parse_qs(urlsplit(self.path).query).get("fresh") or [""])[0]
+        c = self._HEALTH_CACHE
+        if c["out"] is None or fresh or time.time() - c["at"] > 15:
+            mdb = adminusers.connect()
+            try:
+                text = adminusers.get_setting(mdb, "health_targets", adminops.DEFAULT_TARGETS)
+                host = adminusers.get_setting(mdb, "health_host", adminops.DEFAULT_HOST)
+            finally:
+                mdb.close()
+            c["out"] = {"services": adminops.probe(adminops.parse_targets(text, host)),
+                        "backup": adminops.backup_status(_DATA),
+                        "disk": adminops.disk(_DATA), "checked_at": time.time()}
+            c["at"] = time.time()
+        self._send(200, c["out"])
+
+    def _account_detail(self):
+        """Everything about one account on one screen. What a moderator sees is
+        cut to their permissions; addresses and the audit trail are the owner's."""
+        from urllib.parse import urlsplit, parse_qs
+        who = (parse_qs(urlsplit(self.path).query).get("polid") or [""])[0].strip()
+        user, role, perms = self._caller()
+        owner = role == "owner"
+        db = _db()
+        try:
+            mem = _member_row(db, who)
+            if mem is None:
+                return self._send(404, {"error": "No such account."})
+            pol = mem["polid"]
+            prow = db.execute("SELECT * FROM polid WHERE polid=?", (pol,)).fetchone()
+            fp = accounts.account_footprint(db, pol) or {}
+            members = db.execute("SELECT * FROM member WHERE polid=? ORDER BY id",
+                                 (pol,)).fetchall()
+            handles, titles, devices = [], [], []
+            for m in members:
+                for h in db.execute("SELECT id, handle_name FROM handle WHERE member_id=?"
+                                    " ORDER BY id", (m["id"],)):
+                    handles.append(h["handle_name"])
+                    linked = {r[0] for r in db.execute(
+                        "SELECT content_code FROM handle_content WHERE handle_id=?"
+                        " AND status='active'", (h["id"],))}
+                    for c in sorted(linked):
+                        titles.append({"handle": h["handle_name"], "content": c,
+                                       "label": contentlist.content_title(c)})
+                try:
+                    for t in accounts.list_client_tokens(db, m["id"]):
+                        devices.append({"label": _client_label(t["client_sig"]),
+                                        "known": t["client_sig"] in _CLIENT_SIGS,
+                                        "first_seen": t["first_seen"],
+                                        "last_seen": t["last_seen"]})
+                except Exception:
+                    pass
+            owned = sorted({c for c in (fp.get("contents") or [])})
+            linked_codes = {t["content"] for t in titles}
+            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            sess = db.execute(
+                "SELECT s.created_at, s.expires_at, s.peer_ip FROM session s"
+                " JOIN member m ON m.id=s.member_id WHERE m.polid=? AND s.expires_at > ?"
+                " ORDER BY s.created_at DESC", (pol, now)).fetchall()
+            codes = [dict(r) for r in db.execute(
+                "SELECT code, contents, redeemed_at FROM regcode WHERE redeemed_by=?"
+                " ORDER BY redeemed_at", (pol,))]
+        finally:
+            db.close()
+        for c in codes:
+            c["contents_label"] = _content_label(c["contents"])
+        names = {h.lower() for h in handles if h}
+        out = {
+            "polid": pol, "status": prow["status"] if prow and "status" in prow.keys() else None,
+            "created_at": prow["created_at"] if prow else None,
+            "members": [{"login_name": m["login_name"], "status": m["status"],
+                         "mail": m["mail_address"] if "mail_address" in m.keys() else None,
+                         "ext_mail": bool(m["ext_mail"]) if "ext_mail" in m.keys() else False}
+                        for m in members],
+            "handles": handles,
+            "owned": [{"content": c, "label": contentlist.content_title(c),
+                       "linked": c in linked_codes} for c in owned],
+            "characters": titles, "devices": devices,
+            "online": [{"since": r["created_at"],
+                        "addr": r["peer_ip"] if owner else None} for r in sess],
+            "codes": codes, "mail_count": fp.get("mail"), "friends": fp.get("friends"),
+            "reports": None, "gm_calls": None, "activity": None,
+        }
+        if owner or "reports" in perms:
+            got = []
+            try:
+                for name in sorted(os.listdir(REPORT_DIR), reverse=True)[:500]:
+                    if not name.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(REPORT_DIR, name), encoding="utf-8") as f:
+                            rec = json.load(f)
+                    except (OSError, ValueError):
+                        continue
+                    fl = rec.get("fields") or {}
+                    if str(fl.get("suspect") or "").lower() in names:
+                        got.append({"received_at": rec.get("received_at"),
+                                    "application": fl.get("application"),
+                                    "explanation": fl.get("explanation")})
+            except OSError:
+                pass
+            out["reports"] = got[:20]
+        if owner or "gm" in perms:
+            got = []
+            try:
+                for name in sorted(os.listdir(GM_CALL_DIR), reverse=True):
+                    if not self._TICKET_NAME.fullmatch(name):
+                        continue
+                    try:
+                        with open(os.path.join(GM_CALL_DIR, name), encoding="utf-8",
+                                  errors="replace") as f:
+                            rec = json.load(f)
+                    except (OSError, ValueError):
+                        continue
+                    if isinstance(rec, dict) and str(rec.get("handle") or "").lower() in names:
+                        got.append({"id": name[:-5], "received_at": rec.get("received_at"),
+                                    "subject": adminops.clean(rec.get("subject"), 120)})
+            except OSError:
+                pass
+            out["gm_calls"] = got[:20]
+        if owner:
+            mdb = adminusers.connect()
+            try:
+                out["activity"] = [dict(r) for r in mdb.execute(
+                    "SELECT at, actor, role, action, ok FROM audit WHERE target=?"
+                    " COLLATE NOCASE ORDER BY at DESC LIMIT 30", (pol,))]
+            finally:
+                mdb.close()
+        self._send(200, out)
+
+    # -- alerts: Discord and browser push ---------------------------------- #
+    def _alerts_get(self):
+        mdb = adminusers.connect()
+        try:
+            hook = adminusers.get_setting(mdb, "discord_webhook") or ""
+            out = {
+                "discord_set": bool(hook),
+                "discord_hint": ("..." + hook[-6:]) if hook else "",
+                "panel_url": adminusers.get_setting(mdb, "panel_url") or "",
+                "health_targets": adminusers.get_setting(
+                    mdb, "health_targets", adminops.DEFAULT_TARGETS),
+                "health_host": adminusers.get_setting(
+                    mdb, "health_host", adminops.DEFAULT_HOST),
+                "devices": [{"username": r["username"], "role": r["role"],
+                             "ua": r["ua"], "created_at": r["created_at"],
+                             "last_ok": r["last_ok"], "last_error": r["last_error"]}
+                            for r in adminusers.push_list(mdb)],
+                "recent": [dict(r) for r in adminusers.alerted_recent(mdb, 8)],
+            }
+        finally:
+            mdb.close()
+        self._send(200, out)
+
+    def _alerts_post(self):
+        body = self._json_body()
+        act = body.get("action") or "save"
+        mdb = adminusers.connect()
+        try:
+            if act == "test_discord":
+                hook = adminusers.get_setting(mdb, "discord_webhook")
+                if not hook:
+                    return self._send(400, {"error": "No Discord webhook is set."})
+                ok, detail = adminops.discord_post(
+                    hook, "Test alert from the OpenLobby admin panel.")
+                return self._send(200 if ok else 502, {"ok": ok, "detail": detail,
+                                  **({} if ok else {"error": "Discord refused it: " + detail})})
+            hook = str(body.get("discord_webhook") or "").strip()
+            if hook:
+                if not adminops.valid_webhook(hook):
+                    return self._send(400, {"error": "That is not a Discord webhook URL."})
+                adminusers.set_setting(mdb, "discord_webhook", hook)
+            if body.get("clear_discord"):
+                adminusers.set_setting(mdb, "discord_webhook", None)
+            if "panel_url" in body:
+                url = str(body.get("panel_url") or "").strip().rstrip("/")
+                if url and not re.match(r"https?://[^\s/]+(/\S*)?$", url):
+                    return self._send(400, {"error": "Panel address must start with "
+                                                     "http:// or https://."})
+                adminusers.set_setting(mdb, "panel_url", url or None)
+            if "health_targets" in body:
+                text = str(body.get("health_targets") or "")[:4000]
+                adminusers.set_setting(mdb, "health_targets", text)
+            if "health_host" in body:
+                host = str(body.get("health_host") or "").strip()[:200]
+                adminusers.set_setting(mdb, "health_host", host or None)
+        finally:
+            mdb.close()
+        self._HEALTH_CACHE["out"] = None
+        self._send(200, {"ok": True})
+
+    def _push_key(self):
+        user, role, _p = self._caller()
+        mdb = adminusers.connect()
+        try:
+            key = webpush.public_key_b64u(adminops.vapid_key(mdb))
+            mine = [r["endpoint"] for r in adminusers.push_list(mdb)
+                    if r["username"] == user and r["role"] == role]
+        finally:
+            mdb.close()
+        self._send(200, {"key": key, "mine": mine})
+
+    def _push_subscribe(self):
+        body = self._json_body()
+        user, role, _p = self._caller()
+        s = self._session() or {}
+        mdb = adminusers.connect()
+        try:
+            adminusers.push_add(mdb, body.get("subscription") or {}, user, role,
+                                s.get("uid"), str(body.get("origin") or "")[:200],
+                                self.headers.get("User-Agent", ""))
+        except adminusers.ModError as exc:
+            return self._send(400, {"error": str(exc)})
+        finally:
+            mdb.close()
+        self._send(200, {"ok": True})
+
+    def _push_unsubscribe(self):
+        body = self._json_body()
+        user, role, _p = self._caller()
+        mdb = adminusers.connect()
+        try:
+            ep = str(body.get("endpoint") or "")
+            row = mdb.execute("SELECT username, role FROM push_sub WHERE endpoint=?",
+                              (ep,)).fetchone()
+            if row and (role == "owner" or (row["username"], row["role"]) == (user, role)):
+                adminusers.push_remove(mdb, ep)
+        finally:
+            mdb.close()
+        self._send(200, {"ok": True})
+
+    def _push_test(self):
+        user, role, _p = self._caller()
+        mdb = adminusers.connect()
+        try:
+            subs = [r for r in adminusers.push_list(mdb)
+                    if r["username"] == user and r["role"] == role]
+            if not subs:
+                return self._send(400, {"error": "This login has no devices "
+                                                 "with alerts turned on."})
+            sent, total = adminops.push_to(mdb, subs, {
+                "title": "Test alert", "body": "GM call alerts are working.",
+                "tag": "gm-test", "url": "/#gmcalls"})
+        finally:
+            mdb.close()
+        self._send(200 if sent else 502, {"ok": bool(sent), "sent": sent, "total": total,
+                                          **({} if sent else {"error": "The push service "
+                                              "refused it. Turn alerts off and on again."})})
 
     # -- routing ------------------------------------------------------------- #
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/api/session":
             return self._session_info()          # unauthenticated by design
+        if path in _PUBLIC:
+            return self._file(os.path.join(WEB, _PUBLIC[path]))
+        if path.startswith("/icons/"):
+            return self._file(os.path.join(WEB, "icons",
+                                           posixpath.basename(path)))
         if not self._authed(path):
             return
+        if not self._permit(path, _GET_PERMS):
+            return
+        if path == "/api/mods":
+            return self._mods_list()
+        if path == "/api/audit":
+            return self._audit_list()
+        if path == "/api/online":
+            return self._online()
+        if path == "/api/health":
+            return self._health()
+        if path == "/api/account-detail":
+            return self._account_detail()
+        if path == "/api/alerts":
+            return self._alerts_get()
+        if path == "/api/push/key":
+            return self._push_key()
         if path == "/":
             return self._file(os.path.join(WEB, "index.html"))
         if path.startswith("/art/"):
@@ -842,6 +1786,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(os.path.join(WEB, path[len("/static/"):].lstrip("/")))
         if path == "/api/codes":
             return self._codes_list()
+        if path == "/api/sessions":
+            return self._sessions_list()
         if path == "/api/accounts":
             return self._accounts_list()
         if path == "/api/account-clients":
@@ -868,6 +1814,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._pml_load()
         if path == "/api/pml-refs":
             return self._pml_refs()
+        if path == "/api/pml-resolve":
+            return self._pml_resolve_href()
         if path == "/api/news":
             return self._news_state()
         if path == "/api/news/outputs":
@@ -888,12 +1836,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._logout()
         if not self._authed(path):
             return
+        if not self._permit(path, _POST_PERMS):
+            return
+        try:
+            return self._route_post(path)
+        finally:
+            self._audit_post(path)
+
+    def _route_post(self, path):
+        if path == "/api/mods":
+            return self._mods_change()
+        if path == "/api/alerts":
+            return self._alerts_post()
+        if path == "/api/push/subscribe":
+            return self._push_subscribe()
+        if path == "/api/push/unsubscribe":
+            return self._push_unsubscribe()
+        if path == "/api/push/test":
+            return self._push_test()
+        if path == "/api/me/password":
+            return self._me_password()
         if path == "/api/credentials":
             return self._set_credentials()
         if path == "/api/codes":
             return self._codes_create()
         if path == "/api/codes/random":
             return self._send(200, {"code": _rand_code()})
+        if path == "/api/codes/void":
+            return self._codes_void()
+        if path == "/api/sessions/revoke":
+            return self._sessions_revoke()
         if path == "/api/pml-expand":
             return self._pml_expand()
         if path == "/api/grant":
@@ -951,12 +1923,28 @@ class Handler(BaseHTTPRequestHandler):
         no base: a pasted page, or a generated wizard step.
         """
         from urllib.parse import urlsplit, parse_qs
-        base = (parse_qs(urlsplit(self.path).query).get("base") or [""])[0]
+        q = parse_qs(urlsplit(self.path).query)
+        base = (q.get("base") or [""])[0]
+        raw = (q.get("src") or [""])[0]
+        # The page's own src, as written, resolves exactly like an <include>:
+        # relative to the PAGE's folder, `/x` from the host, `file:/x` from the
+        # host's pml tree. Resolving everything against the host roots alone
+        # 404'd every image written relative to its page (`ma_i/maic06i.ang`).
+        if base and raw:
+            host_dirs, tree_dirs, start = _pml_roots(base)
+            got = _pml_resolve(raw, start, host_dirs, tree_dirs)
+            if got:
+                ext = os.path.splitext(got)[1].lower()
+                with open(got, "rb") as f:
+                    blob = f.read()
+                if ext == ".ang":
+                    return self._ang_frame(blob)
+                return self._send(200, blob, _MIME.get(ext, "application/octet-stream"))
         rel = posixpath.normpath("/" + rel).lstrip("/")   # defeat ../ traversal
         roots = []
         if base:
-            host_dirs, tree_dirs, _start = _pml_roots(base)
-            roots += tree_dirs + host_dirs      # overlay first, then the base tree
+            host_dirs, tree_dirs, start = _pml_roots(base)
+            roots += [start] + tree_dirs + host_dirs   # page folder, overlay, base tree
         roots.append(ART_ROOT)
         for root in roots:
             fs_path = os.path.abspath(os.path.join(root, rel))
@@ -964,9 +1952,35 @@ class Handler(BaseHTTPRequestHandler):
                     and os.path.isfile(fs_path):
                 ext = os.path.splitext(fs_path)[1].lower()
                 with open(fs_path, "rb") as f:
-                    return self._send(200, f.read(),
-                                      _MIME.get(ext, "application/octet-stream"))
+                    blob = f.read()
+                if ext == ".ang":
+                    return self._ang_frame(blob)
+                return self._send(200, blob, _MIME.get(ext, "application/octet-stream"))
         self._send(404, "not found", "text/plain")
+
+    def _ang_frame(self, blob):
+        """An `.ang` sprite as one PNG: `?seq=N` picks the SEQUENCE the page's
+        `sd:sequence=N` names, which points at an image through a display list
+        (newsgen.ang_sequences), not at image N directly."""
+        from urllib.parse import urlsplit, parse_qs
+        q = parse_qs(urlsplit(self.path).query)
+        try:
+            seq = int((q.get("seq") or ["0"])[0] or 0)
+            base, frames = _ang_split(blob)
+            seqs = newsgen.ang_sequences(blob)
+        except Exception as exc:
+            return self._send(415, {"error": f"not a readable .ang: {exc}"})
+        if (q.get("layer") or [""])[0] == "base":
+            if base is None:
+                return self._send(404, {"error": "this .ang has no base image"})
+            return self._send(200, base, "image/png")
+        img = seqs[seq] if 0 <= seq < len(seqs) and seqs[seq] is not None else 0
+        png = frames[img if 0 <= img < len(frames) else 0]
+        self._send(200, png, "image/png",
+                   headers=(("X-Ang-Frames", str(len(frames))),
+                            ("X-Ang-Sequences", str(len(seqs))),
+                            ("X-Ang-Base", "1" if base is not None else "0"),
+                            ("Access-Control-Expose-Headers", "X-Ang-Base")))
 
     # -- codes --------------------------------------------------------------- #
     def _codes_list(self):
@@ -977,11 +1991,26 @@ class Handler(BaseHTTPRequestHandler):
                 "redeemed_by FROM regcode ORDER BY created_at DESC").fetchall()
         finally:
             db.close()
+        try:
+            mdb = adminusers.connect()
+            try:
+                origin = adminusers.code_origins(mdb)
+            finally:
+                mdb.close()
+        except sqlite3.Error:
+            origin = {}
+        user, role, _p = self._caller()
         out = [{"code": r["code"], "contents": r["contents"],
                 "contents_label": _content_label(r["contents"]),
                 "note": r["note"], "created_at": r["created_at"],
-                "redeemed_at": r["redeemed_at"], "redeemed_by": r["redeemed_by"]}
+                "redeemed_at": r["redeemed_at"], "redeemed_by": r["redeemed_by"],
+                "created_by": (origin.get(str(r["code"]).upper()) or {}).get("by"),
+                "expires_at": (origin.get(str(r["code"]).upper()) or {}).get("expires_at")}
                for r in rows]
+        # A moderator sees the codes THEY made, and nothing else: the rest
+        # name the accounts that redeemed them.
+        if role == "mod":
+            out = [r for r in out if (r["created_by"] or "").lower() == user.lower()]
         self._send(200, out)
 
     def _codes_create(self):
@@ -991,6 +2020,32 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(contents, str):
             contents = [int(c) for c in contents.replace(" ", "").split(",") if c]
         note = body.get("note") or None
+        try:
+            contents = [int(c) for c in contents]
+            days = float(body.get("expires_days") or 0)
+        except (TypeError, ValueError):
+            return self._send(400, {"error": "Contents and expiry must be numbers."})
+        if days < 0 or days > 3650:
+            return self._send(400, {"error": "Expiry must be between 0 and 3650 days."})
+        expires_at = time.time() + days * 86400 if days else None
+        user, role, _p = self._caller()
+        if role == "mod":
+            row = _mod_row((self._session() or {}).get("uid"), force=True)
+            allowed = adminusers.titles_of(row) if row else []
+            if allowed and not set(contents) <= set(allowed):
+                return self._send(403, {"error": "You can't make codes for "
+                                                 "those titles."})
+            limit = row["code_limit"] if row else 0
+            if limit is not None:
+                mdb = adminusers.connect()
+                try:
+                    made = adminusers.codes_made_since(mdb, user, time.time() - 86400)
+                finally:
+                    mdb.close()
+                if made >= limit:
+                    return self._send(429, {
+                        "error": f"Daily code limit reached ({limit} per "
+                                 f"24 hours)."})
         db = _db()
         try:
             existing = db.execute("SELECT 1 FROM regcode"
@@ -1002,8 +2057,39 @@ class Handler(BaseHTTPRequestHandler):
             db.commit()
         finally:
             db.close()
+        try:
+            mdb = adminusers.connect()
+            try:
+                adminusers.code_origin_add(mdb, accounts.normalise_regcode(code),
+                                           user, role, expires_at)
+            finally:
+                mdb.close()
+        except sqlite3.Error as exc:
+            print(f"[admin] could not record who made {code!r}: {exc}", flush=True)
         self._send(200, {"code": accounts.normalise_regcode(code),
                          "contents": contents, "note": note})
+
+    def _codes_void(self):
+        """Withdraw an UNUSED code, e.g. one printed by mistake or leaked. A
+        redeemed code is history an account points at, so it stays."""
+        body = self._json_body()
+        code = accounts.normalise_regcode(str(body.get("code") or "").strip())
+        if not code:
+            return self._send(400, {"error": "code required"})
+        db = _db()
+        try:
+            n = db.execute("DELETE FROM regcode WHERE code=? COLLATE NOCASE "
+                           "AND redeemed_at IS NULL AND redeemed_by IS NULL",
+                           (code,)).rowcount
+            db.commit()
+        finally:
+            db.close()
+        if not n:
+            return self._send(409, {"error": "no unused code by that name "
+                                             "(a redeemed code cannot be voided)"})
+        who = (self._session() or {}).get("user") or "open-panel"
+        print(f"[admin] {who} voided unused code {code!r}", flush=True)
+        self._send(200, {"ok": True, "code": code})
 
     # -- abuse reports ------------------------------------------------------- #
     #
@@ -1152,6 +2238,8 @@ class Handler(BaseHTTPRequestHandler):
                                 (rec.get("peer") or "").rsplit(":", 1)[0]) in live
             rec["room_shared"] = not rec.get("room") or rec["room"] == shared
             rec["room"] = rec.get("room") or shared
+            if not self._is_owner():
+                rec.pop("peer", None)            # a moderator has no use for an IP
             out.append(rec)
         self._send(200, out)
 
@@ -1255,6 +2343,13 @@ class Handler(BaseHTTPRequestHandler):
             "prefix": gmchat.PREFIX.decode("latin1"),
         }
 
+    def _hide_peers(self, state):
+        """Callers' addresses are the owner's to see, not a moderator's."""
+        if self._is_owner():
+            return
+        for i, c in enumerate(state.get("callers") or []):
+            c["peer"] = "caller %d" % (i + 1)
+
     def _gm_room_param(self, given=None):
         """The room to act on: what was asked for, else what gmd is handing out,
         else the newest room that has a transcript."""
@@ -1274,6 +2369,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(urlsplit(self.path).query)
         room = self._gm_room_param((q.get("room") or [""])[0].strip())
         _ctl, out = self._gm_state()
+        self._hide_peers(out)
         out["room"] = room
         if room:
             try:
@@ -1354,6 +2450,7 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[admin] {ctl['by']} set the GM desk: {', '.join(changed)}",
                   flush=True)
         _c, out = self._gm_state()
+        self._hide_peers(out)
         out["changed"] = changed
         # gmd reads the file when the NEXT 0x801 arrives, so this is a statement
         # of intent, not of what any caller has been told yet.
@@ -1863,9 +2960,40 @@ class Handler(BaseHTTPRequestHandler):
         # Only the constructed ones: a page with no <include> is the common case
         # and says nothing by being absent, so this stays a few hundred entries.
         parts = {k: v for k, v in (graph.parts if graph else {}).items() if v}
+        with _PML_LOCK:
+            titles = dict(_PML_CACHE.get("titles") or {})
         self._send(200, {"root": "www", "count": len(files), "files": files,
                          "shapes": shapes, "shape_help": PML_SHAPES,
-                         "parts": parts})
+                         "parts": parts, "titles": titles})
+
+    def _pml_resolve_href(self):
+        """Where a link on a previewed page goes: /api/pml-resolve?from=&href=
+
+        Answers {"path": <www-relative file>} when the target is a page in the
+        mirror, or {"external": url} for anything outside it. The same three
+        src forms the renderer resolves (relative, /host-absolute, file:/) plus
+        http://<host>/... pointing at a host the mirror has."""
+        from urllib.parse import urlsplit, parse_qs, unquote
+        q = parse_qs(urlsplit(self.path).query)
+        frm = (q.get("from") or [""])[0].replace("\\", "/").lstrip("/")
+        href = (q.get("href") or [""])[0].strip()
+        root = os.path.abspath(WWW_ROOT)
+        target = None
+        u = urlsplit(href)
+        if u.scheme in ("http", "https") and u.netloc:
+            cand = os.path.abspath(os.path.join(root, u.netloc, unquote(u.path).lstrip("/")))
+            if cand.startswith(root + os.sep) and os.path.isfile(cand):
+                target = cand
+            elif not target:
+                return self._send(200, {"external": href})
+        else:
+            src = href.split("?", 1)[0].split("#", 1)[0]
+            src = re.sub(r"^file:/+pml/", "file:/", src)     # file://pml/x == file:/x
+            host_dirs, tree_dirs, start = _pml_roots(frm)
+            target = _pml_resolve(src, start, host_dirs, tree_dirs)
+        if not target:
+            return self._send(200, {"path": None})
+        self._send(200, {"path": os.path.relpath(target, root).replace(os.sep, "/")})
 
     def _pml_refs(self):
         """Which files reference this one, and which it references.
@@ -2162,6 +3290,35 @@ def _cli(argv):
     return False
 
 
+def _start_worker():
+    """GM-call alerts and code expiry (adminops.Worker)."""
+    def may_push(sub):
+        if sub["role"] == "owner":
+            return True
+        row = _mod_row(sub["uid"], force=True)
+        return bool(row) and not row["disabled"] and "gm" in adminusers.perms_of(row)
+
+    def expire_code(code):
+        db = _db()
+        try:
+            n = db.execute("DELETE FROM regcode WHERE code=? COLLATE NOCASE"
+                           " AND redeemed_at IS NULL AND redeemed_by IS NULL",
+                           (code,)).rowcount
+            db.commit()
+        finally:
+            db.close()
+        return n > 0
+
+    def label(cid):
+        try:
+            return contentlist.content_title(int(cid))
+        except (TypeError, ValueError):
+            return ""
+
+    adminops.Worker(GM_CALL_DIR, may_push, label, expire_code,
+                    lambda *a: _audit(*a)).start()
+
+
 def main():
     if _cli(sys.argv[1:]):
         return
@@ -2184,6 +3341,11 @@ def main():
     else:
         print("[admin] auth: OPEN (no credential set) -- safe only while bound "
               "to loopback", flush=True)
+    _start_worker()
+    n = _load_sessions()
+    if n:
+        print(f"[admin] restored {n} remembered sign-in(s) from {SESSION_STORE}",
+              flush=True)
     # Warm the (slow) PML file listing off the request path so the browser is
     # ready by the time the operator opens the PML tab.
     def _warm():

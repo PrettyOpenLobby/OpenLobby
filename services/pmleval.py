@@ -20,6 +20,7 @@ a PREVIEW aid, so "mostly right and never crashes" beats "perfect or nothing".
 Entry point: `expand(text, resolve_include=None, sysvars=None, base=None)`.
 `resolve_include(src, base)` returns `(text, base_of_that_file)`, or None.
 """
+import datetime
 import re
 
 # System variables the pages branch on. Defaults chosen to render the Western
@@ -27,11 +28,21 @@ import re
 DEFAULT_SYSVARS = {
     "_PLATFORM": "WIN",
     "_USER_LANG": "en-US",
+    "_LANG": "en-US",              # the PS2 build's name for _USER_LANG
     "_POL_LOGIN": 0,
     "_POL_UCS_AREA_KBN": "02",     # Western area (00/01 are JP/US-special)
+    "_VERSION": "1.18.15",
+    "_HAVE_CONTENTSID": 1,
+    "_SHORTCUT_ID": "",
     "LANG": "en-US",
     "AREA": "02",
 }
+
+
+def _date_vars():
+    """_YEA/_MON/_DAT: the client's clock. Seasonal pages branch on them."""
+    t = datetime.date.today()
+    return {"_YEA": t.year, "_MON": t.month, "_DAT": t.day}
 
 _MAX_LOOP = 512        # runaway-loop guard
 _MAX_INCLUDE_DEPTH = 8
@@ -40,8 +51,14 @@ _MAX_INCLUDE_DEPTH = 8
 # --------------------------------------------------------------------------- #
 # a lenient PML parse (shared shape with pml.js: {tag, attrs, children, text})
 # --------------------------------------------------------------------------- #
+def _blank(m):
+    # Keep the newlines a comment spanned, so line numbers after it still point
+    # at the right line of the file the operator is editing.
+    return "\n" * m.group(0).count("\n")
+
+
 def _strip_comments(s):
-    s = re.sub(r"<!--[\s\S]*?-->", "", s)
+    s = re.sub(r"<!--[\s\S]*?-->", _blank, s)
     # SE's `<! ... >` short comment. This used to demand a NON-ALPHA after the
     # `<!`, to protect a hypothetical real tag -- but no PML tag starts with
     # `<!`, and SE writes plenty of `<!SHEET NAME>`, `<!URL ...>` and (in
@@ -49,15 +66,18 @@ def _strip_comments(s):
     # failed to match the tag pattern too, so the parser dropped the `<` and
     # emitted `!style>` as TEXT -- taking the rest of that file's markup with
     # it. Strip every `<!...>`, exactly as admin_web/pml.js does.
-    return re.sub(r"<![^>]*>", "", s)
+    return re.sub(r"<![^>]*>", _blank, s)
 
 
 _ATTR_RE = re.compile(r'([\w:.-]+)\s*(?:=\s*("([^"]*)"|\'([^\']*)\'|([^\s>]+)))?')
-_TOK_RE = re.compile(r"<\/?[\w:.-]+[^>]*?>|[^<]+")
+# A tag runs to the first `>` that is NOT inside a quoted value:
+# `<if expr="$a[$i]>0">` is one tag, not `<if expr="$a[$i]>` plus text. The old
+# `[^>]*?>` cut 393 tags short across the mirror.
+_TOK_RE = re.compile(r"""<\/?[\w:.-]+(?:"[^"]*"|'[^']*'|[^'">])*>|[^<]+""")
 _VOID = {
     "input", "img", "meta", "formaction", "define", "style", "br", "bgsound",
     "include", "timer", "textbox", "area", "addmenu", "addlink", "config",
-    "plugin", "hidden", "bar", "systembg", "inlineimg", "multilink",
+    "plugin", "hidden", "bar", "systembg", "inlineimg", "multilink", "hr",
 }
 
 
@@ -76,8 +96,11 @@ def _parse(src):
     src = _strip_comments(src)
     root = {"tag": "#root", "attrs": {}, "children": []}
     stack = [root]
+    line, last = 1, 0
     for m in _TOK_RE.finditer(src):
         tok = m.group(0)
+        line += src.count("\n", last, m.start())
+        last = m.start()
         if tok[0] != "<":
             stack[-1]["children"].append({"tag": "#text", "text": tok,
                                           "children": []})
@@ -92,7 +115,8 @@ def _parse(src):
         name = re.split(r"[\s/>]", tok[1:], 1)[0].lower()
         rest = tok[1 + len(name):]
         rest = re.sub(r"/?>$", "", rest)
-        node = {"tag": name, "attrs": _parse_attrs(rest), "children": []}
+        node = {"tag": name, "attrs": _parse_attrs(rest), "children": [],
+                "line": line}
         stack[-1]["children"].append(node)
         if not (tok.endswith("/>") or name in _VOID):
             stack.append(node)
@@ -102,6 +126,56 @@ def _parse(src):
 # --------------------------------------------------------------------------- #
 # expression evaluation -- SE's C-ish mini language -> restricted python eval
 # --------------------------------------------------------------------------- #
+class _N(int):
+    """A PML number. SE's `+` concatenates when either side is a string
+    ('masc'+$zero+'i.png'), and its `/` is integer division; Python raised a
+    TypeError on the first and produced floats from the second."""
+
+    def __add__(self, o):
+        if isinstance(o, str):
+            return str(int(self)) + o
+        return _N(int(self) + int(o))
+
+    def __radd__(self, o):
+        if isinstance(o, str):
+            return o + str(int(self))
+        return _N(int(o) + int(self))
+
+    def __sub__(self, o):
+        return _N(int(self) - int(o))
+
+    def __rsub__(self, o):
+        return _N(int(o) - int(self))
+
+    def __mul__(self, o):
+        return _N(int(self) * int(o))
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, o):
+        return _N(int(int(self) / int(o)))
+
+    def __rtruediv__(self, o):
+        return _N(int(int(o) / int(self)))
+
+    __floordiv__ = __truediv__
+
+    def __mod__(self, o):
+        return _N(int(self) % int(o))
+
+    def __neg__(self):
+        return _N(-int(self))
+
+
+def _num(v):
+    """Wrap plain ints (not bools) as PML numbers; leave everything else."""
+    if isinstance(v, int) and not isinstance(v, (bool, _N)):
+        return _N(v)
+    if isinstance(v, float) and v.is_integer():
+        return _N(int(v))
+    return v
+
+
 def _to_py(expr):
     """Translate an SE expression to a python one. `$name` -> V['name']."""
     e = expr
@@ -111,7 +185,38 @@ def _to_py(expr):
     # $identifier -> V['identifier']  (indexing like $a[$i] survives: the [...]
     # stays attached to the V['a'] lookup)
     e = re.sub(r"\$([A-Za-z_]\w*)", r"V['\1']", e)
+    # Integer literals become PML numbers too, so `'a'+1` concatenates. Only
+    # digits standing alone, outside quotes.
+    e = _wrap_literals(e)
     return e
+
+
+def _wrap_literals(e):
+    out, i, quote = [], 0, ""
+    while i < len(e):
+        ch = e[i]
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+        elif ch in "\"'":
+            quote = ch
+            out.append(ch)
+            i += 1
+        elif ch.isdigit() and (i == 0 or not (e[i - 1].isalnum() or e[i - 1] in "_.'\"")):
+            j = i
+            while j < len(e) and e[j].isdigit():
+                j += 1
+            if j < len(e) and (e[j].isalpha() or e[j] in "._"):
+                out.append(e[i:j])
+            else:
+                out.append("_N(%s)" % e[i:j])
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 class _Vars(dict):
@@ -137,8 +242,22 @@ class _Vars(dict):
 
 def _eval(expr, V):
     """Evaluate a read expression. Returns the value, or None on failure."""
+    def run(e):
+        return _num(eval(_to_py(e), {"__builtins__": {}, "_N": _N},  # noqa: S307
+                         {"V": V}))
     try:
-        return eval(_to_py(expr), {"__builtins__": {}}, {"V": V})  # noqa: S307
+        return run(expr)
+    except SyntaxError:
+        # SE's pages carry typos like `$F_PATH1+'img_s/ef01s.ang` -- a string
+        # never closed. The Viewer draws those pages, so it closes the string
+        # at the end of the value; do the same.
+        for q in ("'", '"'):
+            if expr.count(q) % 2:
+                try:
+                    return run(expr + q)
+                except Exception:
+                    return None
+        return None
     except Exception:
         return None
 
@@ -152,7 +271,7 @@ def _assign(expr, V):
     m = re.match(r"\$([A-Za-z_]\w*)\s*(\+\+|--)$", expr)
     if m:
         name, op = m.group(1), m.group(2)
-        V[name] = (V.get(name, 0) or 0) + (1 if op == "++" else -1)
+        V[name] = _num((V.get(name, 0) or 0) + (1 if op == "++" else -1))
         return
     m = re.match(r"\$([A-Za-z_]\w*)\s*(\+=|-=|=)\s*(.+)$", expr, re.S)
     if not m:
@@ -163,7 +282,7 @@ def _assign(expr, V):
         V[name] = val
     elif val is not None:
         try:
-            V[name] = (V.get(name, 0) or 0) + (val if op == "+=" else -val)
+            V[name] = _num((V.get(name, 0) or 0) + (val if op == "+=" else -val))
         except Exception:
             V[name] = val
 
@@ -192,6 +311,29 @@ def _build_array(node, V):
 # --------------------------------------------------------------------------- #
 # conditionals: turn an if/elsif/.../else chain into the chosen children
 # --------------------------------------------------------------------------- #
+def _branch_chain(node):
+    """[(branch, body)] for an if/elsif/else chain written SE's way.
+
+    SE writes `<if> A <elsif> B <else> C </if>`: <elsif> and <else> are never
+    closed, so they parse as NESTED inside the <if> (if > elsif > else). A
+    branch's body is its children up to the first nested <elsif>/<else>; that
+    node is the next branch. Treating only siblings as the chain dropped every
+    <else> of that shape -- the Tetra Master top page lost all eight of its
+    buttons -- and drew the <elsif>/<else> bodies whenever the <if> held."""
+    chain = []
+    br = node
+    while br is not None:
+        nxt = None
+        body = br["children"]
+        for k, ch in enumerate(br["children"]):
+            if ch["tag"] in ("elsif", "else"):
+                body, nxt = br["children"][:k], ch
+                break
+        chain.append((br, body))
+        br = nxt
+    return chain
+
+
 def _resolve_conditionals(children, V):
     """Return `children` with each if/elsif/else chain replaced by the one
     branch whose condition holds. Non-conditional nodes pass through."""
@@ -201,22 +343,26 @@ def _resolve_conditionals(children, V):
     while i < n:
         c = children[i]
         if c["tag"] == "if":
-            # gather the chain: this <if>, then contiguous <elsif>/<else>
-            chain = [c]
+            # the chain: nested branches, then any <elsif>/<else> written as
+            # siblings after a closed </if> (whitespace between is allowed)
+            chain = _branch_chain(c)
             j = i + 1
-            while j < n and children[j]["tag"] in ("elsif", "else"):
-                chain.append(children[j])
+            while j < n:
+                t = children[j]
+                if t["tag"] == "#text" and not t["text"].strip():
+                    j += 1
+                    continue
+                if t["tag"] not in ("elsif", "else"):
+                    break
+                chain.extend(_branch_chain(t))
                 j += 1
             chosen = None
-            for br in chain:
-                if br["tag"] == "else":
-                    chosen = br
-                    break
-                if _eval(br["attrs"].get("expr", ""), V):
-                    chosen = br
+            for br, body in chain:
+                if br["tag"] == "else" or _eval(br["attrs"].get("expr", ""), V):
+                    chosen = body
                     break
             if chosen is not None:
-                out.extend(chosen["children"])
+                out.extend(chosen)
             i = j
         elif c["tag"] in ("elsif", "else"):
             i += 1                       # stray branch without an <if>; drop
@@ -232,8 +378,26 @@ def _resolve_conditionals(children, V):
 def _subst(s, V):
     def var(m):
         v = V.get(m.group(1))
-        return "" if v is None else str(v)
+        return "" if v is None else _fmt(v)
     s = re.sub(r"&var=\$([A-Za-z_]\w*);", var, s)
+
+    # `&var=$cgtl[0];`, `&var=$ar_err[$id][1];` -- an expression, usually an
+    # array lookup. Left raw it reaches the page as "(Variable error)" even
+    # though the Viewer resolves it; one that genuinely fails stays raw, and
+    # that IS what the Viewer shows.
+    def var_expr(m):
+        v = _eval(m.group(1), V)
+        if v is None or isinstance(v, (list, dict)):
+            return m.group(0)
+        return _fmt(v)
+    s = re.sub(r"&var=(\$[A-Za-z_][^;]*);", var_expr, s)
+
+    # `{$x}` is the value of $x at the point the markup is emitted -- inside a
+    # <for> that is the loop counter: href="eval:$arBtDialog[{$j}][{$i}][6]".
+    def brace(m):
+        v = V.get(m.group(1))
+        return m.group(0) if v is None else _fmt(v)
+    s = re.sub(r"\{\$([A-Za-z_]\w*)\}", brace, s)
 
     def calc(m):
         v = _eval(m.group(1), V)
@@ -283,7 +447,14 @@ def _fmt(v):
     return str(v)
 
 
-def _eval_attr(value, V):
+#: Attributes that hold numbers. SE evaluates arithmetic in them even with no
+#: variable in sight: pos="98+6,117", size="15*31,21".
+_NUMERIC_ATTRS = {"pos", "size", "areasize", "width", "height", "margin",
+                  "scroll", "delay", "zindex"}
+_ARITH_ONLY = re.compile(r"[\d\s+\-*/().,]+")
+
+
+def _eval_attr(value, V, key=None):
     """Evaluate an attribute value that is a bare SE expression.
 
     Attribute values are not only `&var=` templates. SE writes bare expressions:
@@ -300,7 +471,9 @@ def _eval_attr(value, V):
     """
     value = _subst(value, V)
     if not _EXPR_HINT.search(value):
-        return value
+        if not (key in _NUMERIC_ATTRS and _ARITH_ONLY.fullmatch(value)
+                and re.search(r"\d\s*[-+*/]\s*[\d(]", value)):
+            return value
     outs = []
     for part in _split_top_commas(value):
         got = _eval(part.strip(), V)
@@ -311,9 +484,11 @@ def _eval_attr(value, V):
 
 
 def _emit_attrs(attrs, V):
+    # A value can hold a `"` once evaluated (a calc that builds markup); written
+    # raw it would end the attribute early. pml.js decodes &quot; back.
     out = ""
     for k, v in attrs.items():
-        out += f' {k}="{_eval_attr(v, V)}"'
+        out += f' {k}="{_eval_attr(v, V, k).replace(chr(34), "&quot;")}"'
     return out
 
 
@@ -338,7 +513,7 @@ def _walk(children, V, out, ctx):
             elif "value" in c["attrs"]:
                 raw = c["attrs"]["value"]
                 # numbers stay numbers so arithmetic downstream works
-                V[name] = int(raw) if re.fullmatch(r"-?\d+", raw) else _subst(raw, V)
+                V[name] = _N(int(raw)) if re.fullmatch(r"-?\d+", raw) else _subst(raw, V)
             elif "nodefvalue" in c["attrs"] and name not in V:
                 # `nodefvalue` is what to use when the CALLER passed nothing.
                 # The preview has no caller, so it IS the value. Ignoring it
@@ -346,7 +521,7 @@ def _walk(children, V, out, ctx):
                 # page's `background="$BACKIMAGE[$cnt]"` then indexed an array
                 # with a string and fell back to unrenderable literal markup.
                 raw = c["attrs"]["nodefvalue"]
-                V[name] = int(raw) if re.fullmatch(r"-?\d+", raw) else _subst(raw, V)
+                V[name] = _N(int(raw)) if re.fullmatch(r"-?\d+", raw) else _subst(raw, V)
             else:
                 V.setdefault(name, "")
             continue
@@ -391,7 +566,11 @@ def _walk(children, V, out, ctx):
             continue
         # a normal (possibly positioned) element: emit it, recurse into children
         selfclose = c["tag"] in _VOID and not c["children"]
-        out.append(f"<{t}{_emit_attrs(c['attrs'], V)}>")
+        # `pml-line` ties what the preview draws back to the line in the file
+        # being edited; elements that came in through an include have none.
+        tag_line = (f' pml-line="{c["line"]}"'
+                    if ctx["depth"] == 0 and c.get("line") else "")
+        out.append(f"<{t}{_emit_attrs(c['attrs'], V)}{tag_line}>")
         if not selfclose:
             _walk(c["children"], V, out, ctx)
             out.append(f"</{t}>")
@@ -415,8 +594,11 @@ def expand(text, resolve_include=None, sysvars=None, base=None, report=None):
     the preview explains an empty stage instead of just showing one.
     """
     V = _Vars(DEFAULT_SYSVARS)
+    V.update(_date_vars())
     if sysvars:
         V.update(sysvars)
+    for k in list(V):
+        V[k] = _num(V[k])
     ctx = {"resolve": resolve_include, "depth": 0, "base": base,
            "unresolved": set()}
     try:

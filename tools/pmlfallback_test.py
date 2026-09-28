@@ -143,7 +143,9 @@ check("a Log Out row", 'href="tologout:"' in main)
 check("no Play control on the main menu (it lives on the title page)",
       "gameto:" in main, False)
 check("no GM Call row by default", "gmcallto:" in main, False)
-check("the title tag", "<title>Main Menu</title>" in main)
+# pmleval stamps top-level tags with a `pml-line` marker for the admin preview,
+# so the oracle's output is matched on the tag, not its attributes.
+check("the title tag", bool(re.search(r"<title[^>]*>Main Menu</title>", main)))
 check("ids 1..3 use the stock directories",
       [pmlfallback.game_dir(i) for i in (1, 2, 3, 4, 11)],
       ["ff11", "tetra", "jan", "0004", "0011"])
