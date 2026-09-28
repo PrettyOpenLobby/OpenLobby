@@ -27,6 +27,12 @@ the other; everything else runs concurrently.
 Placeholders are psycopg's: %s positional or %(name)s named. SQLite's ? is not
 accepted.
 
+Code written against sqlite3's connection (accounts.py and everything that
+calls it) uses `compat_connect()` instead: a `CompatConnection` with that
+connection's shape -- execute() returning a cursor, commit(), `with conn:`,
+close() -- and rows readable by position and by name. Its docstring lists the
+rules it keeps. `accounts.connect()` returns one.
+
 Migrations are the files in polcore/migrations/, named NNNN_name.sql and
 applied in order, each in its own transaction, recorded in schema_migrations.
 `migrate()` is safe to call from several containers starting at once: each
@@ -42,6 +48,7 @@ import os
 import re
 import sys
 import threading
+import time
 
 try:
     import psycopg
@@ -123,12 +130,30 @@ def get_pool():
                 kwargs={"autocommit": True, "row_factory": dict_row},
                 # Probe an idle connection before handing it out, so a server
                 # restart surfaces here rather than in whichever request drew
-                # the dead connection.
-                check=ConnectionPool.check_connection,
+                # the dead connection. Only one that has sat idle a while: the
+                # account code borrows per statement (CompatConnection), and a
+                # probe per borrow doubled the round trips of every read.
+                check=_check_if_idle,
+                reset=_note_returned,
                 timeout=30)
             pool.open(wait=True, timeout=30)
             _pool = pool
     return _pool
+
+
+#: Seconds a pooled connection may sit unused before it is probed on checkout.
+CHECK_IDLE_S = float(os.environ.get("POL_DB_CHECK_IDLE_S", "5") or 0)
+
+
+def _note_returned(conn):
+    conn._pol_returned_at = time.monotonic()
+
+
+def _check_if_idle(conn):
+    at = getattr(conn, "_pol_returned_at", None)
+    if at is not None and time.monotonic() - at < CHECK_IDLE_S:
+        return
+    ConnectionPool.check_connection(conn)
 
 
 def close():
@@ -280,6 +305,424 @@ def upsert(table, row, key, update=None, returning=None, conn=None):
     with _borrow(conn) as c:
         cur = c.execute(q, [row[k] for k in cols])
         return cur.fetchone() if ret else cur.rowcount
+
+
+# --------------------------------------------------------------------------- #
+# the compat connection: the DB-API shape the account code was written against
+# --------------------------------------------------------------------------- #
+#: The errors a caller catches, so code that runs SQL needs no psycopg import.
+if psycopg is not None:
+    Error = psycopg.Error
+    IntegrityError = psycopg.IntegrityError
+    OperationalError = psycopg.OperationalError
+    ProgrammingError = psycopg.ProgrammingError
+else:                                   # importable without the driver
+    class Error(Exception):
+        pass
+
+    class IntegrityError(Error):
+        pass
+
+    class OperationalError(Error):
+        pass
+
+    class ProgrammingError(Error):
+        pass
+
+
+class Row(tuple):
+    """A result row readable by position AND by column name.
+
+    `row[0]`, `row["id"]`, `a, b = row`, `dict(row)` and `row.keys()` all work,
+    the way they did on sqlite3.Row, so code written against that keeps working.
+    A name lookup falls back to a case-insensitive match (sqlite3.Row's rule);
+    PostgreSQL folds unquoted aliases to lower case, so `AS pStatus` comes back
+    as `pstatus` and is still found as `row["pStatus"]`. An unknown name raises
+    IndexError, as sqlite3.Row did.
+    """
+    __slots__ = ()
+    _names = ()
+    _index = {}
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            i = self._index.get(key)
+            if i is None:
+                i = self._index.get(key.lower())
+                if i is None:
+                    raise IndexError(f"no column named {key!r}")
+            return tuple.__getitem__(self, i)
+        return tuple.__getitem__(self, key)
+
+    def keys(self):
+        return list(self._names)
+
+    def __repr__(self):
+        return "Row(%s)" % ", ".join(
+            f"{n}={v!r}" for n, v in zip(self._names, tuple(self)))
+
+
+_ROW_CLASSES = {}
+_ROW_LOCK = threading.Lock()
+
+
+def _row_class(names):
+    cls = _ROW_CLASSES.get(names)
+    if cls is None:
+        index = {}
+        for i, name in enumerate(names):
+            index.setdefault(name, i)
+        for i, name in enumerate(names):
+            index.setdefault(name.lower(), i)
+        cls = type("Row", (Row,), {"__slots__": (), "_names": names,
+                                   "_index": index})
+        with _ROW_LOCK:
+            cls = _ROW_CLASSES.setdefault(names, cls)
+    return cls
+
+
+def compat_row(cursor):
+    """psycopg row factory producing `Row`."""
+    desc = cursor.description
+    if not desc:
+        return tuple
+    cls = _row_class(tuple(d.name for d in desc))
+    return cls
+
+
+if psycopg is not None:
+    from psycopg.adapt import Dumper as _Dumper, Loader as _Loader
+
+    class _LooseIntDumper(_Dumper):
+        """int and bool sent as untyped literals, so the server types them
+        from the column they meet. psycopg would send an int as smallint or
+        bigint, and `text_column = 5` then fails with "operator does not
+        exist"; a bool would refuse to go into an INTEGER flag column. SQLite
+        took both, and so does this."""
+        oid = 0
+
+        def dump(self, obj):
+            return str(int(obj)).encode("ascii")
+
+    class _NumericLoader(_Loader):
+        """numeric results (SUM over a bigint, say) as int or float rather
+        than Decimal, which is what SQLite returned for the same query."""
+
+        def load(self, data):
+            text = bytes(data).decode("ascii")
+            if text.lstrip("-").isdigit():
+                return int(text)
+            return float(text)
+
+
+_DML = re.compile(r"^\s*(?:--[^\n]*\n\s*)*(INSERT|UPDATE|DELETE|REPLACE|MERGE)\b",
+                  re.IGNORECASE)
+
+#: How long a statement waits for a row lock another transaction holds before
+#: it fails. SQLite gave up after its 10 s busy timeout; without this a
+#: PostgreSQL writer would wait for ever, which turns one forgotten commit on
+#: a pooled connection into a hang instead of an error.
+LOCK_TIMEOUT = os.environ.get("POL_DB_LOCK_TIMEOUT", "10s")
+
+
+class Result:
+    """What `CompatConnection.execute` returns: the rows already fetched, and
+    the cursor attributes callers read (rowcount, description, fetch*)."""
+    __slots__ = ("_rows", "_pos", "rowcount", "description", "lastrowid")
+
+    def __init__(self, rows, rowcount, description):
+        self._rows = rows
+        self._pos = 0
+        self.rowcount = rowcount
+        self.description = description
+        # PostgreSQL has no rowid; write `INSERT ... RETURNING id` instead.
+        self.lastrowid = None
+
+    def fetchone(self):
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchmany(self, size=1):
+        out = self._rows[self._pos:self._pos + size]
+        self._pos += len(out)
+        return out
+
+    def fetchall(self):
+        out = self._rows[self._pos:]
+        self._pos = len(self._rows)
+        return out
+
+    def __iter__(self):
+        while True:
+            row = self.fetchone()
+            if row is None:
+                return
+            yield row
+
+    def close(self):
+        self._pos = len(self._rows)
+
+
+class CompatConnection:
+    """A connection with the shape of Python's sqlite3.Connection, over the
+    pool.
+
+    The account code (and the title plugins) were written against sqlite3:
+    `conn.execute(sql, params)` returning a cursor, `conn.commit()`,
+    `with conn:` as a transaction, `conn.close()` in a `finally`. This keeps
+    that shape so those callers only had to change their SQL:
+
+      * Autocommit until a write. A SELECT outside a transaction runs on its
+        own. The first INSERT/UPDATE/DELETE opens a transaction (sqlite3's
+        implicit BEGIN) that lasts until commit() or rollback().
+      * A pool connection is held only while a transaction is open. Between
+        statements it goes back to the pool, so a handler that keeps one of
+        these open for a whole request costs nothing while it waits, and
+        nesting one inside another cannot run the pool dry.
+      * Inside a transaction every statement runs under a savepoint. SQLite
+        undid a failed statement and kept the transaction; PostgreSQL would
+        abort the whole transaction, so code that catches an IntegrityError
+        and carries on would otherwise fail on its next statement.
+      * `with conn:` commits on success and rolls back on an exception, and
+        does not close (sqlite3's rule).
+      * close() rolls back anything uncommitted and hands the connection
+        back. The object stays usable (the next statement borrows again),
+        and one that is dropped without close() is cleaned up when it is
+        garbage collected.
+      * Rows are `Row`: by position and by name.
+      * Placeholders are %s. A literal % in the SQL text is written %%.
+
+    `begin(lock=...)` opens a transaction now and takes named advisory locks
+    in it, for the code that relied on SQLite running one writer at a time.
+    """
+
+    def __init__(self):
+        self._pg = None
+        self._pool = None
+        self._fresh = False             # the open transaction is ours and empty
+        self._last_broken = False
+        self._lock = threading.RLock()
+
+    # -- plumbing -----------------------------------------------------------
+    def _acquire(self):
+        if self._pg is None:
+            pool = get_pool()
+            self._pg = pool.getconn()
+            self._pool = pool
+        return self._pg
+
+    def _release(self):
+        pg, pool = self._pg, self._pool
+        self._pg = self._pool = None
+        if pg is None:
+            return
+        try:
+            if pg.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+                pg.rollback()
+        except Exception:               # a broken connection: the pool drops it
+            pass
+        pool.putconn(pg)
+
+    def _in_tx(self):
+        return (self._pg is not None and self._pg.info.transaction_status
+                in (psycopg.pq.TransactionStatus.INTRANS,
+                    psycopg.pq.TransactionStatus.INERROR))
+
+    def _start(self):
+        """BEGIN on the held connection (idle, just acquired)."""
+        self._pg.execute(f"BEGIN; SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
+
+    def _cursor(self):
+        cur = self._pg.cursor(row_factory=compat_row)
+        cur.adapters.register_dumper(int, _LooseIntDumper)
+        cur.adapters.register_dumper(bool, _LooseIntDumper)
+        cur.adapters.register_loader("numeric", _NumericLoader)
+        return cur
+
+    def _run(self, sql, params, many):
+        cur = self._cursor()
+        try:
+            if many:
+                cur.executemany(sql, params)
+            else:
+                cur.execute(sql, params)
+            rows = cur.fetchall() if cur.description else []
+            desc = (tuple((d.name, None, None, None, None, None, None)
+                          for d in cur.description) if cur.description else None)
+            return Result(rows, cur.rowcount, desc)
+        finally:
+            cur.close()
+
+    def _statement(self, sql, params, many=False):
+        with self._lock:
+            if self._pg is None:
+                # A connection that died while it sat in the pool (a database
+                # restart) fails its first statement; the pool only probes one
+                # that has been idle a while. Nothing has run on it yet, so
+                # try once more on another.
+                try:
+                    return self._statement_on(sql, params, many)
+                except OperationalError:
+                    if self._pg is not None or not self._last_broken:
+                        raise
+            return self._statement_on(sql, params, many)
+
+    def _statement_on(self, sql, params, many):
+        self._last_broken = False
+        self._acquire()
+        try:
+            if not self._in_tx():
+                if not _DML.match(sql):
+                    return self._run(sql, params, many)
+                self._start()
+                self._fresh = True
+            if self._fresh:
+                # The transaction holds nothing yet, so a failure can simply
+                # end it: nothing is lost that a savepoint would have kept.
+                try:
+                    out = self._run(sql, params, many)
+                except BaseException:
+                    if not self._pg.broken:
+                        self._pg.rollback()
+                    raise
+                self._fresh = False
+                return out
+            self._pg.execute("SAVEPOINT pol_stmt")
+            try:
+                out = self._run(sql, params, many)
+            except BaseException:
+                if not self._pg.broken:
+                    self._pg.execute("ROLLBACK TO SAVEPOINT pol_stmt")
+                raise
+            self._pg.execute("RELEASE SAVEPOINT pol_stmt")
+            return out
+        finally:
+            if self._pg is not None and self._pg.broken:
+                self._last_broken = True
+                self._fresh = False
+            if not self._in_tx():
+                self._release()
+
+    # -- the sqlite3.Connection surface ---------------------------------------
+    def execute(self, sql, params=None):
+        return self._statement(sql, params)
+
+    def executemany(self, sql, seq):
+        seq = list(seq)
+        if not seq:
+            return Result([], 0, None)
+        return self._statement(sql, seq, many=True)
+
+    def executescript(self, script):
+        """Commit, then run several statements (no parameters) at once."""
+        with self._lock:
+            self.commit()
+            self._acquire()
+            try:
+                self._pg.execute(script)
+            finally:
+                if not self._in_tx():
+                    self._release()
+
+    def cursor(self):
+        return _CompatCursor(self)
+
+    def begin(self, lock=None):
+        """Open a transaction now if none is open, and take the named advisory
+        lock(s) in it, held until commit or rollback (see `transaction`)."""
+        keys = () if lock is None else (
+            (lock,) if isinstance(lock, (str, int)) else tuple(lock))
+        with self._lock:
+            self._acquire()
+            if not self._in_tx():
+                self._start()
+            self._fresh = False
+            for key in keys:
+                self._pg.execute("SELECT pg_advisory_xact_lock(%s)",
+                                 (lock_key(key),))
+
+    @property
+    def in_transaction(self):
+        return self._in_tx()
+
+    def commit(self):
+        with self._lock:
+            if self._pg is not None:
+                try:
+                    if self._in_tx():
+                        self._pg.commit()
+                finally:
+                    self._fresh = False
+                    self._release()
+
+    def rollback(self):
+        with self._lock:
+            self._fresh = False
+            self._release()
+
+    def close(self):
+        self.rollback()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        return False
+
+    def __del__(self):
+        try:
+            if self._pg is not None:
+                self._release()
+        except Exception:
+            pass
+
+
+class _CompatCursor:
+    """`conn.cursor()` for code that asks for one: execute on it, then fetch."""
+
+    def __init__(self, conn):
+        self.connection = conn
+        self._res = Result([], -1, None)
+
+    def execute(self, sql, params=None):
+        self._res = self.connection.execute(sql, params)
+        return self
+
+    def executemany(self, sql, seq):
+        self._res = self.connection.executemany(sql, seq)
+        return self
+
+    rowcount = property(lambda self: self._res.rowcount)
+    description = property(lambda self: self._res.description)
+    lastrowid = property(lambda self: None)
+
+    def fetchone(self):
+        return self._res.fetchone()
+
+    def fetchmany(self, size=1):
+        return self._res.fetchmany(size)
+
+    def fetchall(self):
+        return self._res.fetchall()
+
+    def __iter__(self):
+        return iter(self._res)
+
+    def close(self):
+        self._res = Result([], -1, None)
+
+
+def compat_connect():
+    """A `CompatConnection` on this process's pool (see its docstring)."""
+    _require_driver()
+    return CompatConnection()
 
 
 # --------------------------------------------------------------------------- #
