@@ -124,8 +124,11 @@ expert route.
 python tools/run_all.py
 ```
 
-runs the offline test suite (no Docker needed). Every suite should pass on a
-clean checkout. The suites live in `tools/*_test.py` and `tests/test_*.py`;
+runs the offline test suite. The suites that touch the database start
+throwaway PostgreSQL and Valkey containers, so they need Docker (or
+`POL_TEST_DATABASE_URL` and `POL_TEST_VALKEY_URL`) and
+`pip install "psycopg[binary]" psycopg-pool valkey`; CONTRIBUTING.md has the
+details. Every suite should pass on a clean checkout. The suites live in `tools/*_test.py` and `tests/test_*.py`;
 a new one is registered by hand in `tools/run_all.py`.
 
 ## Troubleshooting

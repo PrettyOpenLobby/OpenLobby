@@ -73,8 +73,39 @@ Anything that must survive a restart goes in PostgreSQL through
 through `polcore/blobs.py`. State other containers need to see while players
 are online (sessions, presence, rooms, the push queue, live-session counts)
 goes in Valkey through `polcore/kv.py`, with an expiry. Do not add a JSON file
-on the shared volume for either. `docs/database.md` lists the keys and the
-blob scopes in use.
+on the shared volume for either. Files are only for what the operator edits
+by hand. `docs/database.md` lists the keys and the blob scopes in use, and
+`tools/db_import.py` moves an old `/data` tree into the database.
+
+The schema is numbered SQL files in `services/polcore/migrations/`. A
+migration that has shipped is never edited; a schema change is a new file
+with the next number. The titles keep their own sets in the same
+`schema_migrations` table, which is keyed by the number alone, so a number
+used twice is taken as already applied and silently skipped. Each
+repository has its own range:
+
+```
+OpenLobby       0001-0999
+CrystalRing     1001-1999   fe_* tables
+CrystalFront    2001-2999   fmo_*
+CrystalMaster   3001-3999   tm_*
+CrystalHoLo     4001-4999   jan_*
+CrystalDirge    5001-5999   doc_*
+CrystalBridge   6001-6999   ffxi_*
+```
+
+A title that moves one of its files into PostgreSQL ships an importer for
+it, run as `python <store>.py import STORE FILE`. It only reads the source,
+runs in one transaction, refuses a table that already holds rows unless
+given `--merge`, writes nothing with `--dry-run`, and changes nothing when
+run a second time. Its command goes into `TITLES` in `tools/db_import.py`
+and into the walkthrough in `docs/database.md`.
+
+`services/live_sessions.py` belongs to the core. A title publishes its
+live-session count with `live_sessions.start_heartbeat` or
+`live_sessions.write_marker` and never ships a copy of the module; the title
+images leave one out of the build and refuse to build if the core's has been
+replaced.
 
 ## Running the checks
 
@@ -83,6 +114,15 @@ python check.py --selftest     # the hygiene scanner can fail (positive controls
 python check.py                # nothing private or proprietary in the tree
 python tools/run_all.py        # every self-test; -k <substring> picks a few
 ```
+
+The suites that touch the database need the Python drivers
+(`pip install "psycopg[binary]" psycopg-pool valkey`) and either Docker,
+which `tools/pgtest.py` uses to start throwaway PostgreSQL and Valkey
+containers, or `POL_TEST_DATABASE_URL` and `POL_TEST_VALKEY_URL` naming
+servers the tests may write to. `POL_TEST_REQUIRE_DB=1` makes a missing
+database a failure instead of a skip; CI sets it. `tests/test_db_import.py`
+rebuilds its old `/data` tree from git at a pinned commit, so a shallow
+clone needs `git fetch --unshallow` first.
 
 Every suite is expected to pass on a clean checkout. On Windows, `resume`
 fails when the ports it uses fall in a range Windows reserves for Hyper-V
