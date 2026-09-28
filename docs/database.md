@@ -438,8 +438,8 @@ one; `docker volume ls` shows them.
    DC="docker compose --project-directory ../openlobby --env-file ../openlobby/.env --env-file .env -f ../openlobby/docker-compose.yml -f docker-compose.yml"
    ```
 
-   and for Fantasy Earth and Janhourou the same without the two
-   `--env-file` options. The order matters:
+   and for Fantasy Earth, Janhourou and Tetra Master the same without the
+   two `--env-file` options. The order matters:
 
    - The core import comes first, because the titles' rows refer to members.
    - FINAL FANTASY XI, before the new bridge starts for the first time. A
@@ -475,31 +475,43 @@ one; `docker volume ls` shows them.
      $DC run --rm --no-deps -v crystalfront_fmo-board-state:/state:ro --entrypoint python fmo fmodb.py import board_state /state
      ```
 
-   - Janhourou, from `crystalholo`. The third command matters only where
-     the web board posted to Discord:
+   - Janhourou, from `crystalholo`. Each member's record
+     (`resources/<member>.jan_stats.json`) needs no command: step 4 copied
+     it into the `blob` table, where the title reads it. The third command
+     matters only where the web board posted to Discord:
 
      ```
      $DC run --rm --no-deps --entrypoint python jan janstore.py import event /data/resources/janevent.json
      $DC run --rm --no-deps --entrypoint python jan janstore.py import rank_snapshot /data/resources/jan-rank-snapshot.json
-     $DC run --rm --no-deps -v crystalholo_jan-board-state:/state:ro --entrypoint python jan janstore.py import board_state /state
+     $DC run --rm --no-deps -v openlobby_jan-board-state:/state:ro --entrypoint python jan janstore.py import board_state /state
+     ```
+
+   - Tetra Master, from `crystalmaster`. The collections, saves, prize
+     records, auction records and weekly lists need no command: step 4
+     copied them into the `blob` table, where the title reads them. The
+     third command matters only where the web board posted to Discord:
+
+     ```
+     $DC run --rm --no-deps --entrypoint python tmrank tmstore.py import event_state /data/tm-event-state.json
+     $DC run --rm --no-deps --entrypoint python tmrank tmstore.py import champion /data/tm-champion.json
+     $DC run --rm --no-deps -v openlobby_tm-board-state:/state:ro --entrypoint python tmrank tmstore.py import board_state /state
      ```
 
    - Dirge of Cerberus, from `crystaldirge`, while the `doc` responder is
      stopped: `$DC run --rm --entrypoint python doc docdb.py import <store>
      /logs/doc-<store>.json` for each store file the importer lists.
 
-   The `-v` volumes are the ones each title used when it was a compose
-   project of its own; `docker volume ls` shows the names on your host.
+   The `-v` volumes are the board and bridge state volumes the titles used
+   before. The bridge and Front Mission Online ran as compose projects of
+   their own, so theirs start with `crystalbridge_` and `crystalfront_`;
+   the Janhourou and Tetra Master boards already ran in the core's project,
+   so theirs start with `openlobby_`. `docker volume ls` shows the names on
+   your host.
    Every title import only reads its source, runs in one transaction,
    prints what it imported and each row it could not map, and refuses a
    table that already holds rows unless given `--merge`, which adds only
    the keys the table lacks. `--dry-run` prints the same report and writes
    nothing, and a second run changes nothing.
-
-   Tetra Master still reads its collections and auctions as files under
-   `resources/`, and has no importer onto the blob table yet. This tool
-   copies them into the blob table by name as well, and leaves the files
-   where they are, so keep them on the volume.
 
 7. Start the stack and the titles:
 
