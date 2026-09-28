@@ -20,17 +20,57 @@ x-app: &app
   environment: &appenv
     POL_CONFIG: /config/server.yaml
     POL_ADVERTISE: "${POL_ADVERTISE:-}"
+    # PostgreSQL and Valkey, the two services below (docs/database.md).
+    POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
+    POL_VALKEY_URL: "valkey://valkey:6379/0"
   volumes:
     - ./config:/config:ro
     - pol-data:/data
     - pol-logs:/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
 
 volumes:
   pol-data:
   pol-logs:
   pol-certs:
+  pol-pgdata:
 
 services:
+  # The database. Accounts, friends, mail and saves live here; back up the
+  # pol-pgdata volume (or run pg_dump) the way you back up pol-data. Not
+  # published on the host; `docker compose exec postgres psql -U openlobby`
+  # reaches it.
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openlobby
+      POSTGRES_PASSWORD: "${POL_DB_PASSWORD:-openlobby}"
+      POSTGRES_DB: openlobby
+    volumes:
+      - pol-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openlobby -d openlobby"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Live state only: who is online, sessions, live rooms, the push queue.
+  # Nothing here needs to survive a restart, so it keeps nothing on disk.
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   dns:
     <<: *app
     build: ./services
