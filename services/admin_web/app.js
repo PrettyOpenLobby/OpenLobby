@@ -2362,6 +2362,20 @@ function categoryOf(host, dirs) {
   return "other";
 }
 
+// A file's language: the locale in its path when it has one (_lang/en-US/..,
+// pcd/ntool/ja-JP/..), else what its title or first line is written in. The
+// base wh000.pol.com tree is mostly SE's Japanese originals, so the path alone
+// would call most English pages unknown.
+const LANG_OF_SEG = { "en-us": "en", "en-gb": "en", en: "en", us: "en", "ja-jp": "ja", ja: "ja", jp: "ja",
+                      "fr-fr": "fr", fr: "fr", "de-de": "de", de: "de" };
+const LANG_NAME = { en: "English", ja: "Japanese", fr: "French", de: "German" };
+const JAPANESE_RE = /[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]/;
+function languageOf(segs, text) {
+  for (const s of segs) { const l = LANG_OF_SEG[s.toLowerCase()]; if (l) return l; }
+  if (JAPANESE_RE.test(text)) return "ja";
+  return /[A-Za-z]{3}/.test(text) ? "en" : "";
+}
+
 function classify(path) {
   let segs = path.split("/");
   let game = null, locale = null, variant = "";
@@ -2381,6 +2395,7 @@ function classify(path) {
   const dirs = segs.slice(host === MAIN_HOST ? 1 : 0, -1);   // other hosts keep their name as the first folder
   const shape = SHAPES[path] || "";
   return { path, host, game, locale, shape, variant, dirs, name, cat: categoryOf(host, dirs),
+           lang: languageOf(path.split("/"), TITLES[path] || LABELS[path] || ""),
            title: TITLES[path] || "", label: TITLES[path] || LABELS[path] || "",
            top: shape === "page" && !!TITLES[path] && SECTION_TOP_RE.test(name)
              && !path.startsWith("_eras/") };
@@ -2403,12 +2418,16 @@ async function loadPmlFileList() {
     LABELS = j.labels || {};
     ALLFILES = j.files.map(classify);
     FILE_BY_PATH = new Map(ALLFILES.map((f) => [f.path, f]));
-    const hosts = new Map(), games = new Map(), locales = new Map();
+    const hosts = new Map(), games = new Map(), langs = new Map();
     const bump = (m, k) => { if (k) m.set(k, (m.get(k) || 0) + 1); };
-    ALLFILES.forEach((f) => { bump(hosts, f.host); bump(games, f.game); bump(locales, f.locale); });
+    ALLFILES.forEach((f) => { bump(hosts, f.host); bump(games, f.game); bump(langs, LANG_NAME[f.lang]); });
     fillFacet($("#fHost"), hosts, "site");
     fillFacet($("#fGame"), games, "game");
-    fillFacet($("#fLocale"), locales, "language");
+    // English by default: the Viewer this panel previews for is the US one.
+    // Files whose language cannot be told stay in every language's list.
+    fillFacet($("#fLocale"), langs, "language");
+    $("#fLocale").value = store.get("pvLang", "English");
+    if (!$("#fLocale").value) $("#fLocale").value = "";
     renderFileList();
   } catch (e) { $("#pmlCount").textContent = "(list unavailable)"; }
 }
@@ -2549,7 +2568,7 @@ function renderFileList() {
     q = $("#fSearch").value.toLowerCase().trim(), sort = $("#fSort").value, kind = $("#fKind").value;
   document.querySelectorAll("#fKindSeg button").forEach((b) => b.classList.toggle("on", b.dataset.f === kind));
   const passes = (f) => (!host || f.host === host) && (!game || f.game === game) &&
-    (!locale || f.locale === locale) && kindMatches(kind, f.shape);
+    (!locale || !f.lang || LANG_NAME[f.lang] === locale) && kindMatches(kind, f.shape);
   FILE_ROWS = ALLFILES.filter((f) => passes(f) &&
     (!q || f.path.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
   $("#pmlCount").textContent = `(${FILE_ROWS.length.toLocaleString()} of ${ALLFILES.length.toLocaleString()})`;
@@ -2614,6 +2633,7 @@ $("#fKindSeg").onclick = (e) => {
 $("#fSort").value = store.get("pvSort", "folders");
 $("#fSort").addEventListener("change", () => store.set("pvSort", $("#fSort").value));
 ["fHost", "fGame", "fLocale", "fSort"].forEach((id) => $("#" + id).addEventListener("change", renderFileList));
+$("#fLocale").addEventListener("change", () => store.set("pvLang", $("#fLocale").value));
 let searchTimer;
 $("#fSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderFileList, 120); });
 
