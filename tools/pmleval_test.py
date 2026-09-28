@@ -277,6 +277,49 @@ pmleval.expand('<define name="$a">&var=$never;', report=report)
 check("an unset <define> and an unknown &var= are not 'missing'",
       report["missing"], [])
 
+# --------------------------------------------------------------------------- #
+# SE's language, the parts the Tetra Master top page and the help manual use.
+# Each of these drew a wrong or empty page before 2026-09-27.
+# --------------------------------------------------------------------------- #
+E = lambda src: pmleval.expand(src)    # noqa: E731
+
+# <elsif>/<else> are never closed, so they parse NESTED inside the <if>.
+got = E('<for init="$i=0" cond="$i<3" next="$i++">'
+        '<if expr="$i==0">A{$i}<elsif expr="$i==1">B{$i}<else>C{$i}</if></for>')
+check("a nested if/elsif/else picks one branch per pass", got.strip(), "A0B1C2")
+check("a sibling <else> after </if> still counts",
+      E('<if expr="0">X</if>\n  <else>Y</else>').strip(), "Y")
+
+check("a quoted > does not end the tag",
+      E('<if expr="3>0"><text>yes</text></if>').count("yes"), 1)
+
+got = E('<define name="$z" value="0"><define name="$n" value="7">'
+        '<define name="$p" calc="\'masc\'+$z+\'\'+$n+\'i.png\'">'
+        '<define name="$h" calc="7/2"><img src="$p" pos="$h,1">')
+check("a string plus a number concatenates", 'src="masc07i.png"' in got, True)
+check("division is integer division", 'pos="3,1"' in got, True)
+
+got = E('<text pos="98+6,117" size="15*31,21" value="a-b">t</text>')
+check("arithmetic in pos/size is evaluated with no variable in it",
+      ('pos="104,117"' in got, 'size="465,21"' in got, 'value="a-b"' in got),
+      (True, True, True))
+
+got = E('<array name="$c">"Title A" "B"</array><define name="$id" value="1">'
+        '<text>&var=$c[0];|&var=$c[$id];|&var=$nope[3];</text>')
+check("&var= takes an array lookup",
+      got[got.index("<text"):].split(">", 1)[1].split("<")[0],
+      "Title A|B|&var=$nope[3];")
+
+got = E('<define name="$j" value="4"><img href="eval:$a[{$j}]">')
+check("{$x} is filled in", 'href="eval:$a[4]"' in got, True)
+
+got = E('<pml>\n<!-- two\nlines -->\n<text pos="1,1">x</text></pml>')
+check("elements carry their source line through comments",
+      'pml-line="4"' in got, True)
+
+check("<hr> is self-closing",
+      E('<sheet><hr pos="0,0"><text>after</text></sheet>').count("</hr>"), 0)
+
 print()
 print("pmleval_test: OK" if ok else "pmleval_test: FAILED")
 shutil.rmtree(WWW, ignore_errors=True)

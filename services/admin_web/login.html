@@ -5,7 +5,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#1c1f28">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="OpenLobby Admin">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <title>OpenLobby Admin - Sign in</title>
   <style>
     :root {
@@ -13,55 +21,101 @@
       --text: #e6e8ee; --muted: #9aa2b4; --accent: #5aa9ff; --bad: #ff7a7a;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: flex; align-items: center;
+    body { margin: 0; min-height: 100vh; min-height: 100dvh; display: flex; align-items: center;
       justify-content: center; background: var(--bg); color: var(--text);
-      font: 14px/1.45 'Segoe UI', system-ui, sans-serif; }
+      font: 14px/1.45 'Segoe UI', system-ui, sans-serif; padding: 16px; }
     form { background: var(--panel); border: 1px solid var(--line);
-      border-radius: 12px; padding: 26px 26px 22px; width: 340px; }
-    h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; letter-spacing: .3px; }
-    .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+      border-radius: 12px; padding: 26px 26px 22px; width: 100%; max-width: 360px;
+      box-shadow: 0 20px 50px rgba(0,0,0,.35); }
+    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+      box-shadow: 0 0 0 4px rgba(90,169,255,.18); }
+    h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+    .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 18px; }
     label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
-    input { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-      border-radius: 7px; padding: 9px 10px; font: inherit; width: 100%; }
-    button { background: var(--accent); color: #04121f; border: 0; width: 100%;
+    input[type=text], input[type=password] { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px; font: inherit;
+      width: 100%; }
+    input:focus { outline: 2px solid rgba(90,169,255,.45); outline-offset: 0;
+      border-color: var(--accent); }
+    .pw { position: relative; }
+    .pw input { padding-right: 58px; }
+    .pw button { position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+      background: none; border: 0; color: var(--muted); font-size: 12px; cursor: pointer;
+      padding: 4px 8px; border-radius: 5px; }
+    .pw button:hover { color: var(--text); background: var(--line); }
+    .keep { display: flex; align-items: center; gap: 8px; margin: 14px 0 0;
+      color: var(--text); font-size: 13px; cursor: pointer; user-select: none; }
+    .keep input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+    .keep-note { color: var(--muted); font-size: 11.5px; margin: 3px 0 0 23px; }
+    button.go { background: var(--accent); color: #04121f; border: 0; width: 100%;
       padding: 10px 16px; border-radius: 8px; font-weight: 600; font-size: 14px;
       cursor: pointer; margin-top: 18px; }
-    button[disabled] { opacity: .6; cursor: default; }
+    button.go[disabled] { opacity: .6; cursor: default; }
     .err { color: var(--bad); font-size: 12.5px; margin-top: 12px; min-height: 17px; }
   </style>
 </head>
 <body>
   <form id="f" autocomplete="on">
-    <h1>OpenLobby Admin</h1>
-    <div class="sub">Admin sign-in</div>
+    <div class="brand"><span class="dot"></span><h1>OpenLobby Admin</h1></div>
+    <div class="sub">Operator sign-in</div>
     <label for="u">Username</label>
-    <input id="u" name="username" autocomplete="username" autofocus required>
+    <input id="u" name="username" type="text" autocomplete="username" autofocus required
+           autocapitalize="off" spellcheck="false">
     <label for="p">Password</label>
-    <input id="p" name="password" type="password" autocomplete="current-password" required>
-    <button id="go" type="submit">Sign in</button>
-    <div class="err" id="err"></div>
+    <div class="pw">
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+      <button type="button" id="show" tabindex="-1" aria-label="Show password">Show</button>
+    </div>
+    <label class="keep" for="keep">
+      <input type="checkbox" id="keep" name="remember"> Keep me signed in on this device
+    </label>
+    <div class="keep-note" id="keepNote">Stays signed in for 30 days, even across restarts.</div>
+    <button class="go" id="go" type="submit">Sign in</button>
+    <div class="err" id="err" role="alert"></div>
   </form>
   <script>
-    const f = document.getElementById("f"), err = document.getElementById("err"),
-          go = document.getElementById("go");
+    const $ = (id) => document.getElementById(id);
+    const f = $("f"), err = $("err"), go = $("go"), keep = $("keep");
+    // Remember the CHOICE (never the password) so the box is ticked next time.
+    // Storage can be missing or refused; the page must work without it.
+    try {
+      keep.checked = localStorage.getItem("pol-admin:keep") === "1";
+      const last = localStorage.getItem("pol-admin:user");
+      if (last) { $("u").value = last; $("p").focus(); }
+    } catch (e) {}
+    $("show").onclick = () => {
+      const p = $("p"), shown = p.type === "text";
+      p.type = shown ? "password" : "text";
+      $("show").textContent = shown ? "Show" : "Hide";
+      p.focus();
+    };
+    // Only for the installed app's offline page; see sw.js. Browsers refuse
+    // it over plain http, which is fine: the panel does not depend on it.
+    if ("serviceWorker" in navigator && window.isSecureContext) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
     f.onsubmit = async (e) => {
       e.preventDefault();
-      err.textContent = ""; go.disabled = true; go.textContent = "Signing in…";
+      err.textContent = ""; go.disabled = true; go.textContent = "Signing in...";
       try {
         const r = await fetch("/api/login", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: document.getElementById("u").value,
-                                 password: document.getElementById("p").value })
+          body: JSON.stringify({ username: $("u").value, password: $("p").value,
+                                 remember: keep.checked })
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error || r.statusText);
+        try {
+          localStorage.setItem("pol-admin:keep", keep.checked ? "1" : "0");
+          localStorage.setItem("pol-admin:user", $("u").value);
+        } catch (e) {}
         // The cookie is set; reload whatever URL was originally asked for.
         location.reload();
       } catch (ex) {
         err.textContent = ex.message;
-        document.getElementById("p").value = "";
-        document.getElementById("p").focus();
-      } finally {
+        $("p").value = "";
+        $("p").focus();
         go.disabled = false; go.textContent = "Sign in";
       }
     };
