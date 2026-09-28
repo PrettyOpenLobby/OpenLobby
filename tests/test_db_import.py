@@ -313,6 +313,13 @@ RES = {
     "auction-pending-%d.json" % m1: (b"[]", 1_700_000_700),
     "content-profiles.json": (b"{}", 1_700_000_800),
     "README": (b"not a resource", 1_700_000_900),
+    # operator backup copies beside a record: never records of their own
+    "%d.tm_collection.json.bak-before-houseprize-backpay-20260926" % m1:
+        (b'{"cards": []}', 1_700_001_000),
+    "%d.jan_stats.json.bak" % m3: (b'{"games": 2}', 1_700_001_100),
+    # Janhourou's own import reads these two (janstore.py import event|rank_snapshot)
+    "janevent.json": (b'{"id": 7}', 1_700_001_200),
+    "jan-rank-snapshot.json": (b'{"0": [3]}', 1_700_001_300),
 }
 for name, (data, mtime) in RES.items():
     fn = os.path.join(SRC, "resources", name)
@@ -322,6 +329,8 @@ for name, (data, mtime) in RES.items():
 # Tetra Master's weekly lists: a directory of their own, imported as scope
 # tmrank; a directory inside it, and any other directory, are not resources
 TMRANK = {"r1.bin": b"rank", "week-2026-39.json": b'{"top": [3, 5]}'}
+with open(os.path.join(SRC, "resources", "tmrank", "r1.bin.bak"), "wb") as fh:
+    fh.write(b"old rank")
 for name, data in TMRANK.items():
     with open(os.path.join(SRC, "resources", "tmrank", name), "wb") as fh:
         fh.write(data)
@@ -517,7 +526,18 @@ print("resources: blobs, readable through the resource store")
 rs = next(s for s in res["sources"] if s["name"] == "resources")
 chk("blob rows", db.query_one("SELECT count(*) AS n FROM blob")["n"], 10)
 left = sorted(x[0] for x in rs["left_out"])
-chk("left as files", left, ["README", "content-profiles.json", "other/", "tmrank/old/"])
+chk("left as files", left, sorted([
+    "README", "content-profiles.json", "other/", "tmrank/old/", "tmrank/r1.bin.bak",
+    "%d.tm_collection.json.bak-before-houseprize-backpay-20260926" % m1,
+    "%d.jan_stats.json.bak" % m3, "janevent.json", "jan-rank-snapshot.json"]))
+why = {x[0]: x[2] for x in rs["left_out"]}
+chk("a backup copy is named as one", why.get("%d.jan_stats.json.bak" % m3),
+    "a backup copy (.bak), not a record")
+chk("the Jan files point at the Jan import", why.get("janevent.json"),
+    "the title's own import reads it (crystalholo: janstore.py import event)")
+chk("no blob row for a backup or a Jan file", db.query_one(
+    "SELECT count(*) AS n FROM blob WHERE path LIKE '%%.bak%%' OR scope IN"
+    " ('janevent', 'jan-rank-snapshot')")["n"], 0)
 for name, data in sorted(TMRANK.items()):
     row = db.query_one("SELECT data, member_id, extract(epoch FROM updated_at) AS t"
                        " FROM blob WHERE scope = 'tmrank' AND path = %s", (name,))

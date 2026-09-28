@@ -15,7 +15,9 @@ stopped). What is read from it:
                          polcore.blobs.split_name(), updated_at = the file's mtime
     resources/tmrank/<f> one `blob` row per file, scope `tmrank`, path <f>
 
-`resources/content-profiles.json` stays a file, and nothing live is imported
+`resources/content-profiles.json` stays a file, and so do backup copies
+(`*.bak`, `*.bak-*`) and `janevent.json` and `jan-rank-snapshot.json`, which
+Janhourou's own import reads. Nothing live is imported
 (sessions, stamps, rooms, the push spool): the services rebuild that in
 Valkey. The report lists what was found and left behind. --logs names the old
 logs volume, so the report can list what is there too (the push spool, the
@@ -133,6 +135,18 @@ PROFILES_FILE = "content-profiles.json"
 #: Subdirectories of resources/ whose files are blobs too: the directory name
 #: is the scope and the file name the path (Tetra Master's weekly lists).
 RESOURCE_SUBDIRS = ("tmrank",)
+#: Files in resources/ that a title's own importer owns: {name: the command}.
+#: They are listed as not imported and never become blob rows.
+TITLE_OWNED_RESOURCES = {
+    "janevent.json": "crystalholo: janstore.py import event",
+    "jan-rank-snapshot.json": "crystalholo: janstore.py import rank_snapshot",
+}
+
+
+def _is_backup(name):
+    """An operator's copy of a file (<name>.bak, <name>.bak-<note>): kept
+    beside the file on the volume, never a record of its own."""
+    return name.endswith(".bak") or ".bak-" in name
 
 #: Live state that stays behind (docs/database.md): (where, name or suffix, what).
 LIVE_FILES = (
@@ -835,6 +849,8 @@ def _resource_files(root):
                         skipped.append((name, "a symbolic link"))
                     elif f.is_dir():
                         skipped.append((name + "/", "a directory inside %s/" % e.name))
+                    elif _is_backup(f.name):
+                        skipped.append((name, "a backup copy (.bak), not a record"))
                     else:
                         files.append((f, e.name, f.name))
         elif e.is_dir():
@@ -842,6 +858,11 @@ def _resource_files(root):
                             "are resources)" % ", ".join(d + "/" for d in RESOURCE_SUBDIRS)))
         elif e.name == PROFILES_FILE:
             skipped.append((e.name, "stays a file (core/pfc.py)"))
+        elif e.name in TITLE_OWNED_RESOURCES:
+            skipped.append((e.name, "the title's own import reads it (%s)"
+                            % TITLE_OWNED_RESOURCES[e.name]))
+        elif _is_backup(e.name):
+            skipped.append((e.name, "a backup copy (.bak), not a record"))
         elif blobs.split_name(e.name) is None:
             skipped.append((e.name, "not a resource name (no scope before a dot)"))
         else:
