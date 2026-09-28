@@ -39,7 +39,7 @@ def main():
     authcap._SELF_IP[0] = stub_ip
     # Before anything listens: a client that was already running when this
     # service restarted is still keyed to a token from the previous process.
-    # See _STAMP_FILE -- without this it cannot log in and reports POL-0008.
+    # See _STAMP_KEY -- without this it cannot log in and reports POL-0008.
     load_stamps()
     redirect.load_login_nicks()
     srv_name = "ci000.pol.com"
