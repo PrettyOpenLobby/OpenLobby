@@ -1,7 +1,7 @@
 """Which title a member is in: leases, publishing across processes, expiry."""
-import json
 import os
 import time
+from polcore import kv
 from srvcore import log
 
 
@@ -13,12 +13,14 @@ from srvcore import log
 #: watcher saw "in the Viewer" for a whole Tetra Master session.
 #:
 #: The 4:5 lands on the LOBBY (`login`) and the push happens in `authsess`, two
-#: containers -- so this crosses the same way room state does: one writer, an
-#: atomic replace, and an mtime-cached read on the other side.
-_TITLE_ZONE_FILE = os.environ.get(
-    "POL_TITLE_ZONE_FILE", os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
-                                        "title-zone.json"))
-_TITLE_ZONE_CACHE = {"mtime": -1.0, "data": {}}
+#: containers -- so it crosses through the live-state store (polcore.kv): one
+#: hash per member, `titlezone:<member id>` = {zone, at[, lease]}, with a key
+#: TTL so an entry nobody clears still goes away. Each change is also published
+#: on the `presence` channel, so the watcher in `authsess` pushes it at once
+#: rather than on its next tick.
+_TITLE_ZONE_KEY = "titlezone:"
+#: The channel a title-zone or 4:5 status change is announced on.
+PRESENCE_CHANNEL = "presence"
 #: A client that dies without saying "I left the title" would otherwise read as
 #: in-title forever. Long enough not to expire a real session.
 _TITLE_ZONE_TTL = 12 * 3600
@@ -46,20 +48,54 @@ _TITLE_ZONE_LEASE_TTL = int(os.environ.get("POL_TITLE_LEASE_TTL", "900"))
 _TITLE_ZONE_REFRESH = max(5, _TITLE_ZONE_LEASE_TTL // 3)
 
 
-def _live_title_zones():
-    """Per-member title state, re-read only when the file's mtime moves."""
+def _title_zone_key(member_id):
+    return _TITLE_ZONE_KEY + str(int(member_id))
+
+
+def _title_zone_row(raw):
+    """A stored hash as {"zone": int, "at": float[, "lease": int]}, or None."""
+    if not raw or raw.get("zone") is None:
+        return None
     try:
-        mtime = os.stat(_TITLE_ZONE_FILE).st_mtime
-    except OSError:
+        row = {"zone": int(raw["zone"]), "at": float(raw.get("at") or 0)}
+        if raw.get("lease"):
+            row["lease"] = int(float(raw["lease"]))
+        return row
+    except (TypeError, ValueError):
+        return None
+
+
+def _title_zone_get(key):
+    """This member's entry, or {} (a live-state failure reads as no entry)."""
+    try:
+        return _title_zone_row(kv.hgetall(_TITLE_ZONE_KEY + key)) or {}
+    except Exception as exc:
+        log("lobby", f"  title zone: cannot read ({exc!r})")
         return {}
-    if mtime != _TITLE_ZONE_CACHE["mtime"]:
-        try:
-            with open(_TITLE_ZONE_FILE, "r", encoding="utf-8") as f:
-                _TITLE_ZONE_CACHE["data"] = json.load(f) or {}
-            _TITLE_ZONE_CACHE["mtime"] = mtime
-        except (OSError, ValueError):
-            return _TITLE_ZONE_CACHE["data"]   # torn write: last good view stands
-    return _TITLE_ZONE_CACHE["data"]
+
+
+def _live_title_zones():
+    """Per-member title state: {member id (str): {zone, at[, lease]}}."""
+    out = {}
+    try:
+        for name in kv.keys(_TITLE_ZONE_KEY + "*"):
+            row = _title_zone_row(kv.hgetall(name))
+            if row is not None:
+                out[name[len(_TITLE_ZONE_KEY):]] = row
+    except Exception as exc:
+        log("lobby", f"  title zone: cannot read ({exc!r})")
+    return out
+
+
+def _title_zone_write(key, row):
+    """Store one member's entry with a key TTL a little past its own expiry
+    (the readers still decide expiry from `at`), and announce the change."""
+    ttl = (row.get("lease") or _TITLE_ZONE_TTL) + 60
+    name = _TITLE_ZONE_KEY + key
+    kv.delete(name)
+    kv.hset(name, mapping=row)
+    kv.expire(name, ttl)
+    kv.publish(PRESENCE_CHANNEL, name)
 
 
 def _publish_title_zone(member_id, zone, in_title):
@@ -67,22 +103,16 @@ def _publish_title_zone(member_id, zone, in_title):
     if member_id is None:
         return
     try:
-        state = dict(_live_title_zones())
         key = str(int(member_id))
         if in_title:
-            state[key] = {"zone": int(zone), "at": time.time()}
-        elif key not in state:
+            _title_zone_write(key, {"zone": int(zone), "at": time.time()})
+        elif not kv.exists(_TITLE_ZONE_KEY + key):
             return                            # nothing to clear, nothing to write
         else:
-            del state[key]
-        os.makedirs(os.path.dirname(_TITLE_ZONE_FILE), exist_ok=True)
-        tmp = _TITLE_ZONE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-        os.replace(tmp, _TITLE_ZONE_FILE)     # atomic
-        _TITLE_ZONE_CACHE["mtime"] = -1.0     # our own next read re-stats
-    except (OSError, ValueError) as exc:
-        log("lobby", f"  title zone: cannot publish ({exc})")
+            kv.delete(_TITLE_ZONE_KEY + key)
+            kv.publish(PRESENCE_CHANNEL, _TITLE_ZONE_KEY + key)
+    except Exception as exc:
+        log("lobby", f"  title zone: cannot publish ({exc!r})")
 
 
 def _title_zone_lease(member_id, zone):
@@ -111,7 +141,7 @@ def _title_zone_lease(member_id, zone):
     THE REFRESH IS FREE. The caller is the per-message game dispatch, so a live
     session renews the lease simply by being played; there is no timer to run and
     nothing to unwind if the process dies. The throttle below is what keeps that
-    from rewriting the file thousands of times a session.
+    from rewriting the entry thousands of times a session.
     """
     if member_id is None:
         return
@@ -119,28 +149,20 @@ def _title_zone_lease(member_id, zone):
         key = str(int(member_id))
     except (TypeError, ValueError):
         return
-    row = (_live_title_zones() or {}).get(key) or {}
+    row = _title_zone_get(key)
     # Same zone and refreshed recently -> nothing to do. A DIFFERENT zone always
     # writes: that is the player moving between titles and the friend list should
     # follow it immediately, not at the next refresh tick.
-    if row.get("zone") == int(zone) \
-            and time.time() - row.get("at", 0) < _TITLE_ZONE_REFRESH:
+    if row.get("zone") == int(zone)             and time.time() - row.get("at", 0) < _TITLE_ZONE_REFRESH:
         return
     try:
-        state = dict(_live_title_zones())
-        state[key] = {"zone": int(zone), "at": time.time(),
-                      "lease": _TITLE_ZONE_LEASE_TTL}
-        os.makedirs(os.path.dirname(_TITLE_ZONE_FILE), exist_ok=True)
-        tmp = _TITLE_ZONE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-        os.replace(tmp, _TITLE_ZONE_FILE)
-        _TITLE_ZONE_CACHE["mtime"] = -1.0
+        _title_zone_write(key, {"zone": int(zone), "at": time.time(),
+                                "lease": _TITLE_ZONE_LEASE_TTL})
         if row.get("zone") != int(zone):
             log("authserv", f"  title zone: member {key} LEASED zone {int(zone)} "
                             f"for {_TITLE_ZONE_LEASE_TTL}s (renewed by traffic)")
-    except (OSError, ValueError) as exc:
-        log("authserv", f"  title zone: cannot lease ({exc})")
+    except Exception as exc:
+        log("authserv", f"  title zone: cannot lease ({exc!r})")
 
 
 def _title_zone_expired(row):
@@ -159,7 +181,7 @@ def _title_zone(member_id):
     if os.environ.get("POL_TITLE_ZONE", "1") != "1":
         return None
     try:
-        row = _live_title_zones().get(str(int(member_id))) or {}
+        row = _title_zone_get(str(int(member_id)))
     except (TypeError, ValueError):
         return None
     if _title_zone_expired(row):
