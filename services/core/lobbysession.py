@@ -426,8 +426,7 @@ def _session_handle_id(db=None):
     own = db is None
     try:
         if own:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
         row = accounts.primary_handle_row(db, mid)
         return int(row["id"]) if row else None
     except Exception:
@@ -446,13 +445,12 @@ def _session_handle_name():
     if accounts is None:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             hid = _session_handle_id(db)
             if not hid:
                 return None
-            row = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+            row = db.execute("SELECT handle_name FROM handle WHERE id = %s",
                              (int(hid),)).fetchone()
             return row["handle_name"] if row else None
         finally:
@@ -493,7 +491,7 @@ def _session_member_id():
     if accounts is None:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             row = db.execute("SELECT id FROM member ORDER BY id LIMIT 1").fetchone()
             return int(row["id"]) if row else None
@@ -581,7 +579,7 @@ def _own_comment():
     if accounts is None:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             hid = _session_handle_id(db)
             if not hid:
@@ -600,8 +598,7 @@ def _session_record(n):
     prev_login = last_logout = None
     if accounts is not None:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 mid = _session_member_id()
                 if mid:

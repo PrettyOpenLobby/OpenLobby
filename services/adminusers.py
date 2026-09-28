@@ -5,27 +5,20 @@ break-glass pair). This module adds MODERATORS: separate logins, each with a
 fixed set of permissions the panel checks on every request (see PERMS and
 admin.Handler._permit). The owner creates and manages them on the Security tab.
 
-It lives in its own database, `data/admin.db`, and not in accounts.db, on
-purpose. accounts.py is imported by login and authsess, and prod's git-sync
-restarts both whenever it changes -- which ends every live game. Nothing in
-here is read by any service but the panel, so it has no business forcing
-that restart.
+Its tables are the admin_* ones (polcore/migrations/0003_admin_discord.sql),
+in the same PostgreSQL as everything else. It used to be its own SQLite file,
+data/admin.db, kept out of accounts.db so that a change here would not make
+prod's git-sync restart login and authsess; with the schema in numbered
+migrations that reason is gone, and nothing here is read by any service but
+the panel.
 
-Stdlib only, like the rest of services/. Passwords use the same PBKDF2 helper
-and policy as the owner credential (accounts.hash_password,
-accounts.check_admin_password_policy).
+Passwords use the same PBKDF2 helper and policy as the owner credential
+(accounts.hash_password, accounts.check_admin_password_policy).
 """
 import json
-import os
-import sqlite3
-import threading
 import time
 
 import accounts
-
-DB = os.environ.get(
-    "POL_ADMIN_DB",
-    os.path.join(os.environ.get("POL_DATA_DIR", "/data"), "admin.db"))
 
 #: What a moderator can be allowed to do. The key is what the panel checks; the
 #: label is what the owner sees. Anything not covered by one of these is the
@@ -38,96 +31,12 @@ PERMS = {
     "accounts_view": "Look up accounts (read-only)",
 }
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS moderator (
-    id            INTEGER PRIMARY KEY,
-    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    pw_hash       TEXT NOT NULL,
-    pw_salt       TEXT NOT NULL,
-    perms         TEXT NOT NULL DEFAULT '',
-    code_limit    INTEGER,              -- codes per rolling 24 h; NULL = no limit
-    disabled      INTEGER NOT NULL DEFAULT 0,
-    created_at    REAL NOT NULL,
-    created_by    TEXT,
-    pw_changed_at REAL NOT NULL         -- part of a session's credential tie
-);
-CREATE TABLE IF NOT EXISTS audit (
-    id      INTEGER PRIMARY KEY,
-    at      REAL NOT NULL,
-    actor   TEXT NOT NULL,
-    role    TEXT NOT NULL,
-    action  TEXT NOT NULL,
-    target  TEXT,
-    detail  TEXT,
-    ok      INTEGER NOT NULL,
-    addr    TEXT
-);
-CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
-CREATE INDEX IF NOT EXISTS audit_actor ON audit(actor);
-CREATE TABLE IF NOT EXISTS code_origin (
-    code  TEXT PRIMARY KEY COLLATE NOCASE,
-    by    TEXT NOT NULL,
-    role  TEXT NOT NULL,
-    at    REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS code_origin_by ON code_origin(by, at);
-CREATE TABLE IF NOT EXISTS setting (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
--- One row per browser that asked for GM-call alerts (Web Push).
-CREATE TABLE IF NOT EXISTS push_sub (
-    endpoint   TEXT PRIMARY KEY,
-    p256dh     TEXT NOT NULL,
-    auth       TEXT NOT NULL,
-    username   TEXT NOT NULL,
-    role       TEXT NOT NULL,
-    uid        INTEGER,
-    origin     TEXT,
-    ua         TEXT,
-    created_at REAL NOT NULL,
-    last_ok    REAL,
-    last_error TEXT
-);
--- GM-call tickets already announced, so a restart never alerts twice.
-CREATE TABLE IF NOT EXISTS alerted (
-    ticket  TEXT PRIMARY KEY,
-    at      REAL NOT NULL,
-    result  TEXT
-);
-"""
-
-#: Columns added after the first release of this file: (table, column, DDL).
-_MIGRATIONS = (
-    ("moderator", "titles",
-     "ALTER TABLE moderator ADD COLUMN titles TEXT NOT NULL DEFAULT ''"),
-    ("code_origin", "expires_at",
-     "ALTER TABLE code_origin ADD COLUMN expires_at REAL"),
-    ("code_origin", "expired",
-     "ALTER TABLE code_origin ADD COLUMN expired INTEGER NOT NULL DEFAULT 0"),
-)
-
-_SCHEMA_DONE = set()
-_LOCK = threading.Lock()
-
 
 def connect(path=None):
-    path = path or DB
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10)
-    conn.row_factory = sqlite3.Row
-    key = os.path.abspath(path)
-    if key not in _SCHEMA_DONE:
-        with _LOCK:
-            conn.executescript(SCHEMA)
-            for table, col, ddl in _MIGRATIONS:
-                cols = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
-                if col not in cols:
-                    conn.execute(ddl)
-            conn.commit()
-            _SCHEMA_DONE.add(key)
-    return conn
+    """A connection for the functions below: the same kind accounts.connect()
+    returns, with the schema brought up to date. `path` is accepted for old
+    callers and ignored."""
+    return accounts.connect()
 
 
 class ModError(ValueError):
@@ -178,15 +87,17 @@ def _check_password(pw):
 
 
 def list_mods(conn):
-    return conn.execute("SELECT * FROM moderator ORDER BY username").fetchall()
+    return conn.execute("SELECT * FROM admin_moderator"
+                        " ORDER BY lower(username)").fetchall()
 
 
 def get_mod(conn, mod_id):
-    return conn.execute("SELECT * FROM moderator WHERE id=?", (mod_id,)).fetchone()
+    return conn.execute("SELECT * FROM admin_moderator WHERE id=%s", (mod_id,)).fetchone()
 
 
 def find_mod(conn, username):
-    return conn.execute("SELECT * FROM moderator WHERE username=?",
+    return conn.execute("SELECT * FROM admin_moderator"
+                        " WHERE lower(username) = lower(%s)",
                         ((username or "").strip(),)).fetchone()
 
 
@@ -217,15 +128,16 @@ def create_mod(conn, username, password, perms, code_limit=None, by=None,
     _check_password(password)
     h, s = accounts.hash_password(password)
     now = time.time()
-    cur = conn.execute(
-        "INSERT INTO moderator (username, pw_hash, pw_salt, perms, code_limit,"
-        " created_at, created_by, pw_changed_at) VALUES (?,?,?,?,?,?,?,?)",
+    mod_id = conn.execute(
+        "INSERT INTO admin_moderator (username, pw_hash, pw_salt, perms, code_limit,"
+        " created_at, created_by, pw_changed_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
+        " RETURNING id",
         (username, h, s, ",".join(clean_perms(perms)), _check_limit(code_limit),
-         now, by, now))
-    conn.execute("UPDATE moderator SET titles=? WHERE id=?",
-                 (",".join(map(str, clean_titles(titles))), cur.lastrowid))
+         now, by, now)).fetchone()["id"]
+    conn.execute("UPDATE admin_moderator SET titles=%s WHERE id=%s",
+                 (",".join(map(str, clean_titles(titles))), mod_id))
     conn.commit()
-    return get_mod(conn, cur.lastrowid)
+    return get_mod(conn, mod_id)
 
 
 def update_mod(conn, mod_id, perms=None, code_limit=..., disabled=None,
@@ -234,16 +146,16 @@ def update_mod(conn, mod_id, perms=None, code_limit=..., disabled=None,
     if row is None:
         raise ModError("No such moderator.")
     if perms is not None:
-        conn.execute("UPDATE moderator SET perms=? WHERE id=?",
+        conn.execute("UPDATE admin_moderator SET perms=%s WHERE id=%s",
                      (",".join(clean_perms(perms)), mod_id))
     if code_limit is not ...:
-        conn.execute("UPDATE moderator SET code_limit=? WHERE id=?",
+        conn.execute("UPDATE admin_moderator SET code_limit=%s WHERE id=%s",
                      (_check_limit(code_limit), mod_id))
     if disabled is not None:
-        conn.execute("UPDATE moderator SET disabled=? WHERE id=?",
+        conn.execute("UPDATE admin_moderator SET disabled=%s WHERE id=%s",
                      (1 if disabled else 0, mod_id))
     if titles is not None:
-        conn.execute("UPDATE moderator SET titles=? WHERE id=?",
+        conn.execute("UPDATE admin_moderator SET titles=%s WHERE id=%s",
                      (",".join(map(str, clean_titles(titles))), mod_id))
     conn.commit()
     return get_mod(conn, mod_id)
@@ -257,14 +169,14 @@ def set_password(conn, mod_id, password):
     # max() so two resets inside one clock tick still change the fingerprint
     row = get_mod(conn, mod_id)
     stamp = max(time.time(), float(row["pw_changed_at"]) + 0.001)
-    conn.execute("UPDATE moderator SET pw_hash=?, pw_salt=?, pw_changed_at=?"
-                 " WHERE id=?", (h, s, stamp, mod_id))
+    conn.execute("UPDATE admin_moderator SET pw_hash=%s, pw_salt=%s, pw_changed_at=%s"
+                 " WHERE id=%s", (h, s, stamp, mod_id))
     conn.commit()
     return get_mod(conn, mod_id)
 
 
 def delete_mod(conn, mod_id):
-    n = conn.execute("DELETE FROM moderator WHERE id=?", (mod_id,)).rowcount
+    n = conn.execute("DELETE FROM admin_moderator WHERE id=%s", (mod_id,)).rowcount
     conn.commit()
     return n > 0
 
@@ -287,8 +199,8 @@ def audit(conn, actor, role, action, target=None, detail=None, ok=True,
     if isinstance(detail, (dict, list)):
         detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
     conn.execute(
-        "INSERT INTO audit (at, actor, role, action, target, detail, ok, addr)"
-        " VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO admin_audit (at, actor, role, action, target, detail, ok, addr)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
         (time.time(), actor or "?", role or "?", action,
          (str(target)[:200] if target not in (None, "") else None),
          (detail[:600] if detail else None), 1 if ok else 0, addr))
@@ -296,49 +208,58 @@ def audit(conn, actor, role, action, target=None, detail=None, ok=True,
 
 
 def audit_list(conn, limit=200, actor=None, before=None):
-    q, args = "SELECT * FROM audit", []
+    q, args = "SELECT * FROM admin_audit", []
     where = []
     if actor:
-        where.append("actor = ? COLLATE NOCASE")
+        where.append("lower(actor) = lower(%s)")
         args.append(actor)
     if before:
-        where.append("at < ?")
+        where.append("at < %s")
         args.append(float(before))
     if where:
         q += " WHERE " + " AND ".join(where)
-    q += " ORDER BY at DESC, id DESC LIMIT ?"
+    q += " ORDER BY at DESC, id DESC LIMIT %s"
     args.append(max(1, min(1000, int(limit))))
     return conn.execute(q, args).fetchall()
 
 
 def audit_actors(conn):
     return [r[0] for r in conn.execute(
-        "SELECT DISTINCT actor FROM audit ORDER BY actor COLLATE NOCASE")]
+        "SELECT actor FROM admin_audit GROUP BY actor"
+        " ORDER BY lower(actor), actor")]
 
 
 # --------------------------------------------------------------------------- #
 # who made each registration code
 # --------------------------------------------------------------------------- #
 def code_origin_add(conn, code, by, role, expires_at=None):
-    conn.execute("INSERT OR REPLACE INTO code_origin (code, by, role, at, expires_at)"
-                 " VALUES (?,?,?,?,?)", (code, by, role, time.time(), expires_at))
+    # The key ignores case (the code column was COLLATE NOCASE), and a repeat
+    # replaces the whole row, `expired` included, as SQLite's OR REPLACE did.
+    conn.execute('INSERT INTO admin_code_origin (code, "by", role, at, expires_at)'
+                 " VALUES (%s,%s,%s,%s,%s)"
+                 " ON CONFLICT ((lower(code))) DO UPDATE SET code = excluded.code,"
+                 ' "by" = excluded."by", role = excluded.role, at = excluded.at,'
+                 " expires_at = excluded.expires_at, expired = 0",
+                 (code, by, role, time.time(), expires_at))
     conn.commit()
 
 
 def code_origins(conn):
     """code (upper) -> {"by": ..., "expires_at": ...}"""
     return {r["code"].upper(): {"by": r["by"], "expires_at": r["expires_at"]}
-            for r in conn.execute("SELECT code, by, expires_at FROM code_origin")}
+            for r in conn.execute(
+                'SELECT code, "by", expires_at FROM admin_code_origin')}
 
 
 def codes_due_to_expire(conn, now=None):
     return [r["code"] for r in conn.execute(
-        "SELECT code FROM code_origin WHERE expires_at IS NOT NULL"
-        " AND expires_at <= ? AND expired = 0", (now or time.time(),))]
+        "SELECT code FROM admin_code_origin WHERE expires_at IS NOT NULL"
+        " AND expires_at <= %s AND expired = 0", (now or time.time(),))]
 
 
 def mark_expired(conn, code):
-    conn.execute("UPDATE code_origin SET expired=1 WHERE code=?", (code,))
+    conn.execute("UPDATE admin_code_origin SET expired=1"
+                 " WHERE lower(code) = lower(%s)", (code,))
     conn.commit()
 
 
@@ -346,15 +267,16 @@ def mark_expired(conn, code):
 # settings, push subscriptions, alert bookkeeping
 # --------------------------------------------------------------------------- #
 def get_setting(conn, key, default=None):
-    r = conn.execute("SELECT value FROM setting WHERE key=?", (key,)).fetchone()
+    r = conn.execute("SELECT value FROM admin_setting WHERE key=%s", (key,)).fetchone()
     return r[0] if r else default
 
 
 def set_setting(conn, key, value):
     if value is None:
-        conn.execute("DELETE FROM setting WHERE key=?", (key,))
+        conn.execute("DELETE FROM admin_setting WHERE key=%s", (key,))
     else:
-        conn.execute("INSERT OR REPLACE INTO setting (key, value) VALUES (?,?)",
+        conn.execute("INSERT INTO admin_setting (key, value) VALUES (%s,%s)"
+                     " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                      (key, str(value)))
     conn.commit()
 
@@ -365,48 +287,55 @@ def push_add(conn, sub, username, role, uid, origin, ua):
             or not keys.get("p256dh") or not keys.get("auth"):
         raise ModError("Not a valid push subscription.")
     conn.execute(
-        "INSERT OR REPLACE INTO push_sub (endpoint, p256dh, auth, username, role,"
-        " uid, origin, ua, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO admin_push_sub (endpoint, p256dh, auth, username, role,"
+        " uid, origin, ua, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " ON CONFLICT (endpoint) DO UPDATE SET p256dh = excluded.p256dh,"
+        " auth = excluded.auth, username = excluded.username,"
+        " role = excluded.role, uid = excluded.uid, origin = excluded.origin,"
+        " ua = excluded.ua, created_at = excluded.created_at,"
+        " last_ok = NULL, last_error = NULL",
         (sub["endpoint"], keys["p256dh"], keys["auth"], username, role, uid,
          origin, (ua or "")[:200], time.time()))
     conn.commit()
 
 
 def push_remove(conn, endpoint):
-    n = conn.execute("DELETE FROM push_sub WHERE endpoint=?", (endpoint,)).rowcount
+    n = conn.execute("DELETE FROM admin_push_sub WHERE endpoint=%s", (endpoint,)).rowcount
     conn.commit()
     return n
 
 
 def push_list(conn):
-    return conn.execute("SELECT * FROM push_sub ORDER BY created_at").fetchall()
+    return conn.execute("SELECT * FROM admin_push_sub ORDER BY created_at").fetchall()
 
 
 def push_result(conn, endpoint, ok, error=None):
     if ok:
-        conn.execute("UPDATE push_sub SET last_ok=?, last_error=NULL WHERE endpoint=?",
+        conn.execute("UPDATE admin_push_sub SET last_ok=%s, last_error=NULL WHERE endpoint=%s",
                      (time.time(), endpoint))
     else:
-        conn.execute("UPDATE push_sub SET last_error=? WHERE endpoint=?",
+        conn.execute("UPDATE admin_push_sub SET last_error=%s WHERE endpoint=%s",
                      ((error or "")[:200], endpoint))
     conn.commit()
 
 
 def alerted_all(conn):
-    return {r[0] for r in conn.execute("SELECT ticket FROM alerted")}
+    return {r[0] for r in conn.execute("SELECT ticket FROM admin_alerted")}
 
 
 def alerted_add(conn, ticket, result):
-    conn.execute("INSERT OR REPLACE INTO alerted (ticket, at, result) VALUES (?,?,?)",
+    conn.execute("INSERT INTO admin_alerted (ticket, at, result) VALUES (%s,%s,%s)"
+                 " ON CONFLICT (ticket) DO UPDATE SET at = excluded.at,"
+                 " result = excluded.result",
                  (ticket, time.time(), result))
     conn.commit()
 
 
 def alerted_recent(conn, limit=10):
-    return conn.execute("SELECT * FROM alerted ORDER BY at DESC LIMIT ?",
+    return conn.execute("SELECT * FROM admin_alerted ORDER BY at DESC LIMIT %s",
                         (limit,)).fetchall()
 
 
 def codes_made_since(conn, by, since):
-    return conn.execute("SELECT COUNT(*) FROM code_origin WHERE by = ?"
-                        " COLLATE NOCASE AND at >= ?", (by, since)).fetchone()[0]
+    return conn.execute('SELECT COUNT(*) FROM admin_code_origin WHERE lower("by")'
+                        " = lower(%s) AND at >= %s", (by, since)).fetchone()[0]

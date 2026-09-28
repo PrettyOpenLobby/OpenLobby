@@ -219,8 +219,7 @@ def _push_deliver(rec, db=None):
     own = db is None
     if own:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
         except Exception as exc:
             log("authserv", f"push: db open failed ({exc!r})")
             return 0
@@ -307,13 +306,12 @@ def _push_deliver_mail(rec, db=None):
     own = db is None
     if own:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
         except Exception as exc:
             log("authserv", f"push: db open failed ({exc!r})")
             return 0
     try:
-        row = db.execute("SELECT member_id FROM handle WHERE id = ?",
+        row = db.execute("SELECT member_id FROM handle WHERE id = %s",
                          (int(handle_id),)).fetchone()
         if row is None:
             return 0
@@ -457,11 +455,11 @@ def _shared_groups(db, watcher_handle, subject_handle):
         out = set()
         try:
             for r in db.execute(
-                    "SELECT id FROM friend WHERE handle_id = ? AND kind = ?",
+                    "SELECT id FROM friend WHERE handle_id = %s AND kind = %s",
                     (int(hid), accounts.KIND_GROUP)):
                 out.add(int(r["id"]))
             for r in db.execute(
-                    "SELECT group_id FROM group_member WHERE member_handle = ?",
+                    "SELECT group_id FROM group_member WHERE member_handle = %s",
                     (int(hid),)):
                 out.add(int(r["group_id"]))
         except Exception:
@@ -518,7 +516,7 @@ def _push_deliver_watchers(db, rec):
     subject_handle_id = int(rec["handle"])
     event, text = int(rec["event"]), rec.get("text", "")
     try:
-        row = db.execute("SELECT member_id, handle_name FROM handle WHERE id = ?",
+        row = db.execute("SELECT member_id, handle_name FROM handle WHERE id = %s",
                          (subject_handle_id,)).fetchone()
         if row is None:
             return 0
@@ -789,8 +787,7 @@ def _push_deliver_presencerows(rec, db=None):
     own = None
     if db is None:
         try:
-            db = own = accounts.connect(
-                os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+            db = own = accounts.connect()
         except Exception as exc:
             log("authserv", f"push[presence-burst]: db open failed ({exc!r})")
             return 0
@@ -800,7 +797,7 @@ def _push_deliver_presencerows(rec, db=None):
         for row in rows:
             slot, guid, fhandle = int(row[0]), int(row[1]), int(row[2])
             try:
-                h = db.execute("SELECT member_id FROM handle WHERE id = ?",
+                h = db.execute("SELECT member_id FROM handle WHERE id = %s",
                                (fhandle,)).fetchone()
                 fmember = int(h["member_id"]) if h else 0
             except Exception:
@@ -918,8 +915,7 @@ def _push_deliver_grouprows(rec, db=None):
     own = db is None
     if own:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
         except Exception as exc:
             log("authserv", f"push[grouprows]: db open failed ({exc!r})")
             return 0
@@ -1135,7 +1131,7 @@ def _push_deliver_handle(db, rec):
     target_handle_id = int(rec["handle"])
     event, text = int(rec["event"]), rec.get("text", "")
     try:
-        row = db.execute("SELECT member_id FROM handle WHERE id = ?",
+        row = db.execute("SELECT member_id FROM handle WHERE id = %s",
                          (target_handle_id,)).fetchone()
         if row is None:
             return 0
@@ -1364,8 +1360,7 @@ def _row_fire(kv):
         # client will compare against. Guessing it is the whole point of the
         # check, so resolve it the same way the list did rather than by hand.
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 rows = [r for r in accounts.list_friends(
                     db, handlelists._member_primary_handle(db, member), status=None)

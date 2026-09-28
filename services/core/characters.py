@@ -18,7 +18,7 @@ def _character_names():
     if accounts is None:
         return {}
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return accounts.character_names(db)
         finally:
@@ -376,7 +376,7 @@ def _chr_put(pt):
         return b""
     moved = 0
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             for i, kind, hslot, hpos in blocks:
                 if i >= len(chars):

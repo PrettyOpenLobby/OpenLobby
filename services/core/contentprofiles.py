@@ -20,7 +20,7 @@ def _member_content_id(member_id, content_code):
     if accounts is None or not member_id:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return accounts.member_content_id(db, member_id, content_code)
         finally:
@@ -202,8 +202,7 @@ def _content_code_for_cid(cid):
         n = accounts.content_id_int(cid)
         if n is None:
             return None
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             # WARNING: NOT `handle_by_content_id` -- that returns a HANDLE row, which
             # has no `content_code` column, so the lookup silently produced None
@@ -215,7 +214,7 @@ def _content_code_for_cid(cid):
             row = db.execute(
                 "SELECT content_code FROM handle_content"
                 " WHERE content_id IS NOT NULL"
-                " AND CAST(content_id AS INTEGER) = ?", (n,)).fetchone()
+                " AND text_int(content_id) = %s", (n,)).fetchone()
             if row is not None:
                 return int(row["content_code"])
         finally:
@@ -350,8 +349,7 @@ def _content_profile_record(size, req_pt=None):
             # no character; digits here would be fiction on the popup.
             name = (characters._character_names() or {}).get((accounts.content_id_int(cid), 1)) or ""
             if not name:
-                db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                     accounts.DEFAULT_DB))
+                db = accounts.connect()
                 try:
                     row = accounts.handle_by_content_id(db, cid)
                     if row is not None:
@@ -377,8 +375,7 @@ def _content_profile_record(size, req_pt=None):
     member_id = None
     if cid and accounts is not None:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 row = accounts.handle_by_content_id(db, cid)
                 if row is not None:
@@ -469,12 +466,11 @@ def _content_profile_record(size, req_pt=None):
     if profilerecord._profile_trailer_on() and cid and accounts is not None \
             and 0 < int(phead) and int(phead) + profilerecord._PROFILE_TRAILER_LEN <= size:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 owner = accounts.handle_by_content_id(db, cid)
                 if owner is not None:
-                    owner = db.execute("SELECT * FROM handle WHERE id = ?",
+                    owner = db.execute("SELECT * FROM handle WHERE id = %s",
                                        (int(owner["id"]),)).fetchone()
                 if owner is not None:
                     purp = (accounts.get_handle_profile(db, int(owner["id"]))

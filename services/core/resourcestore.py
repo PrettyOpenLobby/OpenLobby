@@ -357,8 +357,7 @@ def _capture_resource_write(pt, op=None):
         return
     if lobbymail._mail_name(path):
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 path = lobbymail._mail_normalise(path, lobbysession._session_handle_id(db))
                 # THE CLIENT'S OWN COPY OF A NOTIFICATION WE ALREADY POSTED.

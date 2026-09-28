@@ -1838,12 +1838,12 @@ def _log_ident_probe(db, q):
         hid = int(raw.split("-")[-1])
         row = (accounts.handle_by_guid(db, accounts.handle_guid(hid))
                or accounts.handle_by_client_guid(db, hid)
-               or db.execute("SELECT * FROM handle WHERE id = ?",
+               or db.execute("SELECT * FROM handle WHERE id = %s",
                              (hid,)).fetchone())
         if row is None:
             log(f"ident probe: handle id {hid} names nobody here")
             return
-        m = db.execute("SELECT polid FROM member WHERE id = ?",
+        m = db.execute("SELECT polid FROM member WHERE id = %s",
                        (row["member_id"],)).fetchone()
         log(f"ident probe: handle id {hid} is {row['handle_name']!r} -> "
             f"member {row['member_id']} ({m['polid'] if m else '?'})")
@@ -2757,8 +2757,7 @@ class Handler(BaseHTTPRequestHandler):
                 # means "you do not need one", not "whatever you type is
                 # ignored". Only an empty one walks past, and only here.
                 if code and not _signup_open():
-                    db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                         accounts.DEFAULT_DB))
+                    db = accounts.connect()
                     try:
                         if accounts.check_regcode(db, code) is None:
                             return page_step3(tok, error="That registration code is "
@@ -2863,8 +2862,7 @@ class Handler(BaseHTTPRequestHandler):
                  KINOU_DISCORD: TITLE_DISCORD,
                  }.get(kinou, "Registration Code")
 
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             _log_ident_probe(db, q)
 
@@ -2933,10 +2931,10 @@ class Handler(BaseHTTPRequestHandler):
                 mid = sess["member_id"]
                 m = db.execute(
                     "SELECT mail_address, last_login_at, prev_login_at, status,"
-                    " created_at FROM member WHERE id = ?", (mid,)).fetchone()
+                    " created_at FROM member WHERE id = %s", (mid,)).fetchone()
                 handles = db.execute(
                     "SELECT handle_name, is_primary FROM handle"
-                    " WHERE member_id = ? ORDER BY is_primary DESC, id",
+                    " WHERE member_id = %s ORDER BY is_primary DESC, id",
                     (mid,)).fetchall()
                 # WHICH HANDLE IS THE CLIENT ASKING ABOUT? kinou 1 is the one
                 # menu entry that carries `hid=$_HANDLEID`. _log_ident_probe
@@ -2954,7 +2952,7 @@ class Handler(BaseHTTPRequestHandler):
                         row = (accounts.handle_by_guid(
                                    db, accounts.handle_guid(hid))
                                or accounts.handle_by_client_guid(db, hid)
-                               or db.execute("SELECT * FROM handle WHERE id = ?",
+                               or db.execute("SELECT * FROM handle WHERE id = %s",
                                              (hid,)).fetchone())
                         if row is not None and row["member_id"] == mid:
                             named = row["handle_name"]
@@ -3017,7 +3015,7 @@ class Handler(BaseHTTPRequestHandler):
                     ldb.close()
 
             if kinou == KINOU_MAILADDR:
-                row = db.execute("SELECT mail_address FROM member WHERE id = ?",
+                row = db.execute("SELECT mail_address FROM member WHERE id = %s",
                                  (sess["member_id"],)).fetchone()
                 current = (row["mail_address"] if row else None) or "(not set)"
                 if step < 3:
@@ -3116,7 +3114,7 @@ class Handler(BaseHTTPRequestHandler):
                 # "already used" about a code we have never issued would confirm
                 # its existence to someone guessing.
                 row = db.execute("SELECT redeemed_by FROM regcode"
-                                 " WHERE code=? COLLATE NOCASE",
+                                 " WHERE lower(code) = lower(%s)",
                                  (accounts.normalise_regcode(code),)).fetchone()
                 err = ERR_5534 if row is not None else ERR_5103
                 log(f"kinou=31 code refused for {sess['polid']} "
@@ -3191,8 +3189,7 @@ class Handler(BaseHTTPRequestHandler):
                               done["contents"],
                               can_rdt=bool(done.get("pw")) and rdt_representable(
                                   done["pw"], done["mail"], done["polid"]))
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             handle = st.get("handle") or f"Player{secrets.randbelow(9999):04d}"
             pw = st.get("pw1") or secrets.token_hex(8)
@@ -3294,8 +3291,7 @@ class Handler(BaseHTTPRequestHandler):
             # so a variable that fails to resolve costs nothing that worked.
             # _account_step does its own logging; everything else comes here.
             if IDENT_PROBE and "hid" in q and accounts is not None:
-                db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                     accounts.DEFAULT_DB))
+                db = accounts.connect()
                 try:
                     _log_ident_probe(db, q)
                 finally:

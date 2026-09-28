@@ -262,7 +262,7 @@ def _acct_payload(n, base=None):
     if accounts is None:
         return bytes(out)
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             # THE SESSION'S member, not the lowest id. This builder was missed by
             # the sweep that moved every other record builder onto
@@ -278,7 +278,7 @@ def _acct_payload(n, base=None):
             bound = lobbysession._session_get("member_id")
             mid = bound or lobbysession._session_member_id()
             row = db.execute("SELECT id, polid, mail_address FROM member "
-                             "WHERE id = ?", (mid,)).fetchone() if mid else None
+                             "WHERE id = %s", (mid,)).fetchone() if mid else None
             if not bound:
                 log("lobby", f"acct payload: NO BOUND SESSION for this peer; "
                              f"falling back to member {mid} "
@@ -439,8 +439,8 @@ def _lobby_payload(op1, op2, n, req_pt=None):
         # AN EMPTY FRIEND LIST IS STILL AN ANSWER -- it renumbers the client's
         # table to nothing. `_list_payload` never runs for a zero count, so the
         # slot map has to be cleared here or one from an earlier session outlives
-        # the list it described, and a stray delete indexes db row ids that SQLite
-        # may since have handed to somebody else.
+        # the list it described, and a stray delete indexes db row ids that the
+        # database may since have handed to somebody else.
         friendlist._friend_slots_publish([])
     if lcount:
         return handlelists._list_payload(op1, op2, n, req_pt)

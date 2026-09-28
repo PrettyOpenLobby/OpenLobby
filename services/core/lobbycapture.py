@@ -36,7 +36,7 @@ def _bind_corroborate_mismatch(name, mid, db):
         return False
     try:
         rows = db.execute("SELECT id, member_id FROM handle "
-                          "WHERE handle_name = ?", (name,)).fetchall()
+                          "WHERE handle_name = %s", (name,)).fetchall()
     except Exception:
         return False
     if len(rows) != 1:
@@ -110,13 +110,12 @@ def _capture_active_handle(pt):
     if not name or _MARKER_RE.match(name) or accounts.check_handle_policy(name):
         return
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             mid = lobbysession._session_member_id()
             row = db.execute(
-                "SELECT id FROM handle WHERE handle_name = ?"
-                + (" AND member_id = ?" if mid else ""),
+                "SELECT id FROM handle WHERE handle_name = %s"
+                + (" AND member_id = %s" if mid else ""),
                 (name, mid) if mid else (name,)).fetchone()
             if row is None:
                 # Before shrugging this off as junk: a real handle owned by a
@@ -461,12 +460,11 @@ def _handle_store_delete(index, pos, field):
     name = _handle_store_text(field)
     act = os.environ.get("POL_HANDLE_STORE_DELETE", "0") == "1"
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             mid = lobbysession._session_member_id()
-            row = db.execute("SELECT id FROM handle WHERE member_id = ? AND"
-                             " handle_name = ?", (mid, name)).fetchone() \
+            row = db.execute("SELECT id FROM handle WHERE member_id = %s AND"
+                             " handle_name = %s", (mid, name)).fetchone() \
                 if mid and name else None
             if row is None:
                 log("lobby", f"0:8 record #{index}: DELETE position {pos} "
@@ -521,15 +519,14 @@ def _capture_one_handle(raw):
                      f"{why or 'non-printable or non-ASCII bytes'}")
         return
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             # THE MEMBER WHO IS LOGGED IN, not "the first one in the table". The
             # old query gave every account's newly registered handle to member 1,
             # so a second account's handle was created under the first account and
             # then never appeared in its own 0:9 list.
             mid = lobbysession._session_member_id()
-            row = db.execute("SELECT id FROM member WHERE id = ?",
+            row = db.execute("SELECT id FROM member WHERE id = %s",
                              (mid,)).fetchone() if mid else None
             if row is None:
                 log("lobby", f"handle registration {handle!r} but no member row")

@@ -99,12 +99,12 @@ def _do_send_friend_roster(chat_sess, member_id):
         return 0
     dry = mode == "log"
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
     except Exception as exc:
         log("authserv", f"friend-load: db open failed ({exc!r})")
         return 0
     try:
-        h = db.execute("SELECT id FROM handle WHERE member_id = ?"
+        h = db.execute("SELECT id FROM handle WHERE member_id = %s"
                        " ORDER BY is_primary DESC, id ASC LIMIT 1",
                        (int(member_id),)).fetchone()
         if h is None:
@@ -141,7 +141,7 @@ def _do_send_friend_roster(chat_sess, member_id):
             hg = accounts.handle_guid(int(r["peer_handle"]))
             cg = 0
             if want_client:
-                crow = db.execute("SELECT client_guid FROM handle WHERE id = ?",
+                crow = db.execute("SELECT client_guid FROM handle WHERE id = %s",
                                   (int(r["peer_handle"]),)).fetchone()
                 cg = int(crow["client_guid"] or 0) if crow else 0
             guid = cg or hg
@@ -225,8 +225,8 @@ def _friend_slot_raw(db, watcher_handle_id, subject_handle_id):
     if accounts is None:
         return None
     try:
-        row = db.execute("SELECT id FROM friend WHERE handle_id = ?"
-                         " AND peer_handle = ?",
+        row = db.execute("SELECT id FROM friend WHERE handle_id = %s"
+                         " AND peer_handle = %s",
                          (int(watcher_handle_id), int(subject_handle_id))).fetchone()
     except Exception:
         row = None

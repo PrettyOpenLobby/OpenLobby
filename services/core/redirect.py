@@ -123,7 +123,7 @@ def load_login_nicks():
     if accounts is None:
         return 0
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             rows = db.execute("SELECT nick FROM login_alias").fetchall()
         finally:

@@ -272,7 +272,7 @@ def _xxl_class(sess, gid):
     if mid is None:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return accounts.group_class_of(db, gid, member_id=mid)
         finally:
@@ -337,7 +337,7 @@ def _group_op_nicks(chan, members):
     if gid is None or accounts is None or not members:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             masters = {nm for _g, nm, cls in accounts.list_group_members(db, gid)
                        if int(cls) >= accounts.GROUP_CLASS_MASTER}

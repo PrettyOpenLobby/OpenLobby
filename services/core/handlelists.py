@@ -10,7 +10,7 @@ from . import characters, contentprofiles, friendgroups, friendlist, lobbyrooms,
 
 
 def _member_primary_handle(db, member_id):
-    row = db.execute("SELECT id FROM handle WHERE member_id = ?"
+    row = db.execute("SELECT id FROM handle WHERE member_id = %s"
                      " ORDER BY is_primary DESC, id ASC LIMIT 1",
                      (int(member_id),)).fetchone()
     return int(row["id"]) if row else 0
@@ -105,16 +105,16 @@ def _db_handles():
     if accounts is None:
         return []
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             mid = lobbysession._session_member_id()
-            row = db.execute("SELECT id FROM member WHERE id = ?",
+            row = db.execute("SELECT id FROM member WHERE id = %s",
                              (mid,)).fetchone() if mid else None
             if row is None:
                 return []
             rows = db.execute(
-                "SELECT id, handle_name FROM handle WHERE member_id = ?"
-                " ORDER BY is_primary DESC, id ASC LIMIT ?",
+                "SELECT id, handle_name FROM handle WHERE member_id = %s"
+                " ORDER BY is_primary DESC, id ASC LIMIT %s",
                 (row["id"], _HANDLE_SLOTS)).fetchall()
             return [(int(r["id"]), r["handle_name"],
                      accounts.get_handle_profile(db, int(r["id"])))
@@ -177,11 +177,11 @@ def _face_icons_by_handle():
     if accounts is None:
         return {}
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return {int(r[0]): int(r[1]) for r in db.execute(
                 "SELECT handle_id, val_int FROM handle_profile "
-                "WHERE field_id = ? AND val_int IS NOT NULL",
+                "WHERE field_id = %s AND val_int IS NOT NULL",
                 (friendgroups._PROFILE_FICON,))}
         finally:
             db.close()
@@ -211,11 +211,11 @@ def _comments_by_handle():
     if accounts is None:
         return {}
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return {int(r[0]): str(r[1]) for r in db.execute(
                 "SELECT handle_id, val_text FROM handle_profile "
-                "WHERE field_id = ? AND val_text IS NOT NULL AND val_text <> ''",
+                "WHERE field_id = %s AND val_text IS NOT NULL AND val_text <> ''",
                 (profilerecord._COMMENT_FIELD,))}
         finally:
             db.close()
@@ -263,7 +263,7 @@ def _db_chars():
         return []
     out = []
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             for slot, (hid, _name, _prof) in enumerate(handles[:_HANDLE_SLOTS]):
                 links = accounts.handle_content_list(db, hid)
@@ -707,8 +707,7 @@ def _list_payload(op1, op2, n, req_pt=None):
     if (mode == "friends" and friends and accounts is not None
             and os.environ.get("POL_FRIEND_CONTENTS", "1") == "1"):
         try:
-            _cdb = accounts.connect(
-                os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+            _cdb = accounts.connect()
             try:
                 for _row in friends:
                     _fh = _row[3]
@@ -1122,8 +1121,7 @@ def _member_display_name(member_id):
     name = ""
     if accounts is not None:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 row = accounts.primary_handle_row(db, mid)
                 name = str(row["handle_name"]) if row else ""
