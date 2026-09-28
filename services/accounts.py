@@ -1458,6 +1458,52 @@ def handle_by_guid(conn, guid):
                         (guid & 0xFFFFFFFF,)).fetchone()
 
 
+def handle_nocase():
+    """POL_HANDLE_NOCASE (default on): a handle NAME that matches nobody exactly
+    may still name one handle case-insensitively. See `handle_by_name`."""
+    return os.environ.get("POL_HANDLE_NOCASE", "1") != "0"
+
+
+def handle_by_name(conn, name):
+    """The `handle` row a typed NAME refers to, or None.
+
+    An exact match always wins. Failing that, a case-insensitive match is taken
+    only when it is UNAMBIGUOUS -- one handle and one only. Seen live 2026-09-27:
+    a player asked for "kelpie" (the real handle is `kElpie`), the exact lookup
+    found nobody, so no mirror row was made, the 2:6 reply carried a hashed guid
+    and the request message went to an address that resolves to no handle.
+    POL_HANDLE_NOCASE=0 restores exact-only.
+    """
+    if not name:
+        return None
+    row = conn.execute("SELECT * FROM handle WHERE handle_name = ?",
+                       (name,)).fetchone()
+    if row is not None or not handle_nocase():
+        return row
+    rows = conn.execute("SELECT * FROM handle WHERE handle_name = ? COLLATE NOCASE"
+                        " LIMIT 2", (name,)).fetchall()
+    return rows[0] if len(rows) == 1 else None
+
+
+def friend_row_name(conn, handle_id, peer_name):
+    """The peer_name this handle's friend row for `peer_name` is STORED under.
+
+    Exact first; then, under POL_HANDLE_NOCASE, the one row whose name differs
+    only in case. A row keeps the spelling its own client typed (the client
+    names it that way in every later 2:6), so a lookup by the peer's REAL handle
+    name has to find it by this route. Returns `peer_name` when nothing better
+    is found, so callers behave exactly as before.
+    """
+    if conn.execute("SELECT 1 FROM friend WHERE handle_id = ? AND peer_name = ?",
+                    (handle_id, peer_name)).fetchone() is not None \
+            or not handle_nocase():
+        return peer_name
+    rows = conn.execute("SELECT peer_name FROM friend WHERE handle_id = ?"
+                        " AND peer_name = ? COLLATE NOCASE LIMIT 2",
+                        (handle_id, peer_name)).fetchall()
+    return rows[0]["peer_name"] if len(rows) == 1 else peer_name
+
+
 def primary_handle_row(conn, member_id):
     """A member's default handle ROW (the one the badge shows), or None.
 
@@ -4090,9 +4136,9 @@ STATUS_UNSETTLED = (STATUS_PENDING, STATUS_INVITED)
 
 
 def _peer_handle_row(conn, peer_name):
-    """The local handle a friend name refers to, or None if they are not local."""
-    return conn.execute("SELECT id, member_id FROM handle WHERE handle_name = ?",
-                        (peer_name,)).fetchone()
+    """The local handle a friend name refers to, or None if they are not local.
+    Case-insensitive when unambiguous -- see `handle_by_name`."""
+    return handle_by_name(conn, peer_name)
 
 
 def request_friend(conn, handle_id, peer_name, kind=KIND_FRIEND, guid=None):
@@ -4113,6 +4159,13 @@ def request_friend(conn, handle_id, peer_name, kind=KIND_FRIEND, guid=None):
     peer = _peer_handle_row(conn, peer_name)
     me = conn.execute("SELECT handle_name, member_id FROM handle WHERE id = ?",
                       (handle_id,)).fetchone()
+    if own is not None and peer is not None             and peer["handle_name"] != peer_name and handle_nocase():
+        # A row filed under a mis-cased name before POL_HANDLE_NOCASE never
+        # learned whose it is; tie it to the handle now, so 2:3 serves the
+        # peer's real guid instead of a hash of the typed name.
+        conn.execute("UPDATE friend SET peer_handle = ? WHERE id = ?"
+                     " AND peer_handle IS NULL", (int(peer["id"]), own["id"]))
+        conn.commit()
 
     # SELF-ADD GUARD (2026-08-21). A handle can never be its own friend. Tetra
     # Master's room member sidebar offers "Ask to become friends" on the
@@ -4163,7 +4216,11 @@ def request_friend(conn, handle_id, peer_name, kind=KIND_FRIEND, guid=None):
         # POL_FRIEND_ACCEPT_BOTH=0 restores the wait-for-the-client behaviour.
         if peer is not None and me is not None \
                 and os.environ.get("POL_FRIEND_ACCEPT_BOTH", "1") == "1":
-            set_friend_status(conn, int(peer["id"]), me["handle_name"],
+            # Their row may spell me the way THEY typed it ("kelpie" for
+            # kElpie); `friend_row_name` finds it under POL_HANDLE_NOCASE.
+            set_friend_status(conn, int(peer["id"]),
+                              friend_row_name(conn, int(peer["id"]),
+                                              me["handle_name"]),
                               STATUS_ACTIVE)
         return "accepted"
 
@@ -4174,7 +4231,8 @@ def request_friend(conn, handle_id, peer_name, kind=KIND_FRIEND, guid=None):
         # the confirmation that closes the loop rather than a fresh request.
         theirs = conn.execute(
             "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
-            (int(peer["id"]), me["handle_name"])).fetchone()
+            (int(peer["id"]), friend_row_name(conn, int(peer["id"]),
+                                              me["handle_name"]))).fetchone()
         if theirs is not None and theirs["status"] == STATUS_ACTIVE:
             set_friend_status(conn, handle_id, peer_name, STATUS_ACTIVE)
             return "accepted"
@@ -4240,7 +4298,8 @@ def _mirror_request(conn, handle_id, peer, me, kind):
         return None
     theirs = conn.execute(
         "SELECT id, status FROM friend WHERE handle_id = ? AND peer_name = ?",
-        (int(peer["id"]), me["handle_name"])).fetchone()
+        (int(peer["id"]), friend_row_name(conn, int(peer["id"]),
+                                          me["handle_name"]))).fetchone()
     if theirs is not None:
         return theirs["status"]
     add_friend(conn, int(peer["id"]), me["handle_name"],
@@ -4301,7 +4360,8 @@ def reconcile_pending(conn, handle_id, skip=()):
             continue                        # not one of ours, nothing to read
         theirs = conn.execute(
             "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
-            (int(peer["id"]), me["handle_name"])).fetchone()
+            (int(peer["id"]), friend_row_name(conn, int(peer["id"]),
+                                              me["handle_name"]))).fetchone()
         if theirs is not None and theirs["status"] == STATUS_ACTIVE:
             set_friend_status(conn, handle_id, row["peer_name"], STATUS_ACTIVE)
             done.append(row["peer_name"])

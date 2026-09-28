@@ -10029,9 +10029,8 @@ def _friend_put_reply(n, req_pt=None):
                             _db = accounts.connect(os.environ.get(
                                 "POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
                             try:
-                                _hrow = _db.execute(
-                                    "SELECT id FROM handle WHERE handle_name = ?",
-                                    (named.decode("cp932", "replace"),)).fetchone()
+                                _hrow = accounts.handle_by_name(
+                                    _db, named.decode("cp932", "replace"))
                                 peer_hid = int(_hrow["id"]) if _hrow else 0
                             finally:
                                 _db.close()
@@ -10115,9 +10114,7 @@ def _friend_put_reply(n, req_pt=None):
                             db = accounts.connect(os.environ.get(
                                 "POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
                             try:
-                                hrow = db.execute(
-                                    "SELECT id FROM handle WHERE handle_name = ?",
-                                    (nm,)).fetchone()
+                                hrow = accounts.handle_by_name(db, nm)
                                 if hrow is not None:
                                     guid = accounts.handle_guid(int(hrow["id"]))
                             finally:
@@ -10430,6 +10427,9 @@ def _lobby_paylen(op1, op2, req_pt=None):
         # payload is built, so it is counted from the same _mailbox() the
         # payload will serve -- an empty box declares 12 (8 + 0 + 4), which is
         # exactly what SE sends for an empty mailbox.
+        # Stranded friend requests come back first, so the count includes
+        # them (POL_FRIEND_REQUEST_HEAL, default off).
+        _friend_request_heal()
         return _mail_paylen(len(_mailbox()))
     if _list_count(op1, op2, req_pt):
         # req_pt reaches the count so a mobile 2:3 declares the length of the
@@ -14298,8 +14298,7 @@ def _friend_addrow_push(db, mid, h, recs, before):
         nm = r.get("name")
         if not nm:
             continue
-        prow = db.execute("SELECT id, member_id FROM handle WHERE"
-                          " handle_name = ?", (nm,)).fetchone()
+        prow = accounts.handle_by_name(db, nm)
         if prow is None:
             continue                # a caption or foreign name: nothing to paint
         phid = int(prow["id"])
@@ -14394,8 +14393,7 @@ def _friend_addrow_presence(db, mid, h, recs, before):
         nm = r.get("name")
         if not nm:
             continue
-        prow = db.execute("SELECT id, member_id FROM handle WHERE"
-                          " handle_name = ?", (nm,)).fetchone()
+        prow = accounts.handle_by_name(db, nm)
         if prow is None:
             continue                # a caption or a foreign name: nobody to assert
         phid = int(prow["id"])
@@ -14675,9 +14673,9 @@ def _capture_friend_put(pt):
             # to serve AmicableElm's real guid.
             for r in recs:
                 try:
-                    hrow = db.execute(
-                        "SELECT id FROM handle WHERE handle_name = ?",
-                        (r["name"],)).fetchone()
+                    # Case-insensitive when unambiguous (POL_HANDLE_NOCASE):
+                    # "kelpie" must reach kElpie's guid, not a hash of the name.
+                    hrow = accounts.handle_by_name(db, r["name"])
                     if hrow is not None:
                         g = accounts.handle_guid(int(hrow["id"]))
                     else:
@@ -14771,9 +14769,7 @@ def _capture_friend_put(pt):
                     was = before.get(r["name"])
                     if was is not None and was != accounts.STATUS_INVITED:
                         continue                    # nothing changed for them
-                    peer = db.execute("SELECT id, member_id FROM handle"
-                                      " WHERE handle_name = ?",
-                                      (r["name"],)).fetchone()
+                    peer = accounts.handle_by_name(db, r["name"])
                     if peer is None:
                         continue                    # not one of ours to post to
                     kind = (MAIL_KIND_FRIEND_REQUEST if was is None
@@ -16128,6 +16124,145 @@ def _mailbox(member=None):
         db.close()
     out.sort(key=lambda r: r[0], reverse=True)
     return out
+
+
+#: (recipient handle id, asker handle id) -> when `_friend_request_heal` last
+#: restored or minted that request. Bounds the heal to once per TTL, so a
+#: request one device keeps acknowledging is not handed back on every listing.
+_FRIEND_HEAL_DONE = {}
+
+
+def _friend_request_heal(member=None):
+    """Give back friend requests this member holds but can no longer see.
+
+    Found 2026-09-27: the mailbox is per MEMBER, and the PS2 fetches and 3:2s new
+    messages ~10 s after login, so `_mail_retire` took Amara's and Birdie's
+    requests before Lex's PC ever listed them. 2:3 hides `invited` rows by
+    design, so nothing else shows them and the request is stranded.
+
+    At listing time, for every `invited` friend row of this member whose asker
+    still holds a PENDING row for them and has no live 0x8080 request addressed
+    to that handle: restore the newest retired copy (`.bin.read` / `.bin.stale`
+    -> `.bin`, the undo `_mail_retire` documents), else mint a fresh one the way
+    the website's befriend does. Each (handle, asker) pair is acted on at most
+    once per POL_FRIEND_REQUEST_HEAL_TTL seconds (default 6 h). Returns the
+    number healed. POL_FRIEND_REQUEST_HEAL=1 turns it on (default off).
+    """
+    if os.environ.get("POL_FRIEND_REQUEST_HEAL", "0") != "1" or accounts is None:
+        return 0
+    if member is None:
+        member = _session_get("member_id")
+    if member is None:
+        return 0
+    try:
+        ttl = float(os.environ.get("POL_FRIEND_REQUEST_HEAL_TTL") or "21600")
+    except ValueError:
+        ttl = 21600.0
+    healed = 0
+    try:
+        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+    except Exception:
+        return 0
+    try:
+        want = []
+        for r in db.execute(
+                "SELECT f.handle_id, f.peer_handle, f.peer_name, h.handle_name"
+                " FROM friend f JOIN handle h ON h.id = f.handle_id"
+                " WHERE h.member_id = ? AND f.status = ? AND f.kind = ?",
+                (int(member), accounts.STATUS_INVITED,
+                 accounts.KIND_FRIEND)).fetchall():
+            peer = None
+            if r["peer_handle"]:
+                peer = db.execute("SELECT * FROM handle WHERE id = ?",
+                                  (int(r["peer_handle"]),)).fetchone()
+            if peer is None:
+                peer = accounts.handle_by_name(db, r["peer_name"])
+            if peer is None:
+                continue                # not one of ours: nobody to send it
+            asks = db.execute(
+                "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
+                (int(peer["id"]), accounts.friend_row_name(
+                    db, int(peer["id"]), r["handle_name"]))).fetchone()
+            if asks is None or asks["status"] != accounts.STATUS_PENDING:
+                continue                # the asker no longer waits on this
+            want.append((int(r["handle_id"]), peer))
+        if not want:
+            return 0
+        # Every request message on disk, live or retired, by (recipient handle,
+        # sender). A sender is matched by our guid or by the 15-byte name field.
+        live, retired = set(), {}
+        try:
+            names = os.listdir(RESOURCE_DIR)
+        except OSError:
+            names = []
+        for nm in names:
+            suffix = next((s for s in (".read", ".stale")
+                           if nm.endswith(".bin" + s)), "")
+            base = nm[:-len(suffix)] if suffix else nm
+            path = _mail_path_of(base)
+            meta = _mail_meta(path) if path else None
+            if not meta or meta.get("kind") != MAIL_KIND_FRIEND_REQUEST:
+                continue
+            rrow = _mail_recipient_row(db, meta["recipient_guid"])
+            if rrow is None:
+                continue
+            srow = (accounts.handle_by_guid(db, meta.get("sender_guid") or 0)
+                    or accounts.handle_by_client_guid(
+                        db, meta.get("sender_guid") or 0))
+            keys = {(int(rrow["id"]), "name", meta.get("sender") or "")}
+            if srow is not None:
+                keys.add((int(rrow["id"]), "id", int(srow["id"])))
+            for k in keys:
+                if not suffix:
+                    live.add(k)
+                else:
+                    try:
+                        at = os.path.getmtime(os.path.join(RESOURCE_DIR, nm))
+                    except OSError:
+                        at = 0
+                    retired.setdefault(k, []).append((at, nm, base))
+        now = time.time()
+        for hid, peer in want:
+            ks = [(hid, "id", int(peer["id"])),
+                  (hid, "name", str(peer["handle_name"])[:15])]
+            if any(k in live for k in ks):
+                continue
+            done = (hid, int(peer["id"]))
+            if now - _FRIEND_HEAL_DONE.get(done, -ttl - 1) <= ttl:
+                continue
+            old = sorted(x for k in ks for x in retired.get(k, []))
+            if old:
+                _at, nm, base = old[-1]
+                try:
+                    os.replace(os.path.join(RESOURCE_DIR, nm),
+                               os.path.join(RESOURCE_DIR, base))
+                except OSError as exc:
+                    log("lobby", f"  mail: request heal -- cannot restore {nm!r} "
+                                 f"({exc})")
+                    continue
+                _FRIEND_HEAL_DONE[done] = now
+                healed += 1
+                log("lobby", f"  mail: request heal -- RESTORED "
+                             f"{peer['handle_name']!r}'s friend request to handle "
+                             f"{hid} (member {member}): the row is still invited "
+                             f"and no live request was left ({nm} -> .bin); "
+                             "POL_FRIEND_REQUEST_HEAL=0 disables this")
+                continue
+            if _mail_mint(peer["handle_name"], accounts.handle_guid(int(peer["id"])),
+                          accounts.handle_guid(hid), _FRIEND_REQ_SUBJECT,
+                          _FRIEND_REQ_BODY, kind=MAIL_KIND_FRIEND_REQUEST):
+                _FRIEND_HEAL_DONE[done] = now
+                healed += 1
+                log("lobby", f"  mail: request heal -- MINTED a friend request "
+                             f"from {peer['handle_name']!r} to handle {hid} "
+                             f"(member {member}): the row is invited and no "
+                             "request message was ever stored; "
+                             "POL_FRIEND_REQUEST_HEAL=0 disables this")
+    except Exception as exc:
+        log("lobby", f"  mail: request heal skipped ({exc!r})")
+    finally:
+        db.close()
+    return healed
 
 
 def _mailbox_payload(n, member=None):
