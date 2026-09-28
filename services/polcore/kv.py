@@ -20,14 +20,20 @@ go through get_json/set_json. Both backends expose the same methods:
     incr(key, amount=1) -> int
     hget / hset(key, field=None, value=None, mapping=None) / hgetall / hdel
     push(key, *values) -> length / pop(key, timeout=None) / llen(key)
+    move(src, dst, timeout=None) -> the value moved from the head of src to
+                                    the tail of dst, or None (LMOVE/BLMOVE)
+    lrem(key, value, count=1) -> removed / lrange(key, start=0, stop=-1)
     publish(channel, message) -> receivers
     subscribe(channels, callback) -> Subscription (callback(channel, message)
                                      runs on its own thread; .close() stops it)
     keys(pattern="*") -> key names without the prefix
     get_json / set_json, ping()
 
-`ttl` arguments are seconds (int or float). `pop(key, timeout)` blocks up to
-`timeout` seconds for an element; None does not block.
+`ttl` arguments are seconds (int or float). `pop(key, timeout)` and
+`move(src, dst, timeout)` block up to `timeout` seconds for an element; None
+does not block. `move` is the reliable-queue step: the element stays in `dst`
+(a processing list) until the consumer `lrem`s it, so a consumer that dies
+mid-delivery leaves it there to be delivered again.
 
 The module-level functions (kv.get, kv.set, ...) use one backend per process,
 chosen at first use from the environment. `kv.default()` returns it and
@@ -267,6 +273,58 @@ class MemoryKV(_Base):
             lst = self._typed(self._k(key), collections.deque)
             return len(lst) if lst else 0
 
+    def move(self, src, dst, timeout=None):
+        ks, kd = self._k(src), self._k(dst)
+        deadline = None if not timeout else time.monotonic() + float(timeout)
+        with self._cond:
+            while True:
+                lst = self._typed(ks, collections.deque)
+                if lst:
+                    out = self._typed(kd, collections.deque)
+                    if out is None:
+                        out = self._data[kd] = collections.deque()
+                    v = lst.popleft()
+                    if not lst:
+                        self._data.pop(ks, None)
+                        self._exp.pop(ks, None)
+                    out.append(v)
+                    self._cond.notify_all()
+                    return v
+                if deadline is None:
+                    return None
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._cond.wait(left)
+
+    def lrem(self, key, value, count=1):
+        k = self._k(key)
+        value = _text(value)
+        with self._cond:
+            lst = self._typed(k, collections.deque)
+            if not lst:
+                return 0
+            n = 0
+            keep = collections.deque()
+            for v in lst:
+                if v == value and (count == 0 or n < abs(count)):
+                    n += 1
+                    continue
+                keep.append(v)
+            if keep:
+                self._data[k] = keep
+            else:
+                self._data.pop(k, None)
+                self._exp.pop(k, None)
+            return n
+
+    def lrange(self, key, start=0, stop=-1):
+        with self._cond:
+            lst = self._typed(self._k(key), collections.deque)
+            items = list(lst) if lst else []
+        stop = len(items) if stop == -1 else stop + 1
+        return items[start:stop]
+
     def keys(self, pattern="*"):
         full = self.prefix + pattern
         with self._cond:
@@ -396,6 +454,18 @@ class ValkeyKV(_Base):
     def llen(self, key):
         return self._r.llen(self._k(key))
 
+    def move(self, src, dst, timeout=None):
+        ks, kd = self._k(src), self._k(dst)
+        if not timeout:
+            return self._r.lmove(ks, kd, "LEFT", "RIGHT")
+        return self._r.blmove(ks, kd, float(timeout), "LEFT", "RIGHT")
+
+    def lrem(self, key, value, count=1):
+        return self._r.lrem(self._k(key), int(count), _text(value))
+
+    def lrange(self, key, start=0, stop=-1):
+        return self._r.lrange(self._k(key), int(start), int(stop))
+
     def keys(self, pattern="*"):
         n = len(self.prefix)
         return sorted(k[n:] for k in self._r.scan_iter(match=self.prefix + pattern,
@@ -474,6 +544,7 @@ def _delegate(name):
 
 for _name in ("get", "set", "setnx", "delete", "exists", "expire", "ttl", "incr",
               "hget", "hset", "hgetall", "hdel", "push", "pop", "llen", "keys",
+              "move", "lrem", "lrange",
               "publish", "subscribe", "get_json", "set_json", "ping"):
     globals()[_name] = _delegate(_name)
     __all__.append(_name)
