@@ -292,9 +292,9 @@ def open_ticket_for(guid, req_no=0, ticket_dir=None):
             continue
         if not isinstance(rec, dict):
             continue
-        mine = (guid and rec.get("guid") == guid) or \
-               (req_no and rec.get("request_no") == req_no)
-        if not mine:
+        # By the caller's handle id ONLY. A request number is per session and
+        # must never be enough to hand someone a ticket.
+        if not guid or rec.get("guid") != guid:
             continue
         tid = name[:-len(".json")]
         if rec.get("cancelled_at") or (state.get(tid) or {}).get("status") == "closed":
@@ -623,49 +623,88 @@ class Gmd:
         return n
 
     def resolve(self, raw, peer):
-        """Find the session this datagram belongs to, by TRIAL on clones.
+        """Find the session this datagram belongs to.
 
         Returns (session, plaintext, opened_global, is_retransmit), or
         (None, None, False, False) when nothing opens it.
+
+        CONFIDENTIALITY. Every GM key is a constant shared by all clients, so
+        "whose context opens it" says nothing about WHO sent a datagram. This
+        used to match on that alone, and on 2026-09-28 every caller landed on
+        session #0 and inherited the previous caller's request number, room and
+        held ticket. A session is now chosen by identity only:
+          * a stage-1 0x101 (key blob one) belongs to a session from the SAME
+            address and port with the SAME session dwords (the caller's handle
+            id), and otherwise starts a NEW session;
+          * a stage-2 0x101 (key blob two, from a new port) belongs to the
+            session with the same dwords;
+          * anything else only to a session from the same address and port.
         """
-        ordered = sorted(self.sessions,
-                         key=lambda s: (s.peer != peer, -s.last_seen))
-        for s in ordered:
-            for name, ctx in (("per-slot ZERO", s.zctx), ("per-slot", s.sctx),
-                              ("GLOBAL", s.gctx)):
-                pt = ctx.decrypt(raw)
-                if pt[:4] == b"MAG?":
-                    again = (pt == s.last_request
-                             and time.time() - s.last_request_at < RETRY_WINDOW_S
-                             and (struct.unpack_from("<H", pt, 6)[0] >> 8) not in KEEPALIVE)
-                    log(f"session #{s.idx}, opened with its {name} context"
-                        + (" -- RETRANSMIT, our answer was not accepted" if again else ""))
-                    return s, pt, name == "GLOBAL", again
+        def _type(pt):
+            return struct.unpack_from("<H", pt, 6)[0]
+
+        def _again(s, pt):
+            return (pt == s.last_request
+                    and time.time() - s.last_request_at < RETRY_WINDOW_S
+                    and (_type(pt) >> 8) not in KEEPALIVE)
+
+        mine = sorted((x for x in self.sessions if x.peer == peer),
+                      key=lambda x: -x.last_seen)
+        # 1. stage 1
+        pt = _crypto().GmContext(KEY16).decrypt(raw)
+        if pt[:4] == b"MAG?" and _type(pt) == 0x101:
+            dw = struct.unpack_from("<II", pt, 0x20)
+            s = next((x for x in mine if (x.dwA, x.dwB) == dw), None)
+            if s is not None:
+                again = _again(s, pt)
+                log(f"session #{s.idx}: stage 1 again from the same caller"
+                    + (" -- RETRANSMIT" if again else ""))
+                return s, pt, False, again
+            return self.new_session(pt, "a fresh 0x101 under key blob one")
+        # 2. stage 2
+        pt = _crypto().GmContext(KEY16_B).decrypt(raw)
+        if pt[:4] == b"MAG?" and _type(pt) == 0x101:
+            dw = struct.unpack_from("<II", pt, 0x20)
+            cands = sorted((x for x in self.sessions
+                            if x.sctx_ready and (x.dwA, x.dwB) == dw),
+                           key=lambda x: -x.last_seen)
+            if cands:
+                s = cands[0]
+                again = _again(s, pt)
+                log(f"session #{s.idx}: stage 2 for handle {session_guid(s):#x}"
+                    + (" -- RETRANSMIT" if again else ""))
+                return s, pt, True, again
+            log("** stage 2 with no stage 1 behind it (unknown session dwords) "
+                "-- not answering")
+            return None, None, False, False
+        # 3. everything else: this caller's own session only
+        for s in mine:
+            pt = s.zctx.decrypt(raw)
+            if pt[:4] == b"MAG?":
+                again = _again(s, pt)
+                log(f"session #{s.idx}, opened with its reply context"
+                    + (" -- RETRANSMIT, our answer was not accepted" if again else ""))
+                return s, pt, False, again
         # A client that logged in under POL_AUTH_RSA re-keyed its per-slot
         # context with its auth session key after stage 1 (see
-        # remember_session_key). Try that peer's recent keys; the one that
-        # opens becomes the session's reply context.
-        got = self.find_session_key(raw, peer, ordered)
+        # remember_session_key).
+        got = self.find_session_key(raw, peer, mine)
         if got:
             return got
-        # Nothing matched. A fresh stage 1 is the only thing that legitimately
-        # arrives with no session behind it, and it is always key blob one.
-        pt = _crypto().GmContext(KEY16).decrypt(raw)
-        if pt[:4] != b"MAG?":
-            # Last chance: a mid-call client whose session we lost entirely (no
-            # state file). Its traffic is ZERO-keyed. Adopt it only for the
-            # echo-exempt keepalives, whose answers carry no session data -- a
-            # 0x801 built with session dwords we do not have is how POL-0685
-            # gets raised. Answering the keepalive keeps the call alive until
-            # the client asks for something that needs the real state.
-            pt = _crypto().GmContext(KEY_ZERO).decrypt(raw)
-            if pt[:4] != b"MAG?" or (struct.unpack_from("<H", pt, 6)[0] >> 8) not in KEEPALIVE:
-                return None, None, False, False
-            s = Session(len(self.sessions), _crypto().GmContext(KEY16))
-            self.sessions.append(s)
-            log(f"ADOPTED session #{s.idx} from a zero-keyed keepalive -- we lost "
-                f"its state, so only keepalives can be answered honestly")
-            return s, pt, False, False
+        # Last chance: a mid-call client whose session we lost entirely. Adopt it
+        # only for the echo-exempt keepalives, whose answers carry no session
+        # data -- nothing about anyone's request is ever sent on this path.
+        pt = _crypto().GmContext(KEY_ZERO).decrypt(raw)
+        if pt[:4] != b"MAG?" or (_type(pt) >> 8) not in KEEPALIVE:
+            return None, None, False, False
+        s = Session(len(self.sessions), _crypto().GmContext(KEY16))
+        self.sessions.append(s)
+        log(f"ADOPTED session #{s.idx} from a zero-keyed keepalive -- we lost "
+            f"its state, so only keepalives can be answered honestly")
+        return s, pt, False, False
+
+    def new_session(self, pt, why):
+        """A fresh session: no request, no ticket, no invitation, no room."""
         if len(self.sessions) >= MAX_SESS:
             stale = min(self.sessions, key=lambda s: s.last_seen)
             if time.time() - stale.last_seen <= IDLE_S:
@@ -674,7 +713,7 @@ class Gmd:
             self.sessions.remove(stale)
         s = Session(len(self.sessions), _crypto().GmContext(KEY16))
         self.sessions.append(s)
-        log(f"NEW session #{s.idx} (a fresh 0x101 under key blob one)")
+        log(f"NEW session #{s.idx} ({why})")
         return s, pt, False, False
 
     def find_session_key(self, raw, peer, ordered):
@@ -694,7 +733,7 @@ class Gmd:
         """
         if not peer:
             return None
-        ses = next((x for x in ordered if x.peer and x.peer[0] == peer[0]), None)
+        ses = next((x for x in ordered if x.peer == peer), None)
         echo = ses and ses.last_reply and ses.last_request
         seen, cands = set(), []
         for key in session_keys(peer[0]):
@@ -773,7 +812,9 @@ class Gmd:
             struct.pack_into("<II", m, 0x28, ses.dwA, ses.dwB)
         if body_edit:
             body_edit(m)
-        if rooms:
+        # A ROOM IS ONLY EVER NAMED TO SOMEONE WHO HAS ONE: their own held
+        # request, or an invitation. Nobody is handed a shared room.
+        if rooms and ses is not None and (ses.held or ses.invite):
             room = room_for(ses)[:R_NAME_LEN - 1]
             # Block A is the caller's own chat (Start), block B the one Join
             # enters: an invitation's room when there is one.
@@ -804,9 +845,10 @@ class Gmd:
             if not was or was[0] != ses.held[0]:
                 log(f"    holding ticket {ses.held[0]} (request #{ses.req_no}) "
                     f"for handle {session_guid(ses):#x}: bit 0x02 set")
-        elif was:
-            log(f"    ticket {was[0]} is finished: bit 0x02 cleared, the client "
-                f"resets its call on this 0x801")
+        else:
+            if was:
+                log(f"    ticket {was[0]} is finished: bit 0x02 cleared, the client "
+                    f"resets its call on this 0x801")
             ses.req_no = 0
 
     @staticmethod

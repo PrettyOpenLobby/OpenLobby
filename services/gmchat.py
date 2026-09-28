@@ -76,6 +76,84 @@ def is_gm_room(chan):
     return bool(chan) and chan.startswith(PREFIX)
 
 
+#: Where gmd files requests and the desk keeps their state (both containers
+#: mount /data).
+TICKET_DIR = os.environ.get("POL_GMD_TICKET_DIR", "/data/gm-calls")
+
+
+def room_allowed(chan, member_id, ticket_dir=None, db=None):
+    """May member `member_id` be in GM room `chan`?
+
+    CONFIDENTIALITY. A GM chat is a player's support conversation. Only the
+    player who filed the request (the handle id gmd recorded on the ticket, or
+    the ticket's handle name for requests filed before that) and players the
+    desk explicitly invited may join or hear it, and only while the request is
+    open. Any other GM room -- the old shared one included -- admits nobody.
+    """
+    if isinstance(chan, bytes):
+        chan = chan.decode("latin1", "replace")
+    if not chan or not member_id:
+        return False
+    d = ticket_dir or TICKET_DIR
+    try:
+        with open(os.path.join(d, "gm-tickets.json"), encoding="utf-8") as f:
+            state = json.load(f)
+        state = state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        state = {}
+    try:
+        names = [n for n in os.listdir(d) if n.startswith("gm-") and n.endswith(".json")
+                 and n != "gm-tickets.json"]
+    except OSError:
+        return False
+    for name in names:
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("room") != chan:
+            continue
+        tid = name[:-len(".json")]
+        st = state.get(tid) or {}
+        if rec.get("cancelled_at") or st.get("status") == "closed":
+            return False
+        guids = {int(rec.get("guid") or 0)} | {
+            int(i.get("guid") or 0) for i in st.get("invited") or [] if isinstance(i, dict)}
+        guids.discard(0)
+        return _member_matches(member_id, guids, rec.get("handle") or "", db)
+    return False
+
+
+def _member_matches(member_id, guids, handle_name, db=None):
+    """True if one of the member's handles is a listed handle id, or is the
+    ticket's handle name (requests filed before gmd recorded the id)."""
+    try:
+        import accounts
+    except ImportError:
+        return False
+    own = db is None
+    try:
+        if own:
+            db = accounts.connect()
+        rows = db.execute("SELECT handle_name, client_guid FROM handle "
+                          "WHERE member_id = %s", (int(member_id),)).fetchall()
+    except Exception:
+        return False
+    finally:
+        if own and db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+    for r in rows:
+        if r["client_guid"] and int(r["client_guid"]) in guids:
+            return True
+        if handle_name and not guids and r["handle_name"] == handle_name:
+            return True
+    return False
+
+
 def _hexlen(n):
     """The one-hex-digit length field. 0x4ab2d0c cannot express more than 0xf."""
     return format(min(n, 0xF), "x").encode()

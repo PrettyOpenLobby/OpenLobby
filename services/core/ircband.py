@@ -615,6 +615,18 @@ def _verb_join(arg, nick, srv, peer_ip, sess):
     chan = arg.split(None, 1)[0].strip().rstrip(b"\x00") if arg.split() else b""
     if not chan:
         return None
+    # A GM CALL ROOM IS CONFIDENTIAL: only the player who filed that request, or
+    # a player the desk invited, gets in (gmchat.room_allowed). 473 is IRC's
+    # invite-only refusal.
+    if _gm_roster_nick(chan):
+        import gmchat
+        member = getattr(sess, "member", None)
+        if not gmchat.room_allowed(chan, member):
+            log("authserv", f"  GM room {chan.decode('latin1')}: {nick!r} "
+                            f"(member {member}) REFUSED -- not the requester "
+                            f"and not invited")
+            return [b":" + srv + b" 473 " + nick + b" " + chan +
+                    b" :Cannot join channel (+i)"]
     # *** THE PASSWORD IS CHECKED HERE, AND IT IS THE ONLY PLACE IT CAN BE. ***
     # `JOIN <chan> <key>` -- the key is the second token, in the clear. SE's own
     # rejection, captured 2026-08-15 when the account holder typed the wrong one:

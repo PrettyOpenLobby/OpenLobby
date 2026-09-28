@@ -66,6 +66,7 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
     # spool does not turn into a ping flood. Only the keepalive hop is affected;
     # the redirect hops keep `observe` and their idle-to-close behaviour.
     gm_room = None
+    gm_access = {}     # GM room -> may this connection be in it (confidential)
     # WHICH GAME PEERS THIS SOCKET CARRIES. A member has more than one auth
     # connection (the room band and the table band are separate sockets), so
     # "this member has a push due" is not enough to decide it may leave HERE --
@@ -321,8 +322,22 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                 # #gmchat001 without one ever reaching us.
                 if gmchat is not None:
                     _p = cmd_txt.split(None, 2)
+                    # CONFIDENTIAL: a connection is bound to a GM room -- and so
+                    # handed its spooled GM lines -- only if its member filed
+                    # that request or was invited (gmchat.room_allowed), same
+                    # rule as the JOIN. Asked once per room per connection.
+                    _allowed = False
                     if len(_p) >= 2 and _p[0].upper() in (b"PRIVMSG", b"JOIN") \
                             and gmchat.is_gm_room(_p[1]):
+                        if _p[1] not in gm_access:
+                            gm_access[_p[1]] = gmchat.room_allowed(
+                                _p[1], getattr(chat_sess, "member", None))
+                            if not gm_access[_p[1]]:
+                                log("authserv", f"{peer} spoke to GM room "
+                                                f"{_p[1].decode('latin1')} it may "
+                                                f"not be in -- NOT bound, NOT relayed")
+                        _allowed = gm_access[_p[1]]
+                    if _allowed:
                         if gm_room != _p[1]:
                             gm_room = _p[1]
                             log("authserv", f"{peer} is in GM chat room "
