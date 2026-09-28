@@ -126,6 +126,11 @@ SUITES = [
     # is a performance change and its whole contract is that behaviour --
     # journal mode, transaction isolation, thread exclusivity -- is unchanged.
     ("dbpool",        [sys.executable, "dbpool_test.py"], TOOLS, {}),
+    # polcore.db and polcore.kv, the PostgreSQL and Valkey layer the services
+    # are moving onto. Each starts throwaway containers (tools/pgtest.py) and
+    # reports SKIP without Docker; POL_TEST_REQUIRE_DB=1 makes that a failure.
+    ("polcore_db",    [sys.executable, "test_polcore_db.py"], TESTS, {}),
+    ("polcore_kv",    [sys.executable, "test_polcore_kv.py"], TESTS, {}),
     # THE CONTENT ID MINT (2026-08-23). Registered beside `accounts` because it
     # pins that file's `allocate_content_id` from the outside, and because the
     # thing it guards is invisible from inside our own server: nothing we run
