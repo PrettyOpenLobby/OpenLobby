@@ -269,6 +269,31 @@ def main():
     finally:
         R._mail_meta, R._mail_recipient_row = real_meta, real_row
 
+    print("\n7:11 my settings in the group ->")
+    as_session("Olive")
+    before = R._group_record(0x88, 0, "TEST GROUP", guid=gid,
+                             settings=R._my_group_settings(gid))
+    check(before[0x08:0x08 + 20] == "TEST GROUP".encode("utf-16-le"),
+          "with nothing sent, +0x08 is what it always was")
+    body = bytearray(0x78)
+    struct.pack_into("<Q", body, 0, gid)
+    wide = "back soon".encode("utf-16-le")
+    body[0x08:0x08 + len(wide)] = wide
+    body[0x6E] = 0
+    body[0x6F] = 3
+    t, _ = reply_type(lobby_request(0x07, 0x0B, bytes(body) + b"\x00" * 4))
+    check(t == 0, "7:11 is answered with success")
+    after = R._group_record(0x88, 0, "TEST GROUP", guid=gid,
+                            settings=R._my_group_settings(gid))
+    check(after[0x08:0x08 + len(wide)] == wide and after[0x08 + len(wide)] == 0,
+          "the comment comes back at +0x08", repr(after[0x08:0x20]))
+    check(after[0x6F] == 3, "the status comes back at +0x6F", repr(after[0x6F]))
+    check(after[0x70:0x7A] == b"TEST GROUP", "the row label at +0x70 is unchanged")
+    as_session("Nico")
+    other = R._group_record(0x88, 0, "TEST GROUP", guid=gid,
+                            settings=R._my_group_settings(gid))
+    check(other == before, "another member's record is not touched")
+
     print("\n7:2 disband ->")
 
     def disband(who, group):
