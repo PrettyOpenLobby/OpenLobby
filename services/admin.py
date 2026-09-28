@@ -1048,7 +1048,7 @@ _POST_PERMS = {
     "/api/gm-control": "gm", "/api/gm-say": "gm", "/api/gm-ticket": "gm",
     "/api/push/subscribe": "gm", "/api/push/test": "gm",
     "/api/push/unsubscribe": "any",
-    "/api/triage": "reports",
+    "/api/triage": "reports", "/api/report-reply": "reports",
     "/api/codes/void": "codes_void",
     "/api/account-create": "accounts_manage", "/api/account-password": "accounts_manage",
     "/api/account-state": "accounts_manage", "/api/account-info": "accounts_manage",
@@ -1074,6 +1074,7 @@ _AUDIT_ACTIONS = {
     "/api/gm-control": "changed the GM desk", "/api/gm-say": "wrote in GM chat",
     "/api/gm-ticket": "set a GM call's status",
     "/api/triage": "set a report's status",
+    "/api/report-reply": "answered a report by mail",
     "/api/account-create": "created an account",
     "/api/account-password": "changed an account password",
     "/api/account-state": "changed an account login refusal",
@@ -2015,6 +2016,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._gm_ticket()
         if path == "/api/triage":
             return self._triage()
+        if path == "/api/report-reply":
+            return self._report_reply()
         if path == "/api/account-create":
             return self._account_create()
         if path == "/api/account-password":
@@ -2269,6 +2272,14 @@ class Handler(BaseHTTPRequestHandler):
                 "contact": f.get("sender"),
                 "log": f.get("log"),
             })
+        # The reporter's POL ID, the GM calls the same member filed, and every
+        # answer already mailed -- so nobody answers a report twice.
+        rep_mid, tic_mid, polid = self._member_links(out, self._ticket_rows())
+        for r in out:
+            mid = rep_mid.get(r["id"])
+            r["polid"] = polid.get(mid)
+            r["gm_calls"] = [t for t, m in tic_mid.items() if mid and m == mid]
+            r["replies"] = self._report_replies(r["id"])
         self._send(200, self._with_triage("reports", out))
 
     # -- tester issue reports ------------------------------------------------ #
@@ -2331,6 +2342,199 @@ class Handler(BaseHTTPRequestHandler):
         except adminusers.ModError as exc:
             return self._send(400, {"error": str(exc)})
         self._send(200, {"ok": True, "id": rid, "status": body.get("status")})
+
+    # -- answering a report by PlayOnline mail ------------------------------- #
+    # The Report User form arrives as SMTP from the reporter's own POL address
+    # (the envelope From, `rec["from"]`), so the reply goes straight back into
+    # that mailbox. The Viewer has no other way to hear back about a report: a
+    # GM Call can only be opened by the player's own client.
+    REPLY_DIR = os.path.join(REPORT_DIR, "replies")
+    REPLY_MAX = 2000
+    GM_MAIL_FROM = os.environ.get("POL_GM_MAIL_FROM", "PlayOnline GM <gm@pol.com>")
+    _REPLY_LOCK = threading.Lock()
+
+    #: The Viewer's mailer reads text/plain ISO-8859-1 (see extmail.py, which
+    #: the admin image does not carry). Typographic characters get a plain
+    #: stand-in rather than a '?'.
+    _LATIN1 = str.maketrans({chr(c): s for c, s in (
+        (0x2018, "'"), (0x2019, "'"), (0x201C, '"'), (0x201D, '"'),
+        (0x2013, "-"), (0x2014, "-"), (0x2026, "..."), (0x00A0, " "))})
+
+    @classmethod
+    def _latin1(cls, s):
+        return str(s or "").translate(cls._LATIN1).encode(
+            "latin-1", "replace").decode("latin-1")
+
+    @classmethod
+    def _gm_mail(cls, to_addr, subject, text):
+        """One RFC822 message from the GM, in the shape the Viewer reads."""
+        subject = re.sub(r"[\r\n\t]+", " ", cls._latin1(subject)).strip()[:120]
+        text = cls._latin1(text).replace("\r\n", "\n").replace("\r", "\n")
+        head = [f"From: {cls._latin1(cls.GM_MAIL_FROM)}",
+                f"To: {to_addr}",
+                f"Subject: {subject}",
+                "Date: " + time.strftime("%a, %d %b %Y %H:%M:%S +0000",
+                                         time.gmtime()),
+                f"Message-Id: <gm-{secrets.token_hex(8)}@pol.com>",
+                "MIME-Version: 1.0",
+                "Content-Type: text/plain; charset=ISO-8859-1",
+                "Content-Transfer-Encoding: 8bit"]
+        body = "\r\n".join(head) + "\r\n\r\n" + text.replace("\n", "\r\n") + "\r\n"
+        return body.encode("latin-1", "replace"), subject
+
+    def _report_replies(self, rid):
+        try:
+            with open(os.path.join(self.REPLY_DIR, rid + ".json"),
+                      encoding="utf-8") as f:
+                got = json.load(f)
+        except (OSError, ValueError):
+            return []
+        return got if isinstance(got, list) else []
+
+    def _report_reply(self):
+        """POST {id, text, status?}: mail the reporter from the GM, and record
+        it on the report. `status` (resolved / wontfix / open) is set in the
+        same step when given, so "answer and close" is one click."""
+        body = self._json_body()
+        rid = str(body.get("id") or "").strip()
+        text = str(body.get("text") or "").strip()
+        status = body.get("status")
+        if not rid or os.path.basename(rid) != rid:
+            return self._send(404, {"error": "no such report"})
+        try:
+            with open(os.path.join(REPORT_DIR, rid + ".json"), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            return self._send(404, {"error": "no such report"})
+        if not text:
+            return self._send(400, {"error": "write a message first"})
+        if len(text) > self.REPLY_MAX:
+            return self._send(400, {"error": f"keep it under {self.REPLY_MAX} characters"})
+        to = str(rec.get("from") or "").strip()
+        if "@" not in to:
+            return self._send(400, {"error": "this report has no sender address "
+                                             "to answer"})
+        raw, subject = self._gm_mail(
+            to, "Re: " + (rec.get("subject") or "your report"), text)
+        who = (self._session() or {}).get("user") or "operator"
+        try:
+            db = _db()
+            try:
+                if accounts.member_by_mail(db, to) is None:
+                    return self._send(400, {"error": f"{to} is not one of our "
+                                                     "mailboxes"})
+                accounts.deliver_mail(db, to, raw, sender=self.GM_MAIL_FROM,
+                                      subject=subject)
+            finally:
+                db.close()
+        except Exception as exc:
+            return self._send(500, {"error": f"could not deliver: {exc}"})
+        with self._REPLY_LOCK:
+            rows = self._report_replies(rid)
+            rows.append({"at": time.time(), "by": who, "to": to, "text": text})
+            try:
+                os.makedirs(self.REPLY_DIR, exist_ok=True)
+                tmp = os.path.join(self.REPLY_DIR, rid + ".json.tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(rows, f, ensure_ascii=False, indent=1)
+                os.replace(tmp, os.path.join(self.REPLY_DIR, rid + ".json"))
+            except OSError as exc:
+                print(f"[admin] reply to {rid} was delivered but not recorded: "
+                      f"{exc}", flush=True)
+        if status:
+            try:
+                adb = adminusers.connect()
+                try:
+                    adminusers.triage_set(adb, "reports", rid, status,
+                                          body.get("note"), by=who)
+                finally:
+                    adb.close()
+            except adminusers.ModError as exc:
+                return self._send(400, {"error": f"mail sent, but {exc}"})
+        print(f"[admin] {who} answered report {rid} by mail to {to}", flush=True)
+        self._send(200, {"ok": True, "id": rid, "to": to, "replies": rows})
+
+    # -- who is behind a report or a GM call ---------------------------------- #
+    # A report names its sender by mail address, a GM call by handle. Both
+    # resolve to a member, and that is what links one to the other. Read once
+    # per list request; a lookup that fails leaves the row unlinked, never
+    # breaks the list.
+    def _member_links(self, reports=(), tickets=()):
+        rep_mid, tic_mid, polid = {}, {}, {}
+        try:
+            db = _db()
+        except Exception:
+            return rep_mid, tic_mid, polid
+        try:
+            for r in reports:
+                try:
+                    m = accounts.member_by_mail(db, r.get("from"))
+                except Exception:
+                    m = None
+                if m is not None:
+                    rep_mid[r["id"]] = m["id"]
+                    polid[m["id"]] = m["polid"]
+            for t in tickets:
+                try:
+                    h = accounts.handle_by_name(db, t.get("handle"))
+                    if h is None and t.get("guid"):
+                        # in-game calls leave the handle empty; gmd records the
+                        # caller's handle id (the 0x101 session dwords) instead
+                        h = accounts.handle_by_client_guid(db, t["guid"])
+                except Exception:
+                    h = None
+                if h is not None:
+                    tic_mid[t["id"]] = h["member_id"]
+                    if not t.get("handle"):
+                        t["caller"] = h["handle_name"]
+                    if h["member_id"] not in polid:
+                        row = db.execute("SELECT polid FROM member WHERE id = %s",
+                                         (h["member_id"],)).fetchone()
+                        if row is not None:
+                            polid[h["member_id"]] = row["polid"]
+        finally:
+            db.close()
+        return rep_mid, tic_mid, polid
+
+    def _ticket_rows(self):
+        """(id, handle) for every GM call on disk, without the per-ticket
+        enrichment `_gm_calls_list` does."""
+        out = []
+        try:
+            names = sorted(os.listdir(GM_CALL_DIR), reverse=True)
+        except OSError:
+            return out
+        for name in names[:500]:
+            if not self._TICKET_NAME.fullmatch(name):
+                continue
+            try:
+                with open(os.path.join(GM_CALL_DIR, name), encoding="utf-8",
+                          errors="replace") as f:
+                    rec = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if isinstance(rec, dict):
+                out.append({"id": name[:-len(".json")],
+                            "handle": rec.get("handle"), "guid": rec.get("guid"),
+                            "request_no": rec.get("request_no")})
+        return out
+
+    def _report_rows(self):
+        out = []
+        try:
+            names = sorted(os.listdir(REPORT_DIR), reverse=True)
+        except OSError:
+            return out
+        for name in names[:500]:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(REPORT_DIR, name), encoding="utf-8") as f:
+                    rec = json.load(f)
+            except (OSError, ValueError):
+                continue
+            out.append({"id": name[:-len(".json")], "from": rec.get("from")})
+        return out
 
     #: Which extensions the panel will hand back inline, and as what. Anything
     #: not named here is served as PLAIN TEXT rather than guessed at: these are
@@ -2425,6 +2629,9 @@ class Handler(BaseHTTPRequestHandler):
             mine = state.get(rec["id"]) or {}
             rec["status"] = mine.get("status") or "open"
             rec["status_by"], rec["status_at"] = mine.get("by"), mine.get("at")
+            if rec.get("cancelled_at") and not mine:
+                # the player withdrew it from Confirm/Cancel (gmd, 0x1101)
+                rec["status"], rec["status_by"] = "closed", "the player"
             rec["connected"] = (rec.get("request_no"),
                                 (rec.get("peer") or "").rsplit(":", 1)[0]) in live
             rec["room_shared"] = not rec.get("room") or rec["room"] == shared
@@ -2432,11 +2639,19 @@ class Handler(BaseHTTPRequestHandler):
             if not self._is_owner():
                 rec.pop("peer", None)            # a moderator has no use for an IP
             out.append(rec)
+        # The caller's POL ID and any Report User reports the same member sent.
+        rep_mid, tic_mid, polid = self._member_links(self._report_rows(), out)
+        for rec in out:
+            mid = tic_mid.get(rec["id"])
+            rec["polid"] = polid.get(mid)
+            rec["reports"] = [r for r, m in rep_mid.items() if mid and m == mid]
         self._send(200, out)
 
     def _gm_ticket(self):
-        """Mark a ticket open / answered / closed. Bookkeeping only: nothing
-        here reaches the client, which has no message for it."""
+        """Mark a ticket open / answered / closed. CLOSED reaches the player:
+        gmd stops holding the ticket (0x801 bit 0x02), and on its next 0x801
+        the client ends the call and deletes GmCall.bin, which clears every
+        title's GM Call notice. Open and answered keep it held."""
         body = self._json_body()
         tid, status = (body.get("id") or "").strip(), body.get("status")
         if not self._TICKET_NAME.fullmatch(tid + ".json"):
