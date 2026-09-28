@@ -2764,6 +2764,8 @@ class Handler(BaseHTTPRequestHandler):
             mine = state.get(rec["id"]) or {}
             rec["status"] = mine.get("status") or "open"
             rec["status_by"], rec["status_at"] = mine.get("by"), mine.get("at")
+            rec["knocked_at"], rec["knocked_by"] = (mine.get("knocked_at"),
+                                                    mine.get("knocked_by"))
             if rec.get("cancelled_at") and not mine:
                 # the player withdrew it from Confirm/Cancel (gmd, 0x1101)
                 rec["status"], rec["status_by"] = "closed", "the player"
@@ -2786,20 +2788,37 @@ class Handler(BaseHTTPRequestHandler):
         """Mark a ticket open / answered / closed. CLOSED reaches the player:
         gmd stops holding the ticket (0x801 bit 0x02), and on its next 0x801
         the client ends the call and deletes GmCall.bin, which clears every
-        title's GM Call notice. Open and answered keep it held."""
+        title's GM Call notice. Open and answered keep it held.
+
+        `knock` (true / false) is the GM saying "your chat is ready": gmd then
+        offers that caller Start (flags 0x20, see gmd.KNOCK_ONLY). It can be sent
+        with or without a status; closing a ticket withdraws its knock."""
         body = self._json_body()
         tid, status = (body.get("id") or "").strip(), body.get("status")
+        knock = body.get("knock")
         if not self._TICKET_NAME.fullmatch(tid + ".json"):
             return self._send(400, {"error": "no such ticket"})
-        if status not in self.GM_TICKET_STATUSES:
+        if status is not None and status not in self.GM_TICKET_STATUSES:
             return self._send(400, {"error": "status must be open, answered "
                                              "or closed"})
+        if status is None and knock is None:
+            return self._send(400, {"error": "nothing to change"})
         if not os.path.exists(os.path.join(GM_CALL_DIR, tid + ".json")):
             return self._send(404, {"error": "no such ticket"})
         who = (self._session() or {}).get("user") or "operator"
         with self._GM_TICKET_LOCK:
             st = self._gm_ticket_state()
-            st[tid] = {"status": status, "by": who, "at": time.time()}
+            cur = dict(st.get(tid) or {})
+            if status is not None:
+                cur.update(status=status, by=who, at=time.time())
+            cur.setdefault("status", "open")
+            if knock:
+                cur.update(knocked_at=time.time(), knocked_by=who)
+            if knock is False or cur["status"] == "closed":
+                cur.pop("knocked_at", None)
+                cur.pop("knocked_by", None)
+            st[tid] = cur
+            status = cur["status"]
             tmp = self.GM_TICKET_STATE + ".tmp"
             try:
                 with open(tmp, "w", encoding="utf-8") as f:
@@ -2807,8 +2826,11 @@ class Handler(BaseHTTPRequestHandler):
                 os.replace(tmp, self.GM_TICKET_STATE)
             except OSError as exc:
                 return self._send(500, {"error": f"could not save: {exc}"})
-        print(f"[admin] {who} marked GM call {tid} {status}", flush=True)
-        self._send(200, {"ok": True, "id": tid, "status": status})
+        print(f"[admin] {who} marked GM call {tid} {status}"
+              + (" and knocked" if knock else " (knock withdrawn)"
+                 if knock is False else ""), flush=True)
+        self._send(200, {"ok": True, "id": tid, "status": status,
+                         "knocked_at": cur.get("knocked_at")})
 
     # -- the GM desk: queue control, and the room ----------------------------- #
     #

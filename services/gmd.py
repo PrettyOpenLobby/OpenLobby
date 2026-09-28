@@ -182,6 +182,16 @@ TICKET_STATE_PATH = os.path.join(TICKET_DIR, "gm-tickets.json")
 #: handle Bluebell's stored client_guid (checked on prod 2026-09-28).
 #: POL_GMD_HOLD_TICKETS=0 restores the old behaviour (bit never set).
 HOLD_TICKETS = os.environ.get("POL_GMD_HOLD_TICKETS", "1") != "0"
+#: START IS PER CALLER. Flags 0x20 tells a client "YOUR reserved GM chat is
+#: ready": it saves mode 2 to gmtool/reserve, shows "GM chat is ready.", lights
+#: the home-page GM button and, in Dirge of Cerberus, prints "A GM has requested
+#: to speak with you". Served desk-wide (the old on/off-duty 0x60/0x20) it told
+#: every caller that. Now it is set only for a caller whose held ticket the desk
+#: has KNOCKED (gm-tickets.json `knocked_at`), and 0x40 (Join, an invitation into
+#: someone else's chat) is not offered at all yet. POL_GMD_KNOCK_ONLY=0 restores
+#: the desk-wide flags.
+KNOCK_ONLY = os.environ.get("POL_GMD_KNOCK_ONLY", "1") != "0"
+FLAG_START, FLAG_JOIN = 0x20, 0x40
 TICKET_RE = re.compile(r"gm-\d{8}T\d{6}-(\d+)\.json")
 #: Stage-2 0x201 fields the client copies into its request record, as MESSAGE
 #: offsets (body + 0x18).
@@ -289,6 +299,7 @@ def open_ticket_for(guid, req_no=0, ticket_dir=None):
         tid = name[:-len(".json")]
         if rec.get("cancelled_at") or (state.get(tid) or {}).get("status") == "closed":
             return None                # their newest ticket is finished
+        rec = dict(rec, _knocked=(state.get(tid) or {}).get("knocked_at"))
         return name, rec
     return None
 
@@ -717,7 +728,8 @@ class Gmd:
         struct.pack_into("<HHHI", m, 6, 0x0201, 0x200, echoA, echoC)
         struct.pack_into("<II", m, 0x28, ses.dwA, ses.dwB)
         if ses.held:
-            fill_held_ticket(m, ses.held[1], effective_flags(read_control())[0])
+            fill_held_ticket(m, ses.held[1],
+                             self.caller_flags(ses, effective_flags(read_control())[0]))
         return checksum(bytes(m[:wire_len(0x200)]), 0x200), 0x200
 
     def generic(self, ses, rtype, echoA, echoC, body_edit=None):
@@ -759,6 +771,16 @@ class Gmd:
             log(f"    ticket {was[0]} is finished: bit 0x02 cleared, the client "
                 f"resets its call on this 0x801")
             ses.req_no = 0
+
+    @staticmethod
+    def caller_flags(ses, flags):
+        """The Start/Join bits for THIS caller (see KNOCK_ONLY)."""
+        if not KNOCK_ONLY:
+            return flags
+        flags &= ~(FLAG_START | FLAG_JOIN)
+        if ses is not None and ses.held and ses.held[1].get("_knocked"):
+            flags |= FLAG_START
+        return flags
 
     def cancel_held(self, ses):
         """The player cancelled from Confirm/Cancel (0x1101). Recorded on the
@@ -916,6 +938,7 @@ class Gmd:
                     flags, why = effective_flags(self.control)
                     self.refresh_held(ses)
                     flags = (flags | BIT_HELD) if ses.held else (flags & ~BIT_HELD)
+                    flags = self.caller_flags(ses, flags)
                     q = self.queue_depth(ses)
                     stamp = (flags, q, why)
                     if stamp != self.control_seen:
