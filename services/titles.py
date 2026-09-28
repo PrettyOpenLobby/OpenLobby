@@ -82,6 +82,10 @@ class Core:
       RESOURCE_DIR                    the resource store root
       _peer_is_ps2()                  is THIS lobby connection a PS2 build
       _self_ip()                      the address this server advertises
+      _advertise_configured()         whether an advertise address is set, so
+                                      _self_ip() answers per client (the public
+                                      address to an internet peer, the LAN one
+                                      to a LAN peer) rather than one fixed host
       _peer_build                     thread-local: .ps2 and .ip of THIS connection
                                       (set on the lobby band and the auth band)
       _client_builds(address)         {"<region>/<product>": {"version", "seen"}}:
