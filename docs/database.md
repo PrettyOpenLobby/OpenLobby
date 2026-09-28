@@ -162,6 +162,23 @@ one title), `member_groups` (the groups a member belongs to),
 `member_id_by_handle_name` (a handle typed by a person) and
 `record_character_name` (the write side of `character_names`).
 
+A few more answer questions titles used to ask with their own SQL:
+
+```python
+accounts.friend_row_by_id(conn, friend_id)       # (peer_name, kind) or None
+accounts.member_created_list(conn)               # [(member_id, created_at)]
+accounts.member_content_id_map(conn, code, any_status=True)
+                                                 # {member_id: content_id}
+accounts.handle_client_guid(conn, handle_id)     # int (0 if unseen) or None
+accounts.open_session(conn, member_id, ..., created_at=None)
+```
+
+`member_content_id_map` picks each member's Content ID the way
+`member_content_id` does: the primary handle first, then the oldest handle,
+then slot 0. `created_at` on `open_session` takes a datetime (naive means
+UTC) or ISO-8601 text, so a test can open a session that is already old
+instead of rewriting the row afterwards.
+
 `polcore.kv` has the same methods whichever backend is behind it: `get`,
 `set` with a `ttl` in seconds, `setnx` for a lock with a timeout, hashes
 (`hset`, `hgetall`), a FIFO queue (`push`, and `pop` with an optional

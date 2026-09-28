@@ -975,6 +975,17 @@ def learn_client_guid(conn, handle_id, value):
     return True
 
 
+def handle_client_guid(conn, handle_id):
+    """What the client behind this handle calls itself (see
+    `learn_client_guid`): the stored value as an int, 0 when none has been
+    seen yet, or None when there is no such handle."""
+    row = conn.execute("SELECT client_guid FROM handle WHERE id = %s",
+                       (int(handle_id),)).fetchone()
+    if row is None:
+        return None
+    return int(row["client_guid"] or 0)
+
+
 def handle_by_client_guid(conn, value):
     """The handle that calls itself `value`, or None."""
     if not value:
@@ -2110,6 +2121,30 @@ def content_id_list(conn, content_code, active_only=True):
         q + " ORDER BY content_id", (int(content_code),)).fetchall()]
 
 
+def member_content_id_map(conn, code, any_status=True):
+    """`{member id: Content ID}` for one game, one entry per member that holds
+    one: the id `member_content_id` would return for that member (primary
+    handle first, then the oldest handle, then slot 0). With `any_status`
+    (the default) an inactive link counts too, as for a ranking that keeps a
+    suspended player's row; `any_status=False` counts active links only."""
+    q = ("SELECT DISTINCT ON (h.member_id) h.member_id AS member_id,"
+         " hc.content_id AS cid FROM handle_content hc"
+         " JOIN handle h ON h.id = hc.handle_id"
+         " WHERE hc.content_code = %s AND hc.content_id IS NOT NULL")
+    if not any_status:
+        q += " AND hc.status = 'active'"
+    rows = conn.execute(q + " ORDER BY h.member_id, h.is_primary DESC,"
+                            " h.id ASC, hc.slot ASC", (int(code),)).fetchall()
+    return {int(r["member_id"]): r["cid"] for r in rows}
+
+
+def member_created_list(conn):
+    """`[(member id, created_at)]` for every member, oldest id first.
+    `created_at` is the stored ISO-8601 UTC text."""
+    return [(int(r["id"]), r["created_at"]) for r in conn.execute(
+        "SELECT id, created_at FROM member ORDER BY id").fetchall()]
+
+
 def title_content_slots():
     """`{content code: Content IDs per handle}` for the titles loaded in this
     process that issue more than one (titles.Title.content_slots). Empty when
@@ -3179,6 +3214,18 @@ def set_friend_flags(conn, handle_id, row_id, low=None, flag=None):
     return True
 
 
+def friend_row_by_id(conn, friend_id):
+    """`(peer_name, kind)` of the friend row with this id, or None. The row's
+    id alone, whoever holds it: a title that knows a POL group by its row id
+    (Dirge of Cerberus names a unit after the group) has no handle to scope
+    the lookup to."""
+    row = conn.execute("SELECT peer_name, kind FROM friend WHERE id = %s",
+                       (int(friend_id),)).fetchone()
+    if row is None:
+        return None
+    return row["peer_name"], int(row["kind"])
+
+
 def friend_row_by_guid(conn, handle_id, guid):
     """The friend row this handle holds for `guid`, or None.
 
@@ -4167,10 +4214,30 @@ def ucs_params(conn, polid):
 # --------------------------------------------------------------------------- #
 # sessions
 # --------------------------------------------------------------------------- #
+def _session_time(value):
+    """An aware UTC datetime for open_session's `created_at`: now for None."""
+    if value is None:
+        return datetime.datetime.now(datetime.timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        value = datetime.datetime.fromisoformat(text)
+    if not isinstance(value, datetime.datetime):
+        raise TypeError("created_at wants a datetime or ISO-8601 text, not %r"
+                        % (value,))
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc)
+
+
 def open_session(conn, member_id, nick=None, peer_ip=None, iv=None,
-                 lobby_port=None, ttl_seconds=3600):
+                 lobby_port=None, ttl_seconds=3600, created_at=None):
+    """Record a login and return its token. `created_at` (a datetime, naive
+    meaning UTC, or ISO-8601 text) dates the session other than now, for a
+    test that needs an old one; the expiry is `ttl_seconds` after it."""
     token = secrets.token_hex(16)
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = _session_time(created_at)
     exp = now + datetime.timedelta(seconds=ttl_seconds)
     conn.execute(
         "INSERT INTO session (token, member_id, nick, peer_ip, iv, lobby_port,"

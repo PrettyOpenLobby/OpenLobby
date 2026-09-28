@@ -127,6 +127,11 @@ SUITES = [
     # transactions, what a close leaves behind, thread exclusivity, types --
     # is unchanged on PostgreSQL.
     ("dbpool",        [sys.executable, "dbpool_test.py"], TOOLS, {}),
+    # The lookups the title repositories call instead of reading the account
+    # tables with their own SQL (a friend row by id, member ages, the Content
+    # ID of every member for one game, a handle's client guid, and a session
+    # dated in the past for a test).
+    ("accounts_lookups", [sys.executable, "test_accounts_lookups.py"], TESTS, {}),
     # polcore.db and polcore.kv, the PostgreSQL and Valkey layer the services
     # are moving onto. Each starts throwaway containers (tools/pgtest.py) and
     # reports SKIP without Docker; POL_TEST_REQUIRE_DB=1 makes that a failure.
