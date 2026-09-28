@@ -124,6 +124,11 @@ def main():
         # The 4:5 STATUS watcher, started beside the zone one because it is the
         # same mechanism over a sibling file -- see `_member_status_watcher`.
         threading.Thread(target=pushspool._member_status_watcher, daemon=True).start()
+        # And for which character a member plays, where a title plugin knows it
+        # (titles.Title.playing_characters).
+        if titles.loaded():
+            threading.Thread(target=pushspool._title_character_watcher,
+                             daemon=True).start()
         # Same idea for the friend-ROW push, and for a sharper reason: pushing
         # one at login costs a POL-5135 and a relogin when it is wrong.
         threading.Thread(target=pushspool._row_fire_watcher, daemon=True).start()
