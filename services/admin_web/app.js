@@ -1018,7 +1018,47 @@ function showReport(r) {
   $("#reportLog").hidden = !r.log;
   $("#reportLog").textContent = r.log || "";
   triPaint("rep", "reports", r, () => renderReports());
+  const calls = r.gm_calls || [];
+  $("#repWho").innerHTML = (r.polid ? `Sent by POL ID <b class="mono">${esc(r.polid)}</b>.` :
+      `The sender address matches no account.`) +
+    (calls.length ? ` <a href="#" id="repToGm">${calls.length} GM call${calls.length === 1 ? "" : "s"} from this player</a>` : "");
+  const link = $("#repToGm");
+  if (link) link.onclick = (e) => {
+    e.preventDefault(); GM_SEL = calls[0]; GM_AUTOSEL = true; GM_TICKET_SIG = ""; location.hash = "#gmcalls";
+  };
+  $("#repReplyTo").textContent = r.from || "(no address)";
+  repPaintReplies(r);
+  $("#repReplyText").value = "";
+  const send = async (b, status) => {
+    const text = $("#repReplyText").value.trim();
+    if (!text) { toast("Write a message first", true); return; }
+    b.disabled = true;
+    try {
+      const out = await api("/api/report-reply", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: r.id, text, status }) });
+      r.replies = out.replies || r.replies;
+      if (status) Object.assign(r, { status, status_by: SESSION.user || "you",
+                                     status_at: Date.now() / 1000 });
+      $("#repReplyText").value = "";
+      toast(`Mail sent to ${out.to}`);
+      repPaintReplies(r);
+      triPaint("rep", "reports", r, () => renderReports());
+      renderReports();
+    } catch (err) { toast(err.message, true); }
+    b.disabled = false;
+  };
+  $("#repReplySend").onclick = (e) => send(e.currentTarget, null);
+  $("#repReplyResolve").onclick = (e) => send(e.currentTarget, "resolved");
+  $("#repReplyResolve").hidden = triClosed(r);
   $("#reportLogPanel").style.display = "";
+}
+
+function repPaintReplies(r) {
+  const rows = r.replies || [];
+  $("#repReplies").innerHTML = rows.map((x) =>
+    `<div class="rep-sent"><div class="tri-by">Sent by ${esc(x.by)}, ${esc(ago(x.at * 1000))}</div>` +
+    `<pre style="white-space:pre-wrap">${esc(x.text)}</pre></div>`).join("");
 }
 
 // ---- report status, shared by Issues and Reports ----
@@ -1395,10 +1435,13 @@ async function loadGmCalls() {
   if (!Array.isArray(rows)) return;
   GM_CALLS = rows;
   gmBadge(rows);
-  if (GM_AUTOSEL && !GM_SEL) {
-    // First visit: open the newest request that still needs an answer.
-    const first = rows.find((r) => r.status === "open");
-    if (first) GM_SEL = first.id;
+  if (GM_AUTOSEL) {
+    // First visit: open the newest request that still needs an answer, unless
+    // a link from a report already picked one.
+    if (!GM_SEL) {
+      const first = rows.find((r) => r.status === "open");
+      if (first) GM_SEL = first.id;
+    }
     GM_AUTOSEL = false;
     gmFollowTicketRoom();
   }
@@ -1424,7 +1467,7 @@ function gmRenderList() {
     `<div class="gm-item${r.id === GM_SEL ? " sel" : ""}${r.status === "closed" ? " closed" : ""}" data-id="${esc(r.id)}">` +
       `<div class="gm-item-top">` +
         `<span class="gm-item-who">${r.connected ? `<span class="gm-dot" title="On a GM Call now"></span>` : ""}` +
-          `${esc(gmClean(r.handle)) || "(no handle)"}</span>` +
+          `${esc(gmClean(r.handle) || r.caller || "") || "(no handle)"}</span>` +
         `<span class="gm-item-when">${esc(gmAgo(gmIso(r.received_at)))}</span></div>` +
       `<div class="gm-item-subj">${esc(gmClean(r.subject)) || "(no subject)"}</div>` +
       `<div><span class="gm-st ${esc(r.status)}">${esc(r.status)}</span></div>` +
@@ -1463,7 +1506,7 @@ function gmRenderTicket() {
   $("#gmEmpty").hidden = !!r;
   $("#gmTicket").hidden = !r;
   if (!r) return;
-  $("#gmTWho").textContent = gmClean(r.handle) || "(no handle)";
+  $("#gmTWho").textContent = gmClean(r.handle) || r.caller || "(no handle)";
   $("#gmTSubj").textContent = gmClean(r.subject) || "(no subject)";
   $("#gmTChips").innerHTML =
     (r.connected ? `<span class="gm-st live">On a GM Call now</span>` : "") +
@@ -1475,8 +1518,13 @@ function gmRenderTicket() {
     r.request_no != null ? `request #${r.request_no}` : "",
     t ? `${gmDay(t)} ${gmTime(t)} (${gmAgo(t)})` : "",
     r.peer ? `from ${String(r.peer).replace(/:\d+$/, "")}` : "",
+    r.polid ? `POL ID ${r.polid}` : "",
   ].filter(Boolean);
-  $("#gmTMeta").innerHTML = meta.map((m) => `<span>${esc(m)}</span>`).join("");
+  const reps = r.reports || [];
+  $("#gmTMeta").innerHTML = meta.map((m) => `<span>${esc(m)}</span>`).join("") +
+    (reps.length && can("reports") ? `<span><a href="#" id="gmToRep">${reps.length} report${reps.length === 1 ? "" : "s"} from this player</a></span>` : "");
+  const toRep = $("#gmToRep");
+  if (toRep) toRep.onclick = (e) => { e.preventDefault(); REPORT_SEL = reps[0]; location.hash = "#reports"; };
   $("#gmTBody").textContent = gmClean(r.body).trim() || "(no message text)";
   const btn = (st, label, cls) =>
     `<button class="${cls}" data-st="${st}">${label}</button>`;

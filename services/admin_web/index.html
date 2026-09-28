@@ -896,6 +896,18 @@
           <div class="tri-acts" id="repStActs"></div>
         </div>
         <pre id="reportExpl" style="white-space:pre-wrap"></pre>
+        <p class="hint" id="repWho"></p>
+        <div class="rep-reply">
+          <h3>Answer the reporter</h3>
+          <p class="hint">Sent as a PlayOnline mail from the GM to <span id="repReplyTo" class="mono"></span>.</p>
+          <div id="repReplies"></div>
+          <textarea id="repReplyText" rows="5" maxlength="2000"
+                    placeholder="Thank you for your report. We looked into it and..."></textarea>
+          <div class="tri-acts">
+            <button class="act sm" id="repReplyResolve">Send and mark resolved</button>
+            <button class="ghost sm" id="repReplySend">Send</button>
+          </div>
+        </div>
         <p class="hint" id="reportLogHint">Attached chat log:</p>
         <pre id="reportLog" style="white-space:pre-wrap; overflow-x:auto"></pre>
       </div>
