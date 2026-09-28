@@ -1553,8 +1553,10 @@ async function gmKnock(id, on) {
     if (r) r.knocked_at = out.knocked_at || null;
     GM_TICKET_SIG = "";
     gmRenderTicket();
-    toast(on ? "Knocked: the player's GM Call screen will say GM chat is ready"
-             : "Knock withdrawn");
+    toast(!on ? "Knock withdrawn"
+      : out.knock_message === "sent" ? "Knocked: the player has been told GM chat is ready"
+      : `Knocked. Their GM Call screen will show it, but the live message was not sent: ${out.knock_message}`,
+      on && out.knock_message !== "sent");
   } catch (e) { toast(e.message, true); }
 }
 

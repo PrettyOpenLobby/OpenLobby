@@ -6,7 +6,7 @@ import threading
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
 from srvcore import _arm_stack_dumps, expand_ports, install_stderr_capture, load_config, log
 from authtoken import load_stamps
-from . import authcap, authkick, authresume, authserv, directory, lobbyserver, mailserver, patch, posture, pushspool, redirect, serving, worldserver
+from . import authcap, authkick, authresume, authserv, directory, gmknock, lobbyserver, mailserver, patch, posture, pushspool, redirect, serving, worldserver
 
 
 
@@ -69,6 +69,8 @@ def main():
         # The admin panel's Kick reaches the live channels through this thread
         # (core/authkick.py). A failure there costs Kick, never a login.
         threading.Thread(target=authkick._kick_watcher, daemon=True).start()
+        # And its GM Call Knock, the same way (core/gmknock.py).
+        threading.Thread(target=gmknock._knock_watcher, daemon=True).start()
         # THE LISTEN OFFSET. With the front relay in place (services/authrelay.py)
         # the RELAY owns the ports the client dials and we sit behind it, so the
         # two processes need different port numbers -- docker-compose.prod.yml

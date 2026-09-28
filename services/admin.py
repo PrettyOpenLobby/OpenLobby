@@ -863,6 +863,36 @@ def _request_kick(polid, wait=_KICK_WAIT):
     return json.loads(answer)
 
 
+#: The GM Call Knock is sent by authsess the same way (core/gmknock.py owns
+#: these key names): it mints the knock message and pushes it to the player.
+_KNOCK_QUEUE = "gmknock:queue"
+_KNOCK_REPLY = "gmknock:reply:"
+
+
+def _request_knock(ticket, action=0, wait=_KICK_WAIT):
+    """Ask the running authsess to send `ticket`'s player a GM knock (action 0)
+    or a close (2). Returns its answer; raises TimeoutError, withdrawing the
+    request, when no authsess answered within `wait` seconds."""
+    from polcore import kv
+    reply = _KNOCK_REPLY + secrets.token_hex(8)
+    raw = json.dumps({"reply": reply, "expires": time.time() + wait,
+                      "handle": ticket.get("handle") or "",
+                      "guid": ticket.get("guid") or 0,
+                      "room": ticket.get("room") or "",
+                      "key": os.environ.get("POL_GMD_CHAT_KEY", ""),
+                      "request_no": ticket.get("request_no") or 0,
+                      "action": action})
+    kv.push(_KNOCK_QUEUE, raw)
+    deadline = time.monotonic() + wait
+    answer = None
+    while answer is None and time.monotonic() < deadline:
+        answer = kv.pop(reply, timeout=max(0.1, min(1.0, deadline - time.monotonic())))
+    if answer is None:
+        kv.lrem(_KNOCK_QUEUE, raw)
+        raise TimeoutError("no auth service answered the knock request")
+    return json.loads(answer)
+
+
 def _db():
     return accounts.connect()
 
@@ -2914,8 +2944,25 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[admin] {who} marked GM call {tid} {status}"
               + (" and knocked" if knock else " (knock withdrawn)"
                  if knock is False else ""), flush=True)
+        # The live half of a knock: the message that tells the player now,
+        # rather than on their GM Call screen's next check-in. The flag above
+        # stands either way, so a failure here is reported, not fatal.
+        message = None
+        if knock:
+            try:
+                with open(os.path.join(GM_CALL_DIR, tid + ".json"),
+                          encoding="utf-8", errors="replace") as f:
+                    ticket = json.load(f)
+                got = _request_knock(ticket)
+                message = "sent" if got.get("ok") else got.get("error") or "not sent"
+            except TimeoutError as exc:
+                message = str(exc)
+            except Exception as exc:
+                message = f"not sent ({exc})"
+            print(f"[admin] knock message for {tid}: {message}", flush=True)
         self._send(200, {"ok": True, "id": tid, "status": status,
-                         "knocked_at": cur.get("knocked_at")})
+                         "knocked_at": cur.get("knocked_at"),
+                         "knock_message": message})
 
     # -- the GM desk: queue control, and the room ----------------------------- #
     #
