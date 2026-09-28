@@ -25,8 +25,8 @@ What this suite asserts, each against the OLD behaviour first:
   3. The free warning: a member flip on one address/socket logs a WARNING: line.
      One account relogging in (new sid, same member) must NOT warn -- the
      single-account machine stays silent.
-  4. The per-IV claims survive the JSON round-trip through auth-sessions.json
-     (the cross-container path), so the arbitration verdict is the same after
+  4. The per-IV claims survive the JSON round-trip through the shared session
+     store (the cross-container path), so the arbitration verdict is the same after
      a reload.
 
 The stamp/IV replay pool itself is deliberately untouched (it is load-bearing;
@@ -165,12 +165,12 @@ check(sid2 == "u_live" and R._session_sid() == "u_live",
       "continuity: the bound thread stays with its session")
 
 # --------------------------------------------------------------------------- #
-print("2. per-IV claims survive the auth-sessions.json round-trip")
-# Simulate the OTHER container: drop memory, reload from the shared file.
+print("2. per-IV claims survive the round-trip through the shared session store")
+# Simulate the OTHER container: drop memory, reload from the shared store.
 with R._SESSIONS_LOCK:
     R._sessions_save_locked()
     R._SESSIONS.clear()
-R._SESSIONS_MTIME[0] = 0.0
+R._SESSIONS_VER[0] = None
 fresh_thread()
 iv, sid = R._lobby_bind(frame_under(IV_SHARED), IP, "test:3")
 who, sid = bound_member()

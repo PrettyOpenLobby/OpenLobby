@@ -22,7 +22,6 @@ sys.path.insert(0, os.path.join(HERE, "..", "services"))
 tmp = tempfile.mkdtemp(prefix="digesttest-")
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ.pop("POL_LOGIN_PW_KEY", None)
 # The key's DEFAULT home: the data directory, where accounts.db used to sit.
 os.environ.pop("POL_LOGIN_PW_KEYFILE", None)

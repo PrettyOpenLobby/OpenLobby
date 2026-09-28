@@ -36,9 +36,6 @@ os.environ["POL_LOG_DIR"] = LOG_DIR
 # scratch database (tools/pgtest.py), certainly not the real one.
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_SESSION_FILE"] = os.path.join(LOG_DIR, "auth-sessions.json")
-os.environ["POL_ROOMS_FILE"] = os.path.join(LOG_DIR, "rooms-live.json")
-os.environ["POL_STAMP_FILE"] = os.path.join(LOG_DIR, "auth-stamps.json")
 # Emit modes on: we WANT the lobby to answer with the full content-list reply so
 # we can check it carries Tetra Master. ("full" = 81 00 accept + content + world;
 # "accept" would send a bare header with no body to eyeball on live captures.)
@@ -661,11 +658,11 @@ def hop_created_rooms():
     # in the process that OWNS the registry, which is exactly the blind spot that
     # let a created room register correctly and still never appear: the browser was
     # asking a different process's empty dicts. So ask the way `login` asks --
-    # owner flag off, memory ignored, file only.
+    # owner flag off, memory ignored, published snapshot only.
     owner_rows = R._room_search_rows([], 1103)
     owner_users = R._zone_summary_row(1103)["users"]
     R._ROOMS_OWNER[0] = False
-    R._ROOMS_CACHE["mtime"] = -1.0
+    R._ROOMS_CACHE["raw"] = None
     try:
         reader_rows = R._room_search_rows([], 1103)
         check("created: a READER container sees the room too",
@@ -903,12 +900,13 @@ def hop_session_file():
     """THE TWO-CONTAINER SPLIT. `authsess` recovers the IV; `login` needs it.
 
     They are separate processes (docker-compose: authsess runs `authserv`, login
-    runs `directory,lobby,world,mail`), and the only thing joining them is
-    data/auth-sessions.json. So the file has to behave like a shared table, not
-    like one process's private state.
+    runs `directory,lobby,world,mail`), and the only thing joining them is the
+    shared session store (`authsess:s:*` in polcore.kv). So it has to behave like
+    a shared table, not like one process's private state.
 
     Live failure this guards, 2026-08-13: binding a session per connection made
-    `login` write its own placeholder-only table over the file, destroying the
+    `login` write its own placeholder-only table over the shared file of the
+    time, destroying the
     real sessions `authsess` had put there. The lobby then had no IV for anybody,
     every reply fell back to the XOR path, and the PS2 Viewer waited until it
     gave up -- POL-0010, "disconnected from the server".
@@ -933,22 +931,25 @@ def hop_session_file():
                                  "viewer_open": True}
         R._sessions_save_locked()                  # stands in for `authsess`
 
-    on_disk = json.load(open(R._SESSION_FILE, encoding="utf-8"))
-    check("session file: a real session is published",
+    on_disk = R._sessions_stored()
+    check("session store: a real session is published",
           real_sid in on_disk, str(sorted(on_disk)))
 
     # ...now the OTHER process starts with a placeholder-only table and saves.
+    # A fresh process has read nothing yet, which is what the version reset is.
     with R._SESSIONS_LOCK:
         R._SESSIONS.clear()
+        R._SESSIONS_VER[0] = None
+        R._SESSIONS_WRITTEN.clear()
         R._SESSIONS[junk_sid] = {"iv": None, "ivs": [], "member_id": None,
                                  "at": time.time(), "peer_ip": "127.0.0.1"}
         R._sessions_save_locked()
-    on_disk = json.load(open(R._SESSION_FILE, encoding="utf-8"))
-    check("session file: the other process did NOT clobber it",
-          real_sid in on_disk, f"file now holds {sorted(on_disk)}")
-    check("session file: placeholder slots are not published",
-          junk_sid not in on_disk, f"file now holds {sorted(on_disk)}")
-    check("session file: the reader adopted the session it read",
+    on_disk = R._sessions_stored()
+    check("session store: the other process did NOT clobber it",
+          real_sid in on_disk, f"store now holds {sorted(on_disk)}")
+    check("session store: placeholder slots are not published",
+          junk_sid not in on_disk, f"store now holds {sorted(on_disk)}")
+    check("session store: the reader adopted the session it read",
           R._SESSIONS.get(real_sid, {}).get("member_id") == 42,
           str(R._SESSIONS.get(real_sid)))
 

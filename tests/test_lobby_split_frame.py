@@ -23,7 +23,6 @@ tmp = tempfile.mkdtemp(prefix="splitframe-")
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 
 import responders  # noqa: E402
 

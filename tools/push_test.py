@@ -216,7 +216,6 @@ except ValueError as exc:
 #   broadcast_event  my profile changed -> everyone WATCHING me
 #   push_to_handle   I did something to you -> only YOU
 # --------------------------------------------------------------------------- #
-import json                                                       # noqa: E402
 import tempfile                                                   # noqa: E402
 import accounts                                                   # noqa: E402
 
@@ -300,19 +299,19 @@ check("offline target is a no-op, not a failure",
 # over an empty registry and report success having sent nothing -- so this is the
 # assertion that the two halves are actually connected.
 # --------------------------------------------------------------------------- #
-responders._PUSH_SPOOL = os.path.join(SCRATCH, "push-spool.jsonl")
+responders._push_spool_clear()
 responders._PUSH_LOCAL[0] = False                    # i.e. we are the LOBBY now
 yui.sent.clear()
 n = responders.broadcast_event(c, ids["Lex"][1], responders._PUSH_EV_PROFILE,
                                "spooled")
 check("lobby-side push delivers nothing directly", n, 0)
 check("lobby-side push does not touch the session", len(yui.sent), 0)
-check("...but it is on disk", os.path.exists(responders._PUSH_SPOOL), True)
+check("...but it is queued for authserv", len(responders._push_spool_pending()), 1)
 
 # Now be authserv: drain what the lobby wrote and check it lands.
 responders._PUSH_LOCAL[0] = True
-with open(responders._PUSH_SPOOL, encoding="utf-8") as f:
-    spooled = [json.loads(l) for l in f if l.strip()]
+spooled = responders._push_spool_pending()
+responders._push_spool_clear()
 check("exactly one record spooled", len(spooled), 1)
 for r in spooled:
     responders._push_deliver(r, c)
@@ -329,11 +328,11 @@ yui.sent.clear()
 # The row push DEFAULTS OFF since it broke login with POL-5135 (see
 # _row_push_enabled), so the fan-out vectors have to opt in explicitly.
 os.environ["POL_FRIEND_ROW_PUSH"] = "1"
-open(responders._PUSH_SPOOL, "w").close()
+responders._push_spool_clear()
 responders.push_friend_icons(None, ids["Yui"][0],
                              [(0, SE_ROW_GUID, 757), (1, SE_ROW_GUID + 1, 903)])
-with open(responders._PUSH_SPOOL, encoding="utf-8") as f:
-    rows = [json.loads(l) for l in f if l.strip()]
+rows = responders._push_spool_pending()
+responders._push_spool_clear()
 check("icon rows spool as one record", len(rows), 1)
 check("...carrying both slots", len(rows[0]["rows"]), 2)
 responders._PUSH_LOCAL[0] = True

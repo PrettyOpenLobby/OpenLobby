@@ -656,7 +656,7 @@ os.environ["POL_MAIL_STALE_ACCEPT"] = "1"
 check("a resolvable sender the reader holds NO row for is retired",
       SNAME in _senders(), False)
 check("the bytes survive under .stale, distinct from a 3:2's .read",
-      any(n.endswith(".stale") for n in os.listdir(mdir)), True)
+      any(n.endswith(".stale") for n in R._res_list(scope="mail")), True)
 check("an unresolvable sender is never guessed at -- 'Someone' stays",
       "Someone" in _senders(), True)
 # The real flow must be untouched: a reader PENDING for the sender is exactly

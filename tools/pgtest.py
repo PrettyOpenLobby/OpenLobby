@@ -23,6 +23,14 @@ any server the suite starts as a subprocess) at it, and drops it at exit.
 tools/run_all.py starts the server once and hands every suite its URL through
 POL_TEST_DATABASE_URL, so a full run pays for one container.
 
+Valkey works the same way. A suite that starts servers in other processes,
+which must see each other's live state, calls `use_fresh_valkey()`: it points
+POL_VALKEY_URL at the test Valkey (`valkey_url()`, started on demand, or
+POL_TEST_VALKEY_URL) with a key prefix of its own, so suites sharing one
+server cannot see each other's keys. A suite that runs in one process needs
+none of this: with POL_VALKEY_URL unset, polcore.kv keeps live state in
+memory.
+
     python tools/pgtest.py      # start one, print its URL, remove it
 """
 import atexit
@@ -37,9 +45,11 @@ import urllib.parse
 
 PG_IMAGE = "postgres:17-alpine"
 PG_PASSWORD = "pgtest"
+VALKEY_IMAGE = "valkey/valkey:8-alpine"
 
 _started = []                  # container ids to remove at exit
 _pg_url = None
+_vk_url = None
 
 #: Seconds to wait for the test server to answer. libpq's own default is to
 #: wait for ever, which turned an unreachable POL_TEST_DATABASE_URL into a
@@ -225,6 +235,62 @@ def use_fresh_database():
     polcore_db = sys.modules.get("polcore.db")
     if polcore_db is not None:
         polcore_db.configure(None)
+    return url
+
+
+def _wait_valkey(url, timeout=30):
+    import valkey
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            valkey.Valkey.from_url(url, socket_connect_timeout=2).ping()
+            return
+        except Exception:                 # noqa: BLE001 -- keep trying
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"valkey at {url} did not answer") from None
+            time.sleep(0.2)
+
+
+def valkey_url():
+    """URL of the test Valkey (started on demand; POL_TEST_VALKEY_URL wins)."""
+    global _vk_url
+    if _vk_url:
+        return _vk_url
+    given = os.environ.get("POL_TEST_VALKEY_URL", "").strip()
+    if given:
+        _wait_valkey(given, timeout=CONNECT_TIMEOUT)
+        _vk_url = given
+        return _vk_url
+    if not docker_available():
+        raise RuntimeError("no Docker daemon and POL_TEST_VALKEY_URL is unset")
+    _cid, port = container(VALKEY_IMAGE, 6379,
+                           cmd=["valkey-server", "--save", "",
+                                "--appendonly", "no"])
+    url = "valkey://127.0.0.1:%d/0" % port
+    _wait_valkey(url)
+    _vk_url = url
+    return url
+
+
+def use_fresh_valkey():
+    """Point this process, and every process it starts, at the test Valkey
+    under a key prefix nobody else uses. Sets POL_VALKEY_URL and POL_KV_PREFIX
+    and resets polcore.kv if it is already imported. Returns the URL.
+
+    Without Docker or POL_TEST_VALKEY_URL this exits the suite with a failure:
+    a suite calls it because its processes must share live state.
+    """
+    try:
+        url = valkey_url()
+    except Exception as exc:              # noqa: BLE001 -- say why, then fail
+        print(f"FAIL: no Valkey for this suite ({exc}); start Docker or set "
+              "POL_TEST_VALKEY_URL", flush=True)
+        sys.exit(1)
+    os.environ["POL_VALKEY_URL"] = url
+    os.environ["POL_KV_PREFIX"] = "t%s:" % secrets.token_hex(4)
+    polcore_kv = sys.modules.get("polcore.kv")
+    if polcore_kv is not None:
+        polcore_kv.reset()
     return url
 
 

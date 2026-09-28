@@ -30,7 +30,6 @@ os.environ["POL_RESOURCE_DIR"] = os.path.join(TMP, "res")
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
 os.environ["POL_DISCORD_LINK_DB"] = os.path.join(TMP, "links.db")
-os.environ["POL_PUSH_SPOOL"] = os.path.join(TMP, "logs", "push-spool.jsonl")
 os.environ["POL_UCS_PREFILL_ID"] = "0"
 os.environ["POL_UCS_IDENT_PROBE"] = "0"
 os.environ.pop("POL_BOARDS_BRIDGE_URL", None)
@@ -120,8 +119,12 @@ def free_port():
     return p
 
 
+def stored_names():
+    return set(R._res_list(scope="mail"))
+
+
 def new_names(before):
-    return sorted(n for n in os.listdir(R.RESOURCE_DIR)
+    return sorted(n for n in stored_names()
                   if n.startswith("m.") and n.endswith(".bin") and n not in before)
 
 
@@ -161,7 +164,7 @@ check("a new code voids the same user's older one",
       L.redeem(ldb, first, BM) is None and second != first)
 
 print("the watcher")
-before = set(os.listdir(R.RESOURCE_DIR))
+before = stored_names()
 R._mail_mint(HB["handle_name"], A.handle_guid(HB["id"]), A.handle_guid(HA["id"]),
              "Old news", "sent before the bridge existed")
 check("the FIRST scan only takes stock -- nobody gets their history",
@@ -228,8 +231,8 @@ def submit(uid, subject, body, rid=None):
                                                    "value": body}]}]}})
 
 
-before = set(os.listdir(R.RESOURCE_DIR))
-spool_before = os.path.getsize(os.environ["POL_PUSH_SPOOL"])
+before = stored_names()
+R._push_spool_clear()
 r = submit("111", "Re: Hello there", "Fine\nthanks\x07!")
 got = new_names(before)
 meta = R._mail_meta(R._mail_path_of(got[0])) if got else {}
@@ -240,12 +243,10 @@ check("...from the recipient's handle, to the original sender, as a plain messag
       meta.get("sender") == "Alice" and meta.get("kind") == R.MAIL_KIND_MESSAGE
       and A.handle_by_guid(A.connect(),
                            meta.get("recipient_guid"))["id"] == HB["id"], meta)
-subj, body = B.read_message(os.path.join(R.RESOURCE_DIR, got[0])) if got else ("", "")
+subj, body = B.read_message(R._res_read(got[0])) if got else ("", "")
 check("...the object holding the whole subject and the body, control characters folded",
       subj == "Re: Hello there" and body == "Fine thanks !", (subj, body))
-with open(os.environ["POL_PUSH_SPOOL"], encoding="utf-8") as f:
-    f.seek(spool_before)
-    spooled = [json.loads(line) for line in f if line.strip()]
+spooled = R._push_spool_pending()
 check("...STORED first, then its arrival push spooled for authsess to deliver",
       any(s.get("kind") == "mail" and s.get("handle") == HB["id"] for s in spooled), spooled)
 check("a reply from someone else's Discord account is refused",
