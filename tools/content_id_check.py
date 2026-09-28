@@ -1,6 +1,7 @@
 """Does the Content ID mint still produce SE-SHAPED, unique, never-reused ids?
 
-Offline: an in-memory `accounts.db`, no client, no server, no network.
+Offline: a throwaway PostgreSQL database per section (tools/pgtest.py), no
+client, no server.
 
 WHY THIS EXISTS. Until 2026-08-23 a Content ID was COMPUTED --
 `1000000000 + member.id * 100 + content_code`, ten digits with the game in the
@@ -61,7 +62,6 @@ that stays green under all three is testing nothing.
 """
 import os
 import shutil
-import sqlite3
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +69,7 @@ sys.path.insert(0, os.path.join(HERE, os.pardir, "services"))
 sys.path.insert(0, HERE)
 
 import accounts as A
+import pgtest
 
 FAILED = []
 
@@ -81,12 +82,10 @@ def check(cond, what):
 
 
 def fresh_db():
-    """An empty accounts DB, schema applied, exactly as `connect()` leaves one."""
-    c = sqlite3.connect(":memory:")
-    c.row_factory = sqlite3.Row
-    c.executescript(A.SCHEMA)
-    A._migrate(c)
-    return c
+    """A new, empty account database, schema applied, exactly as `connect()`
+    leaves one. The previous one is left behind (and dropped at exit)."""
+    pgtest.use_fresh_database()
+    return A.connect()
 
 
 def digits(cid):
@@ -207,37 +206,24 @@ check(fresh not in SERVED.values(),
 print()
 print("4. THE COUNTER IS PERSISTENT -- it is a row, not a process variable")
 # --------------------------------------------------------------------------- #
-import tempfile
+c1 = fresh_db()
+first = [A.allocate_content_id(c1) for _ in range(3)]
+c1.commit()
+c1.close()
 
-tmpdir = tempfile.mkdtemp(prefix="polcid")
-path = os.path.join(tmpdir, "accounts.db")
-try:
-    c1 = sqlite3.connect(path)
-    c1.row_factory = sqlite3.Row
-    c1.executescript(A.SCHEMA)
-    A._migrate(c1)
-    first = [A.allocate_content_id(c1) for _ in range(3)]
-    c1.commit()
-    c1.close()
-
-    c2 = sqlite3.connect(path)                     # a RESTARTED server
-    c2.row_factory = sqlite3.Row
-    c2.executescript(A.SCHEMA)
-    A._migrate(c2)
-    second = [A.allocate_content_id(c2) for _ in range(3)]
-    c2.commit()
-    c2.close()
-    check(not set(first) & set(second),
-          f"a restart did not re-issue {first} -> {second}")
-    check(int(second[0]) > int(first[-1]),
-          "the serial carried on from where it stopped")
-finally:
-    for name in os.listdir(tmpdir):
-        try:
-            os.unlink(os.path.join(tmpdir, name))
-        except OSError:
-            pass
-    os.rmdir(tmpdir)
+# A RESTARTED server: every pooled connection closed, and the process's
+# "schema is ready" note forgotten, so the next connect starts from nothing
+# but what the database itself holds.
+A.pool_drain()
+A._SCHEMA_READY.clear()
+c2 = A.connect()
+second = [A.allocate_content_id(c2) for _ in range(3)]
+c2.commit()
+c2.close()
+check(not set(first) & set(second),
+      f"a restart did not re-issue {first} -> {second}")
+check(int(second[0]) > int(first[-1]),
+      "the serial carried on from where it stopped")
 
 # --------------------------------------------------------------------------- #
 print()
@@ -344,7 +330,7 @@ for i in range(8):
     A.set_handle(db, m, f"Handle{i}")
     A.grant_content(db, m, 1)
     A.link_member_content_to_primary(db, m)
-    no = db.execute("SELECT member_no FROM member WHERE id = ?", (m,)).fetchone()[0]
+    no = db.execute("SELECT member_no FROM member WHERE id = %s", (m,)).fetchone()[0]
     cid = primary_links(A.handle_content_list(db, A.primary_handle_row(db, m)["id"]))[0]["content_id"]
     seen[pid] = (no, cid)
 check(all(v[0] == 0 for v in seen.values()),
@@ -352,8 +338,9 @@ check(all(v[0] == 0 for v in seen.values()),
 check(len({v[1] for v in seen.values()}) == 8,
       f"...and all eight Content IDs differ ({[v[1] for v in seen.values()]})")
 dupes = [(r["content_id"], r["n"]) for r in db.execute(
-    "SELECT content_id, COUNT(*) n FROM handle_content WHERE content_id IS NOT NULL"
-    " GROUP BY CAST(content_id AS INTEGER) HAVING n > 1")]
+    "SELECT MIN(content_id) AS content_id, COUNT(*) AS n FROM handle_content"
+    " WHERE content_id IS NOT NULL"
+    " GROUP BY text_int(content_id) HAVING COUNT(*) > 1")]
 check(not dupes, f"no Content ID appears on two handles anywhere in the DB ({dupes})")
 
 # --------------------------------------------------------------------------- #
@@ -375,11 +362,9 @@ import content_id_migrate as M
 mig = tempfile.mkdtemp(prefix="polcidmig")
 try:
     os.makedirs(os.path.join(mig, "resources", "tmrank"))
-    mig_db = os.path.join(mig, "accounts.db")
-    c = sqlite3.connect(mig_db)
-    c.row_factory = sqlite3.Row
-    c.executescript(A.SCHEMA)
-    A._migrate(c)
+    c = fresh_db()
+    mig_argv = [sys.executable, os.path.join(HERE, "content_id_migrate.py"),
+                "--data-dir", mig, "--apply"]
     A.create_polid(c, "MIGRATE1", "pw-account")
     mm = A.add_member(c, "MIGRATE1", "migrant", "pw-member")
     A.set_handle(c, mm, "Migrant")
@@ -400,13 +385,11 @@ try:
                              "cinfo": "Card Level 7"}}, fh)
 
     quiet = []
-    rc = subprocess.call([sys.executable, os.path.join(HERE, "content_id_migrate.py"),
-                          "--db", mig_db, "--apply"],
+    rc = subprocess.call(mig_argv,
                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     check(rc == 0, f"the migration exited 0 (got {rc})")
 
-    c = sqlite3.connect(mig_db)
-    c.row_factory = sqlite3.Row
+    c = A.connect()
     after = {int(r["content_code"]): r["content_id"]
              for r in primary_links(A.handle_content_list(c, mhid))}
     check(len(after) == 3 and not any(A.looks_like_retired_content_id(v)
@@ -452,11 +435,9 @@ try:
 
     # And it must be idempotent: a second run is a no-op, not a second re-mint.
     before = dict(after)
-    rc2 = subprocess.call([sys.executable, os.path.join(HERE, "content_id_migrate.py"),
-                           "--db", mig_db, "--apply"],
+    rc2 = subprocess.call(mig_argv,
                           stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-    c = sqlite3.connect(mig_db)
-    c.row_factory = sqlite3.Row
+    c = A.connect()
     again = {int(r["content_code"]): r["content_id"]
              for r in primary_links(A.handle_content_list(c, mhid))}
     c.close()
@@ -464,16 +445,15 @@ try:
           f"a second run changed nothing ({before} -> {again})")
 
     # A row it does not understand must ABORT the run, before anything is written.
-    c = sqlite3.connect(mig_db)
+    c = A.connect()
     # slot 0 only: `content_id` is UNIQUE now, so setting every FFXI row to the
     # same sentinel is a constraint violation rather than a test. One
     # unrecognised row is all this check ever needed.
     c.execute("UPDATE handle_content SET content_id = 'HAND-ENTERED'"
-              " WHERE handle_id = ? AND content_code = 1 AND slot = 0", (mhid,))
+              " WHERE handle_id = %s AND content_code = 1 AND slot = 0", (mhid,))
     c.commit()
     c.close()
-    rc3 = subprocess.call([sys.executable, os.path.join(HERE, "content_id_migrate.py"),
-                           "--db", mig_db, "--apply"],
+    rc3 = subprocess.call(mig_argv,
                           stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     check(rc3 == 2, f"an unrecognised row refuses the run (exit {rc3}, wanted 2)")
 finally:
