@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="presence-grace-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 
@@ -71,7 +72,7 @@ class FakeChannel:
 
 
 def seed_member():
-    db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    db = accounts.connect()
     row = accounts.ensure_member(db, "GraceTester")
     mid = int(row["id"])
     accounts.open_session(db, mid, nick="GraceTester")
@@ -81,7 +82,7 @@ def seed_member():
 
 
 def is_online(mid):
-    db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    db = accounts.connect()
     try:
         return accounts.member_online(db, mid)
     finally:
@@ -123,7 +124,7 @@ check(any("logout stamped" in ln for ln in LOGS), "the logout was stamped")
 print("3. POL_PRESENCE_LOGOUT_GRACE=0 restores the immediate wipe")
 LOGS.clear()
 PUSHED.clear()
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 accounts.open_session(db, mid, nick="GraceTester")
 db.close()
 os.environ["POL_PRESENCE_LOGOUT_GRACE"] = "0"

@@ -35,7 +35,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "services"))
-os.environ.setdefault("POL_ACCOUNTS_DB", "/nonexistent/mailident.db")
+# No account database: these checks run the mail code stateless.
+os.environ.pop("POL_DATABASE_URL", None)
 
 import responders as R  # noqa: E402
 

@@ -233,13 +233,14 @@ class FakeSession:
         return True
 
 
-path = os.path.join(tempfile.mkdtemp(prefix="pushtest-"), "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = path
+import pgtest  # noqa: E402
+path = pgtest.use_fresh_database()
+SCRATCH = tempfile.mkdtemp(prefix="pushtest-")
 c = accounts.connect(path)
 ids = {}
 for who in ("Lex", "Yui", "Stranger"):
     m = accounts.ensure_member(c, who)
-    h = c.execute("SELECT id FROM handle WHERE member_id=?",
+    h = c.execute("SELECT id FROM handle WHERE member_id=%s",
                   (m["id"],)).fetchone()["id"]
     ids[who] = (int(m["id"]), int(h))
 # Yui watches Lex. Stranger does not.
@@ -299,7 +300,7 @@ check("offline target is a no-op, not a failure",
 # over an empty registry and report success having sent nothing -- so this is the
 # assertion that the two halves are actually connected.
 # --------------------------------------------------------------------------- #
-responders._PUSH_SPOOL = os.path.join(os.path.dirname(path), "push-spool.jsonl")
+responders._PUSH_SPOOL = os.path.join(SCRATCH, "push-spool.jsonl")
 responders._PUSH_LOCAL[0] = False                    # i.e. we are the LOBBY now
 yui.sent.clear()
 n = responders.broadcast_event(c, ids["Lex"][1], responders._PUSH_EV_PROFILE,

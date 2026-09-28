@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 import accounts  # noqa: E402
+import pgtest  # noqa: E402
 
 bad = 0
 
@@ -30,7 +31,7 @@ def chk(what, got, want):
                              "" if ok else "  (want %r)" % (want,)))
 
 
-db_path = os.path.join(tempfile.mkdtemp(prefix="armtest-"), "accounts.db")
+db_path = pgtest.use_fresh_database()
 db = accounts.connect(db_path)
 
 acct = accounts.register_account(db, "Armed", "abc12345", contents=(1,))
@@ -39,7 +40,7 @@ chk("a new account is armed by its own creation", accounts.login_token_armed(db,
 chk("...and holds no login token yet", accounts.get_login_token(db, mid), None)
 
 # the window lapses
-db.execute("UPDATE member SET token_arm_until = ? WHERE id = ?",
+db.execute("UPDATE member SET token_arm_until = %s WHERE id = %s",
            ("2020-01-01T00:00:00Z", mid))
 db.commit()
 chk("a lapsed window is not armed", accounts.login_token_armed(db, mid), False)
@@ -56,7 +57,7 @@ chk("a shorter arm never takes away time already granted", short, long_until)
 # a second account, never armed at all (what an account predating this looks like)
 acct2 = accounts.register_account(db, "Legacy", "abc12345", contents=(1,))
 mid2 = acct2["member_id"]
-db.execute("UPDATE member SET token_arm_until = NULL WHERE id = ?", (mid2,))
+db.execute("UPDATE member SET token_arm_until = NULL WHERE id = %s", (mid2,))
 db.commit()
 chk("an account that was never armed is not armed", accounts.login_token_armed(db, mid2), False)
 

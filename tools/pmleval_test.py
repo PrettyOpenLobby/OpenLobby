@@ -40,7 +40,6 @@ sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 WWW = tempfile.mkdtemp(prefix="pmleval-")
 os.environ["POL_ADMIN_WWW"] = WWW
-os.environ.setdefault("POL_ACCOUNTS_DB", os.path.join(WWW, "unused.db"))
 
 import pmleval                                   # noqa: E402
 import admin                                     # noqa: E402

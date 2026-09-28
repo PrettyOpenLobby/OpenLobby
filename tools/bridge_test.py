@@ -27,7 +27,8 @@ for sub in ("logs", "res"):
     os.makedirs(os.path.join(TMP, sub), exist_ok=True)
 os.environ["POL_LOG_DIR"] = os.path.join(TMP, "logs")
 os.environ["POL_RESOURCE_DIR"] = os.path.join(TMP, "res")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DISCORD_LINK_DB"] = os.path.join(TMP, "links.db")
 os.environ["POL_PUSH_SPOOL"] = os.path.join(TMP, "logs", "push-spool.jsonl")
 os.environ["POL_UCS_PREFILL_ID"] = "0"
@@ -129,7 +130,7 @@ def user(uid):
 
 
 # --------------------------------------------------------------------------- #
-adb = A.connect(os.environ["POL_ACCOUNTS_DB"])
+adb = A.connect()
 alice = A.register_account(adb, "Alice", "password123")
 bobby = A.register_account(adb, "Bobby", "password456")
 HA = A.primary_handle_row(adb, alice["member_id"])
@@ -237,7 +238,7 @@ check("submitting posts ONE PlayOnline message and says so privately",
       and len(got) == 1, (r, got))
 check("...from the recipient's handle, to the original sender, as a plain message",
       meta.get("sender") == "Alice" and meta.get("kind") == R.MAIL_KIND_MESSAGE
-      and A.handle_by_guid(A.connect(os.environ["POL_ACCOUNTS_DB"]),
+      and A.handle_by_guid(A.connect(),
                            meta.get("recipient_guid"))["id"] == HB["id"], meta)
 subj, body = B.read_message(os.path.join(R.RESOURCE_DIR, got[0])) if got else ("", "")
 check("...the object holding the whole subject and the body, control characters folded",

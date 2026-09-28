@@ -20,9 +20,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 tmp = tempfile.mkdtemp(prefix="digesttest-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ.pop("POL_LOGIN_PW_KEY", None)
+# The key's DEFAULT home: the data directory, where accounts.db used to sit.
+os.environ.pop("POL_LOGIN_PW_KEYFILE", None)
+os.environ["POL_DATA_DIR"] = tmp
 
 import accounts  # noqa: E402
 import responders  # noqa: E402
@@ -77,11 +81,11 @@ for greeting, dig in VECTORS:
             accounts.login_digest_ok(d, [greeting], PW), None)
 
 print("sealing")
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 sealed = accounts.seal_login_password(db, "p@ss!w0rd#1")
 chk("the sealed form does not contain the password", "p@ss!w0rd#1" in sealed, False)
 chk("round trip", accounts.unseal_login_password(db, sealed), "p@ss!w0rd#1")
-chk("a key file was made beside the DB",
+chk("a key file was made in the data directory",
     os.path.exists(os.path.join(tmp, "login-pw.key")), True)
 tampered = sealed[:-4] + ("AAAA" if not sealed.endswith("AAAA") else "BBBB")
 chk("a tampered copy is refused, not mis-read",
@@ -98,7 +102,7 @@ chk("register_account keeps a copy", accounts.get_login_password(db, mid),
 accounts.set_account_password(db, acct["polid"], "Maple-Otter-17")
 chk("set_account_password replaces it", accounts.get_login_password(db, mid),
     "Maple-Otter-17")
-db.execute("UPDATE member SET login_pw_sealed = NULL WHERE id = ?", (mid,))
+db.execute("UPDATE member SET login_pw_sealed = NULL WHERE id = %s", (mid,))
 db.commit()
 accounts.verify_member(db, acct["polid"], "wrongwrong")
 chk("a FAILED sign-in stores nothing", accounts.get_login_password(db, mid),
@@ -127,7 +131,7 @@ def login(digest, sig, cred="tokenAAAAAA"):
 
 
 chk("right password, never-played account whose arm LAPSED -> in",
-    (db.execute("UPDATE member SET token_arm_until = NULL WHERE id = ?", (mid,)),
+    (db.execute("UPDATE member SET token_arm_until = NULL WHERE id = %s", (mid,)),
      db.commit(), login(good, PC))[2], (True, None))
 chk("...and that proved the PC build", accounts.digest_client_proven(db, PC), True)
 chk("wrong password on the proven PC build -> refused 0xCA",
@@ -153,7 +157,7 @@ chk("right digest proves the PS2 build", login(good, PS2, cred="tokenPS2PS2"),
 chk("...after which a wrong one is refused",
     login(WRONG, PS2, cred="tokenPS2PS2"), (False, responders.REJECT_BAD_PASSWORD))
 
-db.execute("UPDATE member SET login_pw_sealed = NULL WHERE id = ?", (mid,))
+db.execute("UPDATE member SET login_pw_sealed = NULL WHERE id = %s", (mid,))
 db.commit()
 chk("no copy held -> token check only (unchanged behaviour)",
     login(WRONG, PC, cred="tokenBBBBBB"), (True, None))

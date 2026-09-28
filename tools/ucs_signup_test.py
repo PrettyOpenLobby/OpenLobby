@@ -50,12 +50,13 @@ def _boot():
     """A ucscgi listener on a scratch DB. Returns (base_url, log_path, stop)."""
     tmp = tempfile.mkdtemp(prefix="ucssignup-")
     os.environ["POL_LOG_DIR"] = tmp
-    os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+    import pgtest  # noqa: E402
+    pgtest.use_fresh_database()
     sys.path.insert(0, SERVICES)
     import accounts
     import ucscgi
 
-    accounts.connect(os.environ["POL_ACCOUNTS_DB"]).close()   # builds the schema
+    accounts.connect().close()   # builds the schema
     srv = ucscgi.Server(("127.0.0.1", 0), ucscgi.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return (f"http://127.0.0.1:{srv.server_address[1]}",

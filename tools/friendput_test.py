@@ -213,8 +213,9 @@ check("and a short one still reads at +0x18",
       R._friend_put_ref(ADD, "Lex"), bytes(ADD[0x18:0x24]))
 
 import accounts as A                                            # noqa: E402
+import pgtest                                                   # noqa: E402
 
-db = A.connect(os.path.join(tempfile.mkdtemp(prefix="fpdb-"), "accounts.db"))
+db = A.connect(pgtest.use_fresh_database())
 me = A.ensure_member(db, "TESTER1")
 you = A.ensure_member(db, "TESTER2")
 mine = A.primary_handle_row(db, me["id"])
@@ -386,7 +387,7 @@ check("a row id from somebody else's list deletes nothing",
 
 print("\nthe accept moves both rows, as SE's own service does")
 
-db2 = A.connect(os.path.join(tempfile.mkdtemp(prefix="fpacc-"), "accounts.db"))
+db2 = A.connect(pgtest.use_fresh_database())
 asker = A.primary_handle_row(db2, A.ensure_member(db2, "ASKER1")["id"])
 askee = A.primary_handle_row(db2, A.ensure_member(db2, "ASKEE1")["id"])
 A.request_friend(db2, int(asker["id"]), askee["handle_name"])
@@ -437,7 +438,7 @@ print("\ndeleting a friend is symmetric, and one-sided leftovers still heal")
 # sent. Reported live 2026-08-16 (two requests, neither received). Deletion is
 # symmetric now; the repair paths below stay because old rows and the knob both
 # exist, and because a peer can always drop you between the ask and the resend.
-db3 = A.connect(os.path.join(tempfile.mkdtemp(prefix="fpre-"), "accounts.db"))
+db3 = A.connect(pgtest.use_fresh_database())
 AH = int(A.primary_handle_row(db3, A.ensure_member(db3, "AAAAA1")["id"])["id"])
 BR = A.primary_handle_row(db3, A.ensure_member(db3, "BBBBB1")["id"])
 BH, BN = int(BR["id"]), BR["handle_name"]
@@ -610,8 +611,8 @@ check("the asker's row survives the decline",
 # survived the suite, so this drives it with real messages stored.
 mdir = tempfile.mkdtemp(prefix="fpskip-")
 R.RESOURCE_DIR = mdir
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(mdir, "accounts.db")
-mdb = A.connect(os.environ["POL_ACCOUNTS_DB"])
+pgtest.use_fresh_database()
+mdb = A.connect()
 mrow = A.primary_handle_row(mdb, A.ensure_member(mdb, "MAILBX1")["id"])
 MHID, MMID = int(mrow["id"]), int(mrow["member_id"])
 mdb.close()
@@ -636,7 +637,7 @@ print("\na dead acceptance retires itself at listing time (the 18161 guard)")
 # the request?" prompt -- re-asking a settled friendship. Listing is the one
 # gate every copy passes (client 3:1, our mint, the adopt path), so the filter
 # lives in `_mailbox` and the proof drives that, not the predicate directly.
-mdb = A.connect(os.environ["POL_ACCOUNTS_DB"])
+mdb = A.connect()
 srow = A.primary_handle_row(mdb, A.ensure_member(mdb, "STALEACC")["id"])
 SHID, SNAME = int(srow["id"]), srow["handle_name"]
 
@@ -673,7 +674,6 @@ A.set_friend_status(mdb, MHID, SNAME, A.STATUS_ACTIVE)
 check("with the reader already active, it still stays", SNAME in _senders(), True)
 mdb.close()
 del os.environ["POL_MAIL_STALE_ACCEPT"]
-del os.environ["POL_ACCOUNTS_DB"]
 
 print("\nthe 2:6 reply carries the peer's real guid (the search-add fix)")
 # A search-based add sends guid 0 in the client's own 2:6, so the friend enters

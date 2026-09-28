@@ -29,7 +29,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="content-profile-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_RESOURCE_DIR"] = os.path.join(TMP, "resources")
@@ -135,8 +136,8 @@ def game_fields(handle_id, member_id):
     # JAN_CID is the subject of the captured content write below, and it must
     # resolve to content 3 whether or not any title module is present. The mint
     # hands out ids in the same range, so free the id first.
-    db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
-    db.execute("DELETE FROM handle_content WHERE CAST(content_id AS INTEGER) = ?",
+    db = accounts.connect()
+    db.execute("DELETE FROM handle_content WHERE text_int(content_id) = %s",
                (JAN_CID,))
     accounts.link_content_to_handle(db, handle_id, 3, str(JAN_CID))
     db.commit()
@@ -209,11 +210,11 @@ def main():
 
     # 6. A NAME WE KNOW gets served. This is the one field we can fill today,
     #    and it is what makes the popup show a character instead of a blank.
-    db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    db = accounts.connect()
     member = accounts.ensure_member(db, "CPTEST")
-    handle = db.execute("SELECT * FROM handle WHERE member_id = ?",
+    handle = db.execute("SELECT * FROM handle WHERE member_id = %s",
                         (member["id"],)).fetchone()
-    db.execute("UPDATE handle SET handle_name = ? WHERE id = ?",
+    db.execute("UPDATE handle SET handle_name = %s WHERE id = %s",
                ("Lexffxi", int(handle["id"])))
     accounts.link_content_to_handle(db, int(handle["id"]), 1, str(CTID))
     db.commit()

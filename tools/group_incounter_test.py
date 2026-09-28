@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="group-counter-")
-DB = os.path.join(TMP, "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = DB
+import pgtest  # noqa: E402
+DB = pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_GROUP_CTL"] = os.path.join(TMP, "no-such.ctl")

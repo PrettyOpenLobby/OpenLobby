@@ -43,7 +43,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="lobby-bind-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 
@@ -76,7 +77,7 @@ def _tee_log(channel, msg):
 R.log = _tee_log
 
 # Two real members, as the live incident had: the handles are what 4:7 names.
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 M_STALE = int(accounts.ensure_member(db, "PS2Tester")["id"])   # the wrong one
 M_LIVE = int(accounts.ensure_member(db, "Lex")["id"])          # the right one
 db.close()

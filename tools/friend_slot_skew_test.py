@@ -35,6 +35,7 @@ sys.path.insert(0, SERVICES)
 os.environ.setdefault("POL_LOG_DIR", tempfile.mkdtemp())
 
 import accounts                                            # noqa: E402
+import pgtest                                              # noqa: E402
 import responders                                          # noqa: E402
 
 FAILS = []
@@ -49,10 +50,9 @@ def check(name, cond, detail=""):
 
 def build():
     """A watcher whose list interleaves friends with INCOMING requests."""
-    tmp = tempfile.mkdtemp(prefix="slotskew-")
-    db = accounts.connect(os.path.join(tmp, "accounts.db"))
+    db = accounts.connect(pgtest.use_fresh_database())
     acct = accounts.register_account(db, "Watcher", "hunter2pw")
-    whid = db.execute("SELECT id FROM handle WHERE member_id = ?",
+    whid = db.execute("SELECT id FROM handle WHERE member_id = %s",
                       (acct["member_id"],)).fetchone()["id"]
 
     peers = {}
@@ -66,7 +66,7 @@ def build():
             ("Corvin", "friend")]
     for name, role in plan:
         a = accounts.register_account(db, name, "hunter2pw")
-        phid = db.execute("SELECT id FROM handle WHERE member_id = ?",
+        phid = db.execute("SELECT id FROM handle WHERE member_id = %s",
                           (a["member_id"],)).fetchone()["id"]
         peers[name] = (int(phid), int(a["member_id"]))
         # peer_handle is what every slot derivation matches on, and the live
@@ -99,8 +99,8 @@ def main():
         print("\n[the push path derives the same slot from the GUID]")
         for want, name in enumerate(expected):
             phid = peers[name][0]
-            guid = db.execute("SELECT peer_guid FROM friend WHERE handle_id = ?"
-                              " AND peer_handle = ?", (whid, phid)).fetchone()
+            guid = db.execute("SELECT peer_guid FROM friend WHERE handle_id = %s"
+                              " AND peer_handle = %s", (whid, phid)).fetchone()
             got = responders._watcher_row_slot(
                 db, _member_of(db, whid), int(guid["peer_guid"]))
             check(f"push slot of {name!r} is {want}", got == want, f"got {got}")
@@ -130,7 +130,7 @@ def main():
 
 
 def _member_of(db, handle_id):
-    return int(db.execute("SELECT member_id FROM handle WHERE id = ?",
+    return int(db.execute("SELECT member_id FROM handle WHERE id = %s",
                           (handle_id,)).fetchone()["member_id"])
 
 

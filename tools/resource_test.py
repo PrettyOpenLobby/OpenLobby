@@ -204,9 +204,9 @@ os.environ["POL_MAIL_NORMALISE"] = "1"
 import accounts as A                                            # noqa: E402
 
 # A DB of our own, so the check does not depend on whatever the live one holds.
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(
-    tempfile.mkdtemp(prefix="restest-db-"), "accounts.db")
-_db = A.connect(os.environ["POL_ACCOUNTS_DB"])
+import pgtest                                                   # noqa: E402
+pgtest.use_fresh_database()
+_db = A.connect()
 A.create_polid(_db, "UTESTSEND", "x")
 A.create_polid(_db, "UTESTRECV", "y")
 _sender = A.add_member(_db, "UTESTSEND", "sender", "x")
@@ -243,7 +243,7 @@ check("the sender field becomes that handle's guid",
       _struct.unpack_from("<Q", R._b64decode(fixed[4:]), 0)[0] ^ R._PUSH_GUID_MASK,
       A.handle_guid(SENDER_H))
 check("and what the sender calls itself is now on record",
-      A.handle_by_client_guid(A.connect(os.environ["POL_ACCOUNTS_DB"]),
+      A.handle_by_client_guid(A.connect(),
                               CLIENT_SELF)["id"], SENDER_H)
 # THE "To:" HALF. Until the recipient has named itself we cannot do better than
 # our own guid -- and saying so is the point, because that IS "Unknown User".
@@ -251,7 +251,7 @@ check("a recipient who has never named itself is addressed by our guid",
       R._mail_meta(fixed)["recipient_guid"], A.handle_guid(RECIP_H))
 
 RECIP_SELF = 0x860FB3E2A2
-_db = A.connect(os.environ["POL_ACCOUNTS_DB"])
+_db = A.connect()
 A.learn_client_guid(_db, RECIP_H, RECIP_SELF)
 _db.close()
 fixed = R._mail_normalise(SENT, SENDER_H)
@@ -268,8 +268,8 @@ check("a record already carrying both right ids is not rewritten",
 # The same id, volunteered the earlier way: every client sends it in front of the
 # path on a `u/account` fetch, which is how a recipient can be addressed by name
 # before it has ever sent a message of its own.
-_db = A.connect(os.environ["POL_ACCOUNTS_DB"])
-_db.execute("UPDATE handle SET client_guid = NULL WHERE id = ?", (RECIP_H,))
+_db = A.connect()
+_db.execute("UPDATE handle SET client_guid = NULL WHERE id = %s", (RECIP_H,))
 _db.commit(); _db.close()
 _sess = R._session_get
 R._session_get = lambda field: RECIP_H if field == "handle_id" else _sess(field)
@@ -278,18 +278,18 @@ try:
                          + _struct.pack("<Q", RECIP_SELF)
                          + make_read("u/account", 664)[R._FETCH_SUBJECT_OFF + 8:])
     check("a `u/account` fetch teaches us what the caller calls itself",
-          A.handle_by_client_guid(A.connect(os.environ["POL_ACCOUNTS_DB"]),
+          A.handle_by_client_guid(A.connect(),
                                   RECIP_SELF)["id"], RECIP_H)
     # An `O/m/` fetch carries the MESSAGE's recipient there, not the caller's own
     # id -- learning from that would file somebody else's guid under this handle.
-    _db = A.connect(os.environ["POL_ACCOUNTS_DB"])
-    _db.execute("UPDATE handle SET client_guid = NULL WHERE id = ?", (RECIP_H,))
+    _db = A.connect()
+    _db.execute("UPDATE handle SET client_guid = NULL WHERE id = %s", (RECIP_H,))
     _db.commit(); _db.close()
     R._capture_self_guid(make_read(MAIL, 664)[:R._FETCH_SUBJECT_OFF]
                          + _struct.pack("<Q", 0x123456789)
                          + make_read(MAIL, 664)[R._FETCH_SUBJECT_OFF + 8:])
     check("but an `O/m/` fetch teaches us nothing",
-          A.handle_by_client_guid(A.connect(os.environ["POL_ACCOUNTS_DB"]),
+          A.handle_by_client_guid(A.connect(),
                                   0x123456789), None)
 finally:
     R._session_get = _sess

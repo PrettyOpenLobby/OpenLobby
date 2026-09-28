@@ -17,7 +17,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 tmp = tempfile.mkdtemp(prefix="nocasetest-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
@@ -38,16 +40,16 @@ def chk(what, got, want):
 
 
 def row(db, hid, name):
-    r = db.execute("SELECT status, peer_handle FROM friend WHERE handle_id = ?"
-                   " AND peer_name = ?", (hid, name)).fetchone()
+    r = db.execute("SELECT status, peer_handle FROM friend WHERE handle_id = %s"
+                   " AND peer_name = %s", (hid, name)).fetchone()
     return (r["status"], r["peer_handle"]) if r else None
 
 
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 
 
 def hid(name):
-    return int(db.execute("SELECT id FROM handle WHERE handle_name = ?",
+    return int(db.execute("SELECT id FROM handle WHERE handle_name = %s",
                           (name,)).fetchone()["id"])
 
 
@@ -58,7 +60,7 @@ for nm in ("Amara", "kElpie", "Twin"):
 mid = db.execute("SELECT member_id FROM handle WHERE handle_name = 'Twin'"
                  ).fetchone()["member_id"]
 db.execute("INSERT INTO handle (member_id, handle_name, is_primary, created_at)"
-           " VALUES (?, 'TWIN', 0, '2026-09-27')", (mid,))
+           " VALUES (%s, 'TWIN', 0, '2026-09-27')", (mid,))
 db.commit()
 A, E = hid("Amara"), hid("kElpie")
 
@@ -104,7 +106,7 @@ chk("no mirror on either twin",
     (row(db, hid("Twin"), "Birdie"), row(db, hid("TWIN"), "Birdie")), (None, None))
 
 print("reconcile heals a pending row whose peer's row spells us exactly")
-db.execute("UPDATE friend SET status = 'pending' WHERE handle_id = ? AND peer_name"
+db.execute("UPDATE friend SET status = 'pending' WHERE handle_id = %s AND peer_name"
            " = 'kelpie'", (A,))
 db.commit()
 chk("reconcile_pending", accounts.reconcile_pending(db, A), ["kelpie"])

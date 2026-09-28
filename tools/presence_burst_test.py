@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="presence-burst-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_PRESENCE_PUSH"] = "1"          # the master gate the burst rides
@@ -78,12 +79,12 @@ class FakeSession:
 
 def _primary_handle(db, member_id):
     return int(db.execute(
-        "SELECT id FROM handle WHERE member_id = ? "
+        "SELECT id FROM handle WHERE member_id = %s "
         "ORDER BY is_primary DESC, id ASC LIMIT 1", (int(member_id),)
     ).fetchone()["id"])
 
 
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 watcher = int(accounts.ensure_member(db, "BURSTWATCHER")["id"])
 m_on = int(accounts.ensure_member(db, "FRIENDONLINE")["id"])
 h_on = _primary_handle(db, m_on)

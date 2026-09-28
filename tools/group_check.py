@@ -33,13 +33,14 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
-DB = os.path.join(tempfile.mkdtemp(prefix="group-check-"), "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = DB
+import pgtest  # noqa: E402
+DB = pgtest.use_fresh_database()
+SCRATCH = tempfile.mkdtemp(prefix="group-check-")
 os.environ.setdefault("POL_LOBBY_LIST_MODE", "7:12=groups")
 os.environ.setdefault("POL_GROUP_MEMBERS", "1")
 # The control file tunes live sweeps; a stale one must not silently decide the
 # result of a test. Point it at a path that cannot exist.
-os.environ["POL_GROUP_CTL"] = os.path.join(os.path.dirname(DB), "no-such.ctl")
+os.environ["POL_GROUP_CTL"] = os.path.join(SCRATCH, "no-such.ctl")
 
 import accounts                                                    # noqa: E402
 import responders as R                                             # noqa: E402

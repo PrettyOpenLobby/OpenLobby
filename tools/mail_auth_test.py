@@ -30,8 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "services"))
 
 _TMP = tempfile.mkdtemp(prefix="mailauth-")
-DB = os.path.join(_TMP, "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = DB
+import pgtest  # noqa: E402
+DB = pgtest.use_fresh_database()
 os.environ["POL_ACCOUNTS"] = "1"
 os.environ.pop("POL_MAIL_STRICT", None)
 os.environ.pop("POL_MAIL_SESSION_CHECK", None)

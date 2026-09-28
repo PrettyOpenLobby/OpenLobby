@@ -47,7 +47,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "services"))
-os.environ.setdefault("POL_ACCOUNTS_DB", "/nonexistent/verify.db")
+# No account database: the profile records are built stateless.
+os.environ.pop("POL_DATABASE_URL", None)
 
 import responders as R  # noqa: E402
 

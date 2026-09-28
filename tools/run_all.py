@@ -118,13 +118,14 @@ SUITES = [
 
     # --- the account database: schema, registration, friends, groups -------
     # Gated behind an env var because accounts.py's __main__ is also the
-    # admin CLI. It runs against :memory:, never a real DB.
+    # admin CLI. It runs against a fresh throwaway database, never a real one.
     ("accounts",      [sys.executable, "accounts.py"], SERVICES,
      {"POL_ACCOUNTS_SELFTEST": "1"}),
-    # The CONNECTION POOL (2026-08-19). Registered next to `accounts`
-    # because it pins the same file's invariants from the other side: the pool
-    # is a performance change and its whole contract is that behaviour --
-    # journal mode, transaction isolation, thread exclusivity -- is unchanged.
+    # The ACCOUNT CONNECTION. Registered next to `accounts` because it pins
+    # the same file's invariants from the other side: the code was written
+    # against sqlite3's connection, and the contract is that its behaviour --
+    # transactions, what a close leaves behind, thread exclusivity, types --
+    # is unchanged on PostgreSQL.
     ("dbpool",        [sys.executable, "dbpool_test.py"], TOOLS, {}),
     # polcore.db and polcore.kv, the PostgreSQL and Valkey layer the services
     # are moving onto. Each starts throwaway containers (tools/pgtest.py) and
@@ -369,6 +370,22 @@ def main():
     if not picked:
         print(f"no suite matches {args.k!r}; --list shows them all")
         return 2
+
+    # ONE DATABASE SERVER FOR THE WHOLE RUN. Most suites exercise the account
+    # code, which lives in PostgreSQL; each makes its own empty database on the
+    # server named here (tools/pgtest.py use_fresh_database), so they cannot see
+    # each other's rows, and the run pays for one container instead of fifty.
+    # The container goes when this process exits. POL_TEST_DATABASE_URL, when
+    # set, names a server to use instead and nothing is started.
+    sys.path.insert(0, TOOLS)
+    import pgtest
+    try:
+        os.environ["POL_TEST_DATABASE_URL"] = pgtest.server_url()
+        print("database server: "
+              + os.environ["POL_TEST_DATABASE_URL"].rsplit("@", 1)[-1])
+    except Exception as exc:                  # noqa: BLE001 -- say so, run anyway
+        print(f"WARNING: no PostgreSQL for the suites ({exc}); every suite that "
+              "needs one will fail")
 
     results, failures = [], []
     width = max(len(s[0]) for s in picked)

@@ -34,7 +34,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="accept-presence-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_PRESENCE_PUSH"] = "1"          # the master gate the burst rides
@@ -63,13 +64,13 @@ R._push_emit = lambda rec, db=None: (EMITS.append(rec), 1)[1]
 
 def handle_row(db, member_id):
     return db.execute(
-        "SELECT id, handle_name FROM handle WHERE member_id = ?"
+        "SELECT id, handle_name FROM handle WHERE member_id = %s"
         " ORDER BY is_primary DESC, id ASC LIMIT 1", (int(member_id),)).fetchone()
 
 
 def friend_row_id(db, handle_id, peer_name):
     return int(db.execute(
-        "SELECT id FROM friend WHERE handle_id = ? AND peer_name = ?",
+        "SELECT id FROM friend WHERE handle_id = %s AND peer_name = %s",
         (int(handle_id), peer_name)).fetchone()["id"])
 
 
@@ -84,7 +85,7 @@ def emit_for(member_id):
             and int(e.get("member", 0)) == int(member_id)]
 
 
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 m_ask = int(accounts.ensure_member(db, "ASKERLEX")["id"])          # "Lex"
 m_acc = int(accounts.ensure_member(db, "ACCEPTCLEM")["id"])        # "juno"
 h_ask, h_acc = handle_row(db, m_ask), handle_row(db, m_acc)

@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "services"))
 # small, explicit limits -- set before the module reads them
 os.environ["POL_SIGNUP_PER_DAY"] = "5"
 os.environ["POL_SIGNUP_PER_IP"] = "2"
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(HERE, "_nonexistent_for_import.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 
 import ucscgi  # noqa: E402
 
