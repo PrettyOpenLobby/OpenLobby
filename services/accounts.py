@@ -3581,6 +3581,27 @@ GROUP_CLASS_MIN = 2
 GROUP_CLASS_MAX = 5
 
 
+def count_handle_groups(conn, handle_id, include_pending=True):
+    """How many groups `handle_id` holds: owned, joined, and (by default) the
+    ones it has been invited to and not yet answered.
+
+    The client has four group slots (GROUP_MAX) and silently drops a group past
+    that, so this is what a create or an invite is checked against. Invites
+    count because each one can become a membership without another server
+    check, the same rule Project Crystal Server applies (every group_members
+    row of the account counts). A group the handle both owns and has a member
+    row in is counted once.
+    """
+    q = ("SELECT id AS gid FROM friend WHERE handle_id = %s AND kind = %s "
+         "UNION SELECT m.group_id AS gid FROM group_member m "
+         "JOIN friend f ON f.id = m.group_id "
+         "WHERE m.member_handle = %s AND f.kind = %s")
+    if not include_pending:
+        q += " AND m.pending = 0"
+    return len(conn.execute(q, (int(handle_id), KIND_GROUP,
+                                int(handle_id), KIND_GROUP)).fetchall())
+
+
 def group_id(conn, handle_id, name):
     """The `friend` row id of the group `name` owned by `handle_id`, or None."""
     row = conn.execute(

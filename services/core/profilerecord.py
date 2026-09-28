@@ -5,8 +5,8 @@ import struct
 import time
 from srvcore import hexdump, log, save_capture
 from .deps import accounts
-from . import (contentprofiles, friendlist, lobbyreply, lobbysession, memberstatus, paylen, pfc,
-               pushchannel, pushrecord, pushspool)
+from . import (contentprofiles, friendlist, lobbyrefuse, lobbyreply, lobbysession, memberstatus,
+               paylen, pfc, pushchannel, pushrecord, pushspool)
 
 
 
@@ -569,6 +569,21 @@ def _profile_record(size, req_pt=None, force_hid=None):
                                  f"({int(subject_hid)}) is a RETIRED 10-digit "
                                  f"Content ID -- this client has not relogged "
                                  f"since the migration; serving the active one")
+                if h is None and subject_hid and not force_hid and \
+                        req_pt is not None and \
+                        os.environ.get("POL_PROFILE_NOT_FOUND", "1") == "1":
+                    # SOMEBODY ELSE'S PROFILE THAT WE DO NOT HAVE. Serving the
+                    # viewer's own record here is the "profile bleed" this
+                    # function exists to prevent: the screen draws the wrong
+                    # person, and a mismatched record once crashed the client
+                    # (the content-id case above). Project Crystal Server
+                    # answers "no profile found" (0x7C, POL-5324) instead.
+                    # POL_PROFILE_NOT_FOUND=0 serves the active one as before.
+                    lobbyrefuse._lobby_refuse(
+                        lobbyrefuse.LOBBY_ERR_NO_PROFILE,
+                        f"profile record: subject z_hid {int(subject_hid):#x} "
+                        f"names no handle of ours", req_pt)
+                    return bytes(size)
                 if h is None and subject_hid:
                     log("lobby", f"profile record: subject z_hid "
                                  f"{int(subject_hid):#x} names no handle of "

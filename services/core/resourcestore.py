@@ -450,6 +450,11 @@ def _capture_resource_write(pt, op=None):
                 db.close()
         except Exception as exc:
             log("lobby", f"  mail: cannot normalise the sender field ({exc})")
+        # A GROUP INVITE THE INVITEE COULD NEVER ACCEPT IS REFUSED, NOT FILED:
+        # the inviter is told why (the 3:1 reply carries the error type) and
+        # the invitee never sees an invitation that cannot work.
+        if friendgroups._group_invite_refusal(path, data, pt):
+            return
     _resource_store(path, data)
     lobbymail._mail_announce(path)                    # live delivery -- see _push_deliver_mail
     friendgroups._capture_group_invite(path, data)       # groups have no PUT of their own

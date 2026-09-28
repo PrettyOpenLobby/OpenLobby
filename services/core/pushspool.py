@@ -937,10 +937,18 @@ def _push_deliver_grouprows(rec, db=None):
                 # the low 44 bits differed for every member, every push
                 # appended, and the roster doubled. See `_group_member_packed`.
                 packed = friendgroups._group_member_packed(guid, cls)
+                # A REMOVAL is class 1 with nothing else. Project Crystal Server
+                # tells a group that a member left, was removed, or that the
+                # group is gone by pushing that member's row at rank 1 with only
+                # the group data (no status, no name, no picture); a member who
+                # gets that record about THEMSELF drops the whole group slot.
+                # There is no row left to paint, so the name and icon stay off.
+                gone = int(cls) < accounts.GROUP_CLASS_MIN
                 try:
                     lines += pushrecord.field_push_lines(
                         ts.nick, subject, 0,
-                        icon=icon if icon else None, name=name,
+                        icon=None if gone or not icon else icon,
+                        name=None if gone else name,
                         seq=((int(gid) << 8) & 0xFFFFFFFF), when=when,
                         group=gid, gpacked=packed)
                 except ValueError as exc:

@@ -7,7 +7,7 @@ import titles                   # the title-plugin seam (services/titles.py)  # 
 from srvcore import hexdump, log
 import sessioncrypt
 from .deps import accounts, contentauth, contentlist
-from . import lobbyops, authcap, authnode, characters, contentprofiles, fetchpath, framing, friendgroups, friendlist, friendput, handlelists, lobbybind, lobbymail, lobbysearch, lobbysession, memberstatus, pacing, paylen, profilerecord, resourcestore, titlezone
+from . import lobbyops, authcap, authnode, characters, contentprofiles, fetchpath, framing, friendgroups, friendlist, friendput, handlelists, lobbybind, lobbymail, lobbyrefuse, lobbysearch, lobbysession, memberstatus, pacing, paylen, profilerecord, resourcestore, titlezone
 
 
 
@@ -102,6 +102,10 @@ def _build_lobby_reply_pt(req_pt, world_ip):
     struct.pack_into("<I", r, 4, n)
     r[8:12] = socket.inet_aton(world_ip)[::-1]
     pay = _lobby_payload(req_pt[1], req_pt[2], n, req_pt)
+    refusal = lobbyrefuse._lobby_take_refusal(req_pt)
+    if refusal is not None:
+        # A handler, or the capture step before it, said no. See lobbyrefuse.
+        return lobbyrefuse._lobby_refusal_header(refusal)
     if pay:
         r[24:24 + len(pay)] = pay[:n]
     # The four LIST opcodes read EVERY block with verify=0 -- the helper is

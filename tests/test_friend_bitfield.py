@@ -136,8 +136,18 @@ chk("plain handle id resolves to that handle (knob on)",
 chk("the old tagged form still resolves (knob on)",
     profile_name(0x200000 | int(their_h["id"])), their_h["handle_name"])
 os.environ.pop("POL_FRIEND_BITFIELD")
-chk("knob off: a plain id falls back to the viewer (unchanged)",
+# Knob off, a plain id names nobody. Since 2026-09-28 that is refused with
+# "no profile found" (0x7C) rather than answered with the viewer's own
+# profile; POL_PROFILE_NOT_FOUND=0 keeps the old fallback, which is what this
+# check pins.
+os.environ["POL_PROFILE_NOT_FOUND"] = "0"
+chk("knob off: a plain id falls back to the viewer (POL_PROFILE_NOT_FOUND=0)",
     profile_name(int(their_h["id"])), my_h["handle_name"])
+os.environ.pop("POL_PROFILE_NOT_FOUND")
+_req = b"\x00" * R._TLV_START + item(2, int(their_h["id"])) + b"\x00" * 4
+R._profile_record(600, _req)
+chk("knob off: a plain id is refused as no profile found (default)",
+    R._lobby_take_refusal(_req), R.LOBBY_ERR_NO_PROFILE)
 
 print("search-hit identity row")
 db = accounts.connect()

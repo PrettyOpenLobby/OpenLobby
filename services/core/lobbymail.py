@@ -657,6 +657,19 @@ MAIL_KIND_FRIEND_REQUEST = 0x8080
 MAIL_KIND_FRIEND_ACCEPTED = 0x8480
 MAIL_KIND_GROUP_INVITE = 0x870A
 MAIL_KIND_GROUP_REGISTERED = 0x878A
+#: The rest of the group family. The kind word is the record's +0x3E bitfield:
+#: bit 15 valid, bits 7..11 the message TYPE, bits 0..6 the data type (0x0A for
+#: a group notice, which carries the group id and name after the text). Types
+#: 0x10, 0x12 and 0x13 are named in Project Crystal Server's MessageType, which
+#: sends 0x12 and 0x13 to the Viewer; 0x0E and 0x0F above match SE's captures.
+MAIL_KIND_GROUP_DECLINED = 0x880A      # type 0x10, the invitee said no
+MAIL_KIND_GROUP_REMOVED = 0x890A       # type 0x12, you were removed
+MAIL_KIND_GROUP_DISBANDED = 0x898A     # type 0x13, the group was disbanded
+
+
+def _mail_kind_type(kind):
+    """The message TYPE (bits 7..11) of a record's +0x3E kind word."""
+    return (int(kind or 0) >> 7) & 0x1F
 
 
 def _mail_note_minted(sender_hid, recipient_hid, kind):
@@ -893,7 +906,8 @@ def _mail_sender_slot(sender_guid):
 
 
 def _mail_mint(sender_name, sender_guid, recipient_guid, subject, body,
-               kind=MAIL_KIND_MESSAGE, thread=None, when=None, sender_slot=None):
+               kind=MAIL_KIND_MESSAGE, thread=None, when=None, sender_slot=None,
+               tail=b""):
     """Post a message from the SERVER, and return the `O/m/` path it lives at.
 
     THE POINT: an `O/m/` path IS the 72-byte push record, so a message we mint
@@ -929,6 +943,11 @@ def _mail_mint(sender_name, sender_guid, recipient_guid, subject, body,
     rec[0x20:0x30] = str(subject).encode("cp932", "replace")[:15].ljust(16, b"\x00")
     obj = (str(subject).encode("cp932", "replace") + b"\x07"
            + str(body).encode("cp932", "replace") + b"\x00")
+    # `tail` is the binary block some kinds carry after the text's NUL: the
+    # group notices put `{u64 group id; char name[0x14]}` there (see
+    # `friendgroups._group_notice_tail`). It counts toward +0x38, the way
+    # Project Crystal Server sizes the group notices it sends to the Viewer.
+    obj += bytes(tail or b"")
     if thread is None:
         thread = _mail_next_thread(recipient_guid)
     struct.pack_into("<I", rec, 0x30, int(thread) & 0xFFFFFFFF)
