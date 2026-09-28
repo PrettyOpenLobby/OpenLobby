@@ -398,6 +398,17 @@ class ValkeyKV(_Base):
         self.url = url
         self._r = valkey.Valkey.from_url(url, decode_responses=True,
                                          health_check_interval=30)
+        # BLPOP/BLMOVE hold the socket open for the whole block. valkey-py
+        # gives every connection a 5 s read timeout by default, so a block of
+        # 5 s or more died with "Timeout reading from socket" before the
+        # server answered. Blocking calls get their own pool with no read
+        # timeout (the server ends the block); connect still times out, and
+        # keepalive notices a peer that went away mid-block.
+        self._rb = valkey.Valkey.from_url(url, decode_responses=True,
+                                          health_check_interval=30,
+                                          socket_timeout=None,
+                                          socket_connect_timeout=5,
+                                          socket_keepalive=True)
 
     def ping(self):
         return bool(self._r.ping())
@@ -448,7 +459,7 @@ class ValkeyKV(_Base):
     def pop(self, key, timeout=None):
         if not timeout:
             return self._r.lpop(self._k(key))
-        got = self._r.blpop([self._k(key)], timeout=float(timeout))
+        got = self._rb.blpop([self._k(key)], timeout=float(timeout))
         return None if got is None else got[1]
 
     def llen(self, key):
@@ -458,7 +469,7 @@ class ValkeyKV(_Base):
         ks, kd = self._k(src), self._k(dst)
         if not timeout:
             return self._r.lmove(ks, kd, "LEFT", "RIGHT")
-        return self._r.blmove(ks, kd, float(timeout), "LEFT", "RIGHT")
+        return self._rb.blmove(ks, kd, float(timeout), "LEFT", "RIGHT")
 
     def lrem(self, key, value, count=1):
         return self._r.lrem(self._k(key), int(count), _text(value))
