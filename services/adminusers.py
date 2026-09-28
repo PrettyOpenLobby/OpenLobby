@@ -21,14 +21,24 @@ import time
 import accounts
 
 #: What a moderator can be allowed to do. The key is what the panel checks; the
-#: label is what the owner sees. Anything not covered by one of these is the
-#: OWNER's alone -- creating/deleting accounts, grants, passwords and tokens,
-#: outside mail, news, PML, and managing moderators.
+#: label is what the owner sees, in this order. Two things are the OWNER's alone
+#: and never listed here: the owner sign-in, and managing moderators -- a
+#: moderator who could add moderators could give themselves everything.
 PERMS = {
     "gm": "GM desk: answer GM calls, the duty switch, chat",
     "codes": "Make registration codes (and see the ones they made)",
-    "reports": "Read user reports and tester issue reports",
+    "codes_void": "Void unused registration codes",
+    "reports": "Read user reports and tester issue reports, and close them",
     "accounts_view": "Look up accounts (read-only)",
+    "accounts_manage": "Manage accounts: create, passwords, login tokens, content, "
+                       "refusals, notices, kick, outside mail",
+    "accounts_delete": "Delete accounts",
+    "news_edit": "Write and save announcements",
+    "news_publish": "Publish announcements to players",
+    "pml": "PML Preview",
+    "audit": "See the activity log",
+    "health": "See service status and backups",
+    "settings": "Change GM alert and service check settings",
 }
 
 
