@@ -13,6 +13,7 @@ seeded from an MD5-expansion of K (not the pi digits), then the standard
 encrypt-zero finalization; OFB stream with CR/LF pass-through.
 """
 import itertools
+import os
 import struct
 import threading
 
@@ -455,6 +456,47 @@ def recover_iv(P, S, nick_ct, known_nicks=None, brute=True):
     return None, None
 
 
+def iv_from_user_token(token):
+    """The per-connection OFB IV the client announces in its USER line.
+
+    `USER x 8 * :<token>` -- the token is SE-base64 (the B64 alphabet below, 6
+    bits per symbol, MSB first) and its first 8 decoded bytes ARE the IV this
+    connection encrypts under. Learned from Project Crystal Server (its cipher
+    seeds the OFB state from the decoded USER bytes [0:4] and [4:8]) and checked
+    against our own authserv.log on 2026-09-27: it matched the IV recover_iv
+    found on 464 of 470 logins. The rest of the token is the client's per-launch
+    RSA modulus (see `user_token_modulus`).
+
+    Returns 8 bytes, or None when the token is too short or not in the alphabet.
+    """
+    if isinstance(token, (bytes, bytearray)):
+        token = token.decode("latin-1", "replace")
+    token = (token or "").strip()
+    if len(token) < 12:
+        return None
+    try:
+        return b64decode(token[:12])[:8]
+    except KeyError:
+        return None
+
+
+def try_iv(P, S, nick_ct, iv):
+    """Decrypt a NICK line under a GIVEN IV: (iv, plaintext) or (None, None).
+
+    One block decides: a wrong key or IV turns `NICK ` into noise in the first
+    five bytes, so the full line is only decrypted when those match, and then it
+    must also pass the same `NICK <nick>:<32 hex>:` shape recover_iv demands.
+    """
+    if not iv or len(iv) != 8 or len(nick_ct) < 16:
+        return None, None
+    if ofb_apply(P, S, iv, nick_ct[:8])[:5] != b"NICK ":
+        return None, None
+    pt = ofb_apply(P, S, iv, nick_ct)
+    if _nick_re().match(pt):
+        return bytes(iv), pt
+    return None, None
+
+
 def _cksum32(content):
     """FUN_03823df0: 32-bit little-endian word sum + trailing-byte fold."""
     s = 0
@@ -518,12 +560,78 @@ _B64INV = {c: i for i, c in enumerate(B64)}
 
 
 def b64decode(token):
+    """SE-base64 -> bytes, whole 4-symbol groups only (a partial tail is dropped)."""
     out = bytearray()
     for i in range(0, len(token) - 3, 4):
         v = (_B64INV[token[i]] << 18) | (_B64INV[token[i+1]] << 12) | \
             (_B64INV[token[i+2]] << 6) | _B64INV[token[i+3]]
         out += bytes([(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff])
     return bytes(out)
+
+
+def b64encode(data):
+    """bytes -> SE-base64, every group written as 4 symbols (a short final group
+    is zero-filled, not trimmed) -- the shape Project Crystal Server sends its
+    RSA key line in."""
+    out = []
+    for i in range(0, len(data), 3):
+        c = bytes(data[i:i + 3]) + bytes(3 - len(data[i:i + 3]))
+        v = (c[0] << 16) | (c[1] << 8) | c[2]
+        out += [B64[(v >> 18) & 63], B64[(v >> 12) & 63],
+                B64[(v >> 6) & 63], B64[v & 63]]
+    return "".join(out)
+
+
+#: The client's RSA public exponent. Not a prime (3 * 5 * 17 * 257), which is
+#: fine for encryption; it is what polcore and Project Crystal Server both use.
+RSA_E = 0xFFFF
+
+
+def user_token_modulus(token):
+    """The client's per-launch RSA modulus n, from its USER token, or None.
+
+    `USER x 8 * :<43 symbols><4-char line checksum>`: the 43 symbols are 32
+    bytes of SE-base64 (258 bits, the last two zero), and those 32 bytes read
+    LITTLE-endian are n. Every logged token decodes to an odd 255-bit number.
+    Its low 8 bytes double as the OFB IV (iv_from_user_token).
+    """
+    if isinstance(token, (bytes, bytearray)):
+        token = token.decode("latin-1", "replace")
+    token = (token or "").strip()
+    if len(token) < 43:
+        return None
+    try:
+        raw = b64decode(token[:43] + B64[0])[:32]
+    except KeyError:
+        return None
+    n = int.from_bytes(raw, "little")
+    if n < (1 << 128) or not n & 1:          # not a modulus a client made
+        return None
+    return n
+
+
+def rsa_wrap_key(n, key, e=RSA_E, rand=None):
+    """RSA PKCS#1 v1.5 (type 2) encryption of an 8-byte Blowfish key to modulus n.
+
+    The key is BYTE-REVERSED before wrapping (the client reverses it back when
+    it unwraps; Project Crystal Server does the same), and the ciphertext is the
+    modulus-length big-endian integer. Returns the ciphertext bytes; send them
+    with b64encode(). `rand(k)` supplies padding bytes (os.urandom by default);
+    zero bytes are redrawn, as the padding must be non-zero.
+    """
+    if rand is None:
+        rand = os.urandom
+    k = (n.bit_length() + 7) // 8
+    msg = bytes(key)[::-1]
+    ps_len = k - 3 - len(msg)
+    if ps_len < 8:
+        raise ValueError("modulus too small for PKCS#1 v1.5")
+    ps = b""
+    while len(ps) < ps_len:
+        ps += bytes(b for b in rand(ps_len - len(ps)) if b)
+    em = b"\x00\x02" + ps + b"\x00" + msg
+    c = pow(int.from_bytes(em, "big"), e, n)
+    return c.to_bytes(k, "big")
 
 
 def derive_key(token, e, n, base_order="reverse"):

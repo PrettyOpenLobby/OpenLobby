@@ -328,15 +328,36 @@ def pol_error_token(node_ip, node_port):
 # left zero, which is consistent -- there is nowhere to go.
 REJECT_UNKNOWN_ID = 0xC9        # SE's byte for a PlayOnline ID that does not exist
 REJECT_BAD_PASSWORD = 0xCA      # SE's byte for a real ID with the wrong password
+# The rest of the family, named per Project Crystal Server's AdminData notes
+# (its reading of the client; only C9/CA have been captured from SE by us):
+REJECT_LOCKED = 0xCB            # too many failed logins (the lockout below)
+REJECT_VERSION = 0xCC           # "not working due to a version discrepancy"
+REJECT_BUSY = 0xCD              # "network is busy" -- the generic one
+REJECT_UNKNOWN_ERROR = 0xCE     # unknown error
+# 0xDC..0xFC and 0xFF are ADMIN MESSAGES (the LM-xx dialogs, code - 220), which
+# Crystal uses for "you are banned"-style logouts. Note pol_error_token's
+# reading that the client treats 0 and >= 0xDC as "store and reconnect".
+_REJECT_WHY = {REJECT_UNKNOWN_ID: "unknown PlayOnline ID",
+               REJECT_BAD_PASSWORD: "wrong password",
+               REJECT_LOCKED: "locked out after failed logins",
+               REJECT_VERSION: "version mismatch",
+               REJECT_BUSY: "busy",
+               REJECT_UNKNOWN_ERROR: "unknown error"}
 
-# SE's own 25 bytes, verbatim, with the status byte zeroed for filling in. Only
-# offset 6 is known to carry meaning; the tail is reproduced rather than
-# understood, because copying what the live service sends costs nothing and
-# guessing at it has no upside.
+# SE's own 25 bytes, with the status byte zeroed for filling in.
+#
+# THE TAIL WAS SOMEBODY'S ACCOUNT. Project Crystal Server's AdminData lays this
+# record out as [0:2] volume, [2] domain, [4:6] status, [6] message id (our
+# status byte), [7] account number, [8:12] date, [16:24] MasterPolId
+# (big-endian). In SE's captured refusal those bytes decoded to a real SE
+# account's master id (the account behind the capture), and we were sending
+# it to every player we refused. It is ZEROED, which is also what Crystal
+# sends in its error records; nothing reads it on a refusal as far as anyone
+# knows. The captured value is deliberately NOT kept anywhere in this tree.
 _SE_REJECT_RECORD = bytes.fromhex(
-    "0000000000000000"          # [0:8]  nonce + const, STATUS at [6]
+    "0000000000000000"          # [0:8]  STATUS at [6]
     "0000000002000000"          # [8:16] address field ZERO -- nowhere to go
-    "00000fd5a573e2b800"        # [16:25] SE's tail
+    "000000000000000000"        # [16:24] MasterPolId (zeroed), [24] pad
 )
 
 
@@ -1305,6 +1326,12 @@ class ChatSession:
         self.member = member
         self._lock = threading.Lock()
         self.alive = True
+        #: Which launch and which client build this channel is (set by the
+        #: auth hop), and whether a newer login KILLED it. See
+        #: `_kill_duplicate_logins`: a killed channel's close is not a logout.
+        self.sid = None
+        self.client_sig = None
+        self.killed_dup = False
         #: IRC away-ness, as this connection last declared it (`AWAY <text>` /
         #: bare `AWAY`). Read by `_who_here_flag` as the FALLBACK behind the 4:5
         #: status: `presence-is-afk` -- in this protocol presence is modelled as
@@ -2133,6 +2160,80 @@ def _logout_or_grace(member_id, login_name, peer, sid):
     t = threading.Timer(grace, _fire)
     t.daemon = True
     t.start()
+
+
+def _kill_duplicate_logins(member_id, new_sess, peer=""):
+    """KILL this member's older auth channels that a new login replaces.
+
+    What SE does, per Project Crystal Server: a second login of one POL ID
+    gets the old socket a KILL and an ERROR, both encrypted under the old
+    connection's own cipher, and the old socket is closed without an offline
+    notification (the member is still online, on the new one).
+
+        :<srv> KILL <nick>: <srvip>!<srv>[unknown@<srvip>]!Kicked by same NICK
+        ERROR :Closing Link: <nick>[~x@<client ip>] <srvip>(Killed(Kicked by same NICK))
+
+    WARNING: WHY THIS IS NOT CRYSTAL'S "ANY OTHER SOCKET OF THE POL ID". Here the
+    games dial this same auth port: a Tetra Master launch opens two or three
+    more :51241 channels for the SAME member, from the same machine, under
+    its own USER token and the same client signature as the PC Viewer. A
+    member-wide kill would throw the Viewer off every time a game connects.
+    And one account may run a PC and a PS2 at once. So the
+    default scope (POL_AUTH_KILL_DUP_SCOPE=ip) only kills a channel that is
+    ALL of: a different launch (session id), the same client build (NICK
+    signature), and a DIFFERENT client address -- i.e. the same kind of
+    client signing in from somewhere else. Behind the Docker bridge without
+    the relay preamble every client shares one address, so it kills nothing.
+    `member` is Crystal's rule (any other launch of the member); use it only
+    where no game shares the auth port.
+
+    Returns how many channels were killed. Never raises.
+    """
+    scope = os.environ.get("POL_AUTH_KILL_DUP_SCOPE") or "ip"
+    killed = 0
+    try:
+        for old in PRESENCE.sessions_for(int(member_id)):
+            if (old is new_sess or not getattr(old, "alive", False)
+                    or getattr(old, "killed_dup", True)):
+                continue
+            old_sid = getattr(old, "sid", None)
+            if old_sid is None or old_sid == new_sess.sid:
+                continue                      # the same launch (or unknown)
+            if scope != "member" and (
+                    getattr(old, "client_sig", None) != new_sess.client_sig
+                    or old.peer_ip == new_sess.peer_ip):
+                continue
+            srv = old.srv.decode("latin-1")
+            nick = old.nick.decode("latin-1")
+            ip = old.peer_ip.decode("latin-1")
+            srvip = os.environ.get("POL_AUTH_KILL_SRVIP") or _self_ip()
+            lines = [
+                NoPad(f":{srv} KILL {nick}: {srvip}!{srv}[unknown@{srvip}]"
+                      "!Kicked by same NICK".encode()),
+                NoPad(f"ERROR :Closing Link: {nick}[~x@{ip}] {srvip}"
+                      "(Killed(Kicked by same NICK))".encode()),
+            ]
+            old.killed_dup = True
+            try:
+                old.send(lines)
+            except Exception:
+                pass
+            old.alive = False
+            try:
+                # Wake the owning thread; it closes the socket in its own
+                # `finally`, as every other ending does.
+                old.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            killed += 1
+            log("authserv", f"{peer} KILLED an older login of member "
+                            f"{member_id} ({nick} from {ip}, session "
+                            f"{old.sid}) -- replaced by this one "
+                            f"(POL_AUTH_KILL_DUP, scope={scope})")
+    except Exception as exc:
+        log("authserv", f"{peer} duplicate-login check failed ({exc!r}) -- "
+                        "nothing killed")
+    return killed
 
 
 def _member_has_other_channel(member_id, this_sess):
@@ -6472,6 +6573,19 @@ def login_digest_salts(peer_ip, sent_greetings):
     return out
 
 
+def _lockout_policy():
+    """(fails, window_s) from POL_LOGIN_LOCKOUT_FAILS / _WINDOW_S; fails 0 = off."""
+    try:
+        fails = int(os.environ.get("POL_LOGIN_LOCKOUT_FAILS", "5"))
+    except ValueError:
+        fails = 5
+    try:
+        window = float(os.environ.get("POL_LOGIN_LOCKOUT_WINDOW_S", "900"))
+    except ValueError:
+        window = 900.0
+    return (fails, window) if window > 0 else (0, window)
+
+
 def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                     client_sig=None, digest=None, salts=()):
     """Resolve the login NICK to an account row, or None.
@@ -6545,6 +6659,29 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
             # player -- this ID cannot log in -- and it is honest about what we
             # actually observed.
             return None, None, REJECT_UNKNOWN_ID
+        # LOCKED OUT? After POL_LOGIN_LOCKOUT_FAILS (5) passwords the NICK digest
+        # REFUSED within POL_LOGIN_LOCKOUT_WINDOW_S (900 s), every login of this
+        # member is refused with SE's 0xCB -- the right password too, which is
+        # the point of a lockout -- until enough of those failures age out of
+        # the window. Counted in accounts.db (login_fail), so authsess and the
+        # login container agree. `accounts.py <db> unlock <polid|login>` ends
+        # it early; POL_LOGIN_LOCKOUT_FAILS=0 turns it off.
+        lock_fails, lock_window = _lockout_policy()
+        if lock_fails > 0:
+            try:
+                left = accounts.login_lock_remaining(db, member["id"],
+                                                     lock_fails, lock_window)
+            except Exception as exc:        # a lockout fault must not refuse
+                log("accounts", f"{peer_ip} lockout check failed ({exc!r}) -- "
+                                "not enforced for this login")
+                left = 0
+            if left > 0:
+                log("accounts", f"{peer_ip} REJECT {nick!r}: LOCKED OUT after "
+                                f"{lock_fails} failed logins in {lock_window}s "
+                                f"({int(left)}s left; `accounts.py unlock "
+                                f"{member['polid']}` clears it)")
+                db.close()
+                return None, None, REJECT_LOCKED
         # THE PASSWORD CHECK: the NICK digest against the sealed password copy.
         pw_proven = False
         if digest and os.environ.get("POL_LOGIN_DIGEST", "1") == "1":
@@ -6561,6 +6698,14 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                                 "a servlet sign-in or password change stores it")
             elif accounts.login_digest_ok(digest, salts, pw) is not None:
                 pw_proven = True
+                if lock_fails > 0:
+                    try:
+                        if accounts.clear_login_failures(db, member["id"]):
+                            log("accounts", f"{peer_ip} {nick!r}: right password "
+                                            "-- earlier failed logins forgotten")
+                    except Exception as exc:
+                        log("accounts", f"{peer_ip} could not clear failed "
+                                        f"logins ({exc!r})")
                 if accounts.prove_digest_client(db, client_sig, member["id"]):
                     log("accounts", f"{peer_ip} NICK digest formula PROVEN for "
                                     f"client build {client_sig!r} -- wrong "
@@ -6571,6 +6716,25 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                     mode == "all" or accounts.digest_client_proven(db, client_sig)):
                 log("accounts", f"{peer_ip} REJECT {nick!r}: wrong password "
                                 f"(NICK digest, client {client_sig!r})")
+                # The ONLY place a failure is counted: a refusal the digest
+                # itself made. Token mismatches and unproven builds never get
+                # here, so a build that salts differently cannot lock anyone out
+                # (nor can POL_LOGIN_DIGEST_ENFORCE=all on an unproven one).
+                if lock_fails > 0 and accounts.digest_client_proven(db,
+                                                                    client_sig):
+                    try:
+                        accounts.record_login_failure(db, member["id"], peer_ip,
+                                                      client_sig)
+                        n = accounts.login_failures(db, member["id"],
+                                                    lock_window)
+                        if n >= lock_fails:
+                            log("accounts", f"{peer_ip} *** {nick!r} LOCKED OUT: "
+                                            f"{n} failed logins in "
+                                            f"{lock_window}s -- refused with "
+                                            "0xCB until they age out ***")
+                    except Exception as exc:
+                        log("accounts", f"{peer_ip} could not count the failed "
+                                        f"login ({exc!r})")
                 db.close()
                 return None, None, REJECT_BAD_PASSWORD
             else:
@@ -6757,6 +6921,21 @@ def _front_preamble_addr(conn, addr):
     return (ip, port) if ip else addr
 
 
+def auth_rsa_enabled(peer_ip):
+    """Whether this login gets the RSA-wrapped session key (POL_AUTH_RSA).
+
+    POL_AUTH_RSA=1 turns it on for everyone. POL_AUTH_RSA_IPS (comma-separated
+    client addresses, as the auth hop sees them after the relay preamble) turns
+    it on for those addresses only -- the way to prove it on prod with one
+    tester's clients while every other player keeps K=0.
+    """
+    if os.environ.get("POL_AUTH_RSA", "0") == "1":
+        return True
+    ips = [s.strip() for s in os.environ.get("POL_AUTH_RSA_IPS", "").split(",")
+           if s.strip()]
+    return bool(peer_ip) and peer_ip in ips
+
+
 def handle_authserv(conn, addr, port, srv_name, next_port):
     """Our OWN auth node, using the recovered session cipher (K=0 via token0).
         S: :prefix 300 * <redirect>       (greet, cleartext)
@@ -6854,7 +7033,43 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         elif stamp is not None:
             log("authserv", f"{peer} client accepted the SESSION token "
                             "(USER followed) -- clock is set")
-        conn.sendall(f"{prefix} 300 * {TOKEN0}\r\n".encode())
+        # THE KEY LINE. By default TOKEN0, which forces K=0 (readable wire).
+        # POL_AUTH_RSA=1 (default OFF, not yet proven live) does what SE and
+        # Project Crystal Server do instead: the USER token carries the
+        # client's per-launch RSA modulus, so wrap a fresh random 8-byte
+        # Blowfish key to it and send that. Everything after this line is then
+        # under the new key -- the NICK, our replies, and the lobby, which
+        # rides the same key and IV (see _remember_iv_key / _lobby_crypt).
+        # Anything that goes wrong here falls back to TOKEN0, loudly.
+        # WARNING: Untested against FMO: fmo.py's KEY_POLCORE_LEN note says the 16
+        # polcore key bytes are zero because our login is K=0. With this knob
+        # on they may not be -- if FMO stops handshaking, look there first.
+        rsa_key = None
+        if auth_rsa_enabled(addr[0]):
+            _utok = user.split(b":", 1)[1].strip() if b":" in user else b""
+            try:
+                n_mod = sessioncrypt.user_token_modulus(_utok)
+                if n_mod is None:
+                    log("authserv", f"{peer} *** POL_AUTH_RSA: no RSA modulus in "
+                                    f"the USER line ({user!r}) -- sending TOKEN0 "
+                                    "(K=0) instead ***")
+                else:
+                    rsa_key = os.urandom(8)
+                    wrapped = sessioncrypt.b64encode(
+                        sessioncrypt.rsa_wrap_key(n_mod, rsa_key))
+                    conn.sendall(sessioncrypt.frame_line(
+                        f"{prefix} 300 * {wrapped}".encode(), pad=b"")
+                        + b"\r\n")
+                    log("authserv", f"{peer} POL_AUTH_RSA: sent an RSA-wrapped "
+                                    f"session key ({n_mod.bit_length()}-bit "
+                                    "client modulus)")
+                    _trace("key line", "RSA-wrapped random key")
+            except Exception as exc:
+                log("authserv", f"{peer} *** POL_AUTH_RSA: wrapping failed "
+                                f"({exc!r}) -- sending TOKEN0 (K=0) instead ***")
+                rsa_key = None
+        if rsa_key is None:
+            conn.sendall(f"{prefix} 300 * {TOKEN0}\r\n".encode())
         # NICK is the next CRLF-terminated line (may already be partly in `rest`)
         if b"\r\n" in rest:
             nick_enc, rest = rest.split(b"\r\n", 1)
@@ -6891,8 +7106,59 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # Kept alongside P/S because a RESUME has to rebuild them from scratch in
         # another process, and bf_setkey's output is not something we persist.
         sess_key = b"\x00" * 8
-        iv, nick_pt = sessioncrypt.recover_iv(_P0, _S0, nick_enc)
-        _trace("try K=0", "MATCHED" if iv is not None else "no")
+        iv, nick_pt = None, None
+        # THE IV IS IN THE USER LINE. The client announces it: the first 8
+        # bytes of the SE-base64 USER token are this connection's OFB IV (see
+        # sessioncrypt.iv_from_user_token; it matched recover_iv on 464 of 470
+        # logged logins). So instead of searching for the IV under each key, try
+        # each key against the KNOWN IV -- one Blowfish block per key, K=0 first
+        # -- and only fall back to the crib search below when none of them fits.
+        # POL_IV_FROM_USER=0 skips this and restores the search-only path.
+        iv_path = "search"
+        user_iv = (sessioncrypt.iv_from_user_token(utok)
+                   if os.environ.get("POL_IV_FROM_USER", "1") == "1" else None)
+        if user_iv is not None:
+            for why, key in ([("the RSA-wrapped key", rsa_key)] if rsa_key
+                             else []) + ([("K=0", b"\x00" * 8)]
+                                         + key_candidates(addr[0], stamp)):
+                Pk, Sk = ((_P0, _S0) if key == b"\x00" * 8
+                          else sessioncrypt.bf_setkey(key))
+                iv, nick_pt = sessioncrypt.try_iv(Pk, Sk, nick_enc, user_iv)
+                if iv is None:
+                    continue
+                P, S = Pk, Sk
+                sess_key = key
+                iv_path = "USER"
+                if key == rsa_key:
+                    _session_put(_session_sid(), key=key)
+                    _trace("key recovered", "the RSA-wrapped key")
+                elif key != b"\x00" * 8:
+                    _session_put(_session_sid(), key=key)
+                    log("authserv", f"{peer} session key is {why} ({key.hex()}), "
+                                    "not K=0 -- TOKEN0's state-8 arm did not "
+                                    "run; the lobby will use this key too")
+                    _trace("key recovered", f"{why} ({key.hex()})")
+                break
+            _trace("IV from USER", (f"{user_iv.hex()} MATCHED under "
+                                    f"{sess_key.hex()}") if iv is not None
+                   else f"{user_iv.hex()} fits no candidate key -- searching")
+            if iv is None:
+                log("authserv", f"{peer} the USER token's IV {user_iv.hex()} "
+                                "decrypts the NICK under no candidate key -- "
+                                "falling back to the IV search")
+        if iv is None and rsa_key is not None:
+            Pr, Sr = sessioncrypt.bf_setkey(rsa_key)
+            iv, nick_pt = sessioncrypt.recover_iv(Pr, Sr, nick_enc)
+            _trace("try the RSA key", "MATCHED" if iv is not None else "no")
+            if iv is not None:
+                P, S, sess_key = Pr, Sr, rsa_key
+                _session_put(_session_sid(), key=rsa_key)
+        if iv is None:
+            iv, nick_pt = sessioncrypt.recover_iv(_P0, _S0, nick_enc)
+            _trace("try K=0", "MATCHED" if iv is not None else "no")
+            if iv is not None and user_iv is not None:
+                log("authserv", f"{peer} IV search found {iv.hex()} under K=0 "
+                                f"where the USER token said {user_iv.hex()}")
         if iv is None:
             # Not just THIS connection's token: a client that never re-keyed is
             # holding one from an earlier dial, so replay every session token we
@@ -7035,6 +7301,20 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
                         break
                 log("authserv", f"{peer} hold window ended")
             return
+        if rsa_key is not None and sess_key != rsa_key:
+            # The client did not take the key we wrapped for it -- the NICK
+            # came under K=0 or an old session key. The login goes on under
+            # that key (so nothing breaks), but POL_AUTH_RSA is not working
+            # for this client and whoever armed it needs to know.
+            log("authserv", f"{peer} *** POL_AUTH_RSA: the client IGNORED the "
+                            "RSA-wrapped key -- its NICK decrypted under "
+                            f"{'K=0' if sess_key == bytes(8) else sess_key.hex()} "
+                            "instead; continuing under that key ***")
+            _trace("RSA key IGNORED", f"NICK under {sess_key.hex()}")
+        elif rsa_key is not None:
+            log("authserv", f"{peer} POL_AUTH_RSA: NICK decrypted under the "
+                            "RSA-wrapped key -- this session is not K=0")
+            _remember_iv_key(_session_sid(), iv, rsa_key)
         # NICK line = `NICK <handle>:<32-hex session digest>:<36-char blob>`.
         # The blob's fixed-width layout (decoded live 2026-08-13 from two logins
         # of one account) is  head[8] + pad[13] + TOKEN[11] + nonce[4], and the
@@ -7049,9 +7329,12 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # the PC and PS2 Viewers, so the credential check is scoped by it.
         client_sig = (nick_client_sig(nick_fields[2])
                       if len(nick_fields) > 2 else None)
+        # (Log readers parse this line: keep "IV=.. nick=.. NICK=.." adjacent
+        # and put anything new at the end.)
         log("authserv", f"{peer} IV={iv.hex()} nick={nick!r} NICK={nick_pt!r}"
                         + (f" cred={cred!r}" if cred else "")
-                        + (f" client={client_sig!r}" if client_sig else ""))
+                        + (f" client={client_sig!r}" if client_sig else "")
+                        + f" iv_via={iv_path}")
         # Promote this nick to the front of the crib list, so this account's NEXT
         # dial takes recover_iv's fast path (one Blowfish block) instead of the
         # 64^3 brute force. Covers auto-provisioned accounts too, whose nick is
@@ -7115,8 +7398,7 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             _trace_dump(peer, "reject", [
                 ("what the client was told",
                  f"  status byte {reject:#04x}")])
-            why = ("unknown PlayOnline ID" if reject == REJECT_UNKNOWN_ID
-                   else "wrong password")
+            why = _REJECT_WHY.get(reject, f"status {reject:#04x}")
             # MARK THE SESSION REFUSED, before anything else can use it.
             #
             # We cannot simply drop the session: the reject record below is
@@ -7260,6 +7542,7 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # directly -- see the ChatSession note.
         chat_sess = ChatSession(nick, prefix[1:], addr[0], conn, P, S, iv,
                                 member=member)
+        chat_sess.sid, chat_sess.client_sig = _session_sid(), client_sig
         # Each ENCRYPTED line needs the client's trailing checksum (frame_line) or
         # FUN_037d5e80 rejects it after decrypt (return before the numeric handler) --
         # which is why 422 never registered and the record never reached the gate.
@@ -7269,7 +7552,8 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # on the default (`fail`) it writes nothing and costs a dict lookup.
         _trace_dump(peer, "ok")
         log("authserv", f"{peer} sent mode={mode} {len(lines)}-line reply "
-                        f"(K=0, IV={iv.hex()}, checksummed)")
+                        f"(K={'0' if sess_key == bytes(8) else sess_key.hex()}"
+                        f", IV={iv.hex()}, checksummed)")
         # The real directory/auth hops CLOSE right after replying; the client
         # advances (dials the next node / the lobby) on that EOF. Holding the
         # socket open (POL_AUTH_HOLD) is what made the client hang in "verifying".
@@ -7349,6 +7633,11 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # either way, and keeping it unconditional means is_online() is always true
         # while the socket lives. The matching unregister is in `finally`.
         if keepalive and member is not None:
+            # A newer login of this member replaces an older one, the way SE
+            # and Project Crystal Server do it. Off by default -- see
+            # _kill_duplicate_logins for why that is not as simple here.
+            if os.environ.get("POL_AUTH_KILL_DUP", "0") == "1":
+                _kill_duplicate_logins(int(member["id"]), chat_sess, peer)
             PRESENCE.register(int(member["id"]), chat_sess)
             # No name passed on purpose -- _broadcast_presence resolves the
             # HANDLE name. Passing `nick` here is what leaked URZ82TPPK.
@@ -7362,7 +7651,15 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         if extra:
             log("authserv", f"{peer} client replied {len(extra)}B total\n"
                             + hexdump(extra))
-        if keepalive and acct_db is not None and member is not None                 and _member_has_other_channel(int(member["id"]), chat_sess):
+        if keepalive and member is not None and chat_sess.killed_dup:
+            # REPLACED, NOT LOGGED OUT. A newer login of this member killed
+            # this channel (POL_AUTH_KILL_DUP); the member is still online on
+            # the new one, so no offline push and no session wipe.
+            log("accounts", f"{peer} channel for {member['login_name']} was "
+                            "killed by a newer login -- not a logout, no "
+                            "offline notification")
+        elif keepalive and acct_db is not None and member is not None \
+                and _member_has_other_channel(int(member["id"]), chat_sess):
             # NOT A LOGOUT. This member is still holding another live channel, and
             # close_sessions() would delete its row too. See _member_has_other_channel.
             log("accounts", f"{peer} channel closed for {member['login_name']} but "
@@ -7584,6 +7881,11 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
     _idle_push_gate_said = False    # one log per connection, not per timeout
     try:
         while True:
+            if chat_sess is not None and getattr(chat_sess, "killed_dup", False):
+                # _kill_duplicate_logins shut this socket down, which wakes a
+                # blocked recv on Linux; this catches the next timeout anywhere.
+                close_why = "we closed it: a newer login KILLED this one"
+                break
             if gmchat is not None and gm_room:
                 for spool_nick, rec in gmchat.drain(gm_room):
                     # An empty nick means "attribute it to the client itself" --
@@ -7972,6 +8274,7 @@ def handle_authresume(conn, addr, srv_name):
         prefix = ":" + srv
         chat_sess = ChatSession(nick, srv, addr[0], conn, P, S, iv,
                                 member=member)
+        chat_sess.sid, chat_sess.client_sig = sid, slot.get("client_sig")
         key_txt = "0" if key == b"\x00" * 8 else key.hex()
         log("authserv", f"{peer} RESUMED session {sid} as {nick_s} "
                         f"(fp={fp[:12]}, IV={iv.hex()}, K={key_txt})")
@@ -7993,7 +8296,12 @@ def handle_authresume(conn, addr, srv_name):
                                    P, S, iv, True, ping_every)
         if extra:
             log("authserv", f"{peer} resumed client sent {len(extra)}B total")
-        if acct_db is not None and member is not None                 and _member_has_other_channel(int(member["id"]), chat_sess):
+        if member is not None and chat_sess.killed_dup:
+            log("accounts", f"{peer} resumed channel for "
+                            f"{member['login_name']} was killed by a newer "
+                            "login -- not a logout, no offline notification")
+        elif acct_db is not None and member is not None \
+                and _member_has_other_channel(int(member["id"]), chat_sess):
             log("accounts", f"{peer} resumed channel closed for "
                             f"{member['login_name']} but other live channel(s) "
                             "remain -- not a logout, presence held")
@@ -10339,8 +10647,57 @@ def _lobby_pick_iv(frame, candidates, exact=True):
 
 def _lobby_crypt(data, iv):
     """OFB is symmetric; the keystream restarts from the IV for each message."""
-    P, S = sessioncrypt.bf_setkey(_lobby_key())
+    P, S = sessioncrypt.bf_setkey(_lobby_key_for_iv(iv))
     return sessioncrypt.ofb_apply(P, S, iv, data)
+
+
+def _remember_iv_key(sid, iv, key):
+    """Record that `iv` belongs to a session keyed with `key` (POL_AUTH_RSA).
+
+    The lobby identifies a connection by trying every session's IV against
+    its first frame BEFORE it knows the session -- so before it can ask the
+    session for its key. Under K=0 that never mattered: every session had the
+    same key. An RSA-negotiated key is per connection, so each IV has to carry
+    its own. Hex strings, so the map survives the JSON hop to the lobby's
+    container unchanged.
+    """
+    if not iv or not key:
+        return
+    with _SESSIONS_LOCK:
+        slot = _SESSIONS.get(sid) or {}
+        ivk = dict(slot.get("iv_keys") or {})
+    ivk[bytes(iv).hex()] = bytes(key).hex()
+    while len(ivk) > 8:                      # the slot keeps 8 IVs; match it
+        del ivk[next(iter(ivk))]
+    _session_put(sid, iv_keys=ivk)
+
+
+def _lobby_key_for_iv(iv):
+    """The key a lobby frame under `iv` is encrypted with.
+
+    POL_LOBBY_KEY still wins; then an RSA session that recorded this IV
+    (_remember_iv_key), the bound session's first; then `_lobby_key()`, which
+    is what every lobby frame used before -- so with POL_AUTH_RSA off nothing
+    here can change.
+    """
+    if os.environ.get("POL_LOBBY_KEY"):
+        return _lobby_key()
+    h = bytes(iv).hex() if isinstance(iv, (bytes, bytearray)) else None
+    if h:
+        with _SESSIONS_LOCK:
+            bound = _SESSIONS.get(_session_sid()) or {}
+            hit = (bound.get("iv_keys") or {}).get(h)
+            if hit is None:
+                for slot in _SESSIONS.values():
+                    hit = (slot.get("iv_keys") or {}).get(h)
+                    if hit:
+                        break
+        if hit:
+            try:
+                return bytes.fromhex(hit)
+            except ValueError:
+                pass
+    return _lobby_key()
 
 
 def _lobby_cksum(buf, seed=0):
