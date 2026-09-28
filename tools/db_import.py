@@ -144,8 +144,8 @@ RESOURCE_SUBDIRS = ("tmrank",)
 #: Files in resources/ that a title's own importer owns: {name: the command}.
 #: They are listed as not imported and never become blob rows.
 TITLE_OWNED_RESOURCES = {
-    "janevent.json": "crystalholo: janstore.py import event",
-    "jan-rank-snapshot.json": "crystalholo: janstore.py import rank_snapshot",
+    "janevent.json": "hippaulholo: janstore.py import event",
+    "jan-rank-snapshot.json": "hippaulholo: janstore.py import rank_snapshot",
 }
 
 
@@ -220,7 +220,7 @@ DOC_STORES = (
 #: has no importer for yet. The order is the order they run in
 #: (docs/database.md, "Moving an existing /data").
 TITLES = (
-    ("Final Fantasy XI (LSB bridge)", "crystalbridge", _DC_ENV, [
+    ("Final Fantasy XI (LSB bridge)", "hippaulbridge", _DC_ENV, [
         ("data", "ffxi_idmap.json",
          "run --rm --no-deps --entrypoint python bridge ffxidb.py import idmap "
          "/data/ffxi_idmap.json",
@@ -235,7 +235,7 @@ TITLES = (
          "/state/ffxi_accounts.json",
          "which LSB account each member has"),
     ], []),
-    ("Fantasy Earth", "crystalring", _DC, [
+    ("Fantasy Earth", "hippaulring", _DC, [
         ("data", "fe.db",
          "run --rm --no-deps --entrypoint python feworld fedb.py import fe_db "
          "/data/fe.db", "the characters"),
@@ -247,7 +247,7 @@ TITLES = (
          "/data", "the world's state, which the FE services kept as JSON "
          "files in /data"),
     ], []),
-    ("Front Mission Online", "crystalfront", _DC_ENV, [
+    ("Front Mission Online", "hippaulfront", _DC_ENV, [
         ("data", "fmo.db",
          "run --rm --no-deps --entrypoint python fmo fmodb.py import fmo_db "
          "/data/fmo.db",
@@ -271,7 +271,7 @@ TITLES = (
         ("data", "fmo_sector_wins.json", None,
          "imported by the fmo service on its first start; leave it in /data"),
     ], []),
-    ("Janhourou", "crystalholo", _DC, [
+    ("Janhourou", "hippaulholo", _DC, [
         ("data", "resources/janevent.json",
          "run --rm --no-deps --entrypoint python jan janstore.py import event "
          "/data/resources/janevent.json", "the event record"),
@@ -286,9 +286,9 @@ TITLES = (
          "to Discord"),
         ("data", "resources/<member>.jan_stats.json", None,
          "each member's record: a row of the blob table, which this import "
-         "fills and CrystalHoLo reads; nothing to run"),
+         "fills and HippaulHoLo reads; nothing to run"),
     ], []),
-    ("Tetra Master", "crystalmaster", _DC, [
+    ("Tetra Master", "hippaulmaster", _DC, [
         ("data", "tm-event-state.json",
          "run --rm --no-deps --entrypoint python tmrank tmstore.py import "
          "event_state /data/tm-event-state.json", "the tournament standings"),
@@ -303,14 +303,14 @@ TITLES = (
          "to Discord"),
         ("data", "resources/<member>.tm_collection.json, auction-*", None,
          "the collections, saves, prize records and auction records: rows "
-         "of the blob table, which this import fills and CrystalMaster "
+         "of the blob table, which this import fills and HippaulMaster "
          "reads; nothing to run"),
         ("data", "resources/tmrank/", None,
          "the weekly lists; this import copies each file into the blob table "
          "as scope tmrank, and the tmrank service rebuilds them "
          "(TM_RANK_AT=now publishes at start)"),
     ], []),
-    ("Dirge of Cerberus", "crystaldirge", _DC_ENV, [
+    ("Dirge of Cerberus", "hippauldirge", _DC_ENV, [
         ("logs", fn, "run --rm --no-deps --entrypoint python doc docdb.py import %s /logs/%s"
          % (store, fn), None)
         for fn, store in DOC_STORES

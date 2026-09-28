@@ -335,7 +335,7 @@ def _tokens(meta: dict, peer: str):
     on the PS2 path, and because a token that matches everything is visible as
     such in the manifest's per-token counts, where a missing one is not.
 
-    `session` FIRST: the public CrystalMod shim has no credential vault, so it
+    `session` FIRST: the public HippaulMod shim has no credential vault, so it
     sends no polid -- it sends the POL session id instead ("u" + 16 hex,
     poltoken.cpp), which authserv logs as `session <sid>` at login and the
     lobbies log as `bound to session <sid> (member=N)`. It is the one token that

@@ -571,7 +571,7 @@ chk("a save whose path begins with 'bak' is a save", db.query_one(
     "SELECT data FROM blob WHERE scope = %s AND path = 'bakery.bin'", (str(m1),)),
     {"data": b"bread"})
 chk("the Jan files point at the Jan import", why.get("janevent.json"),
-    "the title's own import reads it (crystalholo: janstore.py import event)")
+    "the title's own import reads it (hippaulholo: janstore.py import event)")
 chk("no blob row for a backup or a Jan file", db.query_one(
     "SELECT count(*) AS n FROM blob WHERE path LIKE '%%.bak%%' OR path LIKE"
     " '%%.pre-%%' OR path LIKE '%%.stale-%%' OR path LIKE '%%.orig%%' OR scope IN"

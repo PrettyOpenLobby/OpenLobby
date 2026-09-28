@@ -467,14 +467,14 @@ one; `docker volume ls` shows them.
      afresh, and a character the Viewer knows under another Content ID gets
      POL-0001. While the table is empty and `/data/ffxi_idmap.json` still
      holds pairings, the bridge does not open its ports and logs what to run
-     (`FFXI_IDMAP_START_EMPTY=1` overrides that). From `crystalbridge`:
+     (`FFXI_IDMAP_START_EMPTY=1` overrides that). From `hippaulbridge`:
 
      ```
      $DC run --rm --no-deps --entrypoint python bridge ffxidb.py import idmap /data/ffxi_idmap.json
      $DC run --rm --no-deps -v crystalbridge_bridge-state:/state:ro --entrypoint python bridge ffxidb.py import accounts /state/ffxi_accounts.json
      ```
 
-   - Fantasy Earth, from `crystalring`:
+   - Fantasy Earth, from `hippaulring`:
 
      ```
      $DC run --rm --no-deps --entrypoint python feworld fedb.py import fe_db /data/fe.db
@@ -482,7 +482,7 @@ one; `docker volume ls` shows them.
      $DC run --rm --no-deps --entrypoint python feworld fedb.py import world /data
      ```
 
-   - Front Mission Online, from `crystalfront`, before `fmo` first starts.
+   - Front Mission Online, from `hippaulfront`, before `fmo` first starts.
      `fmo_characters.json` and `fmo_sector_wins.json` need no command: the
      service imports each the first time it finds its table empty, so leave
      them in `/data`. Import `fmo.db` first, or the service fills the pilot
@@ -498,7 +498,7 @@ one; `docker volume ls` shows them.
      $DC run --rm --no-deps -v crystalfront_fmo-board-state:/state:ro --entrypoint python fmo fmodb.py import board_state /state
      ```
 
-   - Janhourou, from `crystalholo`. Each member's record
+   - Janhourou, from `hippaulholo`. Each member's record
      (`resources/<member>.jan_stats.json`) needs no command: step 4 copied
      it into the `blob` table, where the title reads it. The third command
      matters only where the web board posted to Discord:
@@ -509,7 +509,7 @@ one; `docker volume ls` shows them.
      $DC run --rm --no-deps -v openlobby_jan-board-state:/state:ro --entrypoint python jan janstore.py import board_state /state
      ```
 
-   - Tetra Master, from `crystalmaster`. The collections, saves, prize
+   - Tetra Master, from `hippaulmaster`. The collections, saves, prize
      records, auction records and weekly lists need no command: step 4
      copied them into the `blob` table, where the title reads them. The
      third command matters only where the web board posted to Discord:
@@ -520,7 +520,7 @@ one; `docker volume ls` shows them.
      $DC run --rm --no-deps -v openlobby_tm-board-state:/state:ro --entrypoint python tmrank tmstore.py import board_state /state
      ```
 
-   - Dirge of Cerberus, from `crystaldirge`, while the `doc` responder is
+   - Dirge of Cerberus, from `hippauldirge`, while the `doc` responder is
      stopped: `$DC run --rm --no-deps --entrypoint python doc docdb.py import
      <store> /logs/doc-<store>.json` for each store file the importer lists.
 

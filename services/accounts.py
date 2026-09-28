@@ -1810,7 +1810,7 @@ def character_names(conn):
     """{(content_id_int, content_code): character name} -- the GAME character's
     own name for each Content ID we know one for.
 
-    This is the read side of CrystalBridge's `tools/ffxi_names.py` (any title
+    This is the read side of HippaulBridge's `tools/ffxi_names.py` (any title
     may fill the same table), whose docstring named "the
     Content ID list UI" as the later step and left this table standalone so it
     could land while other work was in flight. It has landed; this is that step.
@@ -1844,7 +1844,7 @@ def record_character_name(conn, content_id, name, content_code=1,
     `character_names`). Returns (outcome, previous name): outcome is 'added',
     'updated' (same name, refreshed) or 'renamed'. Commits.
 
-    For a title's bridge or import tool: CrystalBridge's ffxi_names.py wrote
+    For a title's bridge or import tool: HippaulBridge's ffxi_names.py wrote
     this table with its own SQL against accounts.db.
     """
     now = when or _now()

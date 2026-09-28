@@ -557,7 +557,7 @@ def advertise_for(default, peer_ip=None, dialed_ip=None):
 
 
 #: THE SHIM BUILD IN www/shim/dist IS THE OPERATOR'S OWN, and both doors serve
-#: it to anyone who asks: early CrystalMod installers fetch
+#: it to anyone who asks: early HippaulMod installers fetch
 #: <server>/shim/dist/PolHook.dll before they install. An operator whose www/
 #: holds a private or development build can set POL_SHIM_PRIVATE=1 to hide the
 #: BUILD from peers with a global address. It is still served to the LAN and to
