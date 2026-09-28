@@ -715,7 +715,7 @@ def _build_lobby_reply(stub_ip):
     is not yet confirmed (needs a decoded SE capture), so this is gated behind
     POL_LOBBY_EMIT and logged, not trusted. It exists so the emit path is ready
     the instant lobbydec.py --key ... reveals the real frame layout."""
-    ids = [int(x) for x in os.environ.get("POL_LOBBY_CONTENT_IDS", "1,2").split(",")]
+    ids = contentprofiles.lobby_content_ids()
     block = contentlist.build_block(ids)                 # 192-byte content list
     world_ip = os.environ.get("POL_WORLD_IP") or authcap._self_ip()
     world_port = int(os.environ.get("POL_WORLD_PORT", "51330"))

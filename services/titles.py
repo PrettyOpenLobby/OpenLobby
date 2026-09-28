@@ -304,6 +304,24 @@ class Title:
         real name; `info` is the client's status line."""
         return None
 
+    def character_world(self, cid):
+        """The world identity dword for a Content ID: served at +0x0C of its
+        character record and as `z_ctsid` in the profile's content block.
+        None when the title has no world identity (most do not)."""
+        return None
+
+    def character_display_name(self, cid, content_id, handle_name):
+        """The name to show for a Content ID in the character list, or None
+        for the core's rule (a character name it knows, else the handle name,
+        else the digits)."""
+        return None
+
+    def content_schema(self):
+        """(fields, record_len, phead) for this title's content profile, or
+        None to use the core's table of the Viewer's own layouts
+        (`_CONTENT_SCHEMAS`)."""
+        return None
+
     def describe_line(self, body):
         """A one-line description of a game-envelope body, for the log."""
         return repr(bytes(body[:64]))
@@ -573,3 +591,25 @@ def polpro_spec_files():
     for t in _TITLES:
         out.extend(t.polpro_spec_files)
     return out
+
+
+def character_world(code, cid):
+    """The world identity dword the title for `code` records for `cid`, or None."""
+    t = for_code(code)
+    if t is None:
+        return None
+    return t.character_world(cid)
+
+
+def character_display_name(code, cid, content_id, handle_name):
+    t = for_code(code)
+    if t is None:
+        return None
+    return t.character_display_name(cid, content_id, handle_name)
+
+
+def content_schema(code):
+    t = for_code(code)
+    if t is None:
+        return None
+    return t.content_schema()

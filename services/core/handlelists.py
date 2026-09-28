@@ -4,7 +4,8 @@ import struct
 import time
 from srvcore import log
 from .deps import accounts
-from . import characters, contentprofiles, ffxifields, friendgroups, friendlist, lobbyrooms, lobbysession, profilerecord, pushspool
+import titles
+from . import characters, contentprofiles, friendgroups, friendlist, lobbyrooms, lobbysession, profilerecord, pushspool
 
 
 
@@ -538,20 +539,6 @@ def _handle_record(slot, name, rec, base_bytes=None, guid=0, face_icon=0,
     return bytes(out)
 
 
-#: FFXI's content code, i.e. the value the client's world lookup insists on
-#: finding at character-table `+0x02`.
-_FFXI_CONTENT_CODE = 1
-#: Written by the FFXI bridge (`lsb/ffxi_bridge.py`), read here. Bind-mounted
-#: read-only into this container; absent on a stack without the LSB overlay, in
-#: which case FFXI's world field stays 0 exactly as before.
-_FFXI_IDMAP = os.environ.get("POL_FFXI_IDMAP", "/lsb/ffxi_idmap.json")
-#: Only used to DERIVE a world field for a character the bridge has recorded a
-#: charid for but not yet a `world_field` (see below). Must agree with the
-#: bridge's `FFXI_WORLD_ID` / `FFXI_WORLD_ID_FIX`.
-_FFXI_WORLD_ID = int(os.environ.get("POL_FFXI_WORLD_ID", "0x20"), 0)
-_ffxi_world_cache = {"mtime": None, "map": {}, "prof": {}}
-#: Paths already complained about. See `_ffxi_world_fields`.
-_ffxi_missing_warned = set()
 
 
 def _list_payload(op1, op2, n, req_pt=None):
@@ -750,20 +737,21 @@ def _list_payload(op1, op2, n, req_pt=None):
             out[base:base + rec] = characters._char_record(rec, i, slot, pos, code, cid,
                                                 handle_name=hname,
                                                 names=char_names, bind=bind)
-            if code == _FFXI_CONTENT_CODE and cid:
-                # Serve-time observability for the post-create-relog experiment:
-                # WHAT world identity did this 1:3 actually carry, and WHEN. A
-                # post-create re-fetch that logs a real field here and still
-                # ends in POL-0001 rules the server side out entirely.
+            if cid:
+                # Serve-time observability for a title with a world identity:
+                # WHAT world identity this 1:3 actually carried, and WHEN. A
+                # re-fetch that logs a real field and still fails to connect
+                # rules the server side out entirely.
                 try:
-                    _wf = ffxifields._ffxi_world_fields().get(int(str(cid).strip() or 0))
+                    _wf = titles.character_world(code, int(str(cid).strip() or 0))
                 except ValueError:
                     _wf = None
-                log("lobby", f"1:3 slot {i}: FFXI Content ID {cid} world_field "
-                             + (f"0x{_wf:08X}" if _wf else "NONE (unpaired)")
-                             + ("" if bind else "  [unbound: past this handle's"
-                                               " 8 binding slots, playable but"
-                                               " not shown in the profile view]"))
+                if _wf is not None:
+                    log("lobby", f"1:3 slot {i}: code {code} Content ID {cid} world_field "
+                                 f"0x{_wf:08X}"
+                                 + ("" if bind else "  [unbound: past this handle's"
+                                                   " 8 binding slots, playable but"
+                                                   " not shown in the profile view]"))
             continue
         if mode == "groups" and (op1, op2) == (0x07, 0x0C):
             # 7:12's 136-byte record has its OWN layout, read off polcore

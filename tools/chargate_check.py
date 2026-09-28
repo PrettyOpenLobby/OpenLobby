@@ -150,8 +150,11 @@ def _world_field(charid, worldid=None):
             | (charid & 0xFFFF)) & 0xFFFFFFFF
 
 
-R._ffxi_world_fields = lambda: {30000101: _world_field(FFXI_CHARID),
-                                30000103: _world_field(FFXI_CHARID2)}
+import titles  # noqa: E402
+
+_WORLDS = {30000101: _world_field(FFXI_CHARID), 30000103: _world_field(FFXI_CHARID2)}
+# the FFXI bridge's title records the world identity; stand in for it
+titles.character_world = lambda code, cid: _WORLDS.get(cid) if code == 1 else None
 
 n = R._list_paylen(1, 3, R._list_count(1, 3))
 count = R._list_count(1, 3)

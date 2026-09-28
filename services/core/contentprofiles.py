@@ -5,7 +5,8 @@ import struct
 import titles as _titles_mod    # for functions that keep a local named `titles`  # noqa: E402
 from srvcore import log
 from .deps import accounts
-from . import characters, ffxifields, handlelists, lobbymail, pfc, profilerecord
+from srvcore import RELEASE_DEFAULTS
+from . import characters, handlelists, lobbymail, pfc, profilerecord
 
 
 
@@ -233,289 +234,34 @@ def _content_code_for_request(req_pt):
     return _content_code_for_cid(asked.get(2))
 
 
-#: KEY: **WHICH SCHEMA SLOT EACH TITLE'S LABEL LANDS ON**, read out of the label
-#: file's own record table: each 20-byte record pairs a label pointer with an id
-#: whose LOW BYTE is the schema field index. Verified against FFXI as a positive
-#: control -- its labels resolve to exactly the field names `prof_001.pib`
-#: declares (Name -> 3 z_name, Job Level -> 10 z_joblevel, Race -> 11 z_raceid).
-#:
-#: That is what makes Tetra Master fillable at all: its tail is GENERIC slots
-#: (`z_attrsi0`, `z_attrss0`, `z_attrstr`), so without this mapping there is no
-#: way to know which one the screen calls "Card Level".
-#:
-#: DECODED FOR ALL SIX SHIPPED TITLES 2026-09-12 (`work/pc/profpfb.py` +
-#: `proftrans.split_strings`; the 20-byte records sit at payload offset 0 and
-#: run to the string area, and the enum VALUE tables sit after the strings as
-#: `{u32 value, u32 pointer}` pairs). What the SCREEN draws is exactly this
-#: list -- a schema field with no label record is not on the profile at all:
-#:
-#:     FINAL FANTASY XI  Name 3 / World Name 6 / Nation 7 / Current Area 8 /
-#:                       Job 9 / Job Level 10 / Race 11
-#:     Tetra Master      Player Name 3 / Card Level 16 z_attrsi0 u32 /
-#:                       Title 24 z_attrss0 u16 / Average Rank 9 z_attrstr /
-#:                       Purpose 4
-#:     content 3         Player Name 3 / Level 32 / Rank 26 / Games Played 17 /
-#:                       Money 11 / Yakuman 25 / the five TITLE counts 27..31 /
-#:                       Purpose 4        (all generic z_attr* slots)
-#:     Front Mission     First 9 / Last 5 / Nation 7 / Zone 8
-#:     Dirge of Cerberus Character Name 4 / Rank 6 z_class / Ranking Points 8
-#:     Fantasy Earth     Name 3 / Sex 4 / World 5 / Nation 6 / Class 7 / Level 8
-#:
-#: WARNING: **TWO FIELDS THE EARLIER TABLE GOT WRONG, both by assuming the NAME of a
-#: schema slot tells you which label lands on it.**
-#:  * Front Mission's 名 (first name) points at slot **9 `z_name`**, NOT slot 4
-#:    `z_firstname` -- and so does the file's own search predicate
-#:    (`z_name=INITCAP(%s)` beside `z_lastname=INITCAP(%s)`). Nothing in
-#:    `prof_004.pfb` references slot 4 at all. We now fill BOTH: 9 because that
-#:    is what the screen reads, 4 because it is the schema's own first-name slot
-#:    and the same measured value costs nothing there.
-#:  * Front Mission has NO World Name label. `z_worldname` (6) exists in the
-#:    schema and is never drawn, so it stays unset -- the old "4/5/6/7/8" row
-#:    listed a field the profile does not have.
-_TM_CARD_LEVEL, _TM_TITLE, _TM_AVG_RANK = 16, 24, 9
-_FMO_FIRSTNAME, _FMO_LAST, _FMO_COUNTRY, _FMO_ZONE, _FMO_NAME = 4, 5, 7, 8, 9
-_FE_NAME, _FE_SEX, _FE_WORLD, _FE_NATION, _FE_CLASS, _FE_LEVEL = 3, 4, 5, 6, 7, 8
-_FFXI_WORLD, _FFXI_NATION, _FFXI_ZONE = 6, 7, 8
-_FFXI_JOB, _FFXI_JOBLEVEL, _FFXI_RACE = 9, 10, 11
-_DOC_NAME, _DOC_RANK, _DOC_RANKPOINT = 4, 6, 8
-#: Front Mission's zone enum, from `prof_004.pfb`: 1 O.C.U. Headquarters,
-#: 2 O.C.U. Occupation Zone, 3 U.S.N. Headquarters, 4 U.S.N. Occupation Zone,
-#: 5 Frontline Zone, 6 Coliseum -- which is `fmo.MAPKIND_BANDS` exactly, in
-#: order, and the same 1..6 `fmo.ZONE_HOME_BY_KIND` is keyed on. So the zone a
-#: pilot is standing in is `mapkind // 100`, the client's own arithmetic, not a
-#: table we invented.
-_FMO_ZONE_MAX = 6
-
-#: Fantasy Earth's three player classes, from `fegamedata.item_classes`
-#: ("0 Warrior, 1 Scout, 2 Sorcerer" -- the RoD classes, and the only rows
-#: `PLAYER_CLASSES` names). The index is the stored `look1`, which is
-#: `[unit+0x3AB]` and is a CLASS, not appearance: see `feworld.self_class_id`,
-#: where the name is kept only for store compatibility.
-_FE_CLASSES = {0: "Warrior", 1: "Scout", 2: "Sorcerer"}
-
-#: Fantasy Earth's nations, in the client's own ID order -- the same defaults
-#: `feworld.py --forces` serves to the nation-select screen, so the profile and
-#: the game agree on what nation 1 is called.
-#:
-#: WARNING: The old note here ended "`z_class` and `z_level` have no source in the
-#: roster at all and stay unset". That was true of the JSON roster and stopped
-#: being true on 2026-09-08, when `festore.py` gave every character its own
-#: `class_levels` table -- see `_FE_CLASSES`. Both are served now.
-_FE_NATIONS = {1: "Netzawar", 2: "Cathedira", 3: "Elsord",
-               4: "Holdein", 5: "Gebrand"}
-
-#: The world the player is on, for `z_world`.
-#:
-#: WARNING: **AND A CORRECTION TO THIS FILE'S OWN EARLIER REASONING.** `z_world` was
-#: first left unset "because no world name is configured anywhere to borrow".
-#: That was FALSE: one was configured all along -- `felobby.py`'s `--worlds`
-#: default -- and served live in `0xD00C` on every session. It was configured
-#: BADLY (it read `Test World`), which is a different problem with a different
-#: fix, and `926c9701` fixed it to `PlayOnline` to match FFXI. Leaving the field
-#: blank was the right call for the wrong reason, and a blank justified by a
-#: false premise is the kind of thing that gets inherited.
-#:
-#: WARNING: SOURCE OF TRUTH IS `felobby.py --worlds` (`UnitID:GameID:UserNum:Name`).
-#: This is a SECOND copy of that name, so the two can drift; if the world picker
-#: and the profile ever disagree, that is why. `POL_FE_WORLD` overrides here.
-#: The real fix is one shared constant, which would mean editing felobby.
-_FE_WORLD_NAME = "PlayOnline"
-
-
 def _content_game_fields(code, cid, member_id):
     """Real per-title data for a content profile: `{field_index: value}`.
 
-    WARNING: ONLY WHAT WE ACTUALLY HOLD. A field with no source stays UNSET, and the
-    record builder's rule holds: a zero reads as "not filled in", invented
-    values read as fact.
-
-    KEY: **AND "UNSET" IS WHY THE SCREEN SAYS `Unknown`.** Decoded 2026-08-24 from
-    `prof_002.pfb`'s own tables: Title (slot 24, `z_attrss0`) is an ENUM whose
-    value list runs **1..126**, `Pauper` first and `Almighty` last, with **no
-    entry for 0**. So an unset title is not a blank field, it is an
-    out-of-range enum -- which the Viewer renders as `Unknown`. The same file's
-    field table is what pins the whole mapping (label + schema slot index):
-
-        Player Name  -> 3   z_name      Average Rank -> 9   z_attrstr (string)
-        Card Level   -> 16  z_attrsi0   Purpose      -> 4   z_purp    (enum 0..5)
-        Title        -> 24  z_attrss0   (enum 1..126)
-
-    and that is the WHOLE field set -- five fields. `Money` has a privacy
-    toggle in TM's `Friend.BIN` but no descriptor here, so the Viewer's profile
-    does not carry it and we must not invent a slot for it.
+    The title that serves `code` builds it (`titles.Title.profile_fields`);
+    the core holds no game data of its own. ONLY WHAT THE TITLE ACTUALLY
+    HOLDS: a field with no source stays UNSET, and the record builder's rule
+    holds, a zero reads as "not filled in" and an invented value reads as
+    fact. A title that raises leaves every field unset and is logged.
     """
-    out = {}
     try:
-        # A title module serves its own content code (Tetra Master: Card
-        # Level, Average Rank, Title -- see `titles.Title.profile_fields`).
-        out.update(_titles_mod.profile_fields(code, cid, member_id) or {})
-        if code == 1:                                   # FINAL FANTASY XI
-            # KEY: STRAIGHT OFF LSB'S OWN CHAR-LIST RECORD, via the bridge.
-            # prof_001's six tail fields and the `0x20` record are the same six
-            # values with the same numbering (nation 0..2, ZoneId, job 1..20,
-            # race 1..8) -- both ends are SE's, so nothing is mapped or rescaled
-            # here. See `ffxi_bridge.note_char_fields` for why the bridge has to
-            # be the one that writes them down: the lobby has no route to LSB's
-            # MySQL and knows nothing about a character but its Content ID.
-            #
-            # WARNING: EMPTY UNTIL A CHAR LIST HAS BEEN SEEN. The bridge records these
-            # as the `0x20` goes past, so a profile opened before the player has
-            # ever reached FFXI's character select carries the name and nothing
-            # else -- which is the truth, not a gap to paper over.
-            fx = ffxifields._ffxi_char_fields(cid)
-            if fx.get("world"):
-                out[_FFXI_WORLD] = fx["world"]
-            for key, slot in (("nation", _FFXI_NATION), ("zone", _FFXI_ZONE),
-                              ("job", _FFXI_JOB), ("joblevel", _FFXI_JOBLEVEL),
-                              ("race", _FFXI_RACE)):
-                # Nation 0 is San d'Oria, so `is not None`, not truthiness: a
-                # real 0 has to survive and a missing key has to stay missing.
-                if fx.get(key) is not None:
-                    out[slot] = int(fx[key])
-        elif code == 11 and member_id is not None:      # Fantasy Earth
-            # Keyed `member:<id>` since the roster was split per POL member
-            # (`558ec62f`); before that every player shared one `TestPlayer`
-            # roster and there was nothing to key on.
-            #
-            # WARNING: THROUGH `felobby.load_roster`, NOT BY OPENING THE JSON. The
-            # store became `data/fe.db` on 2026-09-08 (`festore.py`) and the
-            # JSON file froze as the backup, so the old `json.load` here was
-            # reading a file that stops changing the moment the database is in
-            # use: the profile would have gone on serving whatever the roster
-            # said on migration day. This is the call felobby and feworld make,
-            # so it honours the `FE_DB=` rollback too.
-            import felobby
-            row = (felobby.load_roster(felobby._default_store(),
-                                       f"member:{member_id}") or [None])[0]
-            if row:
-                if row.get("name"):
-                    out[_FE_NAME] = row["name"]
-                # sex 0 is MALE, from the model-path builder rather than a
-                # coin toss: an all-zero record always produced Model\Male\m_*
-                # (felobby CHAR_FIELDS, 0x0507a04f).
-                out[_FE_SEX] = "Male" if not int(row.get("sex") or 0) else "Female"
-                nation = _FE_NATIONS.get(int(row.get("force") or 0))
-                if nation:
-                    out[_FE_NATION] = nation
-                world = os.environ.get("POL_FE_WORLD", _FE_WORLD_NAME).strip()
-                if world:
-                    out[_FE_WORLD] = world
-                # CLASS AND LEVEL -- the two the roster never used to carry.
-                # `look1` is the CLASS index: it is `[unit+0x3AB]`, which the
-                # client feeds to the skill-table pick and the level lookup, and
-                # the appearance name is an inherited label kept for store
-                # compatibility (`feworld.self_class_id` says so at length).
-                # The level is that class's row in the per-character
-                # `class_levels` table festore added on 2026-09-08. A character
-                # that has never entered the world has no table, and the field
-                # then stays unset rather than claiming Lv0.
-                cls = row.get("look1")
-                cls = int(cls) & 0xFF if cls is not None else None
-                if cls in _FE_CLASSES:
-                    out[_FE_CLASS] = _FE_CLASSES[cls]
-                levels = row.get("class_levels") or {}
-                if isinstance(levels, dict) and cls is not None:
-                    # JSON turns an int key into a string and sqlite hands the
-                    # same JSON back, so the stored key is a string -- but try
-                    # both, because a caller that never round-tripped it has an
-                    # int and a silent miss here reads as "no level".
-                    lvl = levels.get(str(cls), levels.get(cls))
-                    if lvl is not None:
-                        out[_FE_LEVEL] = str(int(lvl))
-        elif code == 4 and member_id is not None:       # Front Mission Online
-            # WARNING: THROUGH `fmo.load_roster`, for the same reason as FE above: the
-            # pilots moved into `data/fmo.db` on 2026-09-08 (`fmostore.py`) and
-            # the JSON became a frozen backup.
-            import fmo
-            row = (fmo.load_roster(f"member:{member_id}") or [None])[0]
-            if row:
-                if row.get("first"):
-                    # BOTH slots. 9 is what prof_004's 名 label and the file's
-                    # own search predicate read; 4 is the schema's own
-                    # `z_firstname`, which nothing in the label file references.
-                    out[_FMO_NAME] = out[_FMO_FIRSTNAME] = row["first"]
-                if row.get("last"):
-                    out[_FMO_LAST] = row["last"]
-                # WARNING: `character_nation`, NEVER `row["nation"]`. The creation
-                # record's +0x26 and +0x28 were named backwards by the original
-                # differential decode, so the `nation` KEY holds the
-                # GENDER byte -- and both are 1/2, so serving it put every
-                # female pilot in the U.S.N. and every male one in the O.C.U.
-                # with nothing on screen looking broken. That resolver exists so
-                # the swapped key cannot be read by accident again. The enums
-                # agree: 1 O.C.U., 2 U.S.N. in prof_004.pfb as in the creation
-                # menu.
-                nation, _src = fmo.character_nation(row)
-                if nation in (1, 2):
-                    out[_FMO_COUNTRY] = int(nation)
-                # WHERE THE PILOT IS. `mapkind` is written to the store when a
-                # grant is served, and its BAND is the profile's zone enum --
-                # see _FMO_ZONE_MAX. A MapKind outside the client's own bands
-                # leaves the field unset rather than naming a zone the client
-                # would not have named itself.
-                kind = row.get("mapkind")
-                if kind is not None and fmo.in_mapkind_band(int(kind)):
-                    zone = int(kind) // 100
-                    if 1 <= zone <= _FMO_ZONE_MAX:
-                        out[_FMO_ZONE] = zone
-        elif code == 10 and member_id is not None:      # Dirge of Cerberus
-            # THE NAME, from docudp's character store -- readable here because
-            # the store is keyed by `member:<id>` when the doc container runs
-            # with `--account` (POL_DOC_ACCOUNT). Before that it was keyed on the
-            # entrance uid, which is PER SESSION, so there was no way to say
-            # whose roster was whose. Slot 0, the same "first character" rule
-            # FE and FMO use. `/logs` is mounted in this container as it is in
-            # docudp's, so this is the same file, not a copy.
-            path = os.environ.get("POL_DOC_CHARA_STORE", os.path.join(
-                os.environ.get("POL_LOG_DIR", "/logs"), "doc-characters.json"))
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    roster = (json.load(fh) or {}).get(f"member:{member_id}") or []
-            except FileNotFoundError:
-                roster = []
-            first = min((c for c in roster if c.get("name")),
-                        key=lambda c: int(c.get("slot", 0)), default=None)
-            if first:
-                out[_DOC_NAME] = first["name"]
-                # 2026-09-13: RANK and RANKING POINTS from docudp's career store
-                # (tools/doc_stats.py), keyed like the shop wallet,
-                # `member:N/0x<charid>`. The Viewer never learns the charid, so
-                # the slot-0 character is matched by NAME inside this member's
-                # keys -- never a sibling slot, never another member's
-                # same-named character. A character with no career (never
-                # finished a battle) stays name-only rather than claiming a rank.
-                # Rank goes through as-is: prof_010's z_class enum is
-                # {1 DG Drone 3rd Class .. 16 Tsviet} (decoded 2026-09-13 off
-                # the SE original), the same 1-based ladder as the game's byte.
-                spath = os.environ.get("POL_DOC_STATS", os.path.join(
-                    os.environ.get("POL_LOG_DIR", "/logs"), "doc-stats.json"))
-                try:
-                    with open(spath, encoding="utf-8") as fh:
-                        careers = (json.load(fh) or {}).get("chars") or {}
-                except FileNotFoundError:
-                    careers = {}
-                pre = f"member:{member_id}/"
-                mine = sorted(k for k, c in careers.items()
-                              if k.startswith(pre)
-                              and (c or {}).get("name") == first["name"])
-                if mine:
-                    c = careers[mine[0]]
-                    out[_DOC_RANK] = min(max(int(c.get("rank") or 1), 1), 16)
-                    out[_DOC_RANKPOINT] = max(0, int(c.get("rp") or 0))
-        # DIRGE OF CERBERUS (code 10): `prof_010.pfb` draws three fields --
-        # Character Name (4), Rank (6 `z_class`) and Ranking Points (8).
-        #   * the NAME is served above, once the store is account-keyed (Stage 1
-        #     of the DoC identity work, 2026-09-12). With no `--account` the
-        #     store is keyed on the per-session uid and nothing here matches,
-        #     which is the honest result: we cannot say whose character it is.
-        #   * RANK and RANKING POINTS come from doc_stats (2026-09-13); until a
-        #     character finishes a battle there is nothing to put in them.
-        # `z_glevel` (5) and `z_mvp` (7) are in the schema with NO label record
-        # at all, so they are not on the screen and never need filling.
+        return dict(_titles_mod.profile_fields(code, cid, member_id) or {})
     except Exception as exc:
         log("lobby", f"content profile: game data for code {code} "
                      f"unavailable ({exc!r})")
-    return out
+        return {}
+
+
+def lobby_content_ids():
+    """The content codes this server offers, as the login's games menu and
+    the free-contents block list them: POL_LOBBY_CONTENT_IDS, else the
+    release default, else the codes of the loaded titles."""
+    raw = os.environ.get("POL_LOBBY_CONTENT_IDS")
+    if raw is None:
+        raw = RELEASE_DEFAULTS.get("POL_LOBBY_CONTENT_IDS", "")
+    ids = [int(x) for x in raw.split(",") if x.strip()]
+    if ids:
+        return ids
+    return [t.content_code for t in _titles_mod.all() if getattr(t, "content_code", None)]
 
 
 def _content_schema_for(code):
@@ -525,7 +271,9 @@ def _content_schema_for(code):
     serving FFXI's tail to another title is a KNOWN approximation, not a fact,
     and the log should not read as though it were one.
     """
-    entry = _CONTENT_SCHEMAS.get(int(code)) if code is not None else None
+    entry = _titles_mod.content_schema(code) if code is not None else None
+    if entry is None:
+        entry = _CONTENT_SCHEMAS.get(int(code)) if code is not None else None
     if entry is None:
         return lobbymail._CONTENT_SCHEMA, lobbymail._CONTENT_RECORD, _CONTENT_PHEAD, False
     schema, rec_len, phead = entry
@@ -834,8 +582,9 @@ def _identity_content_entries(db, hid):
             # than minting a selectable row the content request cannot resolve.
             continue
         ctsid = cid
-        if code == handlelists._FFXI_CONTENT_CODE:
-            ctsid = ffxifields._ffxi_world_fields().get(cid, cid)
+        world = _titles_mod.character_world(code, cid)
+        if world is not None:
+            ctsid = world
         off = len(shown) * profilerecord._IDREC_CONTENT_STRIDE
         struct.pack_into("<HHII", out, off, present & 0xFFFF, f02 & 0xFFFF,
                          ctsid & 0xFFFFFFFF, cid & 0xFFFFFFFF)

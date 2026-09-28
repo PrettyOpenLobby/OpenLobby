@@ -144,14 +144,17 @@ def check_content_block():
     """Does `_identity_content_entries` reproduce SE's 16 bytes? 0 = yes."""
     links = [{"content_code": 1, "content_id": str(SE_CONTENT_CID),
               "status": "active"}]
-    real_list, real_world = R.accounts.handle_content_list, R._ffxi_world_fields
+    import titles
+    real_list, real_world = R.accounts.handle_content_list, titles.character_world
     try:
         R.accounts.handle_content_list = lambda _db, _hid: links
-        R._ffxi_world_fields = lambda: {SE_CONTENT_CID: SE_CONTENT_CTSID}
+        # the FFXI bridge's title records the world identity; stand in for it
+        titles.character_world = (lambda code, cid:
+                                  SE_CONTENT_CTSID if (code, cid) == (1, SE_CONTENT_CID) else None)
         block = R._identity_content_entries(None, 1)
     finally:
         R.accounts.handle_content_list = real_list
-        R._ffxi_world_fields = real_world
+        titles.character_world = real_world
 
     span = R._IDREC_CONTENT_STRIDE * R._IDREC_CONTENT_MAX
     problems = []

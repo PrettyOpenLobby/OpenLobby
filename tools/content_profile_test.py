@@ -86,49 +86,51 @@ def check(ok, label, detail=""):
 
 
 def game_fields(handle_id, member_id):
-    """`_content_game_fields` for every title that has a source, 2026-09-12.
+    """`_content_game_fields` is the title hook and nothing else.
 
-    Each check below is a REGRESSION that has already happened once somewhere in
-    this project, or the exact shape of one:
-
-      * a value served on the slot its schema NAME suggests instead of the slot
-        the label file points at (Tetra Master's Card Level rendered as the
-        Average Rank string for a week);
-      * a store read directly as JSON after the data moved into sqlite (both
-        game stores moved on 2026-09-08 and the JSON froze as a backup, so the
-        read keeps working and keeps returning migration-day values);
-      * a swapped key read by name (`nation` is the GENDER byte);
-      * an index passed between two ladders with different strides.
+    The per-game builders (FFXI's bridge record, Fantasy Earth's roster, Front
+    Mission's pilots, Dirge of Cerberus's careers, Janhourou's tallies) live in
+    their title modules and are tested in those repositories. What the core
+    promises: the title that serves a code fills the fields, a code with no
+    title yields nothing, and a title that raises yields nothing rather than a
+    half-filled record.
     """
-    import json
+    import titles
 
-    # --- FINAL FANTASY XI: the bridge's record of LSB's own char list --------
-    idmap = os.path.join(TMP, "ffxi_idmap.json")
-    with open(idmap, "w", encoding="utf-8") as fh:
-        json.dump({"1": {"content_id": CTID, "name": "Foxffxi",
-                         "world_field": 1,
-                         # zone 291 is the case that matters: LSB splits the
-                         # zone across zone_no and zone_no2, so a reader that
-                         # takes the low byte alone shows zone 35 instead.
-                         "profile": {"world": "Bahamut", "nation": 0,
-                                     "zone": 291, "job": 5, "joblevel": 62,
-                                     "race": 7}}}, fh)
-    R._FFXI_IDMAP = idmap
-    R._ffxi_world_cache.update(mtime=None, map={}, prof={})
-    f = R._content_game_fields(1, CTID, member_id)
-    check(f.get(R._FFXI_WORLD) == "Bahamut" and f.get(R._FFXI_JOB) == 5
-          and f.get(R._FFXI_JOBLEVEL) == 62 and f.get(R._FFXI_RACE) == 7,
-          "FFXI world/job/level/race come off the bridge's char-list record",
-          repr(f))
-    check(f.get(R._FFXI_ZONE) == 291,
-          "FFXI zone keeps its 9th bit (zone_no2)", repr(f.get(R._FFXI_ZONE)))
-    check(R._FFXI_NATION in f and f[R._FFXI_NATION] == 0,
-          "nation 0 is San d'Oria, not 'missing' -- it must still be SET",
-          repr(f.get(R._FFXI_NATION)))
-    R._FFXI_IDMAP = os.path.join(TMP, "no-such-idmap.json")
-    R._ffxi_world_cache.update(mtime=None, map={}, prof={})
-    check(not R._content_game_fields(1, CTID, member_id),
-          "no id map -> FFXI tail stays UNSET, not zeroed")
+    class Probe(titles.Title):
+        tag = b"PRB"
+        content_code = 250
+        calls = []
+
+        def profile_fields(self, cid, mid):
+            self.calls.append((cid, mid))
+            return {3: "Probe", 7: 2}
+
+    class Broken(titles.Title):
+        tag = b"BRK"
+        content_code = 251
+
+        def profile_fields(self, cid, mid):
+            raise RuntimeError("store down")
+
+    probe, broken = Probe(), Broken()
+    titles.register(probe)
+    titles.register(broken)
+    try:
+        f = R._content_game_fields(250, CTID, member_id)
+        check(f == {3: "Probe", 7: 2} and probe.calls == [(CTID, member_id)],
+              "the title that serves the code builds the fields", repr(f))
+        check(R._content_game_fields(252, CTID, member_id) == {},
+              "a code with no title yields nothing, not a guess")
+        check(R._content_game_fields(251, CTID, member_id) == {},
+              "a title that raises yields nothing rather than a half-filled record")
+        # the world identity and display-name hooks default to "not mine"
+        check(titles.character_world(250, CTID) is None
+              and titles.character_display_name(250, CTID, str(CTID), "Fox") is None
+              and titles.content_schema(250) is None,
+              "a title that does not override the identity hooks leaves them to the core")
+    finally:
+        titles._TITLES[:] = [t for t in titles._TITLES if t not in (probe, broken)]
 
     # JAN_CID is the subject of the captured content write below, and it must
     # resolve to content 3 whether or not any title module is present. The mint
@@ -139,163 +141,6 @@ def game_fields(handle_id, member_id):
     accounts.link_content_to_handle(db, handle_id, 3, str(JAN_CID))
     db.commit()
     db.close()
-
-    # --- FRONT MISSION ONLINE ------------------------------------------------
-    if importlib.util.find_spec("fmo") is None:
-        print("[SKIP] FRONT MISSION ONLINE profile fields: the fmo title module is not present in this tree")
-    else:
-        db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
-        # `handle_content.content_id` is UNIQUE and the mint hands out ids in the
-        # tens of millions, so JAN_CID -- which is a REAL prod id, kept because the
-        # captured write names it -- can collide with one this fixture just minted.
-        db.execute("DELETE FROM handle_content WHERE CAST(content_id AS INTEGER) = ?",
-                   (JAN_CID,))
-        for code, cid in ((3, JAN_CID), (4, CTID + 4), (11, CTID + 11)):
-            accounts.link_content_to_handle(db, handle_id, code, str(cid))
-        db.commit()
-        db.close()
-
-        fmo_store = os.path.join(TMP, "fmo_characters.json")
-        os.environ["FMO_CHAR_STORE"] = fmo_store
-        os.environ["FMO_DB"] = ""              # the JSON store; no migration here
-        with open(fmo_store, "w", encoding="utf-8") as fh:
-            # A FEMALE O.C.U. pilot: `nation` (the swapped key) says 2, the real
-            # nation byte says 1. Serving the wrong one is invisible on screen.
-            json.dump({"member:%d" % member_id: [
-                {"id": 1, "first": "Roy", "last": "Bagman",
-                 "nation": 2, "nation_byte": 1, "gender": 2,
-                 "mapkind": 207, "rank": 21}]}, fh)
-        f = R._content_game_fields(4, CTID + 4, member_id)
-        check(f.get(R._FMO_NAME) == "Roy" and f.get(R._FMO_FIRSTNAME) == "Roy",
-              "FMO first name lands on slot 9 (the labelled one) AND slot 4",
-              repr(f))
-        check(f.get(R._FMO_LAST) == "Bagman", "FMO last name on slot 5", repr(f))
-        check(f.get(R._FMO_COUNTRY) == 1,
-              "FMO nation is the NATION byte, not the swapped `nation` key "
-              "(2 there would read U.S.N. for every female pilot)",
-              repr(f.get(R._FMO_COUNTRY)))
-        check(f.get(R._FMO_ZONE) == 2,
-              "FMO zone is the MapKind band: 207 -> 2, O.C.U. Occupation Zone",
-              repr(f.get(R._FMO_ZONE)))
-        with open(fmo_store, "w", encoding="utf-8") as fh:
-            json.dump({"member:%d" % member_id: [
-                {"id": 1, "first": "Roy", "mapkind": 999}]}, fh)
-        f = R._content_game_fields(4, CTID + 4, member_id)
-        check(R._FMO_ZONE not in f,
-              "a MapKind outside the client's own bands leaves the zone UNSET")
-
-    # --- FANTASY EARTH -------------------------------------------------------
-    if importlib.util.find_spec("felobby") is None:
-        print("[SKIP] FANTASY EARTH profile fields: the felobby title module is not present in this tree")
-    else:
-        import felobby
-        fe_store = os.path.join(TMP, "fe_characters.json")
-        felobby._default_store = lambda: fe_store
-        fe_account = "member:%d" % member_id
-        # WARNING: `charid` is NOT decoration: festore's PRIMARY KEY is (account, charid)
-        # and a row without one is refused on import, which shows up here as an
-        # empty roster rather than an error.
-        with open(fe_store, "w", encoding="utf-8") as fh:
-            json.dump({"accounts": {fe_account: [
-                # look1 IS the class index -- feworld.self_class_id. 2 = Sorcerer.
-                {"charid": 1, "name": "Elle", "sex": 1, "force": 3, "look1": 2,
-                 "class_levels": {"2": 27}}]}}, fh)
-        f = R._content_game_fields(11, CTID + 11, member_id)
-        check(f.get(R._FE_NAME) == "Elle" and f.get(R._FE_SEX) == "Female"
-              and f.get(R._FE_NATION) == "Elsord",
-              "FE name/sex/nation still served after the move to felobby's loader",
-              repr(f))
-        check(f.get(R._FE_CLASS) == "Sorcerer",
-              "FE class is look1 through _FE_CLASSES", repr(f.get(R._FE_CLASS)))
-        check(f.get(R._FE_LEVEL) == "27",
-              "FE level is that class's row in the stored class_levels table",
-              repr(f.get(R._FE_LEVEL)))
-        # The negative case goes through the STORE, not the JSON: the one-shot
-        # import only runs against an empty database, so rewriting the JSON now
-        # would prove nothing (the roster would simply be the one already imported).
-        felobby.save_roster(fe_store, fe_account,
-                            [{"charid": 1, "name": "Elle", "look1": 2}])
-        f = R._content_game_fields(11, CTID + 11, member_id)
-        check(R._FE_CLASS in f and R._FE_LEVEL not in f,
-              "a character with no class_levels keeps its class and has NO level "
-              "-- not Lv0", repr(f))
-
-    # --- JANHOUROU -----------------------------------------------------------
-    if (importlib.util.find_spec("janstats") is None
-            or importlib.util.find_spec("jantitle") is None):
-        print("[SKIP] JANHOUROU profile fields: the jantitle title module is not present in this tree")
-    else:
-        import janstats
-        import jantitle                 # the slot numbers are the title's
-        rec = janstats.blank(member_id)
-        rec["games_played"] = 7
-        rec["places"] = [3, 2, 1, 1]
-        rec["yakuman"] = 2
-        rec["titles"] = {"mahjong_king": 1, "beast_king": 4, "bust_general": 0,
-                         "winnings_general": 3, "wild_tile_king": 5}
-        rec["overrides"] = {"rank": 5}         # tier 1, variant 0 = 凡人 Commoner
-        janstats.store(member_id, rec)
-        f = R._content_game_fields(3, JAN_CID, member_id)
-        check(f.get(jantitle._JAN_GAMES) == 7 and f.get(jantitle._JAN_YAKUMAN) == 2,
-              "jan games played and yakuman come off the one janstats record",
-              repr(f))
-        check([f.get(s) for s in jantitle._JAN_TITLES] == [1, 4, 0, 3, 5],
-              "the five title counters are in janstats.SHOGO_KEYS order",
-              repr([f.get(s) for s in jantitle._JAN_TITLES]))
-        check(f.get(jantitle._JAN_RANK) == 7,
-              "the GAME's rank 5 is the VIEWER's 7 -- 5 variants per tier vs 7. "
-              "Passing it through unconverted names the wrong rank from tier 1 up",
-              repr(f.get(jantitle._JAN_RANK)))
-        check(f.get(jantitle._JAN_LEVEL) == janstats.level_of(rec),
-              "jan level is janstats' own, not a second formula")
-
-    # --- DIRGE OF CERBERUS ---------------------------------------------------
-    #     With the store keyed on the per-session uid there is nothing to match,
-    #     and that must stay an EMPTY tail -- we cannot say whose character it is.
-    doc_store = os.path.join(TMP, "doc-characters.json")
-    os.environ["POL_DOC_CHARA_STORE"] = doc_store
-    doc_stats = os.path.join(TMP, "doc-stats.json")
-    os.environ["POL_DOC_STATS"] = doc_stats
-    if os.path.exists(doc_stats):
-        os.remove(doc_stats)
-    with open(doc_store, "w", encoding="utf-8") as fh:
-        json.dump({"0xa455a599": [{"slot": 0, "name": "Fox"}]}, fh)
-    check(not R._content_game_fields(10, CTID + 10, member_id),
-          "DoC with a UID-keyed store serves nothing -- no POL identity to "
-          "match on")
-    #     Account-keyed (docudp --account member:N): the name comes through, and
-    #     it is the LOWEST slot, not whichever row happens to be first on disk.
-    with open(doc_store, "w", encoding="utf-8") as fh:
-        json.dump({"member:%d" % member_id: [{"slot": 1, "name": "Test"},
-                                             {"slot": 0, "name": "Vincent"}]}, fh)
-    f = R._content_game_fields(10, CTID + 10, member_id)
-    check(f == {R._DOC_NAME: "Vincent"},
-          "DoC with an ACCOUNT-keyed store and NO career serves the slot-0 name "
-          "only -- no rank is claimed for a character that never finished a "
-          "battle", repr(f))
-    #     Career store (tools/doc_stats.py): Rank + Ranking Points of the SAME
-    #     character the name names -- matched by name inside this member's keys,
-    #     never the sibling slot, never another member's same-named character.
-    with open(doc_stats, "w", encoding="utf-8") as fh:
-        json.dump({"chars": {
-            "member:%d/0x0002aa68" % member_id:
-                {"name": "Vincent", "rank": 4, "rp": 120},
-            "member:%d/0x0002aa69" % member_id:
-                {"name": "Test", "rank": 9, "rp": 999},
-            "member:%d/0x0002aa70" % (member_id + 1):
-                {"name": "Vincent", "rank": 16, "rp": 5}}}, fh)
-    f = R._content_game_fields(10, CTID + 10, member_id)
-    check(f == {R._DOC_NAME: "Vincent", R._DOC_RANK: 4, R._DOC_RANKPOINT: 120},
-          "DoC serves the slot-0 character's Rank (z_class enum 1..16, 4 = DG "
-          "Scout 3rd Class) and Ranking Points from doc-stats.json", repr(f))
-    with open(doc_stats, "w", encoding="utf-8") as fh:
-        json.dump({"chars": {"member:%d/0x0002aa68" % member_id:
-                             {"name": "Vincent", "rank": 99, "rp": -5}}}, fh)
-    f = R._content_game_fields(10, CTID + 10, member_id)
-    check(f.get(R._DOC_RANK) == 16 and f.get(R._DOC_RANKPOINT) == 0,
-          "DoC rank is clamped to the enum's 1..16 and points never go negative",
-          repr(f))
-    os.remove(doc_stats)
 
 
 def main():

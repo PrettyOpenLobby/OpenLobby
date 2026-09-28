@@ -32,7 +32,6 @@
     lobbyops.py            The lobby opcode table: one row per request opcode, naming what answers it.
     handlelists.py         Handle, character and list payloads served on the lobby band.
     friendgroups.py        Friend groups: configuration, membership, create/delete/class change, join and invite.
-    ffxifields.py          FFXI world and character fields (to move into the FFXI bridge title).
     characters.py          Character records and the character write (1:A).
     friendlist.py          The friend list as served: records, slot map, database rows.
     lobbymail.py           POL Message mail on the lobby band: mailbox payloads, minting, threads, notices.
@@ -56,3 +55,58 @@
 responders.py (one directory up) is the entry point and the compatibility
 facade over these modules.
 """
+
+#: the modules above, in import order (deps first, boot and main last)
+MODULES = (
+    "deps",
+    "patch",
+    "redirect",
+    "logingate",
+    "directory",
+    "authcap",
+    "authnode",
+    "pfc",
+    "presence",
+    "gamenotice",
+    "chatsession",
+    "roomregistry",
+    "friendroster",
+    "pushchannel",
+    "pushrecord",
+    "memberstatus",
+    "titlezone",
+    "pushspool",
+    "ircband",
+    "authserv",
+    "authresume",
+    "framing",
+    "lobbysession",
+    "paylen",
+    "fetchpath",
+    "lobbysearch",
+    "friendput",
+    "lobbybind",
+    "lobbyreply",
+    "lobbyops",
+    "handlelists",
+    "friendgroups",
+    "characters",
+    "friendlist",
+    "lobbymail",
+    "contentprofiles",
+    "profilerecord",
+    "lobbyrooms",
+    "resourcestore",
+    "pacing",
+    "lobbycapture",
+    "tlsrelay",
+    "portalauth",
+    "portalpages",
+    "lobbyserver",
+    "worldserver",
+    "serving",
+    "mailserver",
+    "posture",
+    "boot",
+    "main",
+)
