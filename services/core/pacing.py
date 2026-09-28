@@ -3,7 +3,7 @@ import os
 import socket
 import time
 import threading
-from srvcore import LOG_DIR, expand_ports, hexdump, log, save_capture
+from srvcore import expand_ports, hexdump, log, save_capture
 from . import lobbysession
 
 
@@ -98,8 +98,6 @@ def _lobby_linger(conn, peer):
         log("lobby", f"{peer} linger ended early: {e}")
         return
     log("lobby", f"{peer} linger window elapsed; closing now")
-CLIENT_BUILDS_PATH = os.environ.get("POL_CLIENT_BUILDS",
-                                    os.path.join(LOG_DIR, "client-builds.json"))
 
 
 # --------------------------------------------------------------------------- #

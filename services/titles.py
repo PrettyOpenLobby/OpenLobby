@@ -84,7 +84,8 @@ class Core:
       _self_ip()                      the address this server advertises
       _peer_build                     thread-local: .ps2 and .ip of THIS connection
                                       (set on the lobby band and the auth band)
-      CLIENT_BUILDS_PATH              the per-address client build record file
+      _client_builds(address)         {"<region>/<product>": {"version", "seen"}}:
+                                      the builds that address last announced
       _title_zone(member_id)          the content id the member is in, or None
       _title_zone_lease(member_id, zone)   renew the member's title lease
       _content_profiles()             the client-written content profiles, by cid
@@ -142,6 +143,9 @@ class Core:
         pass
 
     def _content_profiles(self):
+        return {}
+
+    def _client_builds(self, address):
         return {}
 
     def __getattr__(self, name):

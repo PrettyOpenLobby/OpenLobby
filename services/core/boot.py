@@ -1,5 +1,6 @@
 """Binding the title plugins to the core and merging their tables."""
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
+import clientbuilds
 from srvcore import log
 from .deps import accounts, polpro
 from . import authcap, authnode, chatsession, contentprofiles, fetchpath, gamenotice, handlelists, ircband, lobbymail, lobbyrooms, lobbysession, pacing, paylen, pfc, presence, resourcestore, roomregistry, titlezone
@@ -28,7 +29,7 @@ titles.bind_core(
     _mail_mint=lobbymail._mail_mint, _member_still_present=presence._member_still_present,
     _title_zone=titlezone._title_zone, _title_zone_lease=titlezone._title_zone_lease,
     _content_profiles=pfc._content_profiles, _peer_build=pacing._peer_build,
-    CLIENT_BUILDS_PATH=pacing.CLIENT_BUILDS_PATH)
+    _client_builds=clientbuilds.for_address)
 _TITLES_LOADED = titles.load()
 paylen._FETCH_PATHLEN.update(titles.fetch_pathlen())
 resourcestore.RESOURCE_INIT.update(titles.resource_init())

@@ -1486,7 +1486,7 @@ class Handler(BaseHTTPRequestHandler):
         """Live game counts for anyone signed in; the signed-in accounts for
         those who may look accounts up (addresses for the owner only)."""
         user, role, perms = self._caller()
-        out = {"games": adminops.live_counts(_DATA), "accounts": None}
+        out = {"games": adminops.live_counts(), "accounts": None}
         if role == "owner" or "accounts_view" in perms:
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             db = _db()
