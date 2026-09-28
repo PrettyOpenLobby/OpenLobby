@@ -176,46 +176,72 @@ DOC_STORES = (
 #: `where` is data or logs (the old volumes, checked for the file) or the name
 #: of another volume. A command follows "$DC " (the compose invocation); a
 #: step with no command has nothing to run. A gap is a durable file the title
-#: has no importer for yet (read at the commits named in docs/database.md).
+#: has no importer for yet. The order is the order they run in
+#: (docs/database.md, "Moving an existing /data").
 TITLES = (
     ("Final Fantasy XI (LSB bridge)", "crystalbridge", _DC_ENV, [
-        ("data", "ffxi_idmap.json", None,
-         "which LSB character is which Content ID; belongs in ffxi_idmap"),
-        ("bridge-state volume", "ffxi_accounts.json", None,
-         "which LSB account each member has; belongs in ffxi_lsb_account"),
-    ], [
-        "ffxi_idmap.json and ffxi_accounts.json: CrystalBridge has no importer "
-        "for them yet. They must go in BEFORE the new bridge starts for the "
-        "first time: a bridge that starts on an empty ffxi_idmap pairs every "
-        "character afresh, and a character the Viewer knows under another "
-        "Content ID gets POL-0001. Leave the bridge stopped until they are in.",
-    ]),
+        ("data", "ffxi_idmap.json",
+         "run --rm --no-deps --entrypoint python bridge ffxidb.py import idmap "
+         "/data/ffxi_idmap.json",
+         "which LSB character is which Content ID. Import it BEFORE the new "
+         "bridge starts for the first time: a bridge on an empty ffxi_idmap "
+         "pairs every character afresh, and a character the Viewer knows "
+         "under another Content ID gets POL-0001. While the table is empty "
+         "and this file holds pairings, the bridge waits and says so."),
+        ("crystalbridge_bridge-state volume", "ffxi_accounts.json",
+         "run --rm --no-deps -v crystalbridge_bridge-state:/state:ro "
+         "--entrypoint python bridge ffxidb.py import accounts "
+         "/state/ffxi_accounts.json",
+         "which LSB account each member has"),
+    ], []),
     ("Fantasy Earth", "crystalring", _DC, [
-        ("data", "fe_characters.json",
-         "run --rm --entrypoint python feworld festore.py --import "
-         "/data/fe_characters.json",
-         "only on a server that never had fe.db: the JSON file stopped being "
-         "written when fe.db took over, and would bring characters back as "
-         "they were then"),
-    ], [
-        "fe.db (characters) and fe_mail.db (in-game mail): CrystalRing has no "
-        "importer for them yet. Keep both files on the volume; until they are "
-        "imported, Fantasy Earth starts with no characters and no mail.",
-    ]),
+        ("data", "fe.db",
+         "run --rm --no-deps --entrypoint python feworld fedb.py import fe_db "
+         "/data/fe.db", "the characters"),
+        ("data", "fe_mail.db",
+         "run --rm --no-deps --entrypoint python feworld fedb.py import "
+         "fe_mail_db /data/fe_mail.db", "the in-game mail"),
+        ("data", "<the world state JSON files>",
+         "run --rm --no-deps --entrypoint python feworld fedb.py import world "
+         "/data", "the world's state, which the FE services kept as JSON "
+         "files in /data"),
+    ], []),
     ("Front Mission Online", "crystalfront", _DC_ENV, [
-        ("data", "fmo_characters.json",
-         "run --rm --entrypoint python fmo /app/fmostore.py --import "
-         "/data/fmo_characters.json",
-         "the fmo service imports it on its first start into an empty table; "
-         "the command does the same by hand"),
+        ("data", "fmo.db",
+         "run --rm --no-deps --entrypoint python fmo fmodb.py import fmo_db "
+         "/data/fmo.db",
+         "the pilots and squadron insignia. Import it before fmo first "
+         "starts, or the service fills the table from the older "
+         "fmo_characters.json and this import is refused"),
+        ("crystalfront_fmo-board-state volume", "*_discord.json, discord_channels.json",
+         "run --rm --no-deps -v crystalfront_fmo-board-state:/state:ro "
+         "--entrypoint python fmo fmodb.py import board_state /state",
+         "the City Control board's Discord bookkeeping; only where the board "
+         "posted to Discord"),
+        ("data", "fmo_characters.json", None,
+         "imported by the fmo service on its first start into an empty "
+         "table; leave it in /data"),
         ("data", "fmowar.json", None,
          "imported by the fmo service on its first start; leave it in /data"),
         ("data", "fmo_sector_wins.json", None,
          "imported by the fmo service on its first start; leave it in /data"),
-    ], [
-        "fmo.db (the SQLite pilot database of earlier versions): CrystalFront "
-        "has no importer for it. Keep the file until its pilots are imported.",
-    ]),
+    ], []),
+    ("Janhourou", "crystalholo", _DC, [
+        ("data", "resources/janevent.json",
+         "run --rm --no-deps --entrypoint python jan janstore.py import event "
+         "/data/resources/janevent.json", "the event record"),
+        ("data", "resources/jan-rank-snapshot.json",
+         "run --rm --no-deps --entrypoint python jan janstore.py import "
+         "rank_snapshot /data/resources/jan-rank-snapshot.json",
+         "the ranking's previous order"),
+        ("crystalholo_jan-board-state volume", "*_discord.json, discord_channels.json",
+         "run --rm --no-deps -v crystalholo_jan-board-state:/state:ro "
+         "--entrypoint python jan janstore.py import board_state /state",
+         "the web board's Discord bookkeeping; only where the board posted "
+         "to Discord"),
+        ("data", "resources/<member>.jan_stats.json", None,
+         "still read as a file by CrystalHoLo; stays on the volume"),
+    ], []),
     ("Dirge of Cerberus", "crystaldirge", _DC_ENV, [
         ("logs", fn, "run --rm --entrypoint python doc docdb.py import %s /logs/%s"
          % (store, fn), None)
@@ -233,23 +259,8 @@ TITLES = (
     ], [
         "Tetra Master's collections, auctions and prizes: CrystalMaster still "
         "reads them as files under resources/ and has no importer onto "
-        "polcore.blobs yet. This tool also copies the top-level ones into the "
-        "blob table by name, and leaves the files where they are.",
-    ]),
-    ("Janhourou", "crystalholo", _DC, [
-        ("data", "resources/<member>.jan_stats.json", None,
-         "still read as a file by CrystalHoLo; stays on the volume"),
-        ("data", "resources/janevent.json", None,
-         "the event record, now the 'current' row of jan_event"),
-        ("data", "resources/jan-rank-snapshot.json", None,
-         "the ranking's previous order, now jan_rank_snapshot"),
-        ("board state volume", "*_discord.json, discord_channels.json", None,
-         "the web board's Discord bookkeeping, now jan_board_state"),
-    ], [
-        "janevent.json, jan-rank-snapshot.json and the board's Discord state "
-        "files: CrystalHoLo has no importer for them. Without one the event "
-        "record starts empty, the rank arrows start over, and the board posts "
-        "its Discord messages afresh.",
+        "polcore.blobs yet. This tool also copies them into the blob table by "
+        "name, and leaves the files where they are.",
     ]),
 )
 
@@ -1123,17 +1134,20 @@ def render_titles(has):
             w(indent + line)
 
     w("Next: each title's own files. Run these from that title's checkout,")
-    w("beside openlobby/, with the stack still stopped. The order matters:")
+    w("beside openlobby/, with only postgres running. The order matters:")
     w("")
     w("  1. This import, the core, comes first: the titles' rows refer to")
     w("     members.")
-    w("  2. FFXI: the bridge's two maps go in before the new bridge starts")
-    w("     for the first time.")
-    w("  3. Dirge of Cerberus: its stores go in while the doc responder is")
-    w("     stopped.")
-    w("  4. Front Mission Online imports its JSON files itself on its first")
-    w("     start, so they stay in /data until then.")
+    w("  2. FFXI: the bridge's two maps, before the new bridge starts for the")
+    w("     first time.")
+    w("  3. Fantasy Earth, Front Mission Online and Janhourou: their files,")
+    w("     before each title starts for the first time.")
+    w("  4. Dirge of Cerberus: its stores, while the doc responder is stopped.")
     w("  5. Then start the stack and the titles.")
+    w("")
+    w("Each title's import reads its source without changing it, runs in one")
+    w("transaction, refuses a table that already holds rows unless given")
+    w("--merge, and writes nothing with --dry-run.")
     w("")
     for title, repo, dc, files, gaps in TITLES:
         w("%s (%s)" % (title, repo))

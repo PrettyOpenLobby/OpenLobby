@@ -542,13 +542,38 @@ chk("title files reported by scope", rs["extra"]["other_scopes"],
     {"auction-pending-%d" % m1: 1, "tmrank": 2})
 
 print("title follow-ups")
-for needle in ("docdb.py import stats /logs/doc-stats.json",
-               "festore.py --import /data/fe_characters.json",
-               "GAP: ffxi_idmap.json and ffxi_accounts.json",
-               "BEFORE the new bridge starts", "GAP: fe.db", "GAP: fmo.db",
-               "data/ffxi_idmap.json [found]", "logs/doc-stats.json [found]",
-               "data/fmowar.json [found]", "data/fe_characters.json [not there]"):
-    chk("printed: %s" % needle, needle in " ".join(out.split()), True)
+flat = " ".join(out.split())
+ORDER = (
+    "$DC run --rm --no-deps --entrypoint python bridge ffxidb.py import idmap"
+    " /data/ffxi_idmap.json",
+    "$DC run --rm --no-deps -v crystalbridge_bridge-state:/state:ro --entrypoint"
+    " python bridge ffxidb.py import accounts /state/ffxi_accounts.json",
+    "$DC run --rm --no-deps --entrypoint python feworld fedb.py import fe_db /data/fe.db",
+    "$DC run --rm --no-deps --entrypoint python feworld fedb.py import fe_mail_db"
+    " /data/fe_mail.db",
+    "$DC run --rm --no-deps --entrypoint python feworld fedb.py import world /data",
+    "$DC run --rm --no-deps --entrypoint python fmo fmodb.py import fmo_db /data/fmo.db",
+    "$DC run --rm --no-deps --entrypoint python jan janstore.py import event"
+    " /data/resources/janevent.json",
+    "$DC run --rm --no-deps --entrypoint python jan janstore.py import rank_snapshot"
+    " /data/resources/jan-rank-snapshot.json",
+    "$DC run --rm --no-deps -v crystalholo_jan-board-state:/state:ro --entrypoint"
+    " python jan janstore.py import board_state /state",
+    "$DC run --rm --entrypoint python doc docdb.py import stats /logs/doc-stats.json",
+)
+for needle in ORDER:
+    chk("printed: %s" % needle[4:70], needle in flat, True)
+chk("in the order they run: the bridge, FE, FMO, Jan, then Dirge",
+    [flat.find(n) for n in ORDER] == sorted(flat.find(n) for n in ORDER)
+    and flat.find(ORDER[0]) > 0, True)
+for needle in ("BEFORE the new bridge starts", "data/ffxi_idmap.json [found]",
+               "logs/doc-stats.json [found]", "data/fe.db [found]",
+               "data/fmowar.json [found]", "data/fmo.db [not there]",
+               "imported by the fmo service on its first start"):
+    chk("printed: %s" % needle, needle in flat, True)
+chk("no importer is listed as missing any more",
+    "GAP: ffxi" in flat or "GAP: fe.db" in flat or "GAP: fmo.db" in flat
+    or "GAP: janevent" in flat, False)
 chk("live files named as left behind",
     all(n in out for n in ("auth-sessions.json", "rooms-live.json",
                            "*-sessions-live.json", "push-spool.jsonl")), True)
