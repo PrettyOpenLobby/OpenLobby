@@ -13,6 +13,7 @@ stopped). What is read from it:
     discord_links.db     the discord_* tables (migration 0003)
     resources/<name>     one `blob` row per top-level file, named by
                          polcore.blobs.split_name(), updated_at = the file's mtime
+    resources/tmrank/<f> one `blob` row per file, scope `tmrank`, path <f>
 
 `resources/content-profiles.json` stays a file, and nothing live is imported
 (sessions, stamps, rooms, the push spool): the services rebuild that in
@@ -129,6 +130,9 @@ SOURCES = (
 
 RESOURCES = "resources"
 PROFILES_FILE = "content-profiles.json"
+#: Subdirectories of resources/ whose files are blobs too: the directory name
+#: is the scope and the file name the path (Tetra Master's weekly lists).
+RESOURCE_SUBDIRS = ("tmrank",)
 
 #: Live state that stays behind (docs/database.md): (where, name or suffix, what).
 LIVE_FILES = (
@@ -223,8 +227,9 @@ TITLES = (
         ("data", "resources/auction-*", None,
          "still read as files; stay on the volume"),
         ("data", "resources/tmrank/", None,
-         "the weekly lists, rebuilt by the tmrank service (TM_RANK_AT=now "
-         "publishes at start)"),
+         "the weekly lists; this tool copies each file into the blob table "
+         "as scope tmrank, and the tmrank service rebuilds them "
+         "(TM_RANK_AT=now publishes at start)"),
     ], [
         "Tetra Master's collections, auctions and prizes: CrystalMaster still "
         "reads them as files under resources/ and has no importer onto "
@@ -383,18 +388,20 @@ def live_reasons(src, now=None):
         except OSError:
             pass
     res = os.path.join(src, RESOURCES)
-    try:
-        with os.scandir(res) as it:
-            for e in it:
-                try:
-                    if e.is_file(follow_symlinks=False):
-                        m = e.stat(follow_symlinks=False).st_mtime
-                        if m > newest:
-                            newest, newest_name = m, RESOURCES + "/" + e.name
-                except OSError:
-                    pass
-    except OSError:
-        pass
+    for sub in ("",) + RESOURCE_SUBDIRS:
+        try:
+            with os.scandir(os.path.join(res, sub)) as it:
+                for e in it:
+                    try:
+                        if e.is_file(follow_symlinks=False):
+                            m = e.stat(follow_symlinks=False).st_mtime
+                            if m > newest:
+                                newest, newest_name = m, "/".join(
+                                    p for p in (RESOURCES, sub, e.name) if p)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
     if newest and now - newest < RECENT_S:
         out.append(f"{newest_name} was written {int(now - newest)} s ago")
     return out
@@ -791,22 +798,40 @@ def _scope_kind(scope):
     return "other"
 
 
-def import_resources(conn, res, apply, log, new_members=()):
-    root = res.path
+def _resource_files(root):
+    """([(DirEntry, scope, path)], [(name, why)]) for resources/: each
+    top-level file named <scope>.<path>, and each file of a RESOURCE_SUBDIRS
+    directory under that directory's name as its scope."""
     files, skipped = [], []
     with os.scandir(root) as it:
         entries = sorted(it, key=lambda e: e.name)
     for e in entries:
         if e.is_symlink():
             skipped.append((e.name, "a symbolic link"))
+        elif e.is_dir() and e.name in RESOURCE_SUBDIRS:
+            with os.scandir(e.path) as it2:
+                for f in sorted(it2, key=lambda x: x.name):
+                    name = e.name + "/" + f.name
+                    if f.is_symlink():
+                        skipped.append((name, "a symbolic link"))
+                    elif f.is_dir():
+                        skipped.append((name + "/", "a directory inside %s/" % e.name))
+                    else:
+                        files.append((f, e.name, f.name))
         elif e.is_dir():
-            skipped.append((e.name + "/", "a directory (only top-level files are resources)"))
+            skipped.append((e.name + "/", "a directory (only top-level files and %s "
+                            "are resources)" % ", ".join(d + "/" for d in RESOURCE_SUBDIRS)))
         elif e.name == PROFILES_FILE:
             skipped.append((e.name, "stays a file (core/pfc.py)"))
         elif blobs.split_name(e.name) is None:
             skipped.append((e.name, "not a resource name (no scope before a dot)"))
         else:
-            files.append(e)
+            files.append((e,) + blobs.split_name(e.name))
+    return files, skipped
+
+
+def import_resources(conn, res, apply, log, new_members=()):
+    files, skipped = _resource_files(res.path)
     plan = TablePlan(RESOURCES + "/", "blob")
     plan.pk = ["scope", "path"]
     plan.cols = ("scope", "path", "member_id", "data", "updated_at")
@@ -819,8 +844,7 @@ def import_resources(conn, res, apply, log, new_members=()):
     members = {r["id"] for r in conn.execute("SELECT id FROM member").fetchall()}
     members |= set(new_members)          # a dry run: the accounts it would add
     kinds, others, unlinked = collections.Counter(), collections.Counter(), []
-    for e in files:
-        scope, path = blobs.split_name(e.name)
+    for e, scope, path in files:
         with open(e.path, "rb") as fh:
             data = fh.read()
         mtime = e.stat(follow_symlinks=False).st_mtime

@@ -319,8 +319,16 @@ for name, (data, mtime) in RES.items():
     with open(fn, "wb") as fh:
         fh.write(data)
     os.utime(fn, (mtime, mtime))
-with open(os.path.join(SRC, "resources", "tmrank", "r1.bin"), "wb") as fh:
-    fh.write(b"rank")
+# Tetra Master's weekly lists: a directory of their own, imported as scope
+# tmrank; a directory inside it, and any other directory, are not resources
+TMRANK = {"r1.bin": b"rank", "week-2026-39.json": b'{"top": [3, 5]}'}
+for name, data in TMRANK.items():
+    with open(os.path.join(SRC, "resources", "tmrank", name), "wb") as fh:
+        fh.write(data)
+os.makedirs(os.path.join(SRC, "resources", "tmrank", "old"))
+with open(os.path.join(SRC, "resources", "tmrank", "old", "r0.bin"), "wb") as fh:
+    fh.write(b"older")
+os.makedirs(os.path.join(SRC, "resources", "other"))
 for live in ("auth-sessions.json", "rooms-live.json", "fmo-sessions-live.json",
              "fe.db", "fmowar.json", "ffxi_idmap.json"):
     with open(os.path.join(SRC, live), "w") as fh:
@@ -507,9 +515,16 @@ conn.close()
 
 print("resources: blobs, readable through the resource store")
 rs = next(s for s in res["sources"] if s["name"] == "resources")
-chk("blob rows", db.query_one("SELECT count(*) AS n FROM blob")["n"], 8)
+chk("blob rows", db.query_one("SELECT count(*) AS n FROM blob")["n"], 10)
 left = sorted(x[0] for x in rs["left_out"])
-chk("left as files", left, ["README", "content-profiles.json", "tmrank/"])
+chk("left as files", left, ["README", "content-profiles.json", "other/", "tmrank/old/"])
+for name, data in sorted(TMRANK.items()):
+    row = db.query_one("SELECT data, member_id, extract(epoch FROM updated_at) AS t"
+                       " FROM blob WHERE scope = 'tmrank' AND path = %s", (name,))
+    chk("tmrank/%s: a blob in scope tmrank, path %s" % (name, name),
+        row is not None and bytes(row["data"]) == data and row["member_id"] is None, True)
+    chk("tmrank/%s: updated_at is the mtime" % name, row and int(row["t"]),
+        int(os.path.getmtime(os.path.join(SRC, "resources", "tmrank", name))))
 chk("the mail object through the store",
     R._resource_blob(MAIL_PATH, len(MAIL_BODY) + 4)[:len(MAIL_BODY)] == MAIL_BODY, True)
 store = sys.modules.get("core.resourcestore")
@@ -524,7 +539,7 @@ chk("a deleted member's save is kept, not linked",
     db.query_one("SELECT member_id FROM blob WHERE scope = %s", (str(m4),))["member_id"], None)
 chk("and reported", rs["extra"]["not_linked"], ["%d.U_g_x.bin" % m4])
 chk("title files reported by scope", rs["extra"]["other_scopes"],
-    {"auction-pending-%d" % m1: 1})
+    {"auction-pending-%d" % m1: 1, "tmrank": 2})
 
 print("title follow-ups")
 for needle in ("docdb.py import stats /logs/doc-stats.json",
