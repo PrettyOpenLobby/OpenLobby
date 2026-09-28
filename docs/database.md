@@ -328,6 +328,7 @@ What it reads and where each part goes:
 | Old file | New home |
 | --- | --- |
 | `accounts.db` | the account tables of `0001_accounts.sql`, with every id kept |
+| `accounts.db`, table `web_login` | `web_login` (`0004_web_login.sql`): the website usernames of the website sign-in service, which kept its own table in `accounts.db` |
 | `admin.db` | the `admin_*` tables (`moderator` becomes `admin_moderator`, and so on) |
 | `discord_links.db` | the `discord_*` tables |
 | `resources/<name>` (each top-level file) | a `blob` row: `blobs.split_name(name)` gives scope and path, the bytes are the file, `updated_at` is its mtime |
@@ -343,6 +344,11 @@ What it reads and where each part goes:
 | `/logs/push-spool.jsonl` and its `.offset` | not imported; `push:queue` (drain the old spool first by letting `authsess` run) |
 | `<service>-sessions-live.json`, `tm-matches-live.json` | not imported; `live:<service>` (`live:tm` for Tetra Master) |
 | `/logs/client-builds.json` | not imported; `clientbuild:<address>`, refilled at each client's next launch |
+
+`web_login` belongs to the website sign-in service, which creates and reads
+it and deletes a member's row itself when it deletes the account. The
+table's foreign key to `member` deletes the row with the member as well. As
+in the account tables, a row whose member is gone is skipped and reported.
 
 Everything live is left behind: the services rebuild it within minutes of
 starting. The title repositories' own files are theirs to import, and the
