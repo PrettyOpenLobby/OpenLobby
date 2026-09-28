@@ -107,6 +107,41 @@ def encode_event(event, who):
     return b"U" + ev[:1].upper() + _hexlen(len(who)) + who
 
 
+#: How the GM is shown in the member list and on its chat lines. SE's own manual
+#: screenshot (skins/GM_chat01.png) reads plain "GM" beside the phoenix.
+GM_NAME = os.environ.get("POL_GMCHAT_NAME", "GM").encode("cp932", "replace")
+#: The digits the client prints under "Show H-ID" for the GM. Display only: the
+#: member row is keyed by the id polcore derives from the SENDER's nick.
+GM_HID = int(os.environ.get("POL_GMCHAT_HID", "0") or 0)
+
+
+def encode_roster(chan, name=None, hid=None, gm=True):
+    """An 'H' roster answer: `HA<room>:<p><%013u hid><hexlen><name>dummy`.
+
+    Built exactly as app.dll's own answer at 0x4ab369b. The 'H' handler
+    (0x4ab3610) reads the payload after ':' and gives the SENDER's member row
+    role 1 when it starts with 'G', else role 3 ('U'/'u' = H-ID shown/hidden).
+    Role 1 is the GM: listed first, drawn with the phoenix, lines in red.
+
+    A newcomer asks with `HR<p><hid><hexlen><name>...` (no room, see
+    `HRu87960930222309PS2Tester` in FACTS) and every member answers with one of
+    these, so the GM has to answer too. The row only survives the client's next
+    roster rebuild (0x4ab3754) if the GM nick is also in the room's 352 WHO,
+    which `responders._gm_roster_nick` already provides.
+    """
+    name = (GM_NAME if name is None else name)[:0xF]
+    if isinstance(name, str):
+        name = name.encode("cp932", "replace")
+    p = b"G" if gm else b"U"
+    return (b"HA" + chan + b":" + p + b"%013d" % (GM_HID if hid is None else hid)
+            + _hexlen(len(name)) + name + b"dummy")
+
+
+def is_roster_request(rec):
+    """True for a client's `HR...` roster request."""
+    return rec[:2] == b"HR"
+
+
 def _path(chan):
     safe = chan.decode("latin1", "replace").replace("/", "_").replace("\\", "_")
     return os.path.join(SPOOL, safe + ".txt")

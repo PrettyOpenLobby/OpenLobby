@@ -125,6 +125,34 @@ def main():
           gmchat.is_gm_room(b"#gmchat001") and not gmchat.is_gm_room(b"#xxl0001")
           and not gmchat.is_gm_room(b"") and not gmchat.is_gm_room(None))
 
+    # --- the GM's roster answer, read the way 0x4ab3610 reads it -------------
+    # role = 1 if payload[0]=='G' else 3; hid = payload[1:14]; the name length
+    # is the hex digit at payload[0xe] and the name starts at payload[0xf].
+    def h_payload(rec):
+        if rec[:2] == b"HA":
+            return rec[rec.index(b":") + 1:]
+        return rec[2:]                                   # HR carries no room
+
+    def h_fields(p):
+        n = int(p[0xe:0xf], 16)
+        return (1 if p[:1] == b"G" else 3), p[1:14], p[0xf:0xf + n]
+
+    # Offsets proven on the CLIENT's own captured roster request first.
+    role, hid, name = h_fields(h_payload(b"HRu87960930222309PS2Tester"))
+    check("parser reads a real client HR", (role, hid, name)
+          == (3, b"8796093022230", b"PS2Tester"), repr((role, hid, name)))
+    ha = gmchat.encode_roster(b"#gmcall001")
+    check("GM answer is HA<room>:", ha.startswith(b"HA#gmcall001:"), repr(ha))
+    role, hid, name = h_fields(h_payload(ha))
+    check("GM answer reads back as role 1 named GM", (role, name) == (1, b"GM"),
+          repr((role, hid, name)))
+    role, _, _ = h_fields(h_payload(gmchat.encode_roster(b"#gmcall001", gm=False)))
+    check("...and its non-GM twin reads as role 3", role == 3, str(role))
+    check("HR is a roster request, HA and T are not",
+          gmchat.is_roster_request(b"HRu87960930222309PS2Tester")
+          and not gmchat.is_roster_request(ha)
+          and not gmchat.is_roster_request(gmchat.encode_text("hi")))
+
     # --- trim keeps a busy room bounded --------------------------------------
     saved, gmchat.TRANSCRIPT_MAX = gmchat.TRANSCRIPT_MAX, 5
     try:
