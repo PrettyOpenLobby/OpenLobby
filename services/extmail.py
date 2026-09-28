@@ -4,14 +4,18 @@ The Viewer hardcodes `@pol.com` (it appends it to every address itself and
 names po000/ma000.pol.com as its servers), so INSIDE the game every address
 stays `<name>@pol.com`. This module is the boundary:
 
-  OUT  a member mails an outside address -> the message leaves through a mail
-       provider's HTTPS API (many hosts block port 25), From rewritten to
-       `<mail name>@<POL_EXT_MAIL_DOMAIN>`.
-  IN   whatever receives mail for `*@<POL_EXT_MAIL_DOMAIN>` (an email-routing
-       service, a small relay) hands the raw message to `receive()`. The
-       message is flattened to the plain ISO-8859-1 text the Viewer can show
-       and delivered to the member's mailbox. Wiring that relay is up to the
-       deployment; nothing here listens for it.
+  OUT  a member mails an outside address -> the message is handed over SMTP
+       to a relay (POL_EXT_MAIL_RELAY) that signs it for the outside domain
+       and delivers it; many hosts block outbound port 25, so the relay is
+       usually a small mail server elsewhere. From is rewritten to
+       `<mail name>@<POL_EXT_MAIL_DOMAIN>`, and the envelope sender is that
+       address, so a bounce comes back to the member.
+  IN   the outside domain's MX delivers to this server's SMTP port.
+       core/mailserver.handle_smtp takes a message from an OUTSIDE sender only
+       for an enabled member at `@<POL_EXT_MAIL_DOMAIN>` and hands it to
+       deliver_inbound() here, which flattens it to the plain ISO-8859-1 text
+       the Viewer can show. A relay that cannot speak SMTP to this server can
+       call `receive()` instead.
 
 GATED PER MEMBER. `member.ext_mail` (admin panel, "Ext mail" button) must be
 1 for either direction; everyone else gets a refusal they can see. Sign-up may
@@ -19,11 +23,10 @@ be open, so this is what stands between a spammer and the domain's reputation.
 Daily caps on top (POL_EXT_MAIL_DAILY_OUT / _IN), every message logged in
 `ext_mail_log`.
 
-Off unless configured: with no POL_EXT_MAIL_KEY or no POL_EXT_MAIL_DOMAIN
+Off unless configured: with no POL_EXT_MAIL_RELAY or no POL_EXT_MAIL_DOMAIN
 nothing is ever sent out, and with no domain nothing is accepted in.
 
-  POL_EXT_MAIL_PROVIDER   resend (default) | postmark
-  POL_EXT_MAIL_KEY        the provider API key; empty = outbound OFF
+  POL_EXT_MAIL_RELAY      host:port of the SMTP relay; empty = outbound OFF
   POL_EXT_MAIL_DOMAIN     the outside domain; empty = the whole feature OFF
   POL_EXT_MAIL_DAILY_OUT  outside messages a member may SEND per 24 h (20)
   POL_EXT_MAIL_DAILY_IN   outside messages a member may RECEIVE per 24 h (100)
@@ -32,13 +35,12 @@ import datetime
 import email
 import email.header
 import email.policy
+import email.message
 import email.utils
 import html.parser
-import json
 import os
 import re
-import urllib.error
-import urllib.request
+import smtplib
 
 import base64
 
@@ -64,8 +66,20 @@ def _int_env(name, default):
         return default
 
 
+def relay():
+    """(host, port) of the SMTP relay, or None when outbound is off."""
+    spec = (os.environ.get("POL_EXT_MAIL_RELAY") or "").strip()
+    if not spec:
+        return None
+    host, _, port = spec.rpartition(":")
+    try:
+        return (host, int(port)) if host else (spec, 25)
+    except ValueError:
+        return None
+
+
 def outbound_configured():
-    return bool(os.environ.get("POL_EXT_MAIL_KEY")) and bool(domain())
+    return relay() is not None and bool(domain())
 
 
 def enabled(row):
@@ -239,43 +253,31 @@ def outbound_parts(body, row):
     return frm, subject, text
 
 
-def _post(url, headers, payload):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                 method="POST", headers=dict(
-                                     headers, **{"Content-Type": "application/json",
-                                                 "Accept": "application/json"}))
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status, json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        try:
-            return e.code, json.loads(e.read() or b"{}")
-        except ValueError:
-            return e.code, {}
-    except (OSError, ValueError) as exc:
-        return 0, {"error": repr(exc)}
-
-
 def send(frm, to, subject, text, reply_to):
-    """(ok, detail). One provider call for all of `to`."""
-    key = os.environ.get("POL_EXT_MAIL_KEY") or ""
-    if not key:
-        return False, "outbound not configured (POL_EXT_MAIL_KEY empty)"
-    provider = (os.environ.get("POL_EXT_MAIL_PROVIDER") or "resend").lower()
-    if provider == "postmark":
-        st, j = _post("https://api.postmarkapp.com/email",
-                      {"X-Postmark-Server-Token": key},
-                      {"From": frm, "To": ",".join(to), "Subject": subject,
-                       "TextBody": text, "ReplyTo": reply_to,
-                       "MessageStream": "outbound"})
-        ok = st == 200 and not j.get("ErrorCode")
-        return ok, (j.get("MessageID") if ok else f"{st} {j.get('Message') or j}")
-    st, j = _post("https://api.resend.com/emails",
-                  {"Authorization": f"Bearer {key}"},
-                  {"from": frm, "to": list(to), "subject": subject,
-                   "text": text, "reply_to": reply_to})
-    ok = st == 200 and bool(j.get("id"))
-    return ok, (j.get("id") if ok else f"{st} {j.get('message') or j}")
+    """(ok, detail). One message to all of `to`, through the relay.
+
+    The envelope sender is the member's outside address, so a bounce comes
+    back to the outside domain, and from there into their PlayOnline inbox."""
+    where = relay()
+    if where is None:
+        return False, "outbound not configured (POL_EXT_MAIL_RELAY empty)"
+    msg = email.message.EmailMessage()
+    msg["From"] = frm
+    msg["To"] = ", ".join(to)
+    msg["Subject"] = subject
+    msg["Reply-To"] = reply_to
+    msg["Date"] = email.utils.formatdate(usegmt=True)
+    msg["Message-ID"] = email.utils.make_msgid(domain=domain())
+    msg.set_content(text or "")
+    try:
+        with smtplib.SMTP(where[0], where[1], timeout=20) as s:
+            s.ehlo(domain())
+            refused = s.send_message(msg, from_addr=reply_to, to_addrs=list(to))
+    except (OSError, smtplib.SMTPException) as exc:
+        return False, f"relay {where[0]}:{where[1]}: {exc!r}"[:300]
+    if refused:
+        return False, f"relay refused {sorted(refused)}"
+    return True, msg["Message-ID"]
 
 
 def member_for_local(db, local):
@@ -328,3 +330,29 @@ def receive(db, rcpt, sender, raw, log=print):
     log("[extmail] inbound mail for %s from %r delivered, %d bytes" % (
         row["mail_address"], str(sender)[:80], len(msg)))
     return 200, {"ok": True}
+
+
+def inbound_rcpt(db, rcpt):
+    """(ok, reply, why) for one RCPT of a message from OUTSIDE: only an
+    enabled member at our outside domain, with room left today."""
+    local, _, dom = (rcpt or "").strip().rpartition("@")
+    if not domain() or dom.lower() != domain():
+        return False, b"550 5.7.1 relaying denied\r\n", "not our domain"
+    row = member_for_local(db, local)
+    if not enabled(row) or not row["mail_address"]:
+        return False, b"550 5.1.1 no such mailbox\r\n", (
+            "no such mailbox" if row is None else "member not enabled")
+    if room_today(db, row["id"], "in") <= 0:
+        return False, b"452 4.2.2 mailbox is full for today\r\n", "daily cap"
+    return True, b"250 OK\r\n", "outside -> " + row["mail_address"]
+
+
+def deliver_inbound(db, rcpt, raw, sender):
+    """Store one outside message for `rcpt` (already passed inbound_rcpt).
+    Returns the in-game address it went to."""
+    row = member_for_local(db, rcpt.rpartition("@")[0])
+    box = row["mail_address"]
+    msg, frm, subject = inbound(bytes(raw), box.split("@", 1)[0])
+    accounts.deliver_mail(db, box, msg, sender=frm, subject=subject)
+    note(db, row["id"], "in", sender or "<>", True, subject)
+    return box

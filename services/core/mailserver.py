@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 from srvcore import _stamp, log
 from .deps import accounts, extmail
@@ -777,7 +778,7 @@ def _ext_rcpt_check(mail_from, n_outside):
 
 
 def _ext_relay(mail_from, remote, body, peer):
-    """(ok, detail): send the outside recipients through the provider."""
+    """(ok, detail): send the outside recipients through the relay."""
     db = _mail_db()
     if db is None:
         return False, "no account DB"
@@ -797,6 +798,63 @@ def _ext_relay(mail_from, remote, body, peer):
         db.close()
 
 
+#: Outside senders per source address per hour. The MX is public, so this is
+#: the whole of the flood control before the per-member caps.
+_INBOUND_PER_IP_HOUR = int(os.environ.get("POL_EXT_MAIL_IN_PER_IP_HOUR") or 60)
+_INBOUND_SEEN = {}
+_INBOUND_LOCK = threading.Lock()
+
+
+def _smtp_inbound_sender(mail_from):
+    """True when a MAIL FROM is OUTSIDE mail: a null sender (a bounce) or
+    another domain, with outside mail configured (POL_EXT_MAIL_DOMAIN). A
+    sender claiming OUR domains is never outside (it goes through
+    _smtp_sender_allowed, which refuses it unless it is a signed-in member),
+    so nobody on the internet can pose as `x@pol.com` or a member's outside
+    address."""
+    if extmail is None or accounts is None or not extmail.domain():
+        return False
+    if not mail_from:
+        return True
+    dom = mail_from.rpartition("@")[2].lower() if "@" in mail_from else MAIL_DOMAIN.lower()
+    return dom not in (MAIL_DOMAIN.lower(), extmail.domain())
+
+
+def _smtp_inbound_ip_ok(ip):
+    now = time.time()
+    with _INBOUND_LOCK:
+        seen = [t for t in _INBOUND_SEEN.get(ip, []) if now - t < 3600]
+        if len(seen) >= _INBOUND_PER_IP_HOUR:
+            _INBOUND_SEEN[ip] = seen
+            return False, f"{len(seen)} this hour from {ip}"
+        seen.append(now)
+        _INBOUND_SEEN[ip] = seen
+        if len(_INBOUND_SEEN) > 10000:                  # bounded
+            for k in [k for k, v in _INBOUND_SEEN.items() if now - v[-1] > 3600]:
+                _INBOUND_SEEN.pop(k, None)
+    return True, "outside sender"
+
+
+def _smtp_inbound_rcpt(to):
+    db = _mail_db()
+    if db is None:
+        return False, b"451 4.3.0 try again later\r\n", "no account DB"
+    try:
+        return extmail.inbound_rcpt(db, to)
+    finally:
+        db.close()
+
+
+def _smtp_deliver_inbound(rcpts, body, sender):
+    db = _mail_db()
+    if db is None:
+        return []
+    try:
+        return [extmail.deliver_inbound(db, r, body, sender) for r in rcpts]
+    finally:
+        db.close()
+
+
 def handle_smtp(conn, addr, port=25):
     """A minimal SMTP server. Mail addressed to our own domain is DELIVERED into
     the recipient's mailbox (so PlayOnline members can mail each other, and
@@ -806,6 +864,12 @@ def handle_smtp(conn, addr, port=25):
     conn.settimeout(_MAIL_IDLE)          # see the POP3 handler's note
     f = _MailTrace(conn.makefile("rwb"), "SMTP", peer)
     mail_from, rcpts = "", []
+    # sender_ok: a MAIL FROM was ACCEPTED. Without it a refused MAIL FROM left
+    # the session open to RCPT and DATA with an empty sender, which skips the
+    # From-header check: ignore the 550 and you could mail any member.
+    # inbound: the sender is OUTSIDE (null or another domain), so only enabled
+    # members at the outside domain may be named (extmail.inbound_rcpt).
+    sender_ok, inbound, in_rcpts = False, False, []
     try:
         f.write(b"220 PlayOnline Mail ESMTP\r\n")
         f.flush()
@@ -825,8 +889,18 @@ def handle_smtp(conn, addr, port=25):
                 f.write(b"250-PlayOnline Mail\r\n250 OK\r\n")
             elif up.startswith(b"MAIL FROM"):
                 mail_from = _smtp_addr(text)
-                rcpts = []
+                rcpts, in_rcpts = [], []
+                inbound = _smtp_inbound_sender(mail_from)
+                if inbound:
+                    ok, why = _smtp_inbound_ip_ok(addr[0])
+                    sender_ok = ok
+                    log("mail", f"{peer} SMTP MAIL FROM {mail_from!r} from OUTSIDE: "
+                                f"{'accepted' if ok else 'REFUSED'} ({why})")
+                    f.write(b"250 OK\r\n" if ok else b"450 4.7.1 too many messages, try later\r\n")
+                    f.flush()
+                    continue
                 ok, why = _smtp_sender_allowed(mail_from, addr[0])
+                sender_ok = ok
                 if not ok:
                     log("mail", f"{peer} SMTP MAIL FROM {mail_from!r} REFUSED ({why})")
                     mail_from = ""
@@ -835,8 +909,17 @@ def handle_smtp(conn, addr, port=25):
                     f.write(b"250 OK\r\n")
             elif up.startswith(b"RCPT TO"):
                 to = _smtp_addr(text)
-                if not to:
+                if not sender_ok:
+                    f.write(b"503 5.5.1 MAIL FROM first\r\n")
+                elif not to:
                     f.write(b"501 bad recipient\r\n")
+                elif inbound:
+                    ok, reply, why = _smtp_inbound_rcpt(to)
+                    log("mail", f"{peer} SMTP RCPT {to!r} from outside: "
+                                f"{'accepted' if ok else 'REFUSED'} ({why})")
+                    if ok:
+                        in_rcpts.append(to)
+                    f.write(reply)
                 elif _smtp_is_outside(to):
                     ok, reply, why = _ext_rcpt_check(
                         mail_from, sum(1 for r in rcpts if _smtp_is_outside(r)))
@@ -849,7 +932,7 @@ def handle_smtp(conn, addr, port=25):
                     rcpts.append(to)
                     f.write(b"250 OK\r\n")
             elif up.startswith(b"DATA"):
-                if not rcpts:
+                if not rcpts and not in_rcpts:
                     f.write(b"503 need RCPT first\r\n")
                     f.flush()
                     continue
@@ -873,8 +956,21 @@ def handle_smtp(conn, addr, port=25):
                 if too_big:
                     log("mail", f"{peer} SMTP message over "
                                 f"{_MAIL_MAX_BYTES // 1024} KB -- refused")
-                    rcpts = []
+                    rcpts, in_rcpts = [], []
                     f.write(b"552 message too large\r\n")
+                    f.flush()
+                    continue
+                if inbound:
+                    if len(body) > extmail.MAX_IN_RAW:
+                        in_rcpts = []
+                        f.write(b"552 5.3.4 message too large\r\n")
+                        f.flush()
+                        continue
+                    boxes = _smtp_deliver_inbound(in_rcpts, body, mail_from)
+                    log("mail", f"{peer} SMTP from OUTSIDE {mail_from!r} delivered "
+                                f"to {boxes} ({len(body)}B)")
+                    in_rcpts = []
+                    f.write(b"250 OK\r\n")
                     f.flush()
                     continue
                 log("mail", f"{peer} SMTP message from {mail_from!r} to {rcpts} "
@@ -906,6 +1002,7 @@ def handle_smtp(conn, addr, port=25):
                         .encode("ascii"))
             elif up.startswith(b"RSET"):
                 mail_from, rcpts = "", []
+                sender_ok, inbound, in_rcpts = False, False, []
                 f.write(b"250 OK\r\n")
             elif up.startswith(b"QUIT"):
                 f.write(b"221 bye\r\n")
