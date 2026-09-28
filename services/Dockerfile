@@ -9,7 +9,8 @@ FROM python:3.12-slim@sha256:2fe5997d249a808b8eeea52c58a1dbffbba28754dc11699ef5c
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir pyyaml pycryptodome pillow \n        "psycopg[binary]==3.3.6" "psycopg-pool==3.3.3" "valkey==6.1.1"
+    && pip install --no-cache-dir pyyaml pycryptodome pillow \
+        "psycopg[binary]==3.3.6" "psycopg-pool==3.3.3" "valkey==6.1.1"
 
 WORKDIR /app
 COPY . /app/
