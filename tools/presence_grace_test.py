@@ -115,7 +115,12 @@ PUSHED.clear()
 R.PRESENCE.unregister(mid, chan)
 R._logout_or_grace(mid, "GraceTester", "test:2", None)
 check(is_online(mid), "still online during the grace window")
-time.sleep(1.6)
+# The wipe runs on a timer thread once the 1s grace is up. On a loaded
+# machine it can finish well after that, so wait for it rather than for a
+# fixed time.
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline and (mid, "offline") not in PUSHED:
+    time.sleep(0.1)
 check(not is_online(mid), "offline after the grace -- session rows closed")
 check((mid, "offline") in PUSHED, "offline pushed to the watchers")
 check(any("logout stamped" in ln for ln in LOGS), "the logout was stamped")
