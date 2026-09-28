@@ -547,6 +547,8 @@
       width: 100%; color-scheme: dark; }
     .pv-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .pv-filters summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+    .pv-lang label { margin: 0; color: var(--muted); font-size: 12.5px; }
+    .pv-lang select { width: auto; padding: 4px 8px; }
     .pv-filters label { margin: 8px 0 3px; }
     .pv-filters select { padding: 6px 8px; }
     .pv-list { overflow-y: auto; flex: 1 1 auto; min-height: 120px; margin: 0 -12px;
@@ -1208,11 +1210,13 @@
               <button data-f="">All files</button>
             </div>
           </div>
+          <div class="pv-row pv-lang">
+            <label for="fLocale">Language</label><select id="fLocale"></select>
+          </div>
           <details class="pv-filters">
             <summary>Filters <span id="pmlCount" class="muted"></span></summary>
             <label>Site</label><select id="fHost"></select>
             <label>Game</label><select id="fGame"></select>
-            <label>Language</label><select id="fLocale"></select>
             <label>Sort</label>
             <select id="fSort"><option value="folders">Folders</option><option value="title">Title</option><option value="path">Path</option></select>
             <select id="fKind" hidden>
