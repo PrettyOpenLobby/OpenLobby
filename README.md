@@ -61,6 +61,14 @@ because their contents are Square Enix's:
 - `mirrors/` - patch trees for the Viewer and titles. Only needed if you
   want the client's updater to work against your server.
 
+Without patch trees the patch service answers every version check with "you
+are up to date", echoing the version the client sent. A Viewer that logs in
+again sometimes sends an empty version; `POLP_FALLBACK_VERSION` (for example
+`20130104_0`, the Viewer build you support) is what it is then told, for the
+Viewer (product 1000) only. `POLP_CONSOLE_LIST_CAP` (default `20130601_E`)
+leaves the console Viewers' shutdown-era rows out of the file lists of the
+PS2, P2U, X2U and XB2 Viewer trees you do supply.
+
 Portal pages are optional. When a `.pml` page is requested and there is no
 file for it under `www/`, the server serves a minimal built-in page instead:
 a main menu with the titles the server offers (`POL_LOBBY_CONTENT_IDS`), the

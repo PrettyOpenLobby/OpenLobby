@@ -217,11 +217,19 @@ class Bundle:
         # predates that, so an old bundle still answers correctly.
         oldest = meta.get("oldest_version")
         if not oldest:
-            from polbundle import manifest
             try:
+                from polbundle import manifest
                 oldest = min(r["version"] for r in manifest(path))
-            except (FileNotFoundError, ValueError):
-                oldest = self.latest or "00000000_0"
+            except (ImportError, FileNotFoundError, ValueError):
+                # Without the manifest reader (polbundle, not shipped here) the
+                # catalogue rows give the oldest build, so older supported
+                # clients are still recognised instead of treating latest as
+                # the oldest.
+                from slc import slc_decompress
+                rows = slc_decompress(self.patchlist).decode("latin-1").splitlines()
+                oldest = min((row.split(" ", 1)[0] for row in rows
+                              if re.fullmatch(r"\d{8}_\w", row.split(" ", 1)[0])),
+                             default=self.latest or "00000000_0")
         self.oldest = oldest.encode("latin-1")
 
     def blob_path(self, path):
@@ -286,6 +294,9 @@ class Server:
         #: answer "you are up to date" for ANY tree we do not have, so a
         #: deployment with no patch trees at all lets every title launch
         self.current_all = current_all
+        self.fallback_version = os.environ.get("POLP_FALLBACK_VERSION", "").strip()
+        if self.fallback_version and not re.fullmatch(r"\d{8}_[0-9A-Za-z]", self.fallback_version):
+            raise SystemExit("POLP_FALLBACK_VERSION must be YYYYMMDD_X (e.g. 20130104_0)")
         self.lock = threading.Lock()
         self.stats = {"cmd1": 0, "cmd3": 0, "cmd7": 0, "reject": 0, "bytes": 0}
         self._last_report = 0
@@ -398,6 +409,10 @@ class Server:
 
         Best-effort by design: a failure here must never cost a patch reply.
         """
+        # Re-login can send an empty version. It provides no new build identity
+        # and must not erase the previous claim used by the portal's era router.
+        if not ver:
+            return
         if clientbuilds is not None:
             clientbuilds.record(addr[0], region, prod, ver)
 
@@ -416,21 +431,25 @@ class Server:
         No update is offered, so the client never asks for the list -- which is
         just as well, since there is no list to give it.  That is the whole
         contract: this is for a client that is ALREADY at a playable version, not
-        a way to fake a patch service.  A malformed or empty version claim is
-        echoed as-is and flagged, because the status string it produces
-        ("unknown"/"empty") is then the client's own doing, not ours.
+        a way to fake a patch service. Re-login can send an empty version while
+        still comparing the reply with its installed build. For Viewer checks
+        (product 1000), POLP_FALLBACK_VERSION supplies a static version in that
+        case. It should match the Viewer build this deployment supports.
+        Nonempty claims are echoed normally; real archives retain their normal
+        handling. No per-client history is consulted for patch replies.
         """
         self.bump("cmd7")
-        latest = ver.decode("latin-1")
-        # Compared against ITSELF: version_status is a "can this tree patch you
-        # from there" test, and a tree whose oldest build is the client's own
-        # build always can. Well-formed versions come back `registered`;
-        # malformed ones keep their honest `unknown`/`empty`.
-        status = version_status(ver, ver)
-        self.log(f"[{addr[0]}] cmd7 {region}/{prod} ver={latest!r}"
-                 f" -> {status}, latest={latest} (CURRENT: no bundle, "
-                 f"advertising the client's own version)")
-        if status != "registered":
+        fallback = self.fallback_version.encode("ascii") if prod == "1000" else b""
+        effective = ver or fallback
+        latest = effective.decode("latin-1")
+        status = version_status(effective, effective)
+        source = "static Viewer fallback" if not ver and fallback else "client's own version"
+        self.log(f"[{addr[0]}] cmd7 {region}/{prod} ver={ver.decode('latin-1')!r}"
+                 f" -> {status}, latest={latest} (CURRENT: no bundle, {source})")
+        if not effective:
+            self.log(f"[{addr[0]}]   empty version with no fallback for {region}/{prod}; "
+                     "set POLP_FALLBACK_VERSION to your supported Viewer build for product 1000")
+        elif status != "registered":
             self.log(f"[{addr[0]}]   note: {latest!r} is not a well-formed "
                      f"version, so this reply may not satisfy the client")
         return build_cmd8(DEFAULT_TOKEN, latest, dlhost or self.advertise, status)
@@ -870,7 +889,7 @@ def main():
     currents_declared = [c for c in args.current
                          + os.environ.get("POLP_CURRENT", "").split(",")
                          if c.strip()]
-    if not bundles and not currents_declared and not args.current_all:
+    if not bundles and (args.check or not (currents_declared or args.current_all)):
         raise SystemExit(f"no bundles under {args.root} - supply patch trees, "
                          "or run with --current/$POLP_CURRENT to answer "
                          "version checks with 'you are up to date'")
@@ -879,6 +898,14 @@ def main():
 
     apply_pins(bundles, args.pin + [p for p in
                                     os.environ.get("POLP_PIN", "").split(",") if p.strip()])
+    # POLP_CONSOLE_LIST_CAP caps the console Viewer rows (PS2, P2U, X2U, XB2)
+    # of whichever of those archives are present, without requiring all four.
+    # An explicit --list-cap target still fails on a typo.
+    console_cap = os.environ.get("POLP_CONSOLE_LIST_CAP", "").strip()
+    if console_cap:
+        apply_list_caps(bundles, [f"{region}/1000={console_cap}"
+                                 for region in ("PS2", "P2U", "X2U", "XB2")
+                                 if (region, "1000") in bundles])
     apply_list_caps(bundles, args.list_cap + [c for c in
                     os.environ.get("POLP_LIST_CAP", "").split(",") if c.strip()])
     apply_slim_lists(bundles, args.slim_list + [s for s in

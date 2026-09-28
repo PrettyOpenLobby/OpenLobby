@@ -41,6 +41,11 @@ pgtest.use_fresh_database()
 # "accept" would send a bare header with no body to eyeball on live captures.)
 os.environ["POL_LOBBY_EMIT"] = "derive"
 os.environ["POL_AUTH_MODE"] = "welcome"
+# This in-process client connects directly to authserv and uses synthetic nicks
+# without registered accounts or password tokens.
+os.environ["POL_AUTH_FRONT_PREAMBLE"] = "0"
+os.environ["POL_ACCOUNTS_ENFORCE"] = "0"
+os.environ["POL_ACCOUNTS_ENFORCE_PW"] = "0"
 
 import responders          # noqa: E402  (after sys.path / env setup)
 import sessioncrypt        # noqa: E402

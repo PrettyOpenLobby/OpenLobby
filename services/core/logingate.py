@@ -36,9 +36,8 @@ REJECT_LOCKED = 0xCB            # too many failed logins (the lockout below)
 REJECT_VERSION = 0xCC           # "not working due to a version discrepancy"
 REJECT_BUSY = 0xCD              # "network is busy" -- the generic one
 REJECT_UNKNOWN_ERROR = 0xCE     # unknown error
-# 0xDC..0xFC and 0xFF are ADMIN MESSAGES (the LM-xx dialogs, code - 220), which
-# Crystal uses for "you are banned"-style logouts. Note pol_error_token's
-# reading that the client treats 0 and >= 0xDC as "store and reconnect".
+# Account refusals use accounts.login_reject_code. Successful-login notices
+# have their own setting; unproven codes are excluded from both selectable lists.
 _REJECT_WHY = {REJECT_UNKNOWN_ID: "unknown PlayOnline ID",
                REJECT_BAD_PASSWORD: "wrong password",
                REJECT_LOCKED: "locked out after failed logins",
@@ -79,6 +78,18 @@ def reject_line(peer_ip, status):
     """
     tok = pol_reject_token(status)
     return authnode.NoPad(f"ERROR :Closing Link: [unknown@{peer_ip}] (POL {tok})".encode())
+
+
+def pol_kill_line(server, nick):
+    """Server-side IRC KILL for an established POL session.
+
+    Retail component-2.elf dispatches KILL to FUN_0013ae68, which produces
+    the client's session-kill error. IRC KICK is only a channel membership
+    change. The ordinary reason avoids its special "Kicked by same NICK" arm.
+    """
+    server = server if isinstance(server, bytes) else str(server).encode()
+    nick = nick if isinstance(nick, bytes) else str(nick).encode()
+    return b":" + server.lstrip(b":") + b" KILL " + nick + b" :Administrator disconnect"
 
 
 # --------------------------------------------------------------------------- #

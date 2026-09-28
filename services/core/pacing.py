@@ -4,6 +4,8 @@ import socket
 import time
 import threading
 from srvcore import expand_ports, hexdump, log, save_capture
+from authtoken import _ACCT_STATUS
+from .deps import accounts
 from . import lobbysession
 
 
@@ -239,6 +241,21 @@ def _band_send(conn, resp, port, peer="", hdrs=None):
 #: functions off the lobby band (a test, the auth band) reads the default False
 #: and gets the PC answer, which is what every path did before this.
 _peer_build = threading.local()
+
+
+def _hello_is_ps2(variant):
+    """The lobby hello's +0x09 as `_peer_is_ps2` reads it: 0x00 means PS2.
+
+    The byte is our own status code echoed back (see `_peer_is_ps2`). A
+    per-account login notice (accounts.claim_login_information) rides in the
+    same byte, so a notice code is read as the server-wide status it replaced:
+    setting a notice on an account never switches that player's layouts.
+    """
+    echoed = variant
+    if (variant is not None and variant != _ACCT_STATUS and accounts is not None
+            and variant in getattr(accounts, "LOGIN_INFORMATION_CODES", ())):
+        echoed = _ACCT_STATUS
+    return echoed == 0x00
 
 
 def _peer_is_ps2():

@@ -235,6 +235,9 @@ services:
       POL_AUTH_RSA_IPS: "${POL_AUTH_RSA_IPS:-}"
       POL_AUTH_KILL_DUP: "${POL_AUTH_KILL_DUP:-}"
       POL_AUTH_KILL_DUP_SCOPE: "${POL_AUTH_KILL_DUP_SCOPE:-}"
+      # "refuse": a login the account database cannot resolve is answered
+      # "server busy" instead of continuing without an account.
+      POL_ACCOUNTS_DB_FAIL: "${POL_ACCOUNTS_DB_FAIL:-}"
     healthcheck: *pyhc
 
   authrelay:
@@ -320,6 +323,10 @@ services:
       # REGION/PROD[=BASE],...: leave files unchanged since the disc out of a
       # PS2 title's cmd-1 list (polserver2.py --slim-list). Empty = off.
       POLP_SLIM_LIST: "${POLP_SLIM_LIST:-}"
+      # The Viewer version reported when its check arrives empty (a re-login),
+      # and the newest row the console Viewer trees list. See .env.example.
+      POLP_FALLBACK_VERSION: "${POLP_FALLBACK_VERSION:-}"
+      POLP_CONSOLE_LIST_CAP: "${POLP_CONSOLE_LIST_CAP:-20130601_E}"
     entrypoint: ["sh", "-c", "exec python polserver2.py /mirrors --advertise \"${POL_ADVERTISE:-127.0.0.1}\""]
     ports:
       - "54000:54000"

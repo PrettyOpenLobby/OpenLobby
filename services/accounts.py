@@ -57,6 +57,8 @@ file path from before the move to PostgreSQL is accepted and ignored):
     python accounts.py DB grant     LOGIN CODE [--no CONTENT_NO]
     python accounts.py DB revoke    LOGIN CODE
     python accounts.py DB passwd    LOGIN PASSWORD
+    python accounts.py DB reject-code POLID CODE [--until DATE]
+    python accounts.py DB notice-code POLID CODE [--delivery once|every-login]
     python accounts.py DB list
 """
 import argparse
@@ -90,6 +92,12 @@ _SALT_BYTES = 16
 
 #: Account states. 'jail' is a real PlayOnline state (see module docstring).
 STATUSES = ("active", "suspended", "jail", "closed")
+
+# Refusal codes terminate authentication. Notice codes use a separate setting
+# and are carried by the successful 300 token instead.
+LOGIN_REFUSAL_CODES = frozenset((0xDD, 0xE2, 0xE3, 0xE4, 0xE5,
+                                 0xE6, 0xE7, 0xE9, 0xEB, 0xED, 0xEF,
+                                 0xF0, 0xF1, 0xF2, 0xF3))
 
 #: Mirrors contentlist.CONTENT_NAMES; duplicated so this module stays importable
 #: on its own (the lobby workstream imports contentlist conditionally).
@@ -747,10 +755,13 @@ def reissue_polid(conn, old, new=None):
         raise ValueError(f"{new!r} is already some other member's login name")
     with conn:
         conn.execute(
-            "INSERT INTO polid (polid, pw_hash, pw_salt, status, area_kbn,"
+            "INSERT INTO polid (polid, pw_hash, pw_salt, status, reject_code,"
+            " reject_until, info_code, info_repeat, info_shown_at, area_kbn,"
             " login_pf, property, created_at, updated_at)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (new, row["pw_hash"], row["pw_salt"], row["status"],
+             row["reject_code"], row["reject_until"], row["info_code"],
+             row["info_repeat"], row["info_shown_at"],
              row["area_kbn"], row["login_pf"], row["property"],
              row["created_at"], _now()))
         conn.execute("UPDATE member  SET polid = %s WHERE polid = %s", (new, old))
@@ -2811,6 +2822,122 @@ def get_member(conn, login_name):
                         (login_name,)).fetchone()
 
 
+def set_reject_code(conn, polid, code, until=None):
+    """Set an account-wide refusal and optional UTC expiration."""
+    code = int(code)
+    if code != 0 and code not in LOGIN_REFUSAL_CODES:
+        raise ValueError("code is not a login refusal; use a login notice instead")
+    if until:
+        if code in (0, 0xE7):
+            raise ValueError("an active account or permanent ban cannot have an expiry")
+        try:
+            parsed = datetime.datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("expiry must be an ISO 8601 datetime with timezone") from None
+        if parsed.tzinfo is None:
+            raise ValueError("expiry must include a timezone")
+        if parsed <= datetime.datetime.now(datetime.timezone.utc):
+            raise ValueError("expiry must be in the future")
+        until = parsed.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        until = None
+    with conn:
+        cur = conn.execute("UPDATE polid SET reject_code = %s, reject_until = %s,"
+                           " status = 'active', updated_at = %s WHERE polid = %s",
+                           (code, until, _now(), polid))
+        if cur.rowcount != 1:
+            raise ValueError(f"no such PlayOnline ID: {polid}")
+        conn.execute("UPDATE member SET status = 'active' WHERE polid = %s",
+                     (polid,))
+
+
+def login_reject_code(conn, member):
+    """Return the account-specific refusal code, or zero for an active account."""
+    parent = conn.execute("SELECT status, reject_code, reject_until FROM polid"
+                          " WHERE polid = %s",
+                          (member["polid"],)).fetchone()
+    if parent is None:
+        return 0xC9
+    if parent["reject_code"]:
+        if not parent["reject_until"] or parent["reject_until"] > _now():
+            code = int(parent["reject_code"])
+            return code if code in LOGIN_REFUSAL_CODES else 0xDD
+    # Without an explicit code, a member that is not active is refused with the
+    # unknown-ID byte, as before per-account codes existed: no capture shows SE
+    # refusing a suspended or closed account, and 0xED / 0xE4 have not been
+    # seen working on a client (0xE4 asks "Reactivate?", which nothing serves).
+    # polid.status is not consulted, so existing accounts keep logging in.
+    return 0 if member["status"] == "active" else 0xC9
+
+
+# Codes with notice wording in the US Viewer; 0xFA is additionally observed
+# from a successful 300 token. Refusal-only codes stay on the ERROR path.
+LOGIN_INFORMATION_CODES = frozenset((0xDE, 0xDF, 0xE0, 0xE1, 0xE8,
+                                     0xEA, 0xEC, 0xEE, 0xFA))
+
+
+def set_login_information(conn, polid, code, repeat="once"):
+    """Configure a successful-login message, separately from a refusal."""
+    code = int(code)
+    if code != 0 and code not in LOGIN_INFORMATION_CODES:
+        allowed = ", ".join(f"0x{value:02X}" for value in sorted(LOGIN_INFORMATION_CODES))
+        raise ValueError(f"information code must be 0 or one of {allowed}")
+    if repeat not in ("once", "always"):
+        raise ValueError("repeat must be once or always")
+    with conn:
+        old = conn.execute("SELECT info_code, info_repeat"
+                           " FROM polid WHERE polid = %s", (polid,)).fetchone()
+        if old is None:
+            raise ValueError(f"no such PlayOnline ID: {polid}")
+        changed = (old["info_code"], old["info_repeat"]) != (code, repeat)
+        conn.execute("UPDATE polid SET info_code = %s, info_repeat = %s,"
+                     " info_shown_at = CASE WHEN %s THEN NULL"
+                     " ELSE info_shown_at END, updated_at = %s WHERE polid = %s",
+                     (code, repeat, bool(changed or code == 0), _now(), polid))
+
+
+def claim_login_information(conn, polid):
+    """Choose a notice; atomically reserve a one-time code for this login.
+
+    The claim is made before the welcome is sent, so concurrent logins cannot
+    both receive a one-time notice. A stranded claim can be retried after five
+    minutes if authsess dies before finishing the send. Returns (code, claim
+    timestamp), with a null claim for repeating notices.
+    """
+    row = conn.execute("SELECT info_code, info_repeat, info_shown_at"
+                       " FROM polid WHERE polid = %s", (polid,)).fetchone()
+    if row is None or not row["info_code"]:
+        return 0, None
+    code = int(row["info_code"])
+    if row["info_repeat"] != "once":
+        return code, None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    claim = now.isoformat(timespec="microseconds")
+    stale = (now - datetime.timedelta(minutes=5)).isoformat(timespec="microseconds")
+    with conn:
+        cur = conn.execute("UPDATE polid SET info_shown_at = %s"
+                           " WHERE polid = %s AND info_code = %s AND info_repeat = 'once'"
+                           " AND (info_shown_at IS NULL OR info_shown_at < %s)",
+                           (claim, polid, code, stale))
+    return (code, claim) if cur.rowcount == 1 else (0, None)
+
+
+def complete_login_information(conn, polid, code, claim):
+    """A sent one-time notice becomes No Code in the stored account state."""
+    with conn:
+        conn.execute("UPDATE polid SET info_code = 0, info_shown_at = %s"
+                     " WHERE polid = %s AND info_code = %s AND info_repeat = 'once'"
+                     " AND info_shown_at = %s", (_now(), polid, int(code), claim))
+
+
+def restore_login_information(conn, polid, code, claim):
+    """Requeue a claimed one-time notice if its welcome could not be sent."""
+    with conn:
+        conn.execute("UPDATE polid SET info_shown_at = NULL"
+                     " WHERE polid = %s AND info_code = %s AND info_repeat = 'once'"
+                     " AND info_shown_at = %s", (polid, int(code), claim))
+
+
 def get_login_token(conn, member_id):
     """The stored NICK-line password token for a member, or None if never set."""
     row = conn.execute("SELECT login_token FROM member WHERE id = %s",
@@ -4231,6 +4358,11 @@ def _session_time(value):
     return value.astimezone(datetime.timezone.utc)
 
 
+def _session_lock(member_id):
+    """The advisory lock that orders a member's new login against a kick."""
+    return f"session:{int(member_id)}"
+
+
 def open_session(conn, member_id, nick=None, peer_ip=None, iv=None,
                  lobby_port=None, ttl_seconds=3600, created_at=None):
     """Record a login and return its token. `created_at` (a datetime, naive
@@ -4239,6 +4371,9 @@ def open_session(conn, member_id, nick=None, peer_ip=None, iv=None,
     token = secrets.token_hex(16)
     now = _session_time(created_at)
     exp = now + datetime.timedelta(seconds=ttl_seconds)
+    # The lock close_kicked_sessions holds while it decides whether a kicked
+    # member is still online.
+    conn.begin(lock=_session_lock(member_id))
     conn.execute(
         "INSERT INTO session (token, member_id, nick, peer_ip, iv, lobby_port,"
         " created_at, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -4450,6 +4585,29 @@ def close_sessions(conn, member_id):
     return cur.rowcount
 
 
+def close_kicked_sessions(conn, member_id, tokens):
+    """Retire sessions present at a kick, preserving any newer login.
+
+    The DELETE and the remaining-session check share one transaction under the
+    member's session lock (see open_session), so a new login cannot slip
+    between them. Return (closed count, still online).
+    """
+    with conn:
+        conn.begin(lock=_session_lock(member_id))
+        closed = 0
+        for token in tokens:
+            cur = conn.execute("DELETE FROM session WHERE member_id = %s AND token = %s",
+                               (int(member_id), token))
+            closed += cur.rowcount
+        online = conn.execute(
+            "SELECT 1 FROM session WHERE member_id = %s AND expires_at > %s LIMIT 1",
+            (int(member_id), _now())).fetchone() is not None
+        if not online:
+            conn.execute("UPDATE member SET last_logout_at = %s WHERE id = %s",
+                         (_now(), int(member_id)))
+    return closed, online
+
+
 def purge_sessions(conn):
     """Drop expired sessions. Cheap enough to call on every login."""
     cur = conn.execute("DELETE FROM session WHERE expires_at < %s", (_now(),))
@@ -4502,7 +4660,8 @@ def ensure_member(conn, nick, default_contents=(1, 2, 4, 11, 14)):
 # --------------------------------------------------------------------------- #
 def _cmd_list(conn):
     rows = conn.execute(
-        "SELECT p.polid, p.status AS pstatus, m.id, m.member_no, m.login_name,"
+        "SELECT p.polid, p.status AS pstatus, p.reject_code, p.reject_until,"
+        " m.id, m.member_no, m.login_name,"
         " m.status AS mstatus FROM polid p LEFT JOIN member m ON m.polid = p.polid"
         " ORDER BY p.polid, m.member_no").fetchall()
     if not rows:
@@ -4510,12 +4669,14 @@ def _cmd_list(conn):
         return
     for r in rows:
         if r["id"] is None:
-            print(f"{r['polid']:<16} [{r['pstatus']}]  (no members)")
+            print(f"{r['polid']:<16} [{r['pstatus']}] reject=0x{r['reject_code']:02X}"
+                  f" until={r['reject_until'] or '-'}  (no members)")
             continue
         hn = primary_handle(conn, r["id"]) or "-"
         codes = content_ids(conn, r["id"])
         names = ",".join(CONTENT_NAMES.get(c, str(c)) for c in codes) or "-"
-        print(f"{r['polid']:<16} [{r['pstatus']}]  #{r['member_no']} "
+        print(f"{r['polid']:<16} [{r['pstatus']}] reject=0x{r['reject_code']:02X}"
+              f" until={r['reject_until'] or '-'}  #{r['member_no']} "
               f"{r['login_name']:<16} [{r['mstatus']}]  HN={hn:<12} {names}")
 
 
@@ -4536,6 +4697,20 @@ def main(argv=None):
     p = sub.add_parser("addmember")
     p.add_argument("polid"); p.add_argument("login"); p.add_argument("password")
     p.add_argument("--handle")
+
+    p = sub.add_parser("reject-code", help="set a POL ID's login refusal code; "
+                       "0 clears it, 0xED suspends, 0xE7 terminates")
+    p.add_argument("polid")
+    p.add_argument("code", type=lambda value: int(value, 0))
+    p.add_argument("--until", help="UTC ISO 8601 expiry for a temporary refusal, "
+                   "e.g. 2026-10-01T12:00:00Z")
+
+    p = sub.add_parser("notice-code", help="set a POL ID's successful-login "
+                       "notice code; 0 clears it")
+    p.add_argument("polid")
+    p.add_argument("code", type=lambda value: int(value, 0))
+    p.add_argument("--delivery", choices=("once", "every-login"), default="once",
+                   help="send once (default) or on every login")
 
     p = sub.add_parser("backfill-group-owners",
                        help="write the missing owner row into every group, at "
@@ -4700,6 +4875,14 @@ def main(argv=None):
         if args.handle:
             set_handle(conn, mid, args.handle)
         print(f"created member {args.login} (id={mid}) under {args.polid}")
+    elif args.cmd == "reject-code":
+        set_reject_code(conn, args.polid, args.code, args.until)
+        print(f"{args.polid} reject code set to 0x{args.code:02X}")
+    elif args.cmd == "notice-code":
+        repeat = "always" if args.delivery == "every-login" else "once"
+        set_login_information(conn, args.polid, args.code, repeat)
+        print(f"{args.polid} login notice set to 0x{args.code:02X} "
+              f"({args.delivery})")
     elif args.cmd == "backfill-group-owners":
         r = backfill_group_owners(conn, dry=args.dry_run)
         what = "would add" if args.dry_run else "added"

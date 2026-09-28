@@ -460,7 +460,7 @@ def handle_lobby(conn, addr, port, stub_ip):
         variant = h.get("magic_variant")
         # ...and the same byte decides the SHAPE of some replies, not just the
         # send cadence -- a title's ranking header is 24 bytes here and 28 on the PC.
-        pacing._peer_build.ps2 = (variant == 0x00)
+        pacing._peer_build.ps2 = pacing._hello_is_ps2(variant)
         pacing._peer_build.ip = addr[0]
         pacing._peer_build.pace_note = None          # _lobby_pace_ps2 logs once per hello
         # +0x09 identifies the CLIENT: 0xfa = PC Viewer, 0x00 = PS2 Viewer.

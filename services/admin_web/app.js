@@ -479,6 +479,40 @@ $("#newCodesCopy").onclick = () => {
 };
 
 // ---- accounts ----
+const ACCOUNT_STATES = [
+  [0x00, "No Code", "No administrative message is shown."],
+  [0xDD, "Unexpected error", "Unable to log in due to an unexpected error."],
+  [0xDE, "Missing payment information", "Your account will be closed at the end of this month due to missing payment information. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xDF, "Registration delayed", "Due to internet congestion, it will take longer than usual to complete registration for PlayOnline. Please wait for an e-mail confirming its completion."],
+  [0xE0, "Missing payment information", "Your account will be closed at the end of this month due to missing payment information. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xE1, "Payment problem", "Your account will be closed at the end of this month due to problems with your payment information or with your past payment. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xE2, "Payment hold", "Your account has been temporarily closed due to problems with your payment information or with your past payment. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xE3, "Unexpected error", "Unable to log in due to an unexpected error."],
+  [0xE4, "Disabled, reactivation offered", "Your account has been disabled per your request or has been temporarily disabled for other reasons. You can reactivate your account within 3 months of its closure. Reactivate your PlayOnline account?"],
+  [0xE5, "Payment hold", "Your account has been temporarily closed due to problems with your payment information or with your past payment. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xE6, "Member verification hold", "Your account has been temporarily closed due to a problem with one of the member information verification procedures. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xE7, "Permanent ban", "We have closed your PlayOnline account. Please contact the PlayOnline Information Center for further details."],
+  [0xE8, "Payment problem", "Your account will be closed at the end of this month due to problems with your payment information or with your past payment. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xE9, "Member verification hold", "Your account has been temporarily closed due to problems with the member information verification procedure. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
+  [0xEA, "WebMoney expiring", "Your Webmoney prepaid period is expiring for one or more services. Please log in from a Japanese copy of the PlayOnline Viewer and resolve this issue by the end of the month."],
+  [0xEB, "Beta period ended", "The beta test period is over. Logging in with this account is no longer possible. Please purchase a retail disc and reinstall PlayOnline for future access."],
+  [0xEC, "Fees billed", "This month's fees have been billed. Please select the Now button to review these charges."],
+  [0xED, "Temporary suspension", "Your PlayOnline account is temporarily suspended. Please contact the PlayOnline Information Center for further details."],
+  [0xEE, "Card expiring", "Your registered card expires this month. You must re-register with a valid card through the Change Payment Information section. Do you wish to re-register now?"],
+  [0xEF, "Reactivation refused", "Unable to reactivate your PlayOnline account per your request. Please contact the PlayOnline Information Center for further details if you have any questions."],
+  [0xF0, "Expired card and unpaid fees", "Your account is closed due to an expired card and unpaid fees. You can reactivate your account by paying these fees with a valid card. Proceed and pay fees now?"],
+  [0xF1, "Declined card and unpaid fees", "Your account is closed due to declined authorization on your card and unpaid fees. You can reactivate your account by paying these fees with a valid card. Proceed and pay fees now?"],
+  [0xF2, "Chargeback", "Your account is closed due to receiving a chargeback on past fees. You need to pay these fees before you are allowed to reactivate your account. Proceed and pay these fees?"],
+  [0xF3, "Previous chargeback", "Your account is closed due to receiving a chargeback on a payment for a previous charge. Please proceed and pay the outstanding amount."],
+  [0xFA, "Card expires this month", "The credit card registered for your payment method will expire at the end of the month."],
+];
+const accountState = (code) => ACCOUNT_STATES.find((s) => s[0] === code);
+const stateLabel = (code) => {
+  const state = accountState(code);
+  return state ? `${state[1]}${code ? ` (0x${code.toString(16).toUpperCase()})` : ""}`
+               : `Unknown (0x${Number(code).toString(16).toUpperCase()})`;
+};
+
 let ACCOUNTS = [], ACC_SHOWN = [];
 const accFilter = segControl("#accFilter", "accFilter", "all", () => renderAccounts());
 
@@ -511,7 +545,7 @@ function renderAccounts() {
     ? `${ACCOUNTS.length} account${ACCOUNTS.length === 1 ? "" : "s"}`
     : `${ACC_SHOWN.length} of ${ACCOUNTS.length}`;
   if (!ACC_SHOWN.length) {
-    body.innerHTML = `<tr><td colspan="7" class="muted">${ACCOUNTS.length
+    body.innerHTML = `<tr><td colspan="8" class="muted">${ACCOUNTS.length
       ? "No accounts match." : "No accounts yet."}</td></tr>`;
     return;
   }
@@ -525,6 +559,13 @@ function renderAccounts() {
       : missing ? `<span class="pill used">${owned - missing}/${owned}, ${missing} not linked</span>`
                 : `<span class="pill open">all ${owned}</span>`;
     const clients = [...new Set(r.clients || [])];
+    const expired = !!(r.reject_code && r.reject_until && !r.effective_reject_code);
+    const refusal = r.effective_reject_code ? stateLabel(r.effective_reject_code) :
+      expired ? `Expired: ${stateLabel(r.reject_code)}` : "Allowed";
+    const refusalTime = r.reject_until ? ` until ${new Date(r.reject_until).toLocaleString()}` : "";
+    const notice = r.info_code ? stateLabel(r.info_code) : "No Code";
+    const noticeDelivery = r.info_code ?
+      (r.info_repeat === "once" ? " · once" : " · every login") : "";
     return `<tr>` +
       `<td style="white-space:nowrap"><a class="acct-link mono" data-i="${i}" data-act="detail">${esc(r.polid)}</a>` +
         `<button class="copy" data-i="${i}" data-act="copy" title="Copy">copy</button></td>` +
@@ -532,6 +573,12 @@ function renderAccounts() {
       `<td>${esc(r.contents_label) || "-"}</td>` +
       `<td>${play}</td>` +
       `<td class="clients">${clients.length ? esc(clients.join(", ")) : "never signed in"}</td>` +
+      `<td><div class="account-state"><span class="kind">Refusal</span>` +
+        `<span class="pill ${r.effective_reject_code ? "used" : "open"}" title="${esc(refusal + refusalTime)}">${esc(refusal)}</span>` +
+        (isOwner() ? `<button class="ghost" data-i="${i}" data-act="refusal">Set</button>` : "") + `</div>` +
+        `<div class="account-state"><span class="kind">Notice</span>` +
+        `<span class="pill open" title="${esc(notice + noticeDelivery)}">${esc(notice)}</span>` +
+        (isOwner() ? `<button class="ghost" data-i="${i}" data-act="notice">Set</button>` : "") + `</div></td>` +
       `<td class="muted" style="white-space:nowrap" title="${esc(r.created_at || "")}">${esc(fmtWhen(r.created_at))}</td>` +
       (!isOwner() ? `<td><div class="rowacts"><button class="ghost" data-i="${i}" data-act="detail">Details</button></div></td>` :
       `<td><div class="rowacts">` +
@@ -539,6 +586,7 @@ function renderAccounts() {
         `<button class="ghost" data-i="${i}" data-act="grant" title="Grant or revoke content">Content</button>` +
         `<button class="ghost" data-i="${i}" data-act="pw">Password</button>` +
         `<button class="ghost" data-i="${i}" data-act="tok">Tokens</button>` +
+        `<button class="ghost" data-i="${i}" data-act="kick">Kick</button>` +
         `<button class="${r.ext_mail ? "act" : "ghost"}" data-i="${i}" data-act="ext" ` +
           `title="Mail to and from the internet as ${esc(outsideAddr(r))}">` +
           `Ext mail: ${r.ext_mail ? "on" : "off"}</button>` +
@@ -558,6 +606,9 @@ $("#accountsBody").onclick = (e) => {
   if (act === "grant") prefillGrant(r);
   if (act === "pw") askPassword(r.polid);
   if (act === "tok") askTokens(r.polid);
+  if (act === "refusal") askState(r);
+  if (act === "notice") askInformation(r);
+  if (act === "kick") kickAccount(r.polid);
   if (act === "ext") toggleExtMail(r, b);
   if (act === "del") askDelete(r.polid);
 };
@@ -571,6 +622,179 @@ $("#accCsv").onclick = () => downloadCsv("accounts.csv",
     (r.unlinked || []).map((c) => CONTENT[c] || c).join("; "),
     [...new Set(r.clients || [])].join("; "), r.mail, r.ext_mail ? "on" : "off",
     r.created_at]));
+
+async function kickAccount(polid) {
+  if (!confirm(`Kick all current sessions for ${polid}? The account can log in again unless a refusal is set.`)) return;
+  try {
+    const result = await api("/api/account-kick", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({polid})
+    });
+    toast(`Disconnected ${result.kicked} current session${result.kicked === 1 ? "" : "s"} for ${polid}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- account login state ----
+let STATE_POLID = null;
+const REFUSAL_CODES = [0, 0xDD, 0xE2, 0xE3, 0xE4, 0xE5,
+  0xE6, 0xE7, 0xE9, 0xEB, 0xED, 0xEF, 0xF0, 0xF1, 0xF2, 0xF3];
+$("#stateCode").innerHTML = ACCOUNT_STATES.filter(([code]) =>
+  REFUSAL_CODES.includes(code)
+).map(([code, label]) =>
+  `<option value="${code}">${code ? `0x${code.toString(16).toUpperCase()} · ` : ""}${esc(label)}</option>`
+).join("");
+
+function selectState(code) {
+  $("#stateCode").value = String(code);
+  const state = accountState(code);
+  $("#stateMeaning").textContent = state ?
+    `Client text: ${state[2]}` : "";
+  syncStateDuration();
+  $("#stateChoices").querySelectorAll("button").forEach((button) => {
+    const selected = Number(button.dataset.code) === code;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+function syncStateDuration() {
+  const code = Number($("#stateCode").value);
+  const permanent = code === 0xE7;
+  const disabled = code === 0 || permanent;
+  $("#stateDuration").disabled = disabled;
+  if (disabled) $("#stateDuration").value = "none";
+  $("#stateUntilWrap").style.display = !disabled &&
+    $("#stateDuration").value === "custom" ? "" : "none";
+  $("#stateDurationHint").textContent = permanent
+    ? "Permanent bans cannot have an expiration."
+    : code === 0 ? "Clearing a refusal also clears its expiration."
+    : "At expiration, the account is allowed to log in again automatically.";
+}
+
+function localDateTime(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function askState(account) {
+  STATE_POLID = account.polid;
+  $("#statePolid").textContent = account.polid;
+  const until = account.reject_until;
+  $("#stateDuration").value = until && new Date(until) > new Date()
+    ? "custom" : "none";
+  $("#stateUntil").value = until ? localDateTime(until) : "";
+  const code = account.reject_code || account.effective_reject_code || 0;
+  selectState(REFUSAL_CODES.includes(code) ? code : 0);
+  $("#stateModal").classList.add("show");
+  $("#stateCode").focus();
+}
+
+function closeState() {
+  $("#stateModal").classList.remove("show");
+  STATE_POLID = null;
+}
+
+$("#stateChoices").querySelectorAll("button").forEach((button) => {
+  button.onclick = () => selectState(Number(button.dataset.code));
+});
+$("#stateCode").onchange = () => selectState(Number($("#stateCode").value));
+$("#stateDuration").onchange = syncStateDuration;
+$("#stateCancel").onclick = closeState;
+$("#stateModal").onclick = (e) => {
+  if (e.target === $("#stateModal")) closeState();
+};
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#stateModal").classList.contains("show")) closeState();
+});
+$("#stateGo").onclick = async () => {
+  const polid = STATE_POLID, code = Number($("#stateCode").value);
+  const duration = $("#stateDuration").value;
+  let until = null;
+  if (code && code !== 0xE7 && duration !== "none") {
+    if (duration === "custom") {
+      const local = $("#stateUntil").value;
+      if (!local) return toast("Choose an expiration date and time", true);
+      const date = new Date(local);
+      if (!Number.isFinite(date.getTime()) || date <= new Date())
+        return toast("Expiration must be in the future", true);
+      until = date.toISOString();
+    } else {
+      const periods = { "1h": 3600000, "1d": 86400000,
+        "7d": 7 * 86400000, "30d": 30 * 86400000 };
+      until = new Date(Date.now() + periods[duration]).toISOString();
+    }
+  }
+  const button = $("#stateGo");
+  button.disabled = true;
+  try {
+    await api("/api/account-state", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polid, code, until })
+    });
+    closeState();
+    toast(`${polid}: ${code ? stateLabel(code) : "refusal cleared"}`);
+    loadAccounts();
+  } catch (e) { toast(e.message, true); }
+  finally { button.disabled = false; }
+};
+
+// Information codes use the accepted 300 token. A notice can be queued while a
+// refusal is active; a one-time code becomes No Code after delivery.
+let INFO_POLID = null;
+const INFO_CODES = [0, 0xDE, 0xDF, 0xE0, 0xE1, 0xE8,
+  0xEA, 0xEC, 0xEE, 0xFA];
+$("#infoCode").innerHTML = INFO_CODES.map((code) => {
+  const state = accountState(code);
+  return `<option value="${code}">${code ? `0x${code.toString(16).toUpperCase()} · ` : ""}${esc(state ? state[1] : "Undocumented code")}</option>`;
+}).join("");
+
+function selectInformation(code) {
+  $("#infoCode").value = String(code);
+  const state = accountState(code);
+  $("#infoMeaning").textContent = state ? `Expected client text: ${state[2]}` +
+    (code === 0xDE ? " OpenLobby does not currently fill the date fields." : "")
+    : "The client text for this code has not been documented here.";
+}
+
+function askInformation(account) {
+  INFO_POLID = account.polid;
+  $("#infoPolid").textContent = account.polid;
+  selectInformation(account.info_code || 0);
+  $("#infoRepeat").value = account.info_repeat || "once";
+  $("#infoModal").classList.add("show");
+  $("#infoCode").focus();
+}
+
+function closeInformation() {
+  $("#infoModal").classList.remove("show");
+  INFO_POLID = null;
+}
+$("#infoCode").onchange = () => selectInformation(Number($("#infoCode").value));
+$("#infoCancel").onclick = closeInformation;
+$("#infoModal").onclick = (e) => {
+  if (e.target === $("#infoModal")) closeInformation();
+};
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#infoModal").classList.contains("show")) closeInformation();
+});
+$("#infoGo").onclick = async () => {
+  const polid = INFO_POLID, code = Number($("#infoCode").value);
+  const repeat = $("#infoRepeat").value;
+  const button = $("#infoGo");
+  button.disabled = true;
+  try {
+    await api("/api/account-info", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polid, code, repeat })
+    });
+    closeInformation();
+    toast(`${polid}: ${code ? stateLabel(code) : "login notice cleared"}`);
+    loadAccounts();
+  } catch (e) { toast(e.message, true); }
+  finally { button.disabled = false; }
+};
 
 // "Content" on a row: aim the grant form at that account and tick what it
 // already owns, so the operator sees the current state before changing it.
@@ -2811,9 +3035,15 @@ async function openAccount(polid) {
   $("#acctTitle").innerHTML = `<code class="mono">${esc(r.polid)}</code> ${esc(r.handles[0] || "")}`;
   $("#acctSub").textContent = r.online.length ? "Signed in now" : "Not signed in";
   const status = r.status && r.status !== "active" ? `<span class="pill used">${esc(r.status)}</span>` : `<span class="pill open">active</span>`;
+  const refusal = r.effective_reject_code ? stateLabel(r.effective_reject_code) : "Allowed";
+  const refusalTime = r.effective_reject_code && r.reject_until
+    ? ` until ${new Date(r.reject_until).toLocaleString()}` : "";
+  const notice = r.info_code ? stateLabel(r.info_code) +
+    (r.info_repeat === "once" ? " · once" : " · every login") : "No Code";
   let html = `<div class="acct-grid">`;
   html += sec("Account",
-    kv("Status", status) + kv("Created", when(r.created_at)) +
+    kv("Status", status) + kv("Login refusal", esc(refusal + refusalTime)) +
+    kv("Login notice", esc(notice)) + kv("Created", when(r.created_at)) +
     kv("Login name", esc(m.login_name || "-")) +
     kv("Handles", esc(r.handles.join(", ") || "-")) +
     kv("Mail", esc(m.mail || "-") + (m.ext_mail ? " (outside mail on)" : "")) +
@@ -2847,7 +3077,10 @@ async function openAccount(polid) {
   $("#acctBody").innerHTML = html;
   $("#acctActions").innerHTML = isOwner()
     ? `<button class="ghost" data-a="grant">Content</button><button class="ghost" data-a="pw">Password</button>` +
-      `<button class="ghost" data-a="tok">Tokens</button><button class="danger" data-a="del">Delete</button>`
+      `<button class="ghost" data-a="tok">Tokens</button>` +
+      `<button class="ghost" data-a="refusal">Refusal</button>` +
+      `<button class="ghost" data-a="notice">Notice</button>` +
+      `<button class="ghost" data-a="kick">Kick</button><button class="danger" data-a="del">Delete</button>`
     : "";
   $("#acctModal").classList.add("show");
 }
@@ -2860,7 +3093,7 @@ document.addEventListener("keydown", (e) => {
 $("#acctActions").onclick = (e) => {
   const b = e.target.closest("button[data-a]");
   if (!b || !ACCT) return;
-  const polid = ACCT.polid, a = b.dataset.a;
+  const account = ACCT, polid = account.polid, a = b.dataset.a;
   closeAccount();
   if (a === "grant") {
     location.hash = "#accounts";
@@ -2869,6 +3102,9 @@ $("#acctActions").onclick = (e) => {
   }
   if (a === "pw") askPassword(polid);
   if (a === "tok") askTokens(polid);
+  if (a === "refusal") askState(account);
+  if (a === "notice") askInformation(account);
+  if (a === "kick") kickAccount(polid);
   if (a === "del") askDelete(polid);
 };
 

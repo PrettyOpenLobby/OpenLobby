@@ -203,6 +203,8 @@ in and play, and each key expires on its own. Key names are shown without
 | `contentauth:rows` | the per-login content auth values (contentauth.py), JSON list | `POL_CONTENT_AUTH_TTL` (default 24 hours) after the last one |
 | `push:queue` | pushes the lobby queued for `authsess` to deliver, one JSON record each | when delivered |
 | `push:work` | the push `authsess` is delivering right now | when delivered |
+| `authkick:queue` | the admin panel's Kick requests for `authsess`, `{"polid", "reply", "expires"}` | when read; the panel withdraws one nobody read within 5 seconds |
+| `authkick:reply:<id>` | `authsess`'s answer to one Kick request, `{"ok", "kicked"}` or `{"ok": false, "error"}` | a minute |
 | `live:<service>` | a service's live-session count, `{"count", "stamp"}` (live_sessions.py) | `POL_LIVE_SESSIONS_TTL` (default a day) after the last publish |
 | `clientbuild:<address>` | hash `<region>/<product>` to `{"version", "seen"}`, the build a client announced to the patch server | `POL_CLIENT_BUILDS_TTL` (default 30 days) |
 

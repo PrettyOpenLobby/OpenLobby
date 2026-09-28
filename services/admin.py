@@ -566,6 +566,36 @@ def _pml_resolve(src, base, host_dirs, tree_dirs):
     return None
 
 
+#: The admin panel's Kick is carried out by authsess, which holds the sockets:
+#: the request goes through the live-state store to core/authkick.py, which
+#: owns these key names.
+_KICK_QUEUE = "authkick:queue"
+_KICK_REPLY = "authkick:reply:"
+_KICK_WAIT = 5.0
+
+
+def _request_kick(polid, wait=_KICK_WAIT):
+    """Ask the running authsess to kick `polid`. Returns its answer,
+    `{"ok": True, "kicked": n}` or `{"ok": False, "error": ...}`; raises
+    TimeoutError when no authsess answered within `wait` seconds, after
+    withdrawing the request so a later authsess does not act on it."""
+    from polcore import kv
+    reply = _KICK_REPLY + secrets.token_hex(8)
+    raw = json.dumps({"polid": polid, "reply": reply,
+                      "expires": time.time() + wait})
+    kv.push(_KICK_QUEUE, raw)
+    # Waited for in short blocking reads: a single blocking read as long as
+    # the whole wait can outlast the Valkey client's own socket timeout.
+    deadline = time.monotonic() + wait
+    answer = None
+    while answer is None and time.monotonic() < deadline:
+        answer = kv.pop(reply, timeout=max(0.1, min(1.0, deadline - time.monotonic())))
+    if answer is None:
+        kv.lrem(_KICK_QUEUE, raw)
+        raise TimeoutError("no auth service answered the kick request")
+    return json.loads(answer)
+
+
 def _db():
     return accounts.connect()
 
@@ -974,6 +1004,9 @@ _AUDIT_ACTIONS = {
     "/api/gm-ticket": "set a GM call's status",
     "/api/account-create": "created an account",
     "/api/account-password": "changed an account password",
+    "/api/account-state": "changed an account login refusal",
+    "/api/account-info": "changed an account login notice",
+    "/api/account-kick": "kicked an account",
     "/api/account-clear-token": "cleared a login token",
     "/api/account-extmail": "changed outside mail",
     "/api/account-delete": "deleted an account",
@@ -1545,6 +1578,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "No such account."})
             pol = mem["polid"]
             prow = db.execute("SELECT * FROM polid WHERE polid=%s", (pol,)).fetchone()
+            reject_code = accounts.login_reject_code(db, mem)
             fp = accounts.account_footprint(db, pol) or {}
             members = db.execute("SELECT * FROM member WHERE polid=%s ORDER BY id",
                                  (pol,)).fetchall()
@@ -1584,6 +1618,12 @@ class Handler(BaseHTTPRequestHandler):
         names = {h.lower() for h in handles if h}
         out = {
             "polid": pol, "status": prow["status"] if prow and "status" in prow.keys() else None,
+            "reject_code": prow["reject_code"] if prow else 0,
+            "reject_until": prow["reject_until"] if prow else None,
+            "effective_reject_code": reject_code,
+            "info_code": prow["info_code"] if prow else 0,
+            "info_repeat": prow["info_repeat"] if prow else "once",
+            "info_shown_at": prow["info_shown_at"] if prow else None,
             "created_at": prow["created_at"] if prow else None,
             "members": [{"login_name": m["login_name"], "status": m["status"],
                          "mail": m["mail_address"] if "mail_address" in m.keys() else None,
@@ -1897,6 +1937,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._account_create()
         if path == "/api/account-password":
             return self._account_password()
+        if path == "/api/account-state":
+            return self._account_state()
+        if path == "/api/account-info":
+            return self._account_info()
+        if path == "/api/account-kick":
+            return self._account_kick()
         if path == "/api/account-clear-token":
             return self._account_clear_token()
         if path == "/api/account-extmail":
@@ -2534,7 +2580,8 @@ class Handler(BaseHTTPRequestHandler):
     def _accounts_list(self):
         db = _db()
         try:
-            rows = db.execute("SELECT polid, created_at FROM polid "
+            rows = db.execute("SELECT polid, status, reject_code, reject_until, info_code,"
+                              " info_repeat, info_shown_at, created_at FROM polid "
                               "ORDER BY created_at DESC LIMIT 500").fetchall()
             out = []
             for r in rows:
@@ -2578,6 +2625,14 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         clients = []      # pre-migration DB: just omit it
                 out.append({"polid": pol, "created_at": r["created_at"],
+                            "account_status": r["status"],
+                            "reject_code": r["reject_code"],
+                            "reject_until": r["reject_until"],
+                            "info_code": r["info_code"],
+                            "info_repeat": r["info_repeat"],
+                            "info_shown_at": r["info_shown_at"],
+                            "effective_reject_code": accounts.login_reject_code(
+                                db, mem or {"polid": pol, "status": "active"}),
                             "handle": handle, "contents": contents,
                             "linked": linked,
                             "unlinked": sorted(set(contents) - set(linked)),
@@ -2858,6 +2913,95 @@ class Handler(BaseHTTPRequestHandler):
                          # `responders.resolve_account` owns the real decision --
                          # this only reports the inputs it reads.
                          "rearm_needed": not (left or legacy or armed)})
+
+    def _account_state(self):
+        """Set a POL ID's client-visible login status for all its members."""
+        body = self._json_body()
+        pol = body.get("polid")
+        code = body.get("code")
+        until = body.get("until")
+        if not isinstance(pol, str) or not pol.strip():
+            return self._send(400, {"error": "polid required"})
+        if type(code) is not int:
+            return self._send(400, {"error": "code must be an integer"})
+        if until is not None and not isinstance(until, str):
+            return self._send(400, {"error": "until must be an ISO 8601 datetime"})
+        pol = pol.strip()
+        db = _db()
+        try:
+            accounts.set_reject_code(db, pol, code, until)
+        except ValueError as exc:
+            message = str(exc)
+            return self._send(404 if message.startswith("no such") else 400,
+                              {"error": message})
+        except Exception as exc:
+            return self._send(500, {"error": str(exc)})
+        finally:
+            db.close()
+        who = (self._session() or {}).get("user") or "open-panel"
+        print(f"[admin] {who} set account {pol!r} refusal to {code:#04x} "
+              f"until {until or 'cleared manually'}",
+              flush=True)
+        self._send(200, {"ok": True, "polid": pol, "code": code,
+                         "until": until})
+
+    def _account_info(self):
+        """Configure a notice carried in the successful login token."""
+        body = self._json_body()
+        pol = body.get("polid")
+        code = body.get("code")
+        repeat = body.get("repeat", "once")
+        if not isinstance(pol, str) or not pol.strip():
+            return self._send(400, {"error": "polid required"})
+        if type(code) is not int:
+            return self._send(400, {"error": "code must be an integer"})
+        if not isinstance(repeat, str):
+            return self._send(400, {"error": "invalid notice settings"})
+        pol = pol.strip()
+        db = _db()
+        try:
+            accounts.set_login_information(db, pol, code, repeat)
+        except ValueError as exc:
+            message = str(exc)
+            return self._send(404 if message.startswith("no such") else 400,
+                              {"error": message})
+        except Exception as exc:
+            return self._send(500, {"error": str(exc)})
+        finally:
+            db.close()
+        who = (self._session() or {}).get("user") or "open-panel"
+        print(f"[admin] {who} set account {pol!r} information code to "
+              f"{code:#04x} ({repeat})", flush=True)
+        self._send(200, {"ok": True, "polid": pol, "code": code,
+                         "repeat": repeat})
+
+    def _account_kick(self):
+        """Ask the auth responder to disconnect existing channels for a POL ID."""
+        body = self._json_body()
+        pol = body.get("polid")
+        if not isinstance(pol, str) or not pol.strip():
+            return self._send(400, {"error": "polid required"})
+        pol = pol.strip()
+        db = _db()
+        try:
+            if not db.execute("SELECT 1 FROM polid WHERE polid = %s", (pol,)).fetchone():
+                return self._send(404, {"error": f"no such PlayOnline ID: {pol}"})
+        except Exception as exc:
+            return self._send(500, {"error": str(exc)})
+        finally:
+            db.close()
+        try:
+            result = _request_kick(pol)
+        except Exception as exc:      # no answer, or the live-state store is down
+            return self._send(503, {"error": f"auth service unavailable: {exc}"})
+        if not result.get("ok"):
+            return self._send(404 if result.get("error", "").startswith("no such") else 503,
+                              {"error": result.get("error", "kick failed")})
+        who = (self._session() or {}).get("user") or "open-panel"
+        kicked = result["kicked"]
+        print(f"[admin] {who} kicked {kicked} live channel(s) for {pol!r}",
+              flush=True)
+        self._send(200, {"ok": True, "polid": pol, "kicked": kicked})
 
     def _account_delete(self):
         """Erase an account. The POL ID must be repeated in the body.
