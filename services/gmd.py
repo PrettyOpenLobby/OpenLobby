@@ -52,6 +52,7 @@ Configuration is environment only, so compose owns it:
     POL_GMD_TICKET_DIR   /data/gm-calls
 """
 import os
+import re
 import socket
 import struct
 import sys
@@ -161,6 +162,96 @@ CONTROL_PATH = os.path.join(TICKET_DIR, "gm-control.json")
 #: the effective values rather than re-deriving the precedence rules and drifting
 #: out of step with them. Purely informational; nothing reads it back.
 SERVING_PATH = os.path.join(TICKET_DIR, "gm-serving.json")
+#: The desk's own status per ticket (open / answered / closed), written by the
+#: admin panel. gmd only reads it.
+TICKET_STATE_PATH = os.path.join(TICKET_DIR, "gm-tickets.json")
+
+#: THE SERVER HOLDS THE TICKET (app.dll, read 2026-09-28). 0x801 flags bit
+#: 0x02 means "there is an open request for you": with it CLEAR, a client that
+#: still has a call (mode != 0) resets itself on the next 0x801 -- deletes
+#: gmtool/reserve, clears Request No. and deletes GmCall.bin, which is what
+#: every title reads for its GM Call notice (0x4ab0425 -> 0x4aaf23d(0) ->
+#: 0x4ab1e80). With it SET and no local call (mode 0) the client REBUILDS the
+#: request from our stage-2 0x201 body (polcore state 7 copies it to
+#: 0x4dbd398): Request No. at body +0x04, flags at +0x34 (0x20 -> mode 2),
+#: subject at +0x58, text at +0x98. With it set, Submit never sends a new
+#: 0x102 and Confirm/Cancel sends 0x1101 instead of cancelling locally.
+#:
+#: The caller is recognised by the 0x101's session dwords, which are the
+#: logged-in handle's 64-bit id: ticket #4's dwords 0x25_3953FBA4 are
+#: handle Bluebell's stored client_guid (checked on prod 2026-09-28).
+#: POL_GMD_HOLD_TICKETS=0 restores the old behaviour (bit never set).
+HOLD_TICKETS = os.environ.get("POL_GMD_HOLD_TICKETS", "1") != "0"
+TICKET_RE = re.compile(r"gm-\d{8}T\d{6}-(\d+)\.json")
+#: Stage-2 0x201 fields the client copies into its request record, as MESSAGE
+#: offsets (body + 0x18).
+S2_REQ, S2_CONTENT, S2_ISSUE, S2_FLAGS = 0x1C, 0x48, 0x4A, 0x4C
+S2_SUBJ, S2_SUBJ_LEN, S2_TEXT, S2_TEXT_LEN = 0x70, 0x40, 0xB0, 0x150
+BIT_HELD = 0x02
+
+
+def session_guid(ses):
+    """The caller's 64-bit handle id, from the 0x101 session dwords."""
+    return ((ses.dwB & 0xFFFFFFFF) << 32) | (ses.dwA & 0xFFFFFFFF)
+
+
+def _ticket_state(path=None):
+    import json
+    try:
+        with open(path or TICKET_STATE_PATH, encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return st if isinstance(st, dict) else {}
+
+
+def open_ticket_for(guid, req_no=0, ticket_dir=None):
+    """(name, record) of the newest OPEN ticket this caller holds, or None.
+
+    A ticket is open until the desk closes it or the player cancels it. Matched
+    on the caller's handle id; `req_no` also matches a ticket filed in this
+    same session before the id was recorded on tickets.
+    """
+    import json
+    d = ticket_dir or TICKET_DIR
+    try:
+        names = sorted((n for n in os.listdir(d) if TICKET_RE.fullmatch(n)),
+                       reverse=True)
+    except OSError:
+        return None
+    state = _ticket_state(os.path.join(d, "gm-tickets.json"))
+    for name in names:
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        mine = (guid and rec.get("guid") == guid) or \
+               (req_no and rec.get("request_no") == req_no)
+        if not mine:
+            continue
+        tid = name[:-len(".json")]
+        if rec.get("cancelled_at") or (state.get(tid) or {}).get("status") == "closed":
+            return None                # their newest ticket is finished
+        return name, rec
+    return None
+
+
+def fill_held_ticket(m, rec, flags):
+    """Write a held ticket into a stage-2 0x201, where the client rebuilds its
+    request from. The content id / issue pair at body +0x30/+0x32 mirrors the
+    0x102's own +0x04/+0x06 and is inferred, not proven."""
+    def put(off, n, text):
+        raw = str(text or "").encode("cp932", "replace")[:n - 1]
+        m[off:off + n] = raw + b"\0" * (n - len(raw))
+    struct.pack_into("<I", m, S2_REQ, int(rec.get("request_no") or 0))
+    struct.pack_into("<HH", m, S2_CONTENT, int(rec.get("content_id") or 0) & 0xFFFF,
+                     int(rec.get("issue") or 0) & 0xFFFF)
+    struct.pack_into("<I", m, S2_FLAGS, (flags & 0x60) | BIT_HELD)
+    put(S2_SUBJ, S2_SUBJ_LEN, rec.get("subject"))
+    put(S2_TEXT, S2_TEXT_LEN, rec.get("body"))
 
 #: cft_1217_udp's key blob one, permuted a8,ac,a0,a4 on the way into the buffer.
 KEY16 = struct.pack("<4I", 0xBC5224A2, 0x2B61B926, 0xA0A0D48A, 0xB0FEB355)
@@ -312,7 +403,7 @@ def fixed_len(t):
 class Session:
     __slots__ = ("sctx", "gctx", "zctx", "sctx_ready", "dwA", "dwB",
                  "echoA", "echoC", "peer", "last_seen", "req_no", "idx",
-                 "last_request", "last_request_at", "last_reply")
+                 "last_request", "last_request_at", "last_reply", "held")
 
     def __init__(self, idx, sctx):
         self.idx = idx
@@ -324,6 +415,10 @@ class Session:
         self.peer = None
         self.last_seen = time.time()
         self.req_no = 0
+        #: The open ticket this caller holds, as (name, record), or None.
+        #: Looked up again on every 0x801, so a close on the desk lands on the
+        #: next poll.
+        self.held = None
         #: The last request we read, when it arrived, and the exact ciphertext we
         #: answered it with. The client repeats a datagram verbatim when our answer
         #: does not satisfy it (2s, 4s, 8s, 16s, then it gives up), so an identical
@@ -510,6 +605,8 @@ class Gmd:
         m[5] = 0x0A
         struct.pack_into("<HHHI", m, 6, 0x0201, 0x200, echoA, echoC)
         struct.pack_into("<II", m, 0x28, ses.dwA, ses.dwB)
+        if ses.held:
+            fill_held_ticket(m, ses.held[1], effective_flags(read_control())[0])
         return checksum(bytes(m[:wire_len(0x200)]), 0x200), 0x200
 
     def generic(self, ses, rtype, echoA, echoC, body_edit=None):
@@ -533,7 +630,46 @@ class Gmd:
                 m[R_KEY_B:R_KEY_B + len(CHAT_KEY)] = CHAT_KEY[:R_KEY_LEN - 1]
         return checksum(bytes(m[:wire_len(total)]), total), total
 
-    def write_ticket(self, body, req_no, peer):
+    # -- the ticket the caller holds ----------------------------------------- #
+    def refresh_held(self, ses):
+        """Look up the caller's open ticket again. A ticket that was held and
+        is now closed or cancelled drops the request number with it, so the
+        caller leaves the queue and its room."""
+        if not HOLD_TICKETS or not (ses.dwA or ses.dwB):
+            return
+        was = ses.held
+        ses.held = open_ticket_for(session_guid(ses), ses.req_no)
+        if ses.held:
+            ses.req_no = int(ses.held[1].get("request_no") or ses.req_no)
+            if not was or was[0] != ses.held[0]:
+                log(f"    holding ticket {ses.held[0]} (request #{ses.req_no}) "
+                    f"for handle {session_guid(ses):#x}: bit 0x02 set")
+        elif was:
+            log(f"    ticket {was[0]} is finished: bit 0x02 cleared, the client "
+                f"resets its call on this 0x801")
+            ses.req_no = 0
+
+    def cancel_held(self, ses):
+        """The player cancelled from Confirm/Cancel (0x1101). Recorded on the
+        ticket itself -- gmd owns those files; gm-tickets.json is the panel's."""
+        import json
+        if not ses.held:
+            log("    0x1101 with no held ticket -- answered, nothing to cancel")
+            return
+        name, rec = ses.held
+        rec = dict(rec, cancelled_at=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                   time.gmtime()))
+        path = os.path.join(TICKET_DIR, name)
+        try:
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False, indent=1)
+            os.replace(path + ".tmp", path)
+            log(f"    ticket {name} CANCELLED by the player")
+        except OSError as e:
+            log(f"  ** could not mark {name} cancelled: {e}")
+        ses.held, ses.req_no = None, 0
+
+    def write_ticket(self, body, req_no, peer, guid=0):
         """The 0x102 is the whole ticket -- who, which title, category, subject,
         description. Filed as JSON into the directory the dashboard reads."""
         import json
@@ -542,6 +678,10 @@ class Gmd:
         rec = {
             "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "request_no": req_no,
+            # The caller's handle id (the 0x101 session dwords). What a later
+            # session is matched to this ticket by, and what the panel resolves
+            # to a member when the handle field is empty (in-game calls).
+            "guid": guid,
             "handle": s(0x40, 16),
             "content_id": struct.unpack_from("<H", body, 0x04)[0],
             "issue": struct.unpack_from("<H", body, 0x06)[0],
@@ -637,6 +777,7 @@ class Gmd:
                 ses.dwA, ses.dwB = struct.unpack_from("<II", pt, 0x20)
                 ses.echoA, ses.echoC, ses.sctx_ready = echoA, echoC, True
                 log(f"    session dwords: {ses.dwA:08x} / {ses.dwB:08x}")
+                self.refresh_held(ses)
                 our_ip = advertise_for(CHAT_IP or self.local_ip_for(peer[0]),
                                        peer[0])
                 rep, n = self.redirect(ses, echoA, echoC, our_ip)
@@ -649,13 +790,21 @@ class Gmd:
                         ses.req_no = self.next_request()
                     rn = ses.req_no
                     edit = lambda m: struct.pack_into("<I", m, 0x1C, rn)
-                    self.write_ticket(pt[0x18:], rn, f"{peer[0]}:{peer[1]}")
+                    self.write_ticket(pt[0x18:], rn, f"{peer[0]}:{peer[1]}",
+                                      guid=session_guid(ses))
+                    self.refresh_held(ses)
+                elif rtype_out == 0x1201:
+                    # Confirm/Cancel with a held ticket: the player withdrew it.
+                    # A bare 0x1201 is all cft_1251 checks for.
+                    self.cancel_held(ses)
                 elif rtype_out == 0x801:
                     # ONE read of the desk for this whole reply. Flags and queue
                     # that disagreed about which version of the file they came
                     # from would be a race nobody could reproduce.
                     self.control = read_control()
                     flags, why = effective_flags(self.control)
+                    self.refresh_held(ses)
+                    flags = (flags | BIT_HELD) if ses.held else (flags & ~BIT_HELD)
                     q = self.queue_depth(ses)
                     stamp = (flags, q, why)
                     if stamp != self.control_seen:
