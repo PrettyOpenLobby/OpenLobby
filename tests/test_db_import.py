@@ -199,6 +199,13 @@ r.execute("CREATE TABLE handle_content_pre_slots (handle_id INTEGER, content_cod
           " INTEGER, content_id TEXT, status TEXT, linked_at TEXT)")
 r.execute("INSERT INTO handle_content_pre_slots VALUES (1, 2, '1', 'active', 'x')")
 r.execute("INSERT INTO handle_content_pre_slots VALUES (2, 2, '2', 'active', 'x')")
+# the website sign-in service's own table (regapi, which is not in this
+# repository), created and filled the way it does
+r.execute("CREATE TABLE IF NOT EXISTS web_login (username TEXT NOT NULL UNIQUE"
+          " COLLATE NOCASE, member_id INTEGER NOT NULL UNIQUE, created_at TEXT NOT NULL)")
+r.execute("INSERT INTO web_login VALUES ('alice.web', ?, '2026-01-01T00:00:00Z')", (m1,))
+r.execute("INSERT INTO web_login VALUES ('Carol.Web', ?, '2026-01-02T00:00:00Z')", (m3,))
+r.execute("INSERT INTO web_login VALUES ('ghost.web', 999, '2026-01-03T00:00:00Z')")
 r.execute("CREATE TABLE scratch_notes (note TEXT)")
 r.execute("INSERT INTO scratch_notes VALUES ('left by hand')")
 r.commit()
@@ -417,6 +424,7 @@ want_orphans = {
     "content": {"member_id -> member.id": 1},
     "mail": {"member_id -> member.id": 1},
     "session": {"member_id -> member.id": 1},
+    "web_login": {"member_id -> member.id": 1},
 }
 got_orphans = {t["table"]: t["orphans"] for s in res["sources"] for t in s["tables"]
                if t["orphans"]}
@@ -483,6 +491,18 @@ chk("admin: the quoted \"by\" column",
 chk("discord: a u64 guid kept as text",
     db.query_one("SELECT peer_guid FROM discord_reply")["peer_guid"], str(2 ** 63 + 5))
 chk("discord: the link", db.query_one("SELECT member_id FROM discord_link")["member_id"], m1)
+chk("web_login: the website usernames, their case kept",
+    [(r["username"], r["member_id"]) for r in db.query(
+        "SELECT username, member_id FROM web_login ORDER BY member_id")],
+    [("alice.web", m1), ("Carol.Web", m3)])
+try:
+    with db.transaction() as _c:
+        db.execute("INSERT INTO web_login (username, member_id, created_at)"
+                   " VALUES ('ALICE.WEB', %s, 'x')", (m2,), conn=_c)
+    _dup = "accepted"
+except Exception:                                   # noqa: BLE001 -- UniqueViolation
+    _dup = "refused"
+chk("web_login: a username is unique ignoring case, as it was", _dup, "refused")
 
 print("group_member in rowid order")
 order = [r["member_name"] for r in db.query(

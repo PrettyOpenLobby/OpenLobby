@@ -108,6 +108,9 @@ ACCOUNT_TABLES = (
     "handle_profile", "profile", "regcode", "mail", "admin_cred",
     "login_token_client", "ext_mail_log", "login_digest_client", "login_fail",
     "list_stamp", "handle_content_trimmed", "content_character",
+    # the website sign-in service's own table (regapi, not in this repository;
+    # migration 0004), which it kept in accounts.db
+    "web_login",
 )
 
 #: Tables the old accounts.db may hold that are left out on purpose.
