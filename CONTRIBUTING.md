@@ -122,7 +122,11 @@ containers, or `POL_TEST_DATABASE_URL` and `POL_TEST_VALKEY_URL` naming
 servers the tests may write to. `POL_TEST_REQUIRE_DB=1` makes a missing
 database a failure instead of a skip; CI sets it. `tests/test_db_import.py`
 rebuilds its old `/data` tree from git at a pinned commit, so a shallow
-clone needs `git fetch --unshallow` first.
+clone needs `git fetch --unshallow` first. `tools/run_all.py` points
+`POL_DATA_DIR`, `POL_RESOURCE_DIR`, `POL_LOG_DIR` and `POL_LOGIN_PW_KEYFILE`
+into a temporary directory of its own when they are not set, and removes it
+at the end; without that a suite falls back to `/data`, which on Windows is
+the root of the current drive. A value you set yourself is used as it is.
 
 Every suite is expected to pass on a clean checkout. On Windows, `resume`
 fails when the ports it uses fall in a range Windows reserves for Hyper-V
