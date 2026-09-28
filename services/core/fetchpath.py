@@ -157,3 +157,11 @@ def _select_window(pt):
     first = struct.unpack_from("<I", pt, paylen._FETCH_WINDOW_OFF)[0]
     want = struct.unpack_from("<I", pt, paylen._FETCH_WINDOW_LEN)[0]
     return (first, want) if want else None
+
+
+def capture_fetch(pt):
+    """3:0 (lobby opcode table). Read-only, and deliberately BEFORE the fetch
+    is answered: this is where a client volunteers the id it knows itself by
+    (see `_capture_self_guid`)."""
+    _capture_self_guid(pt)
+    return True

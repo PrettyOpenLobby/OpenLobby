@@ -1144,3 +1144,12 @@ def _member_display_name(member_id):
             log("authserv", f"  room roster: cannot name member {mid} ({exc!r})")
     lobbyrooms._ROOM_NAME_CACHE[mid] = (name, time.monotonic())
     return name
+
+
+def payload_handle_ack(n, req_pt):
+    """0:8 handle registration (lobby opcode table): the acknowledgement
+    record. POL_HANDLE_ACK=0 falls through to the generic path, where
+    `_handlereg_payload` answers instead."""
+    if os.environ.get("POL_HANDLE_ACK", "1") != "1":
+        return None
+    return _handle_reg_payload(n)

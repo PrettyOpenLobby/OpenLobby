@@ -1528,3 +1528,23 @@ _GROUP_CREATE_F08_OFF = 0x08
 #: constant may well be account- or shard-scoped, in which case replaying it is
 #: worse than sending nothing.
 _GROUP_CREATE_REPLY = 12                # 12 data + the signer's 4-byte trailer
+
+
+# --------------------------------------------------------------------------- #
+# The lobby opcode table's entries for the friend list write (see lobbyops.py)
+# --------------------------------------------------------------------------- #
+def payload_friend_put(n, req_pt):
+    """2:6 KPutFriendList reply payload, or None for the generic builder."""
+    return _friend_put_reply(n, req_pt) or None
+
+
+def capture_friend_put(pt):
+    """2:6 KPutFriendList. This is the ONLY way a friend is ever added, renamed
+    or removed -- see the 02:06 note above. Without it the client's writes were
+    answered with 168 zero bytes and dropped, which is why nothing the user
+    did on the Friend List screen ever survived a relaunch. POL_FRIEND_PUT=0
+    stores nothing."""
+    if os.environ.get("POL_FRIEND_PUT", "1") != "1":
+        return False
+    _capture_friend_put(pt)
+    return True

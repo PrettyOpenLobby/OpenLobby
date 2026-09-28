@@ -2,7 +2,8 @@
 import os
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
 from srvcore import log, save_capture
-from . import contentprofiles, fetchpath, friendput, handlelists, lobbymail, lobbyrooms, lobbysearch, lobbysession, resourcestore, titlezone
+from . import (contentprofiles, fetchpath, friendput, handlelists, lobbymail, lobbyops, lobbyrooms,
+               lobbysearch, lobbysession, resourcestore, titlezone)
 
 
 # THE REPLY READER, disassembled (polcore sub_037df690, the state-4 handler).
@@ -485,7 +486,6 @@ _FRIEND_PAYLEN_SWEEP = (168, 176, 8, 480, 16, 520)
 _FRIEND_PAYLEN_AT = [0]
 
 
-def _lobby_paylen(op1, op2, req_pt=None):
     # 02:06 REPLY LENGTH, live-tunable. **168 was never measured.** The length
     # table is anchored on 18 SE samples and SE's captures contain no friend
     # write at all, so this one entry is a guess that has been treated as fact.
@@ -498,143 +498,148 @@ def _lobby_paylen(op1, op2, req_pt=None):
     # pointed here.
     #
     # Sweep it with `friend_paylen=` in the control file; 0 means "no opinion".
-    if (op1, op2) == (0x02, 0x06):
-        # A MULTI-RECORD WRITE NEEDS A MULTI-RECORD REPLY. The table's 184 is
-        # the N=1 case of `N*168 + 16` (see `_friend_put_reply_len`), and SE's
-        # own two-record reply is 352 -- so answering 184 to an N=2 write, which
-        # is what we did, declares one record and drops the other. Our client has
-        # only ever been seen sending N=1, where this is byte-identical to the
-        # table; SE's client sent N=2 for an ignore-add. POL_FRIEND_PUT_MULTI=0
-        # pins the old fixed length.
-        if req_pt is not None and os.environ.get("POL_FRIEND_PUT_MULTI", "1") == "1":
-            want = _friend_put_reply_len(req_pt)
-            if want and want != _LOBBY_PAYLEN.get((0x02, 0x06)):
-                log("lobby", f"  2:6 reply length: {want} for "
-                             f"{(want - _FRIEND_PUT_REPLY_FIXED)//friendput._FRIEND_PUT_REC}"
-                             f" record(s) (the table's "
-                             f"{_LOBBY_PAYLEN.get((0x02, 0x06))} is the 1-record "
-                             f"case)")
-                return want
-        n = lobbysearch._search_calib()["friend_paylen"]
-        if n == "sweep":
-            # AUTO-SWEEP. Each successive 2:6 gets the next candidate length, so
-            # the whole sweep needs no commands between attempts -- which matters
-            # because a hung Viewer has to be restarted by hand, and making the
-            # user drive five settings by hand costs five restarts.
-            #
-            # The client re-sends the same write every ~35-45 s while it is
-            # unhappy, so a length that SATISFIES it shows up in the log as the
-            # value after which the retries stop.
-            n = _FRIEND_PAYLEN_SWEEP[_FRIEND_PAYLEN_AT[0] % len(_FRIEND_PAYLEN_SWEEP)]
-            _FRIEND_PAYLEN_AT[0] += 1
-            log("lobby", f"  2:6 reply length SWEEP step "
-                         f"{_FRIEND_PAYLEN_AT[0]}/{len(_FRIEND_PAYLEN_SWEEP)}: "
-                         f"n={n}  (if the client stops retrying after this one, "
-                         f"{n} is the answer)")
-            return n
-        if n:
-            log("lobby", f"  2:6 reply length OVERRIDE: {n} "
-                         f"(table says {_LOBBY_PAYLEN.get((0x02, 0x06))})")
-            return n
-    if (op1, op2) == (0x03, 0x00) and req_pt is not None \
-            and fetchpath._fetch_path(req_pt).startswith(_SELECT_PATH):
+def paylen_friend_put(req_pt):
+    """2:6 KPutFriendList reply length (lobby opcode table).
+
+    A MULTI-RECORD WRITE NEEDS A MULTI-RECORD REPLY, and the length is
+    live-tunable; None lets the table's 184 stand.
+    """
+    # A MULTI-RECORD WRITE NEEDS A MULTI-RECORD REPLY. The table's 184 is
+    # the N=1 case of `N*168 + 16` (see `_friend_put_reply_len`), and SE's
+    # own two-record reply is 352 -- so answering 184 to an N=2 write, which
+    # is what we did, declares one record and drops the other. Our client has
+    # only ever been seen sending N=1, where this is byte-identical to the
+    # table; SE's client sent N=2 for an ignore-add. POL_FRIEND_PUT_MULTI=0
+    # pins the old fixed length.
+    if req_pt is not None and os.environ.get("POL_FRIEND_PUT_MULTI", "1") == "1":
+        want = _friend_put_reply_len(req_pt)
+        if want and want != _LOBBY_PAYLEN.get((0x02, 0x06)):
+            log("lobby", f"  2:6 reply length: {want} for "
+                         f"{(want - _FRIEND_PUT_REPLY_FIXED)//friendput._FRIEND_PUT_REC}"
+                         f" record(s) (the table's "
+                         f"{_LOBBY_PAYLEN.get((0x02, 0x06))} is the 1-record "
+                         f"case)")
+            return want
+    n = lobbysearch._search_calib()["friend_paylen"]
+    if n == "sweep":
+        # AUTO-SWEEP. Each successive 2:6 gets the next candidate length, so
+        # the whole sweep needs no commands between attempts -- which matters
+        # because a hung Viewer has to be restarted by hand, and making the
+        # user drive five settings by hand costs five restarts.
+        #
+        # The client re-sends the same write every ~35-45 s while it is
+        # unhappy, so a length that SATISFIES it shows up in the log as the
+        # value after which the retries stop.
+        n = _FRIEND_PAYLEN_SWEEP[_FRIEND_PAYLEN_AT[0] % len(_FRIEND_PAYLEN_SWEEP)]
+        _FRIEND_PAYLEN_AT[0] += 1
+        log("lobby", f"  2:6 reply length SWEEP step "
+                     f"{_FRIEND_PAYLEN_AT[0]}/{len(_FRIEND_PAYLEN_SWEEP)}: "
+                     f"n={n}  (if the client stops retrying after this one, "
+                     f"{n} is the answer)")
+        return n
+    if n:
+        log("lobby", f"  2:6 reply length OVERRIDE: {n} "
+                     f"(table says {_LOBBY_PAYLEN.get((0x02, 0x06))})")
+        return n
+    return None
+
+
+def paylen_fetch(req_pt):
+    """3:0 KGetDetailData reply length (lobby opcode table): a search
+    result's own length, a message at the length its reader declares, a
+    title's variable-length resource, a per-path override, or the measured
+    length in _FETCH_PATHLEN. None means no measured length: the generic
+    rules answer with the opcode default and say so."""
+    if req_pt is None:
+        return None
+    if fetchpath._fetch_path(req_pt).startswith(_SELECT_PATH):
         n = _select_paylen(req_pt)
         if n:
             return n
     # ANY OTHER 03:00 path: its own measured length -- see _FETCH_PATHLEN. The
     # length is a constant in whichever caller issues the fetch, NOT a field on the
     # wire (that reading was wrong and is retracted above).
-    if (op1, op2) == (0x03, 0x00) and req_pt is not None:
-        path = fetchpath._fetch_path(req_pt)
-        if path.startswith(lobbysearch._MAIL_PATH_PREFIX):
-            # A MESSAGE IS SERVED AT ITS OWN LENGTH, WHICH THE READER DECLARES.
-            # SE answers a 30-byte object with a 34-byte payload -- object plus
-            # trailer, never padded (`_MAIL_OBJ_OFF`). Padding it to the 664 this
-            # opcode defaults to is what raised **POL-5135**: the reader checks
-            # the trailer at the length IT asked for, finds our zero padding
-            # there, and the bytes it never read desynchronise the socket, which
-            # is the long stall before the error.
-            want = lobbymail._mail_read_len(req_pt) or 0
-            try:
-                have = os.path.getsize(resourcestore._resource_read_file(path))
-            except OSError:
-                have = 0
-            n = want or have
-            if have and want and have != want:
-                log("lobby", f"  3:0 {path[:32]!r}: reader wants {want}B, the store "
-                             f"holds {have}B -- serving {n}B (+4 trailer). A "
-                             "mismatch means the object was stored wrong.")
-            if n:
-                return n + 4
-        # A TITLE'S VARIABLE-LENGTH RESOURCES declare their length here: the
-        # lists whose reader asks for `count * record` where the count is what
-        # the title promised on the auth band, so no constant can be right for
-        # more than one length, and the one header whose length differs by
-        # client build. See `titles.Title.resource_length`.
-        # THE REQUESTER'S OWN TITLE IS ASKED FIRST: two titles serve the same
-        # lobby-list paths at different lengths, and which one this member is
-        # in is known from the title-zone lease.
-        _tn = titles.resource_length(path, zone=titlezone._title_zone(lobbysession._session_get("member_id")))
-        if _tn is not None:
-            return _tn
-        if path:
-            # PER-PATH OVERRIDE, for bisecting a stalled fetch without touching
-            # the paths that work. POL_LOBBY_PAYLEN is per-OPCODE, and 03:00 is
-            # one opcode carrying many resources -- overriding it would break
-            # `u/account` in the same breath, which is the path-mixing trap this
-            # file has fallen into twice.
-            #
-            #   POL_RESOURCE_PAYLEN="U/g/<a save path>=668"
-            #
-            # WHY THIS EXISTS (2026-08-13): one title's save was the ONLY reply on
-            # the whole channel that stalls deterministically -- 10/10 across every
-            # log we have, at both lengths tried (1000 and 1004 total), while
-            # replies of 1040, 1208, 1884, 2048 and 60028 bytes are all accepted.
-            # So it is not size in general. Serving THIS path at a length already
-            # proven on the same opcode (664 data, as `u/account` and
-            # a title's save both use) separates "this length is unreadable" from
-            # "this path is unreadable", which no other measurement can.
-            for item in os.environ.get("POL_RESOURCE_PAYLEN", "").split(","):
-                key, _, val = item.partition("=")
-                if key.strip() == path:
-                    try:
-                        n = int(val, 0)
-                    except ValueError:
-                        break
-                    # WARNING: Do not re-add the old "transport probe; the game will
-                    # reject the short blob" wording here: it was inherited
-                    # from the 2026-08-13 save-path probe and is WRONG for
-                    # b/g/RL000, whose 1476B declare the client ACCEPTS
-                    # (confirmed live 2026-08-19T20:30Z).
-                    log("lobby", f"  3:0 {path!r}: PAYLEN OVERRIDE {n} "
-                                 f"(measured {_FETCH_PATHLEN.get(path)})")
-                    return n
-            n = _FETCH_PATHLEN.get(path)
-            if n:
+    path = fetchpath._fetch_path(req_pt)
+    if path.startswith(lobbysearch._MAIL_PATH_PREFIX):
+        # A MESSAGE IS SERVED AT ITS OWN LENGTH, WHICH THE READER DECLARES.
+        # SE answers a 30-byte object with a 34-byte payload -- object plus
+        # trailer, never padded (`_MAIL_OBJ_OFF`). Padding it to the 664 this
+        # opcode defaults to is what raised **POL-5135**: the reader checks
+        # the trailer at the length IT asked for, finds our zero padding
+        # there, and the bytes it never read desynchronise the socket, which
+        # is the long stall before the error.
+        want = lobbymail._mail_read_len(req_pt) or 0
+        try:
+            have = os.path.getsize(resourcestore._resource_read_file(path))
+        except OSError:
+            have = 0
+        n = want or have
+        if have and want and have != want:
+            log("lobby", f"  3:0 {path[:32]!r}: reader wants {want}B, the store "
+                         f"holds {have}B -- serving {n}B (+4 trailer). A "
+                         "mismatch means the object was stored wrong.")
+        if n:
+            return n + 4
+    # A TITLE'S VARIABLE-LENGTH RESOURCES declare their length here: the
+    # lists whose reader asks for `count * record` where the count is what
+    # the title promised on the auth band, so no constant can be right for
+    # more than one length, and the one header whose length differs by
+    # client build. See `titles.Title.resource_length`.
+    # THE REQUESTER'S OWN TITLE IS ASKED FIRST: two titles serve the same
+    # lobby-list paths at different lengths, and which one this member is
+    # in is known from the title-zone lease.
+    _tn = titles.resource_length(path, zone=titlezone._title_zone(lobbysession._session_get("member_id")))
+    if _tn is not None:
+        return _tn
+    if path:
+        # PER-PATH OVERRIDE, for bisecting a stalled fetch without touching
+        # the paths that work. POL_LOBBY_PAYLEN is per-OPCODE, and 03:00 is
+        # one opcode carrying many resources -- overriding it would break
+        # `u/account` in the same breath, which is the path-mixing trap this
+        # file has fallen into twice.
+        #
+        #   POL_RESOURCE_PAYLEN="U/g/<a save path>=668"
+        #
+        # WHY THIS EXISTS (2026-08-13): one title's save was the ONLY reply on
+        # the whole channel that stalls deterministically -- 10/10 across every
+        # log we have, at both lengths tried (1000 and 1004 total), while
+        # replies of 1040, 1208, 1884, 2048 and 60028 bytes are all accepted.
+        # So it is not size in general. Serving THIS path at a length already
+        # proven on the same opcode (664 data, as `u/account` and
+        # a title's save both use) separates "this length is unreadable" from
+        # "this path is unreadable", which no other measurement can.
+        for item in os.environ.get("POL_RESOURCE_PAYLEN", "").split(","):
+            key, _, val = item.partition("=")
+            if key.strip() == path:
+                try:
+                    n = int(val, 0)
+                except ValueError:
+                    break
+                # WARNING: Do not re-add the old "transport probe; the game will
+                # reject the short blob" wording here: it was inherited
+                # from the 2026-08-13 save-path probe and is WRONG for
+                # b/g/RL000, whose 1476B declare the client ACCEPTS
+                # (confirmed live 2026-08-19T20:30Z).
+                log("lobby", f"  3:0 {path!r}: PAYLEN OVERRIDE {n} "
+                             f"(measured {_FETCH_PATHLEN.get(path)})")
                 return n
-            # Formatted paths (b/g/RL000, ...): longest matching prefix wins.
-            hit = max((p for p in _FETCH_PATHLEN_PREFIX if path.startswith(p)),
-                      key=len, default=None)
-            if hit:
-                return _FETCH_PATHLEN_PREFIX[hit]
-            log("lobby", f"  3:0 path {path!r} has NO measured length -- falling "
-                         f"back to the declared frame length. Read the caller's "
-                         f"length argument and add it to _FETCH_PATHLEN.")
-    if (op1, op2) == (0x03, 0x03) and lobbymail._mail_count():
-        return lobbymail._mail_paylen(lobbymail._mail_count())      # 8 + count*264 + 4
-    if (op1, op2) == (0x03, 0x03):
-        # THE REAL MAILBOX. The length has to be declared here, before the
-        # payload is built, so it is counted from the same _mailbox() the
-        # payload will serve -- an empty box declares 12 (8 + 0 + 4), which is
-        # exactly what SE sends for an empty mailbox.
-        # Stranded friend requests come back first, so the count includes
-        # them (POL_FRIEND_REQUEST_HEAL, default off).
-        lobbymail._friend_request_heal()
-        return lobbymail._mail_paylen(len(lobbymail._mailbox()))
-    if handlelists._list_count(op1, op2, req_pt):
-        # req_pt reaches the count so a mobile 2:3 declares the length of the
-        # rows it will actually carry (a mismatch is POL-5135).
-        return handlelists._list_paylen(op1, op2, handlelists._list_count(op1, op2, req_pt))
+        n = _FETCH_PATHLEN.get(path)
+        if n:
+            return n
+        # Formatted paths (b/g/RL000, ...): longest matching prefix wins.
+        hit = max((p for p in _FETCH_PATHLEN_PREFIX if path.startswith(p)),
+                  key=len, default=None)
+        if hit:
+            return _FETCH_PATHLEN_PREFIX[hit]
+        log("lobby", f"  3:0 path {path!r} has NO measured length -- falling "
+                     f"back to the declared frame length. Read the caller's "
+                     f"length argument and add it to _FETCH_PATHLEN.")
+    return None
+
+
+def paylen_override(op1, op2):
+    """POL_LOBBY_PAYLEN="4:7=8,3:0=664": a per-opcode length pin, for finding
+    a length by sweeping. None when the opcode is not named."""
     for item in os.environ.get("POL_LOBBY_PAYLEN", "").split(","):
         if "=" not in item:
             continue
@@ -645,21 +650,22 @@ def _lobby_paylen(op1, op2, req_pt=None):
                 return int(val, 0)
         except ValueError:
             continue
-    # 05:04 SERVES TWO DIFFERENT RECORDS AND THE LENGTH DEPENDS ON THE REQUEST,
-    # which a fixed table entry cannot express -- so the table's 604 is right for
-    # the handle profile and wrong in KIND for the other one. Measured on retail:
-    # a one-item TLV gets 604 (600 record + 4), a two-item TLV gets 284 (280 + 4).
-    # Declaring 604 to a content request is a 320-byte overrun of what the client
-    # will read, i.e. exactly the shape of the bug the 604 entry itself fixed.
-    if (op1, op2) == (0x05, 0x04) and contentprofiles._is_content_profile_request(req_pt):
-        # AND THE CONTENT RECORD'S LENGTH IS PER TITLE, not a constant 280.
-        # `prof_<code>.pib` carries it: 280 FFXI, 432 TM, 432 code 3, 280 FMO,
-        # 240 (code 10), 464 FE. Serving 284 to a title that reads 436 is the
-        # same class of defect as the 604-to-a-content-request above, one layer
-        # down. See `_CONTENT_SCHEMAS`.
-        _s, rec_len, _p, _m = contentprofiles._content_schema_for(
-            contentprofiles._content_code_for_request(req_pt))
-        return rec_len + 4
+    return None
+
+
+def _lobby_paylen(op1, op2, req_pt=None):
+    op = lobbyops.lookup(op1, op2)
+    if op is not None and op.paylen is not None:
+        n = op.paylen(req_pt)
+        if n is not None:
+            return n
+    if handlelists._list_count(op1, op2, req_pt):
+        # req_pt reaches the count so a mobile 2:3 declares the length of the
+        # rows it will actually carry (a mismatch is POL-5135).
+        return handlelists._list_paylen(op1, op2, handlelists._list_count(op1, op2, req_pt))
+    forced = paylen_override(op1, op2)
+    if forced is not None:
+        return forced
     _known = _LOBBY_PAYLEN.get((op1, op2))
     if _known is not None:
         return _known

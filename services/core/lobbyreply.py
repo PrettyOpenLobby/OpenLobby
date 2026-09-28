@@ -7,7 +7,7 @@ import titles                   # the title-plugin seam (services/titles.py)  # 
 from srvcore import hexdump, log
 import sessioncrypt
 from .deps import accounts, contentauth, contentlist
-from . import authcap, authnode, characters, contentprofiles, fetchpath, framing, friendgroups, friendlist, friendput, handlelists, lobbybind, lobbymail, lobbysearch, lobbysession, memberstatus, pacing, paylen, profilerecord, resourcestore, titlezone
+from . import lobbyops, authcap, authnode, characters, contentprofiles, fetchpath, framing, friendgroups, friendlist, friendput, handlelists, lobbybind, lobbymail, lobbysearch, lobbysession, memberstatus, pacing, paylen, profilerecord, resourcestore, titlezone
 
 
 
@@ -428,180 +428,11 @@ def _lobby_payload(op1, op2, n, req_pt=None):
 
     Returns b"" for "no override", i.e. the historical all-zero payload.
     """
-    if (op1, op2) == (0x05, 0x04) and contentprofiles._is_content_profile_request(req_pt):
-        # The CONTENT profile -- same opcode, two-item TLV. See
-        # `_is_content_profile_request`; `n` is 284 = 280 record + checksum.
-        return contentprofiles._content_profile_record(n - 4, req_pt)
-    if (op1, op2) == (0x05, 0x04):
-        # The profile READ-BACK. Served unconditionally from the DB: this is
-        # normal operation, not a probe, so it is deliberately NOT behind
-        # POL_LOBBY_TAIL. `n` is 604 = 600 record + the 4-byte checksum the
-        # caller appends, so the record itself is n-4.
-        return profilerecord._profile_record(n - 4, req_pt)
-    if (op1, op2) == (0x03, 0x00) and req_pt is not None \
-            and fetchpath._fetch_path(req_pt).startswith(paylen._SELECT_PATH):
-        # NOT the account record. Same opcode, different key -- see _lobby_paylen.
-        return lobbysearch._search_result_payload(n, req_pt)
-    if (op1, op2) == (0x03, 0x00) and req_pt is not None:
-        # ONE OPCODE, MANY RESOURCES. 03:00 is keyed by the path string, so the
-        # POL_LOBBY_TAIL="3:0=acct" override below must NOT reach a non-account
-        # path -- it would hand a game the account record truncated to 200
-        # bytes, which is the same path-mixing that broke `u/s/select`.
-        path = fetchpath._fetch_path(req_pt)
-        pacing._lobby_delay(path)
-        if path and path != "u/account":
-            # A TITLE MAY BUILD THIS FETCH LIVE (its lobby lists from the room
-            # registry, for a member it knows is in that title) and bypass the
-            # stored copy altogether.
-            live = titles.resource_live(path, n, req_pt)
-            if live is not None:
-                return live
-            blob = resourcestore._resource_blob(path, n, fetchpath._fetch_subject(req_pt))
-            log("lobby", f"  3:0 {path!r}: serving {len(blob)}B"
-                         + ("" if blob.strip(b"\x00") else " (all zero = 'no data "
-                            "stored yet'. WARNING: That is not automatically SAFE -- a "
-                            "manifest read as count=0 is a fatal error on some "
-                            "titles; see RESOURCE_INIT and the title's own)"))
-            return blob
-    if (op1, op2) == (0x05, 0x03) and req_pt is not None \
-            and os.environ.get("POL_SEARCH", "1") == "1":
-        pay = lobbysearch._search_payload(n, req_pt)
-        if pay:
+    op = lobbyops.lookup(op1, op2)
+    if op is not None and op.payload is not None:
+        pay = op.payload(n, req_pt)
+        if pay is not None:
             return pay
-    if (op1, op2) == (0x02, 0x06):
-        pay = friendput._friend_put_reply(n, req_pt)
-        if pay:
-            return pay
-    if (op1, op2) == (0x00, 0x08) and os.environ.get("POL_HANDLE_ACK", "1") == "1":
-        return handlelists._handle_reg_payload(n)
-    if (op1, op2) == (0x07, 0x01) and os.environ.get("POL_GROUPS", "1") == "1":
-        # CREATE GROUP. Writes the DB row AND answers with the group's id, which
-        # is what the client keys its `#XXL` channel on -- see _group_create.
-        # POL_GROUPS=0 falls through to the generic path below, i.e. the old
-        # discard with an all-zero reply, and leaves a 7:1 tail probe usable.
-        return friendgroups._group_create(req_pt)
-    if (op1, op2) == (0x07, 0x03) and os.environ.get("POL_GROUPS", "1") == "1":
-        # ROLE CHANGE. Called for its side effect -- the reply is header-only
-        # (n = 0), so there is no payload to build and b"" is the whole answer.
-        return friendgroups._group_class_change(req_pt)
-    if (op1, op2) == (0x07, 0x02) and os.environ.get("POL_GROUPS", "1") == "1":
-        # DELETE GROUP. Header-only reply like the other group writes; the
-        # side effect is the whole answer -- see _group_delete.
-        return friendgroups._group_delete(req_pt)
-    if (op1, op2) == (0x07, 0x0B) and os.environ.get("POL_GROUPS", "1") == "1":
-        # MY GROUP STATUS. Parsed and logged only -- see _group_my_status.
-        return friendgroups._group_my_status(req_pt)
-    if (op1, op2) == (0x01, 0x0A) and os.environ.get("POL_CHR_PUT", "1") == "1":
-        # PS2 CHARACTER-LIST WRITE-BACK. Header-only reply; the side effect (a
-        # handle<->Content-ID move) is the whole answer -- see _chr_put.
-        # POL_CHR_PUT=0 keeps the old discard (still header-only via the table).
-        return characters._chr_put(req_pt)
-    if (op1, op2) == (0x04, 0x05) and req_pt is not None \
-            and os.environ.get("POL_STATUS_ECHO", "1") == "1":
-        # **KChangeMyStatus** -- "put me online". Until 2026-08-12 this had no
-        # builder at all and fell through to 32 zero bytes. The Viewer tolerates
-        # that (it sends 4:5 twice and carries on regardless), but the standalone
-        # Friend List does NOT: it tears down its session channel and every lobby
-        # socket 0.7 s after the reply and sits on "connecting" forever, which is
-        # what a -5314 "no data" looks like from the outside.
-        #
-        # The request says exactly what it wants to be told back. Decrypted, its
-        # 40-byte payload is 24 zero bytes, then the new state, then the handle:
-        #     ... 00 00 00 01 0e 00 00 00 00 01 00 ...   status=1, content 0x0e=14
-        #     ... 4c 65 78 ...                           handle "Lex"
-        # so we echo the state back and drop the trailing handle+checksum, which
-        # is the natural shape for a "your status is now X" acknowledgement and
-        # the only one the request itself justifies.
-        #
-        # EXPERIMENT, not a captured truth: SE's own 4:5 reply has never been
-        # captured. POL_STATUS_ECHO=0 restores the zero-fill if this regresses a
-        # client -- check the Viewer still logs in after changing this.
-        body = req_pt[40:]
-        echo = body[:n]
-        if len(echo) < n:
-            echo += b"\x00" * (n - len(echo))
-        log("lobby", f"  4:5 KChangeMyStatus: echoing {n}B of the requested state "
-                     f"(was {n} zero bytes); POL_STATUS_ECHO=0 to revert")
-        # DUMP THE STATE (2026-08-16, TM track). This blob is how the client says
-        # WHICH TITLE it is in -- the comment above already reads a content id out
-        # of it (0x0e=14 for the Viewer), and Tetra Master is content id 2. It is
-        # the candidate carrier for "friends see me in Tetra Master", so log it
-        # rather than inferring the change from the reply checksum. Cheap, and it
-        # is the only place the decrypted state is in hand.
-        log("lobby", f"  4:5 state: {echo.hex()}")
-        # THE CONTENT AUTH VALUE (contentauth.py). SE's reply carries
-        # a fresh 16-byte random value in its first 16 bytes -- the bytes this
-        # echo has always filled with the request's zeros -- and polcore keys the
-        # title with it (FMO: TCP RC4 key = value + our 0x0322 tail). Minting one
-        # per login is what lets FMO name the member from the key instead of the
-        # address. Only zones in POL_CONTENT_AUTH_ZONES; every other title gets
-        # the unchanged echo.
-        _zf = memberstatus._status_frame_zone(echo)
-        if (contentauth is not None and _zf is not None
-                and _zf[0] in contentauth.ZONES):
-            _mid = lobbysession._session_get("member_id")
-            if _mid is None:
-                log("lobby", f"  4:5 content auth: zone {_zf[0]} but NO member "
-                             f"bound to this session -- echoing zeros; the title "
-                             f"falls back to the address")
-            elif not contentauth.enabled_for(_mid):
-                pass        # rollout gate (content-auth-members.txt): unchanged echo
-            else:
-                _cv = contentauth.mint()
-                try:
-                    contentauth.publish(_mid, lobbysession._session_get("peer_ip"), _zf[0], _cv)
-                    echo = _cv + echo[contentauth.LEN:]
-                    log("lobby", f"  4:5 content auth: zone {_zf[0]} member {_mid} "
-                                 f"-> value {_cv.hex()[:8]}.. in reply bytes 0..15")
-                except (OSError, ValueError) as exc:
-                    log("lobby", f"  4:5 content auth: cannot publish ({exc}) -- "
-                                 f"echoing zeros so the key stays one FMO can read")
-        # AND ACT ON IT: +19 is "inside a title", u16 at +20 the content id
-        # (1000 = the Viewer). This is the only place we learn it, and the
-        # presence push in the other container reads it back via _title_zone.
-        if len(echo) >= 22:
-            # WARNING: THE ZONE DECIDES, NOT BYTE 19 -- see _STATUS_ZONE_LATCH. Tetra
-            # Master sends in_title=0 while still naming zone 2 nine seconds
-            # after entering, and taking that as an exit is what showed a friend
-            # in TM as sitting in the Viewer.
-            zone, in_title = memberstatus._status_frame_zone(echo)
-            titlezone._publish_title_zone(lobbysession._session_get("member_id"), zone, in_title)
-            log("lobby", f"  4:5 zone={zone} in_title={in_title} "
-                         f"(flag={echo[19]})")
-        # AND THE PRESENCE STATUS, which is the OTHER field in this body and had
-        # never been read (2026-08-19, `pol-presence-status-protocol`). One byte
-        # at +0x16: 01 Online, 02 Away, 05 Invisible. It is what SE reflects as
-        # the `G@`/`H@` letter in the in-room 352 WHO -- we hardcoded `H`, so an
-        # AFK member showed as present -- and it is the state a friend-list
-        # presence push should carry. Stored here because this is the only place
-        # the client ever says it; `_member_status_watcher` in the OTHER
-        # container turns a change into the push (see `_publish_member_status`
-        # for why it crosses through a file).
-        code = memberstatus._status_frame_code(echo)
-        if code is not None:
-            named = {memberstatus._STATUS_ONLINE: "online", memberstatus._STATUS_AWAY: "away",
-                     memberstatus._STATUS_INVISIBLE: "invisible"}.get(code)
-            if memberstatus._publish_member_status(lobbysession._session_get("member_id"), code):
-                log("lobby", f"  4:5 status={code:#04x}"
-                             + (f" ({named})" if named
-                                else " -- UNMEASURED code; 03/04 are the two we "
-                                     "have never seen, capture what the client "
-                                     "was showing and name it")
-                             + f"; WHO will now say "
-                               f"{'G' if memberstatus._status_is_away(code) else 'H'} for this "
-                               "member")
-        return echo
-    if (op1, op2) == (0x04, 0x06):
-        # POL_FRIENDS=1 restores the pre-2026-08-12 behaviour (32-byte friend
-        # entries here) for A/B. It is WRONG -- see _session_record -- and it is
-        # what made the lobby clock read 12/31/1969.
-        if os.environ.get("POL_FRIENDS", "0") == "1":
-            return friendlist._friend_payload(n)
-        return lobbysession._session_record(n)
-    if (op1, op2) == (0x03, 0x03) and lobbymail._mail_count():
-        return lobbymail._mail_payload(n)                 # POL_LOBBY_MAIL marker probe
-    if (op1, op2) == (0x03, 0x03):
-        return lobbymail._mailbox_payload(n)
     lcount = handlelists._list_count(op1, op2, req_pt)
     if (op1, op2) == (0x02, 0x03) and not lcount \
             and handlelists._list_mode(op1, op2) == "friends":

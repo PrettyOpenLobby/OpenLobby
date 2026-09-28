@@ -416,3 +416,13 @@ def _chr_put(pt):
         return b""
     log("lobby", f"  1:10 chlist: applied {moved} move(s); the next 1:3 serves them")
     return b""
+
+
+def payload_chr_put(n, req_pt):
+    """1:A PS2 CHARACTER-LIST WRITE-BACK (lobby opcode table). Header-only
+    reply; the side effect (a handle<->Content-ID move) is the whole answer --
+    see _chr_put. POL_CHR_PUT=0 keeps the old discard (still header-only via
+    the table)."""
+    if os.environ.get("POL_CHR_PUT", "1") != "1":
+        return None
+    return _chr_put(req_pt)
