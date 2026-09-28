@@ -127,9 +127,10 @@ def main():
     # The wording is load-bearing: an admin reading "all failed the crib"
     # concludes the key was never ours and goes looking at the client. That is
     # only justified when the search was exhaustive.
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            os.pardir, "services", "responders.py"),
-               encoding="utf-8").read()
+    # The dump is built where the auth node handles a login; read that
+    # module's source rather than assuming a file name for it.
+    import inspect
+    src = open(inspect.getsourcefile(R.handle_authserv), encoding="utf-8").read()
     # Anchored on the trace event, which occurs ONCE. "could not recover IV" is
     # the obvious anchor and the wrong one: its first occurrence is the comment
     # block near the top of the file, three thousand lines from the code that
