@@ -26,12 +26,9 @@ tmp = tempfile.mkdtemp(prefix="proftrailer-")
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
 os.environ["POL_RESOURCE_DIR"] = os.path.join(tmp, "resources")
-os.environ["POL_MEMBER_STATUS_FILE"] = os.path.join(tmp, "member-status.json")
-os.environ["POL_TITLE_ZONE_FILE"] = os.path.join(tmp, "title-zone.json")
 os.environ.pop("POL_PROFILE_TRAILER", None)
 
 import accounts  # noqa: E402

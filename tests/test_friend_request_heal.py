@@ -20,7 +20,6 @@ tmp = tempfile.mkdtemp(prefix="reqheal-")
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
 os.environ["POL_RESOURCE_DIR"] = os.path.join(tmp, "resources")
@@ -64,7 +63,6 @@ adrena = R._mail_mint("Amara", G(ids["Amara"]), G(ids["Fox"]),
                       R._FRIEND_REQ_SUBJECT, R._FRIEND_REQ_BODY,
                       kind=R.MAIL_KIND_FRIEND_REQUEST)
 R._mail_retire(adrena)
-res = os.environ["POL_RESOURCE_DIR"]
 live_name = R._mail_name(adrena)
 
 
@@ -74,8 +72,7 @@ def requests():
 
 
 print("the stranded state")
-chk("Amara's request is retired", os.path.exists(os.path.join(res, live_name
-                                                               + ".read")), True)
+chk("Amara's request is retired", R._res_exists(live_name + ".read"), True)
 chk("Fox's mailbox holds no request", requests(), [])
 
 print("knob off (default): nothing happens")
@@ -86,9 +83,8 @@ print("knob on")
 os.environ["POL_FRIEND_REQUEST_HEAL"] = "1"
 chk("heal: Amara restored + Birdie minted, Ghost left",
     R._friend_request_heal(CAS_MEMBER), 2)
-chk("Amara's file is back under its own name",
-    (os.path.exists(os.path.join(res, live_name)),
-     os.path.exists(os.path.join(res, live_name + ".read"))), (True, False))
+chk("Amara's message is back under its own name",
+    (R._res_exists(live_name), R._res_exists(live_name + ".read")), (True, False))
 chk("the mailbox lists both requests", requests(), ["Amara", "Birdie"])
 fox = [p for _w, p, m in R._mailbox(CAS_MEMBER) if m["sender"] == "Birdie"][0]
 meta = R._mail_meta(fox)

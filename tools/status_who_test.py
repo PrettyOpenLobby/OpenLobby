@@ -38,8 +38,6 @@ import pgtest  # noqa: E402
 pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
-os.environ["POL_MEMBER_STATUS_FILE"] = os.path.join(TMP, "member-status.json")
-os.environ["POL_TITLE_ZONE_FILE"] = os.path.join(TMP, "title-zone.json")
 
 import responders as R                                             # noqa: E402
 

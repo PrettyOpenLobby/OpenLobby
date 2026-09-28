@@ -21,7 +21,6 @@ tmp = tempfile.mkdtemp(prefix="gatestamps-")
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ.pop("POL_GATE_LIST_STAMPS", None)
 
 import accounts  # noqa: E402

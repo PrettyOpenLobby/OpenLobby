@@ -24,8 +24,6 @@ tmp = tempfile.mkdtemp(prefix="killdup-")
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
-os.environ["POL_SESSION_FILE"] = os.path.join(tmp, "auth-sessions.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
 os.environ["POL_CAPTURE"] = "0"

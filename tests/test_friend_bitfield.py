@@ -21,7 +21,6 @@ tmp = tempfile.mkdtemp(prefix="friendbits-")
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()
-os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
 os.environ["POL_RESOURCE_DIR"] = os.path.join(tmp, "resources")

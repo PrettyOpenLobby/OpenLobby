@@ -20,7 +20,6 @@ title. The first and third are instant; the second is the only one covering
 THE EXPIRY IS DRIVEN BY REWRITING `at`, NOT BY SLEEPING. A test that waited out a
 real lease would take 15 minutes and would still only prove the default.
 """
-import json
 import os
 import sys
 import tempfile
@@ -32,10 +31,11 @@ sys.path.insert(0, os.path.join(HERE, "..", "services"))
 LOG_DIR = tempfile.mkdtemp(prefix="tzone-")
 DATA_DIR = tempfile.mkdtemp(prefix="tzdata-")
 os.environ["POL_LOG_DIR"] = LOG_DIR
-os.environ["POL_TITLE_ZONE_FILE"] = os.path.join(DATA_DIR, "title-zone.json")
+os.environ["POL_DATA_DIR"] = DATA_DIR
 os.environ["POL_TITLE_LEASE_TTL"] = "60"
 
 import responders as R                              # noqa: E402
+from polcore import kv                              # noqa: E402
 
 #: A title's content id, and therefore its presence zone. The lease is
 #: generic; 3 is the zone the traffic inference was first built for.
@@ -54,11 +54,12 @@ def check(label, got, want):
 
 def age(member, seconds):
     """Backdate an entry's `at`, which is how every expiry below is driven."""
-    state = json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))
-    state[str(member)]["at"] = time.time() - seconds
-    with open(R._TITLE_ZONE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-    R._TITLE_ZONE_CACHE["mtime"] = -1.0
+    kv.hset(R._title_zone_key(member), "at", time.time() - seconds)
+
+
+def stored(member):
+    """The entry as the other process reads it."""
+    return R._live_title_zones()[str(member)]
 
 
 print("a lease is visible, renews itself, and expires")
@@ -66,18 +67,18 @@ print("a lease is visible, renews itself, and expires")
 R._title_zone_lease(7, ZONE)
 check("a leased zone reads back", R._title_zone(7), 3)
 
-# RENEWAL IS THROTTLED, or the file would be rewritten once per game message --
-# Janhourou alone logged 10,361 of them, and two containers read-modify-write it.
-first = json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))["7"]["at"]
+# RENEWAL IS THROTTLED, or the entry would be rewritten once per game message --
+# Janhourou alone logged 10,361 of them.
+first = stored(7)["at"]
 R._title_zone_lease(7, ZONE)
-same = json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))["7"]["at"]
-check("an immediate re-lease does not rewrite the file", same, first)
+same = stored(7)["at"]
+check("an immediate re-lease does not rewrite the entry", same, first)
 
 # ...but once past the refresh point, traffic renews it. This is the whole
 # mechanism: a live session holds its own lease open by being played.
 age(7, R._TITLE_ZONE_REFRESH + 1)
 R._title_zone_lease(7, ZONE)
-renewed = json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))["7"]["at"]
+renewed = stored(7)["at"]
 check("past the refresh point, traffic renews the lease", renewed > first, True)
 check("and the zone is still live", R._title_zone(7), 3)
 
@@ -85,8 +86,7 @@ check("and the zone is still live", R._title_zone(7), 3)
 age(7, 61)
 check("a lapsed lease reads as no title", R._title_zone(7), None)
 check("...and the watcher's view drops it too",
-      R._title_zone_expired(
-          json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))["7"]), True)
+      R._title_zone_expired(stored(7)), True)
 
 print("\nthe fast clears beat the lease, and a latch is NOT shortened by it")
 
@@ -155,8 +155,22 @@ for bad in (None, "", "nope", object()):
     R._title_zone_lease(bad, ZONE)         # must not raise
 check("a junk member id is ignored, not raised on", True, True)
 check("and wrote nothing",
-      set(json.load(open(R._TITLE_ZONE_FILE, encoding="utf-8"))) - {"7", "9", "10", "11"},
+      set(R._live_title_zones()) - {"7", "9", "10", "11"},
       set())
+
+print("\nanother process hears about a change as it happens")
+heard = []
+sub = kv.subscribe(R.PRESENCE_CHANNEL, lambda ch, msg: heard.append(msg))
+R._title_zone_lease(12, ZONE)
+R._publish_title_zone(12, R._PRESENCE_ZONE_VIEWER, False)
+deadline = time.time() + 3
+while len(heard) < 2 and time.time() < deadline:
+    time.sleep(0.02)
+sub.close()
+check("a lease and its clear are both announced on the presence channel",
+      heard, [R._title_zone_key(12), R._title_zone_key(12)])
+check("the entry carries a key TTL, so one nobody clears still goes",
+      0 < kv.ttl(R._title_zone_key(7)) <= R._TITLE_ZONE_LEASE_TTL + 60, True)
 
 print()
 print("titlezone_test: OK" if ok else "titlezone_test: FAILED")

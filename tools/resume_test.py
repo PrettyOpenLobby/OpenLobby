@@ -45,12 +45,14 @@ TMP = tempfile.mkdtemp(prefix="resume-test-")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pgtest  # noqa: E402
 pgtest.use_fresh_database()                   # the authserv child inherits it
+# ...and the live-state store: the child publishes its sessions there, and this
+# process reads them back, so the two must share one (a Valkey, own prefix).
+pgtest.use_fresh_valkey()
 ENV = dict(os.environ)
 ENV.update({
     "POL_CONFIG":              os.path.join(ROOT, "config", "server.yaml"),
     "POL_LOG_DIR":             TMP,
-    "POL_SESSION_FILE":        os.path.join(TMP, "auth-sessions.json"),
-    "POL_STAMP_FILE":          os.path.join(TMP, "auth-stamps.json"),
+    "POL_DATA_DIR":            TMP,
     "POL_AUTH_MODE":           "welcome",
     "POL_AUTH_CLOCK":          "0",     # a redirect-shaped greeting; one fewer hop
     "POL_AUTH_PORTS":          str(CLIENT_PORT),
@@ -177,13 +179,16 @@ def login(sock):
     return [dec(l) for l in welcome.split(b"\r\n") if l]
 
 
-def session_file():
+def session_store():
+    """The sessions the authserv child has published, by session id."""
     import json
-    try:
-        with open(ENV["POL_SESSION_FILE"], encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {}
+    from polcore import kv
+    out = {}
+    for name in kv.keys("authsess:s:*"):
+        raw = kv.get(name)
+        if raw:
+            out[name[len("authsess:s:"):]] = json.loads(raw)
+    return out
 
 
 def ask_resume(fp):
@@ -223,7 +228,7 @@ def main():
               f"decoded={b' | '.join(lines)[:90]!r}")
 
         # -- 2. the session recorded what a resume needs -------------------- #
-        slots = [s for s in session_file().values() if s.get("resume_fp")]
+        slots = [s for s in session_store().values() if s.get("resume_fp")]
         slot = slots[0] if slots else {}
         fp = slot.get("resume_fp", "")
         check("state: session slot carries a resume fingerprint", bool(fp),

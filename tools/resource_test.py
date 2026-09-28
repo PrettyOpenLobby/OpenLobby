@@ -27,6 +27,11 @@ os.environ.setdefault("POL_LOG_DIR", tempfile.mkdtemp(prefix="restest-log-"))
 # The storage checks below address objects by the path the client sent, so the
 # sender-field rewrite is off for them and tested on its own at the bottom.
 os.environ["POL_MAIL_NORMALISE"] = "0"
+# The resource store is the `blob` table, so every check needs a database of
+# its own (tools/pgtest.py), from the first write on.
+sys.path.insert(0, HERE)
+import pgtest                                                   # noqa: E402
+pgtest.use_fresh_database()
 import responders as R                                          # noqa: E402
 
 fails = []
@@ -70,6 +75,7 @@ def make_read(path, want):
 
 
 R.RESOURCE_DIR = tempfile.mkdtemp(prefix="restest-")
+from polcore import blobs  # noqa: E402
 print("03:01 write -> 03:00 read round trip")
 
 pt = make_write(SE_PATH, CONTENT)
@@ -80,6 +86,15 @@ R._capture_resource_write(pt)
 # The read side already existed; this is the half that was never fed.
 blob = R._resource_blob(SE_PATH, len(CONTENT) + 4)
 check("content survives verbatim", blob[:len(CONTENT)], CONTENT)
+# THE STORE IS THE DATABASE. The message is one row of the `blob` table, in
+# the mail scope, under the name it used to have as a file -- and nothing was
+# written to the resource directory.
+check("the message is a row of the blob table, in the mail scope",
+      blobs.get(*blobs.split_name(R._resource_file(SE_PATH))), CONTENT)
+check("its scope and path spell the old file name",
+      blobs.file_name(*blobs.split_name(R._resource_file(SE_PATH))),
+      R._resource_file(SE_PATH))
+check("and no file was written", os.listdir(R.RESOURCE_DIR), [])
 
 # LENGTH. SE answers a 30-byte object with a 34-byte payload and never pads;
 # padding it to this opcode's 664 default is what raised POL-5135, because the
@@ -135,9 +150,9 @@ check("with retire off, a 3:2 leaves the message alone",
 os.environ["POL_MAIL_RETIRE"] = "1"
 R._capture_resource_write(bytes(short), op="3:2")
 check("a 3:2 retires the message from the mailbox",
-      os.path.exists(R._resource_file(SE_PATH)), False)
+      R._res_exists(R._resource_file(SE_PATH)), False)
 check("and keeps the bytes beside it, undo-able",
-      open(R._resource_file(SE_PATH) + ".read", "rb").read(), CONTENT)
+      R._res_read(R._resource_file(SE_PATH) + ".read"), CONTENT)
 # Retiring twice is a no-op, not a crash -- the client re-sends on a re-login.
 R._capture_resource_write(bytes(short), op="3:2")
 check("retiring an already-retired message is inert", True, True)
@@ -161,14 +176,12 @@ check("an `@` in the token survives the round trip",
 check("and it is not left in the filename", "@" in R._mail_name(AT), False)
 
 # Written by member 7's session under the old scheme, read by member 1's client.
-legacy = os.path.join(R.RESOURCE_DIR, "7.%s.bin" %
-                      __import__("re").sub(r"[^A-Za-z0-9._-]", "_", MAIL))
-with open(legacy, "wb") as f:
-    f.write(BODY)
+legacy = "7.%s.bin" % __import__("re").sub(r"[^A-Za-z0-9._-]", "_", MAIL)
+R._res_write(legacy, BODY)
 check("a message an older build filed under the sender still reads back",
       R._resource_blob(MAIL, 664)[:len(BODY)], BODY)
 check("and it is adopted, so it is stored under exactly one name",
-      (os.path.exists(legacy), os.path.exists(R._resource_file(MAIL))),
+      (R._res_exists(legacy), R._res_exists(R._resource_file(MAIL))),
       (False, True))
 
 # The recipient's own client answers a read with a write of its own. That echo
@@ -181,7 +194,7 @@ try:
     check("a reader's write-back does not overwrite the message",
           R._resource_blob(MAIL, 664)[:len(BODY)], BODY)
     check("but it is kept beside it",
-          open(R._resource_file(MAIL) + ".readback", "rb").read(),
+          R._res_read(R._resource_file(MAIL) + ".readback"),
           b"the reader's echo")
     # The author writing again is a normal update and must still land.
     R._mail_owner = lambda path: 7
@@ -203,8 +216,8 @@ print("\nboth identity fields are rewritten into the reader's vocabulary")
 os.environ["POL_MAIL_NORMALISE"] = "1"
 import accounts as A                                            # noqa: E402
 
-# A DB of our own, so the check does not depend on whatever the live one holds.
-import pgtest                                                   # noqa: E402
+# A fresh DB of our own, so the check does not depend on what the store
+# checks above left behind.
 pgtest.use_fresh_database()
 _db = A.connect()
 A.create_polid(_db, "UTESTSEND", "x")

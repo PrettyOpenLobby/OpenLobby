@@ -132,6 +132,11 @@ SUITES = [
     # reports SKIP without Docker; POL_TEST_REQUIRE_DB=1 makes that a failure.
     ("polcore_db",    [sys.executable, "test_polcore_db.py"], TESTS, {}),
     ("polcore_kv",    [sys.executable, "test_polcore_kv.py"], TESTS, {}),
+    # The saved-resource store (the `blob` table) and the account deletion
+    # that takes a member's saves with it; then the live-session markers and
+    # client-build records other containers read from Valkey.
+    ("polcore_blobs", [sys.executable, "test_polcore_blobs.py"], TESTS, {}),
+    ("live_markers",  [sys.executable, "test_live_markers.py"], TESTS, {}),
     # THE CONTENT ID MINT (2026-08-23). Registered beside `accounts` because it
     # pins that file's `allocate_content_id` from the outside, and because the
     # thing it guards is invisible from inside our own server: nothing we run
@@ -386,6 +391,20 @@ def main():
     except Exception as exc:                  # noqa: BLE001 -- say so, run anyway
         print(f"WARNING: no PostgreSQL for the suites ({exc}); every suite that "
               "needs one will fail")
+
+    # ...AND ONE VALKEY, for the suites whose processes share live state
+    # (pgtest.use_fresh_valkey gives each its own key prefix). Every other
+    # suite keeps its live state in memory, as a single process does.
+    try:
+        os.environ["POL_TEST_VALKEY_URL"] = pgtest.valkey_url()
+        print("valkey server: "
+              + os.environ["POL_TEST_VALKEY_URL"].rsplit("/", 2)[-2])
+    except Exception as exc:                  # noqa: BLE001 -- say so, run anyway
+        print(f"WARNING: no Valkey for the suites ({exc}); every suite that "
+              "needs one will fail")
+    # A live-state URL from the caller's shell would make every suite share
+    # one store; the suites that need Valkey ask for it themselves.
+    os.environ.pop("POL_VALKEY_URL", None)
 
     results, failures = [], []
     width = max(len(s[0]) for s in picked)

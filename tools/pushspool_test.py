@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Prove the push spool is drained ONCE, and cannot grow forever.
+"""Prove the push queue delivers each record, in order, and never twice.
 
     python pushspool_test.py
 
-THE BUG THIS PINS. `_push_spool_watcher` kept its byte offset in a local, so it
-started every process at 0 and re-delivered the entire spool on each restart.
-Found 2026-08-17 by restarting authsess and watching 315 records replay out of a
-353-record file that nothing had ever trimmed.
+THE BUG THIS PINS. The old file spool's drain kept its byte offset in a local,
+so it started every process at 0 and re-delivered the entire spool on each
+restart. Found 2026-08-17 by restarting authsess and watching 315 records
+replay out of a 353-record file that nothing had ever trimmed.
 
 It presented as harmless -- every replayed record was dropped, because no session
 had registered yet -- and that is the trap. It inverts the point of `authrelay`,
@@ -16,24 +16,38 @@ that wins the race is handed the whole accumulated push history at once: stale
 friend rows, stale events, replayed as though they had just happened. The 315
 drops were luck, not design.
 
-So the property under test is "a record is delivered exactly once, across a
-restart" -- and the restart is simulated by running the drain loop's logic twice
-over the same files, which is what a new process does.
+The spool is now a queue in the live-state store (polcore.kv), and the
+properties under test are the ones the file had to be engineered for:
+
+  * a record is delivered once, and a restart (a fresh process running the
+    watcher's start-up recovery) replays nothing already delivered;
+  * a record taken by a consumer that died before delivering it IS delivered
+    by the next one (at least once), and only once;
+  * order is kept, a malformed record cannot wedge the queue, and nothing is
+    left behind once it is drained.
+
+They run against the in-process store and against a real Valkey, and on Valkey
+the lobby half runs in ANOTHER PROCESS, which is the hop the queue exists for.
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "..", "services"))
+SERVICES = os.path.join(HERE, "..", "services")
+sys.path.insert(0, SERVICES)
+sys.path.insert(0, HERE)
 
 LOG_DIR = tempfile.mkdtemp(prefix="spool-")
 os.environ["POL_LOG_DIR"] = LOG_DIR
-os.environ["POL_PUSH_SPOOL_MAX_MB"] = "0.001"        # 1024 bytes
+os.environ["POL_DATA_DIR"] = LOG_DIR
 
+import pgtest                                         # noqa: E402
 import responders as R                                # noqa: E402
+from polcore import kv                                # noqa: E402
 
 ok = True
 delivered = []
@@ -48,106 +62,106 @@ def check(label, got, want):
 
 
 R._push_deliver = lambda rec: delivered.append(rec)   # capture, do not send
+R._PUSH_LOCAL[0] = False                              # we are the lobby
 
 
-def spool(n):
-    with open(R._PUSH_SPOOL, "a", encoding="utf-8") as f:
-        for i in range(n):
-            f.write(json.dumps({"kind": "rows", "seq": i}) + "\n")
+def spool(n, start=0):
+    """Queue n records the way the lobby does (`_push_emit`). A group MODE
+    record, because its switch is on by default."""
+    for i in range(start, start + n):
+        R._push_emit({"kind": "gmode", "gid": 1, "member": 1, "seq": i})
 
 
-def drain_once():
-    """One pass of the watcher's body -- i.e. what a fresh process does."""
-    off = R._push_offset_load()
-    try:
-        if off > os.path.getsize(R._PUSH_SPOOL):
-            off = 0
-    except OSError:
-        off = 0
-    size = os.path.getsize(R._PUSH_SPOOL)
-    if size < off:
-        off = 0
-    if size > off:
-        # BINARY, mirroring the watcher exactly -- a text-mode read translates
-        # newlines and the byte offset then drifts one byte per line. That is not
-        # hypothetical: it is what this test hit on Windows before the watcher
-        # was changed to read bytes, and it is the reason the mirror is here
-        # rather than the test calling the loop directly.
-        with open(R._PUSH_SPOOL, "rb") as f:
-            f.seek(off)
-            chunk = f.read()
-        cut = chunk.rfind(b"\n") + 1
-        if cut:
-            off += cut
-            for raw in chunk[:cut].split(b"\n"):
-                if raw.strip():
-                    R._push_deliver(json.loads(raw.decode("utf-8")))
-            R._push_offset_save(off)
-    return R._push_spool_rotate(off)
+def drain():
+    """What the watcher does while running: take, deliver, acknowledge."""
+    while R._push_spool_drain_one() is not None:
+        pass
 
 
-print("a record is delivered once, and a restart does not replay it")
+def seqs():
+    return [r.get("seq") for r in delivered]
 
-spool(5)
-drain_once()
-check("the first drain delivers everything", len(delivered), 5)
 
-drain_once()
-check("a second pass in the SAME process delivers nothing new", len(delivered), 5)
+def queue_suite():
+    R._push_spool_clear()
+    delivered.clear()
+    print(" a record is delivered once, and a restart does not replay it")
+    spool(5)
+    check("the lobby's pushes are queued", kv.llen(R._PUSH_QUEUE), 5)
+    drain()
+    check("the first drain delivers everything, in order", seqs(), [0, 1, 2, 3, 4])
+    drain()
+    check("a second pass in the SAME process delivers nothing new", len(delivered), 5)
 
-# THE REGRESSION ITSELF: a fresh process must resume, not restart. Before the
-# fix this returned 10 -- the whole spool, a second time.
+    # THE REGRESSION ITSELF: a fresh process must resume, not restart.
+    delivered.clear()
+    check("a RESTART replays nothing", (R._push_spool_recover(), len(delivered)),
+          (0, 0))
+    spool(3, start=5)
+    drain()
+    check("...but new records after the restart still arrive", seqs(), [5, 6, 7])
+
+    print(" a consumer that dies mid-delivery loses nothing")
+    delivered.clear()
+    spool(2, start=8)
+    # take one the way the watcher does, then "die" before delivering it
+    taken = kv.move(R._PUSH_QUEUE, R._PUSH_WORK)
+    check("the taken record is held on the work list", kv.llen(R._PUSH_WORK), 1)
+    check("the next process delivers it at start-up", R._push_spool_recover(), 1)
+    check("...exactly the record that was in flight",
+          [json.loads(taken)["seq"]], seqs())
+    check("...and the work list is empty after", kv.llen(R._PUSH_WORK), 0)
+    drain()
+    check("the rest of the queue follows", seqs(), [8, 9])
+    check("a second restart replays none of it", R._push_spool_recover(), 0)
+
+    print(" junk cannot wedge the queue, and nothing is left behind")
+    delivered.clear()
+    kv.push(R._PUSH_QUEUE, "not json")
+    spool(1, start=10)
+    drain()
+    check("a malformed record is dropped and the next one still arrives",
+          seqs(), [10])
+    check("the queue is empty once drained", kv.llen(R._PUSH_QUEUE), 0)
+    check("so is the work list", kv.llen(R._PUSH_WORK), 0)
+
+    print(" the lobby's push returns 0: queued, not delivered")
+    check("a queued push reports no delivery",
+          R._push_emit({"kind": "gmode", "gid": 1, "member": 1, "seq": 11}), 0)
+    check("...and is waiting for authserv",
+          [r["seq"] for r in R._push_spool_pending()], [11])
+    R._push_spool_clear()
+
+
+print("in-process store")
+kv.reset(kv.MemoryKV(prefix="spooltest:"))
+queue_suite()
+
+print("\nValkey")
+pgtest.use_fresh_valkey()
+check("the live-state store is Valkey", kv.default().backend, "valkey")
+queue_suite()
+
+print(" the lobby in ANOTHER process, authserv here")
 delivered.clear()
-drain_once()
-check("a RESTART replays nothing", len(delivered), 0)
-
-spool(3)
-drain_once()
-check("...but new records after the restart still arrive", len(delivered), 3)
-
-print("\nthe offset survives nonsense without going deaf")
-
-# An offset past the end means the spool was replaced while we were down. The
-# reader must start over, not seek past EOF and silently stop delivering.
-R._push_offset_save(10 ** 9)
-delivered.clear()
-drain_once()
-check("an offset past the end restarts from 0 rather than going deaf",
-      len(delivered) > 0, True)
-
-# A shrinking file is a rotation someone else did.
-with open(R._PUSH_SPOOL, "w", encoding="utf-8") as f:
-    f.write(json.dumps({"kind": "rows", "seq": 99}) + "\n")
-delivered.clear()
-drain_once()
-check("a shrunken spool is re-read from the start", len(delivered), 1)
-
-print("\nthe spool cannot grow forever")
-
-# Rotation is deliberately conservative: fully drained AND over the cap AND
-# idle. The idle test is what makes the rename safe against the OTHER
-# container's appender, so assert it holds the rotation back.
-spool(60)                                              # well past 1024 bytes
-drain_once()
-check("a big, freshly-written spool is NOT rotated (still warm)",
-      os.path.exists(R._PUSH_SPOOL + ".1"), False)
-
-old = time.time() - (R._PUSH_SPOOL_IDLE + 5)
-os.utime(R._PUSH_SPOOL, (old, old))
-drain_once()
-check("once drained, oversized and idle, it rotates",
-      os.path.exists(R._PUSH_SPOOL + ".1"), True)
-check("and the offset resets with it", R._push_offset_load(), 0)
-
-# The generation kept must be the real content -- a spool is the only record of
-# what was pushed and when.
-kept = sum(1 for _ in open(R._PUSH_SPOOL + ".1", encoding="utf-8"))
-check("the retired generation still holds its records", kept > 0, True)
-
-delivered.clear()
-spool(2)
-drain_once()
-check("draining continues into the fresh spool", len(delivered), 2)
+LOBBY = (
+    "import sys; sys.path.insert(0, %r)\n"
+    "import responders as R\n"
+    "R._PUSH_LOCAL[0] = False\n"
+    "for i in range(20):\n"
+    "    R._push_emit({'kind': 'gmode', 'gid': 2, 'member': 2, 'seq': i})\n"
+    % os.path.abspath(SERVICES))
+proc = subprocess.run([sys.executable, "-c", LOBBY], env=dict(os.environ),
+                      capture_output=True, text=True, timeout=120)
+check("the lobby process ran", proc.returncode, 0)
+if proc.returncode:
+    print(proc.stdout[-2000:], proc.stderr[-2000:])
+deadline = time.time() + 10
+while len(delivered) < 20 and time.time() < deadline:
+    R._push_spool_drain_one(timeout=0.5)
+check("every push crossed the process boundary, in order", seqs(), list(range(20)))
+check("and the queue is empty", kv.llen(R._PUSH_QUEUE), 0)
+R._push_spool_clear()
 
 print("\na row push whose watcher has not registered yet is HELD, not dropped")
 
