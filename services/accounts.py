@@ -462,6 +462,30 @@ CREATE TABLE IF NOT EXISTS login_digest_client (
     proven_at   TEXT NOT NULL
 );
 
+-- FAILED VIEWER LOGINS, for the lockout (SE's status 0xCB). One row per wrong
+-- password the NICK digest actually REFUSED -- never a token mismatch or an
+-- unproven build. In the DB, not in memory, because the auth hop (authsess) and
+-- the login container are separate processes and both must see one count.
+-- `at` is unix seconds. `accounts.py <db> unlock <polid|login>` clears a member.
+CREATE TABLE IF NOT EXISTS login_fail (
+    member_id   INTEGER NOT NULL,
+    at          REAL NOT NULL,
+    peer_ip     TEXT,
+    client_sig  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_login_fail ON login_fail(member_id, at);
+
+-- WHEN EACH OF A MEMBER'S LISTS LAST CHANGED, as served in the login record
+-- (responders.build_gate_record, POL_GATE_LIST_STAMPS=1). `fingerprint` is
+-- what the list looked like when `stamp` was set; see list_stamp().
+CREATE TABLE IF NOT EXISTS list_stamp (
+    member_id   INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    stamp       INTEGER NOT NULL,
+    PRIMARY KEY (member_id, kind)
+);
+
 CREATE INDEX IF NOT EXISTS idx_member_polid   ON member(polid);
 CREATE INDEX IF NOT EXISTS idx_content_member ON content(member_id);
 CREATE INDEX IF NOT EXISTS idx_session_member ON session(member_id);
@@ -3003,6 +3027,54 @@ def prove_digest_client(conn, client_sig, member_id):
     return cur.rowcount == 1
 
 
+def record_login_failure(conn, member_id, peer_ip=None, client_sig=None,
+                         now=None):
+    """Count one digest-refused wrong password against a member. Rows older than
+    a day are pruned for that member on the way, so the table stays small."""
+    now = time.time() if now is None else float(now)
+    conn.execute("DELETE FROM login_fail WHERE member_id = ? AND at < ?",
+                 (int(member_id), now - 86400))
+    conn.execute("INSERT INTO login_fail (member_id, at, peer_ip, client_sig)"
+                 " VALUES (?,?,?,?)", (int(member_id), now, peer_ip, client_sig))
+    conn.commit()
+
+
+def login_failures(conn, member_id, window_s, now=None):
+    """How many refused passwords this member has in the last `window_s` s."""
+    now = time.time() if now is None else float(now)
+    return conn.execute("SELECT COUNT(*) FROM login_fail WHERE member_id = ?"
+                        " AND at > ?", (int(member_id), now - float(window_s))
+                        ).fetchone()[0]
+
+
+def login_lock_remaining(conn, member_id, fails, window_s, now=None):
+    """Seconds this member stays LOCKED OUT, or 0.
+
+    Locked while `fails` or more refused passwords sit inside the trailing
+    `window_s` -- so the lock ends when the `fails`-th newest of them ages out
+    of the window. A locked-out attempt is refused before the password check,
+    so it adds no row and cannot extend the lock.
+    """
+    if fails <= 0 or window_s <= 0:
+        return 0
+    now = time.time() if now is None else float(now)
+    rows = conn.execute("SELECT at FROM login_fail WHERE member_id = ? AND at > ?"
+                        " ORDER BY at DESC LIMIT ?",
+                        (int(member_id), now - float(window_s), int(fails))
+                        ).fetchall()
+    if len(rows) < fails:
+        return 0
+    return max(0.0, float(rows[-1][0]) + float(window_s) - now)
+
+
+def clear_login_failures(conn, member_id):
+    """Forget a member's refused passwords (a proven login, or `unlock`)."""
+    n = conn.execute("DELETE FROM login_fail WHERE member_id = ?",
+                     (int(member_id),)).rowcount
+    conn.commit()
+    return n
+
+
 def login_password_status(conn):
     """(member_id, login_name, has_copy) for every active member."""
     rows = conn.execute("SELECT id, login_name, login_pw_sealed FROM member"
@@ -4796,6 +4868,9 @@ def main(argv=None):
 
     sub.add_parser("pwcopy", help="which accounts the lobby can check the "
                                   "Viewer password for (NICK digest)")
+    p = sub.add_parser("unlock", help="clear a member's failed Viewer logins, "
+                       "ending a lockout (SE status 0xCB)")
+    p.add_argument("ident", help="POL ID or login name")
     p = sub.add_parser("armed", help="show which accounts may bind a login "
                        "token right now, and which hold no token at all")
 
@@ -5081,6 +5156,15 @@ def main(argv=None):
             state = "ARMED until " + until if until > now else \
                 ("armed window lapsed " + until if until else "never armed")
             print(f"  {r['polid']}  {tokens} token(s)  {state}")
+    elif args.cmd == "unlock":
+        row = conn.execute("SELECT id, polid, login_name FROM member"
+                           " WHERE polid = ? OR login_name = ?",
+                           (args.ident, args.ident)).fetchone()
+        if row is None:
+            raise SystemExit(f"no account matches {args.ident!r}")
+        n = clear_login_failures(conn, row["id"])
+        print(f"{row['polid']} ({row['login_name']}): cleared {n} failed "
+              "login(s); not locked out")
     elif args.cmd == "pwcopy":
         have = 0
         for mid, login, ok in login_password_status(conn):
@@ -5748,6 +5832,16 @@ if __name__ == "__main__":
         assert not member_online_from(c, mid, None)
         close_sessions(c, mid)
         assert not member_online_from(c, mid, "203.0.113.7")
+        # failed-login lockout: 2 fails in a 100 s window locks until the
+        # older one ages out; unlock clears it
+        record_login_failure(c, mid, now=1000.0)
+        assert login_lock_remaining(c, mid, 2, 100, now=1001.0) == 0
+        record_login_failure(c, mid, now=1010.0)
+        assert login_lock_remaining(c, mid, 2, 100, now=1011.0) == 89.0
+        assert login_lock_remaining(c, mid, 2, 100, now=1101.0) == 0
+        assert login_failures(c, mid, 100, now=1011.0) == 2
+        assert clear_login_failures(c, mid) == 2
+        assert login_lock_remaining(c, mid, 2, 100, now=1011.0) == 0
         print("accounts.py self-test OK")
     else:
         raise SystemExit(main())

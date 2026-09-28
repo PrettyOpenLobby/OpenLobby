@@ -19,8 +19,20 @@ from srvcore import (
 TOKEN_ALPHABET = "N43OVHBJ1Y2C0WSXED5QFILRZMUTAPGK"
 
 # [4:8] was recorded here as one opaque "constant" lifted from a capture. It is
-# NOT one field, and byte [6] is not a constant at all -- it is the ACCOUNT
-# STATUS CODE, which is why every login raised the credit-card dialog.
+# NOT a constant: it is the CLIENT'S IPv4 ADDRESS as the server saw it.
+# 6c37fab1 is the client's own address in the SE capture the bytes were copied
+# from. Project Crystal Server's greeting record (InitData) spells the
+# layout out: [0:4] server time, [4:8] client IP, [8:12] IRC/redirect IP
+# (non-zero = "dial this"), [12:14] its port, [20:22] client port, [22] = [23] =
+# 1. So "6c37 ?? b1" is somebody's address, not a magic, and nothing in the
+# client checks it as one (see below).
+#
+# We still do NOT write the real peer address here, and must not: the client
+# ALSO reads byte [6] -- the third octet -- as the ACCOUNT STATUS CODE, which is
+# why every login raised the credit-card dialog (the capture's octet 0xFA =
+# LM-30). A player whose third octet is >= 0xDD would get an LM-xx dialog on
+# every login. So the bytes stay as they are, [6] is ours to set, and nobody's
+# address is at stake: [4:5] and [7] are the capture's octets, frozen.
 #
 # The client's store routine (polcore sub_037d5a00, dst = DAT_03868258) copies
 # the 25-byte record field by field with per-field byte order, and that split
@@ -44,8 +56,10 @@ TOKEN_ALPHABET = "N43OVHBJ1Y2C0WSXED5QFILRZMUTAPGK"
 # is both silent and accepted. Set POL_ACCT_STATUS=0xfa to get the old behaviour
 # back, or to any code in 0xDD..0xFC to raise that dialog deliberately.
 _ACCT_STATUS = int(os.environ.get("POL_ACCT_STATUS", "0"), 0) & 0xFF
+#: [4:8] "client IP" -- the captured address with [6] replaced by the status code.
+#: The name is historical; it is not a constant in SE's protocol.
 _CONST_48 = bytes.fromhex("6c37") + bytes([_ACCT_STATUS]) + bytes.fromhex("b1")
-_CONST_END = bytes.fromhex("010100")      # [22:25] constant
+_CONST_END = bytes.fromhex("010100")      # [22] = [23] = 1 (Crystal: same), [24] 0
 
 
 def token_encode(raw):
@@ -75,10 +89,10 @@ def build_redirect_token(node_ip, node_port):
     """
     raw = bytearray(25)
     raw[0:4] = b"\x00\x00\x00\x00"          # nonce=0 -> first-hop K=0
-    raw[4:8] = _CONST_48
+    raw[4:8] = _CONST_48                    # "client IP" + status [6]; see above
     raw[8:12] = socket.inet_aton(node_ip)
     raw[12:14] = struct.pack(">H", node_port)
-    # [14:20] zero, [20:22] varies (leave zero), [22:25] constant
+    # [14:20] zero, [20:22] = client port in SE's (left zero), [22:25] see above
     raw[22:25] = _CONST_END
     return token_encode(bytes(raw)) + "NNNN"   # 4-sym trailing checksum: unenforced
 
