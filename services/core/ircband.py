@@ -716,6 +716,22 @@ def _verb_join(arg, nick, srv, peer_ip, sess):
     out.append(_names_line(chan, nick, srv, sess))
     out.append(b":" + srv + b" 366 " + nick + b" " + chan +
                b" :End of NAMES list.")
+    # THE GM ARRIVES TOO, in a GM Call room. The Viewer's GM chat member table
+    # is rebuilt from polcore's channel member list (app.dll 0x4ab3754 via
+    # cft_1256), and polcore adds a member on a JOIN (0x037d7910) or a 352.
+    # The GM has no session, so no JOIN of its own ever reached the client and
+    # its row never stuck. Announce it, then send its `HA...:G` roster record
+    # at once so the row gets the GM role and name without waiting for the
+    # client's `HR`. POL_GMCHAT_ANNOUNCE=0 turns this off.
+    gm = _gm_roster_nick(chan)
+    if gm and os.environ.get("POL_GMCHAT_ANNOUNCE", "1") != "0":
+        try:
+            import gmchat
+            host = _irc_host(srv)
+            out.append(b":" + gm + b"!~x@" + host + b" JOIN :" + chan)
+            out.append(gmchat.privmsg(chan, gmchat.encode_roster(chan), host))
+        except Exception as exc:
+            log("authserv", f"  GM announce for {chan!r} skipped ({exc!r})")
     return out
 
 

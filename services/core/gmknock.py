@@ -45,6 +45,7 @@ _ACTION_OFF, _REQNO_OFF = 0x4F, 0x50
 SENDER = os.environ.get("POL_GM_KNOCK_SENDER", "GM")
 SUBJECT = os.environ.get("POL_GM_KNOCK_SUBJECT", "GM Call")
 TEXT = os.environ.get("POL_GM_KNOCK_TEXT", "GM chat is ready. Please start GM chat.")
+CLOSE_TEXT = os.environ.get("POL_GM_CLOSE_TEXT", "Your GM Call request has been closed.")
 
 
 def knock_tail(room, key, request_no, action=ACTION_KNOCK):
@@ -78,7 +79,8 @@ def send_knock(name, guid, room, key, request_no, action=ACTION_KNOCK):
     if h is None:
         raise ValueError("the player on this request has no handle we know")
     path = lobbymail._mail_mint(
-        SENDER, 0, accounts.handle_guid(int(h["id"])), SUBJECT, TEXT,
+        SENDER, 0, accounts.handle_guid(int(h["id"])), SUBJECT,
+        CLOSE_TEXT if action == ACTION_CLOSE else TEXT,
         kind=MAIL_KIND_GM_KNOCK, tail=knock_tail(room, key, request_no, action))
     if not path:
         raise ValueError("the knock message could not be stored")
