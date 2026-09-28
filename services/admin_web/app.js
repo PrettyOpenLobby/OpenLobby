@@ -2086,7 +2086,8 @@ function startRuntime(r) {
       vars: EXPAND_REPORT.vars || {},
       log: logEvent,
       toast: (m) => toast(m),
-      onHelp: (t) => { $("#pvHelp").textContent = t; },
+      // alt text carries SE's colour codes ("^03Play FINAL FANTASY XI.")
+      onHelp: (t) => { $("#pvHelp").textContent = String(t || "").replace(/\^\d\d/g, ""); },
       navigate: openLink,
       history: (d) => { for (let i = 0; i < Math.abs(d); i++) $(d < 0 ? "#pvBack" : "#pvFwd").click(); },
       reload: renderPreview,
