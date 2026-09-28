@@ -2409,8 +2409,13 @@ function classify(path) {
   return { path, host, game, locale, shape, variant, dirs, name, cat: categoryOf(host, dirs),
            lang: languageOf(path.split("/"), TITLES[path] || LABELS[path] || ""),
            title: TITLES[path] || "", label: TITLES[path] || LABELS[path] || "",
-           top: shape === "page" && !!TITLES[path] && SECTION_TOP_RE.test(name)
-             && !path.startsWith("_eras/") };
+           // A start page: a section's index.pml near the top of the tree
+           // (pml/game/ff11/index.pml, pml/help/basis/index.pml,
+           // pml2/cs/index.pml). Deeper index pages and <xx>pm01.pml are
+           // subsections (game/0010/beta/bepm01.pml, game/0011/pr/index.pml).
+           top: shape === "page" && !path.startsWith("_eras/") && host === MAIN_HOST
+             && /^index\.pml$/i.test(name) && dirs.length <= 3 && /^pml2?$/.test(dirs[0] || ""),
+           canon: segs.join("/").toLowerCase() };
 }
 
 function fillFacet(sel, values, label) {
@@ -2429,6 +2434,9 @@ async function loadPmlFileList() {
     TITLES = j.titles || {};
     LABELS = j.labels || {};
     ALLFILES = j.files.map(classify);
+    // Pages the US Viewer is served from _lang/en-US/: in the English view
+    // the base copy of those is hidden, as the Viewer never shows it.
+    EN_COPIES = new Set(ALLFILES.filter((f) => f.variant === "en-US").map((f) => f.canon));
     FILE_BY_PATH = new Map(ALLFILES.map((f) => [f.path, f]));
     const hosts = new Map(), games = new Map(), langs = new Map();
     const bump = (m, k) => { if (k) m.set(k, (m.get(k) || 0) + 1); };
@@ -2447,6 +2455,7 @@ async function loadPmlFileList() {
 const kindMatches = (kind, shape) => !kind || (kind === "draws" ? shape !== "data" : shape === kind);
 const visibleUnderFilter = (path) => kindMatches($("#fKind").value, SHAPES[path] || "");
 let FILE_ROWS = [];
+let EN_COPIES = new Set();
 let FILE_BY_PATH = new Map();
 
 // Pinned and recently opened pages, per browser.
@@ -2580,7 +2589,8 @@ function renderFileList() {
     q = $("#fSearch").value.toLowerCase().trim(), sort = $("#fSort").value, kind = $("#fKind").value;
   document.querySelectorAll("#fKindSeg button").forEach((b) => b.classList.toggle("on", b.dataset.f === kind));
   const passes = (f) => (!host || f.host === host) && (!game || f.game === game) &&
-    (!locale || !f.lang || LANG_NAME[f.lang] === locale) && kindMatches(kind, f.shape);
+    (!locale || !f.lang || LANG_NAME[f.lang] === locale) && kindMatches(kind, f.shape) &&
+    !(locale === "English" && !f.variant && EN_COPIES.has(f.canon));
   FILE_ROWS = ALLFILES.filter((f) => passes(f) &&
     (!q || f.path.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
   $("#pmlCount").textContent = `(${FILE_ROWS.length.toLocaleString()} of ${ALLFILES.length.toLocaleString()})`;
@@ -2592,7 +2602,10 @@ function renderFileList() {
     const known = (paths) => paths.map((p) => FILE_BY_PATH.get(p)).filter(Boolean);
     renderSection("#pinned", "Pinned", known(PV_PINS), out);
     renderSection("#recent", "Recent", known(PV_RECENT).filter((f) => !PV_PINS.includes(f.path)).slice(0, 6), out);
-    renderSection("#tops", "Section top pages", FILE_ROWS.filter((f) => f.top).sort(byLabel), out);
+    // Start pages in category order (portal, games, news, help...), then by path.
+    const catRank = Object.fromEntries(PV_CATEGORIES.map(([id], i) => [id, i]));
+    renderSection("#tops", "Start pages", FILE_ROWS.filter((f) => f.top)
+      .sort((a, b) => catRank[a.cat] - catRank[b.cat] || a.canon.localeCompare(b.canon)), out);
     // Categories start closed (keys without "#"), so the list opens as a
     // short table of contents.
     for (const [id, label] of PV_CATEGORIES) {
