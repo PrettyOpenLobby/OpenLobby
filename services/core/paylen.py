@@ -185,6 +185,11 @@ _LOBBY_PAYLEN = {
     (0x03, 0x02): 0,      # OBJECT WRITE-BACK (mark-read / delete on `O/m/`
                           # paths). Was missing from this table
                           # entirely and fell through to the default 8.
+    (0x03, 0x04): 0,      # MULTI-TARGET WRITE: one message to up to 20
+                          # recipients. Never seen on our wire; Project Crystal
+                          # Server answers it header-only against the Viewer,
+                          # like the other writes. See resourcestore.
+                          # _capture_multi_write.
     (0x07, 0x02): 0,      # KDeleteGroup (request len 0x10). ZERO wire
                           # samples -- no capture has ever carried one. Header-only
                           # like the other group WRITES (7:3, 7:11); a body here

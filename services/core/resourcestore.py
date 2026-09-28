@@ -7,7 +7,7 @@ import titles                   # the title-plugin seam (services/titles.py)  # 
 from polcore import blobs
 from srvcore import log
 from .deps import accounts
-from . import fetchpath, friendgroups, lobbymail, lobbyreply, lobbysearch, lobbysession, pacing, paylen, pfc
+from . import fetchpath, friendgroups, lobbymail, lobbyrefuse, lobbyreply, lobbysearch, lobbysession, pacing, paylen, pfc
 
 
 #: Where the title plugins still keep files of their own (their records,
@@ -450,6 +450,9 @@ def _capture_resource_write(pt, op=None):
                 db.close()
         except Exception as exc:
             log("lobby", f"  mail: cannot normalise the sender field ({exc})")
+        # A MESSAGE TO A GROUP goes to each member, not under this path.
+        if friendgroups._group_message_fanout(path, data, pt):
+            return
         # A GROUP INVITE THE INVITEE COULD NEVER ACCEPT IS REFUSED, NOT FILED:
         # the inviter is told why (the 3:1 reply carries the error type) and
         # the invitee never sees an invitation that cannot work.
@@ -506,6 +509,73 @@ def payload_fetch(n, req_pt):
                     "manifest read as count=0 is a fatal error on some "
                     "titles; see RESOURCE_INIT and the title's own)"))
     return blob
+
+
+#: 3:4, the multi-target write, as Project Crystal Server reads it
+#: (FileWriteMultiOperation), from the payload start:
+_MULTI_COUNT_OFF = 0x000               # u8   how many targets
+_MULTI_TARGETS_OFF = 0x170             # 20 x u64, each target's id
+_MULTI_PATH_OFF = 0x210                # 0x180 bytes, the NUL-terminated path
+_MULTI_PATH_LEN = 0x180
+_MULTI_LENGTH_OFF = 0x394              # u32, the object's length
+_MULTI_DATA_OFF = 0x398                # the object itself
+_MULTI_MAX = 20                        # its hard limit; more is refused
+
+
+def capture_multi_write(pt):
+    """3:4: store one message for each of up to 20 targets. Returns True.
+
+    Never seen on our wire. Project Crystal Server handles it for the Viewer:
+    one request carries the target ids, one `O/m/` path and one object, and each
+    target gets a copy in their mailbox; more than 20 targets is refused with
+    0xFF. Our mailbox is keyed by the path's recipient field, so each copy is
+    readdressed (`lobbymail._mail_readdress`). A target id resolves either as
+    our guid or as the id the target's own client calls itself, like any
+    message recipient. POL_MULTI_WRITE=0 stores nothing, as before.
+    """
+    if os.environ.get("POL_MULTI_WRITE", "1") != "1" or accounts is None:
+        return False
+    body = pt[0x28:]
+    if len(body) < _MULTI_DATA_OFF:
+        log("lobby", f"  03:04 write: body is {len(body)}B, shorter than the "
+                     f"{_MULTI_DATA_OFF}B header; nothing stored")
+        return True
+    count = body[_MULTI_COUNT_OFF]
+    if count > _MULTI_MAX:
+        lobbyrefuse._lobby_refuse(
+            lobbyrefuse.LOBBY_ERR_GENERIC,
+            f"03:04 write: {count} targets, more than {_MULTI_MAX}", pt)
+        return True
+    raw = body[_MULTI_PATH_OFF:_MULTI_PATH_OFF + _MULTI_PATH_LEN]
+    path = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
+    length = struct.unpack_from("<I", body, _MULTI_LENGTH_OFF)[0]
+    data = bytes(body[_MULTI_DATA_OFF:_MULTI_DATA_OFF + length])
+    if not lobbymail._mail_name(path) or not data:
+        log("lobby", f"  03:04 write: {path[:48]!r} ({len(data)}B) is not a "
+                     f"message this server delivers; nothing stored")
+        return True
+    delivered, unknown = [], []
+    try:
+        db = accounts.connect()
+        try:
+            for i in range(count):
+                tid = struct.unpack_from("<Q", body, _MULTI_TARGETS_OFF + 8 * i)[0]
+                row = lobbymail._mail_recipient_row(db, tid)
+                copy = lobbymail._mail_readdress(db, path, row) if row else None
+                if copy is None:
+                    unknown.append(f"{tid:#x}")
+                    continue
+                _resource_store(copy, data)
+                lobbymail._mail_announce(copy)
+                delivered.append(row["handle_name"])
+        finally:
+            db.close()
+    except Exception as exc:
+        log("lobby", f"  03:04 write: failed ({exc!r})")
+        return True
+    log("lobby", f"  03:04 write: {len(data)}B message delivered to {delivered}"
+                 + (f"; no handle of ours for {unknown}" if unknown else ""))
+    return True
 
 
 def capture_write(pt):

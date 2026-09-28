@@ -4,7 +4,7 @@ import re
 import time
 from srvcore import hexdump, log
 from .deps import accounts
-from . import lobbyops, fetchpath, friendput, lobbybind, lobbysession, profilerecord, resourcestore
+from . import lobbyops, fetchpath, friendput, lobbybind, lobbysession, profilerecord, pushspool, resourcestore
 
 
 
@@ -133,9 +133,18 @@ def _capture_active_handle(pt):
                 log("lobby", f"4:7 active handle {name!r} seen on an unbound "
                              f"thread; not recorded")
                 return
+            prev = lobbysession._session_get("handle_id")
             lobbysession._session_put(sid, handle_id=int(row["id"]))
             log("lobby", f"4:7 active handle = {name!r} (handle id {row['id']}, "
                          f"guid {accounts.handle_guid(row['id']):#x})")
+            # A SWITCH, not the first 4:7 of the session: tell the old handle's
+            # watchers it left and the new one's that it arrived (see
+            # `pushspool._push_deliver_handleswitch`). POL_HANDLE_SWITCH_PRESENCE=0
+            # turns it off.
+            if prev and mid and int(prev) != int(row["id"]) and \
+                    os.environ.get("POL_HANDLE_SWITCH_PRESENCE", "1") == "1":
+                pushspool._push_emit({"kind": "handleswitch", "member": int(mid),
+                                      "old": int(prev), "new": int(row["id"])})
         finally:
             db.close()
     except Exception as exc:

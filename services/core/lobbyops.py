@@ -96,6 +96,9 @@ def _build():
         Op(0x03, 0x02, "object write-back",
            "updates an existing O/m/ object (mark read, delete)",
            capture=resourcestore.capture_write),
+        Op(0x03, 0x04, "multi-target write",
+           "one O/m/ message to up to 20 recipients; header-only reply",
+           capture=resourcestore.capture_multi_write),
         Op(0x03, 0x03, "mail list",
            "the mailbox: 8 + count * 264 + 4",
            paylen=lobbymail.paylen_mailbox,
@@ -129,7 +132,8 @@ def _build():
            payload=friendgroups.payload_delete),
         Op(0x07, 0x03, "KChgGrpMemClass", "a member's role in a group; header-only reply",
            payload=friendgroups.payload_class_change),
-        Op(0x07, 0x0B, "KChgMyGrpStatus", "parsed and logged; header-only reply",
+        Op(0x07, 0x0B, "KChgMyGrpStatus",
+           "my comment, handle slot and status in one group; header-only reply",
            payload=friendgroups.payload_my_status),
     ]
     for op in rows:
