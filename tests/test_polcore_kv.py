@@ -107,6 +107,29 @@ def suite(s, other):
     chk("blocking pop wakes on a push", s.pop("q", timeout=3), "late")
     chk("...before the timeout", time.monotonic() - t0 < 2.5, True)
 
+    print(" reliable queue (move / lrem / lrange)")
+    s.push("rq", "a", "b", "c")
+    chk("move takes the head", s.move("rq", "rq:work"), "a")
+    chk("...and appends it to the work list", s.lrange("rq:work"), ["a"])
+    chk("move again", s.move("rq", "rq:work"), "b")
+    chk("work list keeps order", s.lrange("rq:work"), ["a", "b"])
+    chk("source keeps the rest", s.lrange("rq"), ["c"])
+    chk("lrem removes one", s.lrem("rq:work", "a"), 1)
+    chk("lrem of a missing value", s.lrem("rq:work", "zz"), 0)
+    chk("lrange after lrem", s.lrange("rq:work"), ["b"])
+    chk("lrange with bounds", (s.push("rq", "d", "e"), s.lrange("rq", 1, 2))[1],
+        ["d", "e"])
+    s.delete("rq", "rq:work")
+    chk("move from an empty list, no wait", s.move("rq", "rq:work"), None)
+    t0 = time.monotonic()
+    chk("move with timeout on an empty list", s.move("rq", "rq:work", timeout=0.5), None)
+    chk("...and it waited", time.monotonic() - t0 >= 0.4, True)
+    threading.Timer(0.2, lambda: s.push("rq", "late")).start()
+    chk("blocking move wakes on a push", s.move("rq", "rq:work", timeout=3), "late")
+    chk("...and the value sits in the work list", s.lrange("rq:work"), ["late"])
+    chk("lrem empties the work list", (s.lrem("rq:work", "late"), s.llen("rq:work")),
+        (1, 0))
+
     print(" publish / subscribe")
     got = []
     sub = s.subscribe(["presence", "rooms"], lambda ch, msg: got.append((ch, msg)))
