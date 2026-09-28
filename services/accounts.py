@@ -5,7 +5,9 @@ Until now every responder was stateless: `handle_authserv` took whatever NICK th
 client sent, echoed it back in the 001/422 welcome, and read the games menu out of
 an environment variable. That is enough to prove the login chain, but it cannot
 express the things PlayOnline accounts actually *are*, so this module introduces
-them. It is stdlib-only (sqlite3 + hashlib) so it adds no image dependency.
+them. The data lives in PostgreSQL (POL_DATABASE_URL), reached through
+polcore.db; the schema is polcore/migrations/, and `connect()` below says what
+a connection looks like to the code in this file.
 
 WHY THESE TABLES -- the shape is taken from the client, not invented:
 
@@ -47,7 +49,8 @@ WHY THESE TABLES -- the shape is taken from the client, not invented:
 NOT modelled, deliberately: characters/worlds. Those live behind the per-title
 world server, not POL, and we have no captures of that layer yet.
 
-CLI:
+CLI (DB is `-` or left out for POL_DATABASE_URL, or a postgresql:// URL; a
+file path from before the move to PostgreSQL is accepted and ignored):
     python accounts.py DB init
     python accounts.py DB addpolid  POLID PASSWORD [--area 00 --pf 01 --prop 00]
     python accounts.py DB addmember POLID LOGIN PASSWORD [--handle NAME]
@@ -64,9 +67,11 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
+import sys
 import time
 import threading
+
+from polcore import db
 
 try:
     import polnick
@@ -77,9 +82,6 @@ try:
     import titles                       # per-title Content ID slots
 except ImportError:                     # a bare copy of this file
     titles = None
-
-#: Where the DB lives inside the container; override with POL_ACCOUNTS_DB.
-DEFAULT_DB = os.environ.get("POL_ACCOUNTS_DB", "/data/accounts.db")
 
 #: PBKDF2-HMAC-SHA256. Cost is deliberately modest: this gates a 2002 game
 #: client on a private server, and the auth path is synchronous per connection.
@@ -96,406 +98,209 @@ CONTENT_NAMES = {1: "FinalFantasyXI", 2: "TetraMaster", 3: "Janhourou",
                  11: "FantasyEarth", 14: "PolFriendList",
                  15: "FinalFantasyXITest"}
 
-#: The journal mode this database runs in. NOT WAL, by default, and that is a
-#: deployment fact rather than a preference: `data/` is a Windows BIND MOUNT, and
-#: WAL needs a shared-memory `-shm` file beside the database. Docker Desktop's
-#: filesystem does not give sqlite reliable shared memory there, which has now
-#: cost this project twice --
-#:
-#:   * a truncated database after a restart (see the accounts.db WAL note, and
-#:     `data/accounts.db.corrupt-*`, which is the wreckage), and
-#:   * 2026-08-13, a PS2 login that failed with
-#:     `OperationalError('unable to open database file')` on an ordinary write.
-#:     The login did not fail loudly -- `resolve_account` catches everything and
-#:     continues "stateless", so the console got a session with NO ACCOUNT: no
-#:     games menu, no handle, and a lobby that then had nothing to serve.
-#:
-#: TRUNCATE keeps a rollback journal in the same directory and needs no shared
-#: memory. The thing WAL buys -- readers that do not block behind a writer -- is
-#: worth very little for a handful of clients, and nothing at all next to losing
-#: the database. POL_SQLITE_JOURNAL overrides it (use WAL on a real filesystem).
-JOURNAL_MODE = os.environ.get("POL_SQLITE_JOURNAL", "TRUNCATE")
-
-SCHEMA = """
-PRAGMA foreign_keys = ON;
-
-CREATE TABLE IF NOT EXISTS polid (
-    polid       TEXT PRIMARY KEY,
-    pw_hash     TEXT NOT NULL,
-    pw_salt     TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'active',
-    area_kbn    TEXT NOT NULL DEFAULT '00',
-    login_pf    TEXT NOT NULL DEFAULT '01',
-    property    TEXT NOT NULL DEFAULT '00',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS member (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    polid        TEXT NOT NULL REFERENCES polid(polid) ON DELETE CASCADE,
-    member_no    INTEGER NOT NULL,
-    login_name   TEXT NOT NULL UNIQUE,
-    pw_hash      TEXT NOT NULL,
-    pw_salt      TEXT NOT NULL,
-    access_level INTEGER NOT NULL DEFAULT 0,
-    status       TEXT NOT NULL DEFAULT 'active',
-    created_at   TEXT NOT NULL,
-    UNIQUE (polid, member_no)
-);
-
-CREATE TABLE IF NOT EXISTS handle (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_id   INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
-    handle_name TEXT NOT NULL UNIQUE,
-    is_primary  INTEGER NOT NULL DEFAULT 1,
-    created_at  TEXT NOT NULL
-);
-
--- Extra login NICKs that map to an existing member. The NICK is derived by the
--- CLIENT from the credentials the user typed, and different clients derive it
--- DIFFERENTLY for one and the same account: the US Viewer logs in as UH5GRSV86
--- while the standalone Friend List (PolFL.exe), which predates Square Enix
--- accounts, derives UBJ8OPU7G from the same POL ID. Without this table the second
--- client is either rejected (POL_ACCOUNTS_ENFORCE=1 -> POL-0008) or
--- auto-provisioned as a SEPARATE member, which logs in fine but shows an empty
--- friend list because it is a different account.
---
--- Deliberately NOT the `handle` table: handles are the in-game handle list the
--- lobby serves back (0:8/0:9, face icons), and a login NICK is not one of those.
-CREATE TABLE IF NOT EXISTS login_alias (
-    nick       TEXT PRIMARY KEY,
-    member_id  INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
-    note       TEXT,
-    created_at TEXT NOT NULL
-);
-
--- Tombstones for deleted handles. The client caches its handle table LOCALLY and
--- re-volunteers the whole thing on 0:8 every login, so a handle merely removed
--- from `handle` gets re-captured straight back. A row here means "the user deleted
--- this handle" and the 0:8 capture skips it, so deletion sticks even though the
--- client keeps sending it. An explicit re-registration (set_handle) clears it.
-CREATE TABLE IF NOT EXISTS deleted_handle (
-    member_id   INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
-    handle_name TEXT NOT NULL,
-    deleted_at  TEXT NOT NULL,
-    PRIMARY KEY (member_id, handle_name)
-);
-
-CREATE TABLE IF NOT EXISTS content (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_id     INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
-    content_code  INTEGER NOT NULL,
-    content_no    TEXT,
-    status        TEXT NOT NULL DEFAULT 'active',
-    registered_at TEXT NOT NULL,
-    UNIQUE (member_id, content_code)
-);
-
--- Per-HANDLE Content ID links. A member's `content` grant is account-level (they
--- own the title); the client, however, checks whether the CURRENT HANDLE has a
--- Content ID linked for a game ("No Content ID registered to this handle" / "Unlink
--- a Content ID from this handle" / "Reorganize Content ID list"). This table is
--- that link: which of a member's contents are attached to which handle, with the
--- SE-style Content ID value and its status (active / cancelled -> the client's
--- "reactivate a cancelled one"). `content_id` is the on-wire value; its exact
--- format is still being pinned by the oracle test, so it is provisional here.
-CREATE TABLE IF NOT EXISTS handle_content (
-    handle_id    INTEGER NOT NULL REFERENCES handle(id) ON DELETE CASCADE,
-    content_code INTEGER NOT NULL,
-    slot         INTEGER NOT NULL DEFAULT 0,
-    content_id   TEXT,
-    status       TEXT NOT NULL DEFAULT 'active',
-    linked_at    TEXT NOT NULL,
-    PRIMARY KEY (handle_id, content_code, slot)
-);
-
--- A Content ID belongs to EXACTLY ONE handle (POL-7169/7187/5326), and that
--- rule now has to survive a table where one (handle, game) holds several rows.
--- `_content_id_taken` has always enforced it in code; this is the backstop that
--- cannot be forgotten by a new call site. NULLs are exempt, which is what
--- SQLite's UNIQUE already does and what a not-yet-minted row needs.
-CREATE UNIQUE INDEX IF NOT EXISTS handle_content_id_unique
-    ON handle_content (content_id) WHERE content_id IS NOT NULL;
-
--- THE CONTENT ID COUNTER. One row, holding the next serial to hand out.
---
--- Content IDs are ALLOCATED, not computed, and that is a measurement rather than
--- a preference: a real SE Content ID was read off the live SE-connected Viewer
--- two independent ways on 2026-08-23 (the 64-slot content table at
--- `polcore+0x403080` slot `+0x08`, and the shim's `[pay]` capture of the real
--- `1:3` reply at record offset 0x10 LE; the value and its provenance are in the
--- GITIGNORED `Ignored Files/content-ids.md`, which is why nothing here quotes
--- it). It is a plain ~8-digit integer in the tens of millions with the
--- game/service carried in a SEPARATE u16 content-code field -- so there is no
--- account, no game and no check digit inside the number, and nothing about it
--- is derivable from what we hold. See `allocate_content_id`.
-CREATE TABLE IF NOT EXISTS content_id_seq (
-    id      INTEGER PRIMARY KEY CHECK (id = 1),
-    next_id INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS friend (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    handle_id    INTEGER NOT NULL REFERENCES handle(id) ON DELETE CASCADE,
-    peer_handle  INTEGER REFERENCES handle(id) ON DELETE SET NULL,
-    peer_name    TEXT NOT NULL,
-    peer_guid    INTEGER NOT NULL DEFAULT 0,
-    kind         INTEGER NOT NULL DEFAULT 2048,
-    status       TEXT NOT NULL DEFAULT 'active',
-    comment      TEXT,
-    -- The caption THIS account gave that person ("rename a friend"), and the
-    -- two ignore-state bytes their 2:6 record carries. Both are measured off
-    -- retail; see the `friend` entries in _MIGRATIONS for the byte values and
-    -- for why the ignore bits are stored rather than decoded.
-    label        TEXT,
-    ignore_low   INTEGER,
-    ignore_flag  INTEGER,
-    created_at   TEXT NOT NULL,
-    UNIQUE (handle_id, peer_name)
-);
-
--- Group MEMBERSHIP. A group is a `friend` row with kind = KIND_GROUP, so a
--- group's identity is that row's id and its name is unique per owning handle.
---
--- Two ceilings here are the CLIENT'S, not ours, and both are validated by it:
--- the 07:12 count block's byte 0 must be <= 4 (four group slots at polcore
--- 0x3bb06c0, stride 0x3098) and bytes 1..4 must each be <= 0x40 (64 member
--- slots per group at obj+0x30, stride 0xC0). Exceeding either draws POL-5133.
---
--- `class` is the 3-bit field the wire record packs at bit 50. polcore accepts
--- 2..5 and REJECTS anything else, and a group whose members are all rejected
--- is dropped from the list entirely. Class 2 additionally marks the group
--- UNUSABLE once it is copied into the group flags (0x37e7d10), so the usable
--- values are 3..5 -- see responders._GROUP_MEMBER_CLASS for the full chain.
-CREATE TABLE IF NOT EXISTS group_member (
-    group_id      INTEGER NOT NULL REFERENCES friend(id) ON DELETE CASCADE,
-    member_handle INTEGER REFERENCES handle(id) ON DELETE SET NULL,
-    member_name   TEXT NOT NULL,
-    member_guid   INTEGER NOT NULL DEFAULT 0,
-    class         INTEGER NOT NULL DEFAULT 3,
-    -- 1 = invited but not yet accepted. Served ONLY to the group's owner
-    -- (their "Inviting into group" rows); everyone else sees accepted members
-    -- alone, and a pending member does not see the group at all until they
-    -- accept. polcore's 2..5 class range has no way to say "halfway in", so
-    -- the halfway state lives here instead of in `class`.
-    pending       INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL,
-    PRIMARY KEY (group_id, member_name)
-);
-
-CREATE TABLE IF NOT EXISTS session (
-    token      TEXT PRIMARY KEY,
-    member_id  INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
-    nick       TEXT,
-    peer_ip    TEXT,
-    iv         TEXT,
-    lobby_port INTEGER,
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
-);
-
--- Handle profile: what the client sends on lobby opcode 05:01 (age, sex, job,
--- location, languages, interests, mail address, portrait). NOT the same thing as
--- `profile` below, which is SE's sign-up contact details.
---
--- Stored as one row per FIELD ID rather than one column per field, deliberately.
--- The wire format is an id-keyed TLV stream and the id map is still incomplete
--- (0x11 and 0x01/0x02 are unidentified), so a column-per-field schema would need
--- migrating every time another id is identified, and would silently drop the ones
--- that are not. Key-value keeps unknown fields instead of discarding them, and it
--- matches how the record has to be rendered back out again.
---
--- val_int and val_text: TLV values are either a small integer (len 8, of which
--- only the low bytes are meaningful -- the rest is uninitialised client stack) or
--- a string (len 320 for the mail address). Exactly one is set.
---- KEYED ON handle_id, NOT member_id. It was member-keyed until 2026-08-12,
---- which made every handle on an account share one profile -- open any of them
---- and the same age/sex/interests/portrait came back. That is not how
---- PlayOnline worked: a handle IS the persona, and its profile is the thing
---- other players look at. See `handle_guid` for how a handle is named on the
---- wire, and `_migrate_handle_profile` for the one-time move of member-keyed
---- rows onto that member's primary handle.
-CREATE TABLE IF NOT EXISTS handle_profile (
-    handle_id  INTEGER NOT NULL REFERENCES handle(id) ON DELETE CASCADE,
-    field_id   INTEGER NOT NULL,
-    val_int    INTEGER,
-    val_text   TEXT,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (handle_id, field_id)
-);
-
--- Member profile: the "personal contact information" of SE's step 5/7.
---
--- Column names mirror the client's own PML variables ONE FOR ONE
--- ($_POLSIGNUP_KANJI_FAMILY_NAME -> kanji_family, ZIP_MAIN -> zip_main, ...),
--- so the page and the database line up with no translation layer and any
--- mismatch is visible rather than buried in a mapping.
---
--- The shape is SE's, which is JP-market: family/given split with a KANJI pair
--- and a KATAKANA (phonetic reading) pair, a two-part postcode, three address
--- lines and a three-part phone number. Western clients label these "Last name /
--- First name" and simply leave the katakana fields empty -- that is a DISPLAY
--- concern, not a schema one, so we keep SE's structure and let unused columns
--- stay null.
-CREATE TABLE IF NOT EXISTS profile (
-    polid           TEXT PRIMARY KEY REFERENCES polid(polid) ON DELETE CASCADE,
-    kanji_family    TEXT,
-    kanji_first     TEXT,
-    katakana_family TEXT,
-    katakana_first  TEXT,
-    zip_main        TEXT,
-    zip_sub         TEXT,
-    address_0       TEXT,
-    address_1       TEXT,
-    address_2       TEXT,
-    phone_0         TEXT,
-    phone_1         TEXT,
-    phone_2         TEXT,
-    country         TEXT,
-    updated_at      TEXT NOT NULL
-);
-
--- Registration codes. SE's step 3/7 takes the code as FIVE dash-separated
--- groups. Codes are STORED exactly as issued but COMPARED `COLLATE NOCASE` --
--- SE's screen claims case-sensitivity, and honouring that cost a real player
--- their sign-up on 2026-08-29 (see `normalise_regcode`). The stored spelling is
--- what every UPDATE writes back, so the audit trail keeps the issued form.
--- `redeemed_by` is the POL ID the code created, which makes
--- a code single-use and gives us an audit trail; `contents` is the
--- comma-separated content codes it grants (a retail code granted three FFXI
--- Content IDs per SE's own walkthrough).
-CREATE TABLE IF NOT EXISTS regcode (
-    code        TEXT PRIMARY KEY,
-    contents    TEXT NOT NULL DEFAULT '1',
-    note        TEXT,
-    created_at  TEXT NOT NULL,
-    redeemed_at TEXT,
-    redeemed_by TEXT REFERENCES polid(polid)
-);
-
--- PlayOnline Mail. One row per stored message; the mailbox is keyed on the
--- LOCAL PART of the address rather than member_id, because that is all a POP3
--- login carries (the client sends either "cas" or "cas@pol.com" as the user id
--- and there is no POL ID anywhere in the session). `member_id` is kept when we
--- can resolve one, for joins and for cascade-delete.
---
--- `uidl` is what the client stores in its own EMAIL/uidllist to decide whether a
--- message is new, so it MUST be stable for the life of the message and unique
--- within the mailbox -- reusing one makes the client skip a real message.
-CREATE TABLE IF NOT EXISTS mail (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    box         TEXT NOT NULL,
-    member_id   INTEGER REFERENCES member(id) ON DELETE CASCADE,
-    uidl        TEXT NOT NULL,
-    sender      TEXT,
-    subject     TEXT,
-    raw         BLOB NOT NULL,
-    received_at TEXT NOT NULL,
-    deleted_at  TEXT,
-    UNIQUE (box, uidl)
-);
-
--- The admin panel's operator credential. A SINGLETON row (id is pinned to 1):
--- there is one operator login, and the panel changes it in place rather than
--- accumulating rows. Kept here, in the same DB the panel already opens, so the
--- credential can be changed at RUN TIME -- the environment variables it used to
--- read are fixed at process start and live in a .env the container cannot write.
---
--- No row = no credential = the panel is open, which is its first-run state and
--- is safe only on the loopback bind. See services/admin.py.
-CREATE TABLE IF NOT EXISTS admin_cred (
-    id         INTEGER PRIMARY KEY CHECK (id = 1),
-    username   TEXT NOT NULL,
-    pw_hash    TEXT NOT NULL,
-    pw_salt    TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
--- ONE ACCOUNT, MANY CLIENTS: the NICK token is per (account x client build).
---
--- `member.login_token` was a single trust-on-first-use slot, which silently made
--- an account single-platform: the PC seeds it, and the PS2 Viewer -- which
--- presents a DIFFERENT 11-char token for the same account -- is then refused
--- for ever with SE reject 0xCA ("wrong password"). Worked example, measured
--- live 2026-08-24: account `ABCD1234`/"Fox" logged in 223 times as
--- `AbCdEfGhIjK` from the PC and was refused 4 times as `ZyXwVuTsRqP` from the
--- PS2, while an account seeded FROM the PS2 worked there and would have failed
--- on the PC for the mirror-image reason.
---
--- `client_sig` is the NICK blob's fixed 21-char head+pad (blob[0:21]) -- the
--- only measured discriminator between client builds:
---     PC/Deck Viewer   TTTTTAISTTTTTTTTTTTTT  (and ...AIT..., same token)
---     PS2 Viewer       TTTTT7ITTTGaItbIQ8nHA
--- It is a MEASUREMENT, not a decoded field: what those bytes mean is unknown,
--- so this stores the signature verbatim rather than a platform name we invented.
---
--- TOFU is now per (member, client_sig): the first login from a given client
--- records that client's token, later logins from it must match. A client
--- signature never seen for this account seeds its own slot, which is exactly
--- the trust the account's very first login already got.
-CREATE TABLE IF NOT EXISTS login_token_client (
-    member_id  INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
-    client_sig TEXT NOT NULL,
-    token      TEXT NOT NULL,
-    first_seen TEXT NOT NULL,
-    last_seen  TEXT NOT NULL,
-    PRIMARY KEY (member_id, client_sig)
-);
-
--- Every message that crossed the outside-mail boundary, both ways. It is the
--- daily cap's counter (services/extmail.py) and the trail for "who sent that".
-CREATE TABLE IF NOT EXISTS ext_mail_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_id  INTEGER REFERENCES member(id) ON DELETE CASCADE,
-    direction  TEXT NOT NULL,          -- 'out' | 'in'
-    peer_addr  TEXT,
-    at         TEXT NOT NULL,
-    ok         INTEGER NOT NULL,
-    detail     TEXT
-);
-
--- CLIENT BUILDS WHOSE NICK DIGEST HAS BEEN PROVEN. The digest formula
--- (md5(greeting[:40] + password), see login_digest_ok) was measured on the PC
--- Viewer; a build only has a wrong password REFUSED on the digest once one real
--- login from it has matched. Until then a mismatch falls back to the token check,
--- so a build that salts differently cannot lock its players out.
-CREATE TABLE IF NOT EXISTS login_digest_client (
-    client_sig  TEXT PRIMARY KEY,
-    member_id   INTEGER,
-    proven_at   TEXT NOT NULL
-);
-
--- FAILED VIEWER LOGINS, for the lockout (SE's status 0xCB). One row per wrong
--- password the NICK digest actually REFUSED -- never a token mismatch or an
--- unproven build. In the DB, not in memory, because the auth hop (authsess) and
--- the login container are separate processes and both must see one count.
--- `at` is unix seconds. `accounts.py <db> unlock <polid|login>` clears a member.
-CREATE TABLE IF NOT EXISTS login_fail (
-    member_id   INTEGER NOT NULL,
-    at          REAL NOT NULL,
-    peer_ip     TEXT,
-    client_sig  TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_login_fail ON login_fail(member_id, at);
-
--- WHEN EACH OF A MEMBER'S LISTS LAST CHANGED, as served in the login record
--- (responders.build_gate_record, POL_GATE_LIST_STAMPS=1). `fingerprint` is
--- what the list looked like when `stamp` was set; see list_stamp().
-CREATE TABLE IF NOT EXISTS list_stamp (
-    member_id   INTEGER NOT NULL REFERENCES member(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL,
-    fingerprint TEXT NOT NULL,
-    stamp       INTEGER NOT NULL,
-    PRIMARY KEY (member_id, kind)
-);
-
-CREATE INDEX IF NOT EXISTS idx_member_polid   ON member(polid);
-CREATE INDEX IF NOT EXISTS idx_content_member ON content(member_id);
-CREATE INDEX IF NOT EXISTS idx_session_member ON session(member_id);
-CREATE INDEX IF NOT EXISTS idx_mail_box       ON mail(box, deleted_at);
-CREATE INDEX IF NOT EXISTS idx_ext_mail_log   ON ext_mail_log(member_id, direction, at);
-"""
+# --------------------------------------------------------------------------- #
+# THE TABLES, AND WHY THEY ARE SHAPED THIS WAY
+#
+# The DDL lives in polcore/migrations/ (0001_accounts.sql and the files after
+# it), applied by polcore.db.migrate(); a schema change is a new numbered file
+# there. What the SQL cannot say is why a table is what it is, so that stays
+# here, next to the code that reads and writes it.
+#
+# [login_alias]
+# Extra login NICKs that map to an existing member. The NICK is derived by the
+# CLIENT from the credentials the user typed, and different clients derive it
+# DIFFERENTLY for one and the same account: the US Viewer logs in as UH5GRSV86
+# while the standalone Friend List (PolFL.exe), which predates Square Enix
+# accounts, derives UBJ8OPU7G from the same POL ID. Without this table the
+# second client is either rejected (POL_ACCOUNTS_ENFORCE=1 -> POL-0008) or
+# auto-provisioned as a SEPARATE member, which logs in fine but shows an empty
+# friend list because it is a different account.
+#
+# Deliberately NOT the `handle` table: handles are the in-game handle list the
+# lobby serves back (0:8/0:9, face icons), and a login NICK is not one of those.
+#
+# [deleted_handle]
+# Tombstones for deleted handles. The client caches its handle table LOCALLY
+# and re-volunteers the whole thing on 0:8 every login, so a handle merely
+# removed from `handle` gets re-captured straight back. A row here means "the
+# user deleted this handle" and the 0:8 capture skips it, so deletion sticks
+# even though the client keeps sending it. An explicit re-registration
+# (set_handle) clears it.
+#
+# [handle_content]
+# Per-HANDLE Content ID links. A member's `content` grant is account-level
+# (they own the title); the client, however, checks whether the CURRENT HANDLE
+# has a Content ID linked for a game ("No Content ID registered to this
+# handle" / "Unlink a Content ID from this handle" / "Reorganize Content ID
+# list"). This table is that link: which of a member's contents are attached
+# to which handle, with the SE-style Content ID value and its status (active /
+# cancelled -> the client's "reactivate a cancelled one"). `content_id` is the
+# on-wire value, TEXT in two widths (see content_id_int).
+#
+# A Content ID belongs to EXACTLY ONE handle (POL-7169/7187/5326), and that rule
+# has to survive a table where one (handle, game) holds several rows (`slot`).
+# `_content_id_taken` has always enforced it in code; the partial unique index
+# handle_content_id_unique is the backstop that cannot be forgotten by a new
+# call site. NULLs are exempt, which is what a not-yet-minted row needs.
+#
+# [content_id_seq]
+# THE CONTENT ID COUNTER. One row, holding the next serial to hand out.
+#
+# Content IDs are ALLOCATED, not computed, and that is a measurement rather
+# than a preference: a real SE Content ID was read off the live SE-connected
+# Viewer two independent ways on 2026-08-23 (the 64-slot content table at
+# `polcore+0x403080` slot `+0x08`, and the shim's `[pay]` capture of the real
+# `1:3` reply at record offset 0x10 LE; the value and its provenance are in the
+# GITIGNORED `Ignored Files/content-ids.md`, which is why nothing here quotes
+# it). It is a plain ~8-digit integer in the tens of millions with the
+# game/service carried in a SEPARATE u16 content-code field -- so there is no
+# account, no game and no check digit inside the number, and nothing about it
+# is derivable from what we hold. See `allocate_content_id`.
+#
+# [group_member]
+# Group MEMBERSHIP. A group is a `friend` row with kind = KIND_GROUP, so a
+# group's identity is that row's id and its name is unique per owning handle.
+#
+# Two ceilings here are the CLIENT'S, not ours, and both are validated by it:
+# the 07:12 count block's byte 0 must be <= 4 (four group slots at polcore
+# 0x3bb06c0, stride 0x3098) and bytes 1..4 must each be <= 0x40 (64 member
+# slots per group at obj+0x30, stride 0xC0). Exceeding either draws POL-5133.
+#
+# `class` is the 3-bit field the wire record packs at bit 50. polcore accepts
+# 2..5 and REJECTS anything else, and a group whose members are all rejected
+# is dropped from the list entirely. Class 2 additionally marks the group
+# UNUSABLE once it is copied into the group flags (0x37e7d10), so the usable
+# values are 3..5 -- see responders._GROUP_MEMBER_CLASS for the full chain.
+#
+# `pending` = 1 is invited but not yet accepted. Served ONLY to the group's
+# owner (their "Inviting into group" rows); everyone else sees accepted members
+# alone, and a pending member does not see the group at all until they accept.
+# polcore's 2..5 class range has no way to say "halfway in", so the halfway
+# state lives here instead of in `class`. `seq` is the order members were
+# first added (list_group_members).
+#
+# [handle_profile]
+# Handle profile: what the client sends on lobby opcode 05:01 (age, sex, job,
+# location, languages, interests, mail address, portrait). NOT the same thing
+# as `profile` below, which is SE's sign-up contact details.
+#
+# Stored as one row per FIELD ID rather than one column per field,
+# deliberately. The wire format is an id-keyed TLV stream and the id map is
+# still incomplete (0x11 and 0x01/0x02 are unidentified), so a column-per-field
+# schema would need migrating every time another id is identified, and would
+# silently drop the ones that are not. Key-value keeps unknown fields instead
+# of discarding them, and it matches how the record has to be rendered back
+# out again.
+#
+# val_int and val_text: TLV values are either a small integer (len 8, of which
+# only the low bytes are meaningful -- the rest is uninitialised client stack)
+# or a string (len 320 for the mail address). Exactly one is set.
+#
+# KEYED ON handle_id, NOT member_id. It was member-keyed until 2026-08-12,
+# which made every handle on an account share one profile -- open any of them
+# and the same age/sex/interests/portrait came back. That is not how
+# PlayOnline worked: a handle IS the persona, and its profile is the thing
+# other players look at. See `handle_guid` for how a handle is named on the
+# wire.
+#
+# [profile]
+# Member profile: the "personal contact information" of SE's step 5/7.
+#
+# Column names mirror the client's own PML variables ONE FOR ONE
+# ($_POLSIGNUP_KANJI_FAMILY_NAME -> kanji_family, ZIP_MAIN -> zip_main, ...),
+# so the page and the database line up with no translation layer and any
+# mismatch is visible rather than buried in a mapping.
+#
+# The shape is SE's, which is JP-market: family/given split with a KANJI pair
+# and a KATAKANA (phonetic reading) pair, a two-part postcode, three address
+# lines and a three-part phone number. Western clients label these "Last name
+# / First name" and simply leave the katakana fields empty -- that is a
+# DISPLAY concern, not a schema one, so we keep SE's structure and let unused
+# columns stay null.
+#
+# [regcode]
+# Registration codes. SE's step 3/7 takes the code as FIVE dash-separated
+# groups. Codes are STORED exactly as issued but COMPARED case-insensitively
+# (lower(code) = lower(%s)) -- SE's screen claims case-sensitivity, and
+# honouring that cost a real player their sign-up on 2026-08-29 (see
+# `normalise_regcode`). The stored spelling is what every UPDATE writes back,
+# so the audit trail keeps the issued form. `redeemed_by` is the POL ID the
+# code created, which makes a code single-use and gives us an audit trail;
+# `contents` is the comma-separated content codes it grants (a retail code
+# granted three FFXI Content IDs per SE's own walkthrough).
+#
+# [mail]
+# PlayOnline Mail. One row per stored message; the mailbox is keyed on the
+# LOCAL PART of the address rather than member_id, because that is all a POP3
+# login carries (the client sends either "cas" or "cas@pol.com" as the user id
+# and there is no POL ID anywhere in the session). `member_id` is kept when we
+# can resolve one, for joins and for cascade-delete.
+#
+# `uidl` is what the client stores in its own EMAIL/uidllist to decide whether
+# a message is new, so it MUST be stable for the life of the message and
+# unique within the mailbox -- reusing one makes the client skip a real
+# message.
+#
+# [admin_cred]
+# The admin panel's operator credential. A SINGLETON row (id is pinned to 1):
+# there is one operator login, and the panel changes it in place rather than
+# accumulating rows. Kept in the database the panel already opens, so the
+# credential can be changed at RUN TIME -- the environment variables it used
+# to read are fixed at process start and live in a .env the container cannot
+# write.
+#
+# No row = no credential = the panel is open, which is its first-run state and
+# is safe only on the loopback bind. See services/admin.py.
+#
+# [login_token_client]
+# ONE ACCOUNT, MANY CLIENTS: the NICK token is per (account x client build).
+#
+# `member.login_token` was a single trust-on-first-use slot, which silently
+# made an account single-platform: the PC seeds it, and the PS2 Viewer --
+# which presents a DIFFERENT 11-char token for the same account -- is then
+# refused for ever with SE reject 0xCA ("wrong password"). Worked example,
+# measured live 2026-08-24: account `ABCD1234`/"Fox" logged in 223 times as
+# `AbCdEfGhIjK` from the PC and was refused 4 times as `ZyXwVuTsRqP` from the
+# PS2, while an account seeded FROM the PS2 worked there and would have failed
+# on the PC for the mirror-image reason.
+#
+# `client_sig` is the NICK blob's fixed 21-char head+pad (blob[0:21]) -- the
+# only measured discriminator between client builds:
+#     PC/Deck Viewer   TTTTTAISTTTTTTTTTTTTT  (and ...AIT..., same token)
+#     PS2 Viewer       TTTTT7ITTTGaItbIQ8nHA
+# It is a MEASUREMENT, not a decoded field: what those bytes mean is unknown,
+# so this stores the signature verbatim rather than a platform name we
+# invented.
+#
+# TOFU is now per (member, client_sig): the first login from a given client
+# records that client's token, later logins from it must match. A client
+# signature never seen for this account seeds its own slot, which is exactly
+# the trust the account's very first login already got.
+#
+# [ext_mail_log]
+# Every message that crossed the outside-mail boundary, both ways. It is the
+# daily cap's counter (services/extmail.py) and the trail for "who sent that".
+#
+# [login_digest_client]
+# CLIENT BUILDS WHOSE NICK DIGEST HAS BEEN PROVEN. The digest formula
+# (md5(greeting[:40] + password), see login_digest_ok) was measured on the PC
+# Viewer; a build only has a wrong password REFUSED on the digest once one real
+# login from it has matched. Until then a mismatch falls back to the token
+# check, so a build that salts differently cannot lock its players out.
+#
+# [login_fail]
+# FAILED VIEWER LOGINS, for the lockout (SE's status 0xCB). One row per wrong
+# password the NICK digest actually REFUSED -- never a token mismatch or an
+# unproven build. In the database, not in memory, because the auth hop
+# (authsess) and the login container are separate processes and both must see
+# one count. `at` is unix seconds. `accounts.py - unlock <polid|login>` clears
+# a member.
+#
+# [list_stamp]
+# WHEN EACH OF A MEMBER'S LISTS LAST CHANGED, as served in the login record
+# (responders.build_gate_record, POL_GATE_LIST_STAMPS=1). `fingerprint` is
+# what the list looked like when `stamp` was set; see list_stamp().
+# --------------------------------------------------------------------------- #
 
 
 # --------------------------------------------------------------------------- #
@@ -572,14 +377,9 @@ def check_admin_password_policy(password):
 
 def get_admin_cred(conn):
     """The operator credential row, or None when none has been set."""
-    try:
-        return conn.execute(
-            "SELECT username, pw_hash, pw_salt, updated_at"
-            "  FROM admin_cred WHERE id = 1").fetchone()
-    except sqlite3.OperationalError:
-        # A DB last touched by a build that predates this table. Treat it as
-        # "no credential" rather than 500ing the panel that would set one.
-        return None
+    return conn.execute(
+        "SELECT username, pw_hash, pw_salt, updated_at"
+        "  FROM admin_cred WHERE id = 1").fetchone()
 
 
 def set_admin_cred(conn, username, password):
@@ -597,8 +397,11 @@ def set_admin_cred(conn, username, password):
         raise ValueError(msg)
     pw_hash, pw_salt = hash_password(password)
     conn.execute(
-        "INSERT OR REPLACE INTO admin_cred (id, username, pw_hash, pw_salt,"
-        " updated_at) VALUES (1,?,?,?,?)",
+        "INSERT INTO admin_cred (id, username, pw_hash, pw_salt,"
+        " updated_at) VALUES (1,%s,%s,%s,%s)"
+        " ON CONFLICT (id) DO UPDATE SET username = excluded.username,"
+        " pw_hash = excluded.pw_hash, pw_salt = excluded.pw_salt,"
+        " updated_at = excluded.updated_at",
         (username, pw_hash, pw_salt, _now()))
     return username
 
@@ -608,499 +411,222 @@ def clear_admin_cred(conn):
     conn.execute("DELETE FROM admin_cred WHERE id = 1")
 
 
-#: Columns added after the first schema shipped. `CREATE TABLE IF NOT EXISTS`
-#: silently leaves an existing table alone, so new columns need adding by hand
-#: or an upgraded server sees an old DB and fails at runtime instead of here.
-_MIGRATIONS = {
-    "group_member": [
-        ("pending", "INTEGER NOT NULL DEFAULT 0"),
-    ],
-    "member": [
-        # PlayOnline Mail. SE assigns an address at registration (the real one
-        # looked like x141582595264@pol.com) and lets you request up to three
-        # preferred names; mail has its OWN password, which is why the Viewer
-        # prompts separately for it.
-        ("mail_address", "TEXT"),
-        ("mail_pw_hash", "TEXT"),
-        ("mail_pw_salt", "TEXT"),
-        # The mail password IN CLEAR, and only for accounts that opt in.
-        # APOP (which is what the Viewer's PlayOnline-mail preset selects) sends
-        # MD5(banner + password) -- there is no way to check that against a
-        # one-way hash, so verifying it at all requires the plaintext. This is a
-        # SEPARATE password from the POL login one by SE's own design, the Viewer
-        # prompts for it separately, and leaving it NULL simply falls back to
-        # accepting any digest. Never reuse the login password here.
-        ("mail_pw_plain", "TEXT"),
-        # Login/logout clock, served back in the lobby 04:06 session record
-        # (payload +0x08 = last login, +0x0C = last logout; see
-        # responders._session_record). `last_login_at` is THIS session's login and
-        # `prev_login_at` the one before it -- the lobby's "Last Login" wants the
-        # previous one, since by the time it renders you are already logged in.
-        ("last_login_at", "TEXT"),
-        ("prev_login_at", "TEXT"),
-        ("last_logout_at", "TEXT"),
-        # The stable password token off the NICK line's third field (11 chars;
-        # see responders.nick_credential). Trust-on-first-use: recorded on the
-        # first login, compared on every later one. This is NOT the plaintext
-        # password nor a hash of it -- it is the client-derived credential the
-        # Viewer transmits, which is stable per password, so comparing it is a
-        # real password check without our having reversed the derivation. Kept
-        # separate from pw_hash (which the registration flow sets) on purpose.
-        ("login_token", "TEXT"),
-        # WHEN THIS ACCOUNT MAY BIND A LOGIN TOKEN (ISO-8601 UTC, NULL = never).
-        #
-        # The token is trust-on-first-use: the first login of a client records
-        # whatever it presents, because the token is a function of the password
-        # we have not reversed and so cannot precompute. That is fine for a
-        # private LAN and wrong on a public server -- an account that has never
-        # been played is one crafted NICK away from being taken over by anyone
-        # who knows its POL ID, and the real owner would never know.
-        #
-        # So binding is only allowed while the account is ARMED, and what arms
-        # it is a password proof: creating the account, or an operator running
-        # `accounts.py arm` for a player who has shown they know the password.
-        # `arm_login_token` writes it; `login_token_armed` reads it.
-        ("token_arm_until", "TEXT"),
-        # May this member mail the INTERNET (and be mailed from it) through the
-        # outside-mail domain? Set only from the admin panel; see services/extmail.py.
-        ("ext_mail", "INTEGER NOT NULL DEFAULT 0"),
-        # THE LOGIN PASSWORD, SEALED (reversible, never plaintext at rest).
-        # The NICK line's 32-hex field is md5(greeting token + password), with
-        # the per-connection greeting FIRST -- so a one-way hash cannot check
-        # it and the lobby needs the password itself. Same reason as
-        # mail_pw_plain above (APOP). Written wherever a password is set or
-        # proven (register, passwd, a servlet sign-in); read only by
-        # responders.resolve_account. See seal_login_password.
-        ("login_pw_sealed", "TEXT"),
-    ],
-    "handle": [
-        # WHAT THIS CLIENT CALLS ITSELF. A client knows its PEERS by the guids we
-        # serve, but it knows ITSELF by a value of its own -- constant per
-        # account, and visible to us in everything it writes: the sender field of
-        # a message it sends, and the 8 bytes at +0x0C of a 02:06 friend record.
-        # SE's account holder carries 0x8c002c1e04bc91 in both.
-        #
-        # It matters because a message's RECIPIENT field is the reader itself. In
-        # our guid the reader does not recognise it and the header renders "To:
-        # Unknown User" -- reported live 2026-08-16 on a push that otherwise
-        # worked. Learned, never invented; NULL simply means "not seen yet".
-        ("client_guid", "INTEGER"),
-    ],
-    "friend": [
-        # THE CLIENT'S OWN ID FOR THIS ROW -- the 12 bytes at +0x18 of a 02:06
-        # write record, kept verbatim because it is how a DELETE names its
-        # target. A deletion carries no name (the field holds stale heap; see
-        # responders._friend_put_records), so without this there is nothing to
-        # match it against and "remove friend" can only be applied by guessing.
-        # It is client-minted and opaque -- polcore's guid key K, most likely --
-        # so it is stored, compared and never interpreted.
-        ("client_ref", "BLOB"),
-        # THE SECOND ID, and the one a delete always carries in the same place:
-        # the 4 bytes at request 0x158, immediately in front of the record grid.
-        # Measured 2026-08-16 across seven consecutive delete attempts -- stable
-        # per row (`a21af5eb` for one friend, `e2b8e568` for another) and stable
-        # across attempts, while the record's own name field held heap. Two
-        # independent ids means a delete still matches when one of them is
-        # missing.
-        ("wire_ref", "BLOB"),
-        # THE PER-FRIEND LABEL -- what "rename a friend" actually writes.
-        # Measured 2026-08-19 off retail (capture `grouplife.txt` @257632):
-        # renaming `Cyn` to
-        # "Cool friend :3" sends a plain `2:6 KPutFriendList` whose record
-        # carries that text in the slot the NAME normally occupies. It is not a
-        # new opcode and it is not the handle changing name -- it is a caption
-        # this account keeps for that person. Distinct from `comment`, which is
-        # the PEER's own profile text.
-        ("label", "TEXT"),
-        # THE IGNORE STATE, round-tripped rather than interpreted. Same capture:
-        # ignoring somebody is not an opcode either, it is two flag bytes on
-        # their record inside the same 2:6 --
-        #     normal      low=0x21  flag=0x00
-        #     ignore ADD  low=0x31  flag=0x34
-        #     scope->PoL  low=0x51  flag=0x00
-        #     un-ignore   low=0x21  flag=0x40
-        # Four samples is not enough to name every bit, and the handoff is
-        # explicit that we need not: store them, serve them back, never drop
-        # them. `ignore_low` is the byte in front of the record grid, and
-        # `ignore_flag` the one at record +0x03 (see responders'
-        # `_FRIEND_PUT_FLAG_AT`).
-        ("ignore_low", "INTEGER"),
-        ("ignore_flag", "INTEGER"),
-    ],
-}
+# --------------------------------------------------------------------------- #
+# COLUMNS ADDED AFTER THE FIRST SCHEMA SHIPPED, and what each one is for. They
+# were ALTER TABLE ADD COLUMN steps under SQLite; 0001_accounts.sql folds them
+# into the tables.
+#
+# member.mail_address, mail_pw_hash, mail_pw_salt
+#   PlayOnline Mail. SE assigns an address at registration (the real one looked
+#   like x141582595264@pol.com) and lets you request up to three preferred
+#   names; mail has its OWN password, which is why the Viewer prompts
+#   separately for it.
+#
+# member.mail_pw_plain
+#   The mail password IN CLEAR, and only for accounts that opt in. APOP (which
+#   is what the Viewer's PlayOnline-mail preset selects) sends MD5(banner +
+#   password) -- there is no way to check that against a one-way hash, so
+#   verifying it at all requires the plaintext. This is a SEPARATE password
+#   from the POL login one by SE's own design, the Viewer prompts for it
+#   separately, and leaving it NULL simply falls back to accepting any digest.
+#   Never reuse the login password here.
+#
+# member.last_login_at, prev_login_at, last_logout_at
+#   Login/logout clock, served back in the lobby 04:06 session record (payload
+#   +0x08 = last login, +0x0C = last logout; see responders._session_record).
+#   `last_login_at` is THIS session's login and `prev_login_at` the one before
+#   it -- the lobby's "Last Login" wants the previous one, since by the time it
+#   renders you are already logged in.
+#
+# member.login_token
+#   The stable password token off the NICK line's third field (11 chars; see
+#   responders.nick_credential). Trust-on-first-use: recorded on the first
+#   login, compared on every later one. This is NOT the plaintext password nor
+#   a hash of it -- it is the client-derived credential the Viewer transmits,
+#   which is stable per password, so comparing it is a real password check
+#   without our having reversed the derivation. Kept separate from pw_hash
+#   (which the registration flow sets) on purpose.
+#
+# member.token_arm_until
+#   WHEN THIS ACCOUNT MAY BIND A LOGIN TOKEN (ISO-8601 UTC, NULL = never).
+#
+#   The token is trust-on-first-use: the first login of a client records
+#   whatever it presents, because the token is a function of the password we
+#   have not reversed and so cannot precompute. That is fine for a private LAN
+#   and wrong on a public server -- an account that has never been played is
+#   one crafted NICK away from being taken over by anyone who knows its POL
+#   ID, and the real owner would never know.
+#
+#   So binding is only allowed while the account is ARMED, and what arms it is
+#   a password proof: creating the account, or an operator running
+#   `accounts.py - arm` for a player who has shown they know the password.
+#   `arm_login_token` writes it; `login_token_armed` reads it.
+#
+# member.ext_mail
+#   May this member mail the INTERNET (and be mailed from it) through the
+#   outside-mail domain? Set only from the admin panel; see services/extmail.py.
+#
+# member.login_pw_sealed
+#   THE LOGIN PASSWORD, SEALED (reversible, never plaintext at rest). The NICK
+#   line's 32-hex field is md5(greeting token + password), with the
+#   per-connection greeting FIRST -- so a one-way hash cannot check it and the
+#   lobby needs the password itself. Same reason as mail_pw_plain above (APOP).
+#   Written wherever a password is set or proven (register, passwd, a servlet
+#   sign-in); read only by responders.resolve_account. See
+#   seal_login_password.
+#
+# handle.client_guid
+#   WHAT THIS CLIENT CALLS ITSELF. A client knows its PEERS by the guids we
+#   serve, but it knows ITSELF by a value of its own -- constant per account,
+#   and visible to us in everything it writes: the sender field of a message
+#   it sends, and the 8 bytes at +0x0C of a 02:06 friend record. SE's account
+#   holder carries 0x8c002c1e04bc91 in both.
+#
+#   It matters because a message's RECIPIENT field is the reader itself. In
+#   our guid the reader does not recognise it and the header renders "To:
+#   Unknown User" -- reported live 2026-08-16 on a push that otherwise worked.
+#   Learned, never invented; NULL simply means "not seen yet".
+#
+# friend.client_ref
+#   THE CLIENT'S OWN ID FOR THIS ROW -- the 12 bytes at +0x18 of a 02:06 write
+#   record, kept verbatim because it is how a DELETE names its target. A
+#   deletion carries no name (the field holds stale heap; see
+#   responders._friend_put_records), so without this there is nothing to match
+#   it against and "remove friend" can only be applied by guessing. It is
+#   client-minted and opaque -- polcore's guid key K, most likely -- so it is
+#   stored, compared and never interpreted.
+#
+# friend.wire_ref
+#   THE SECOND ID, and the one a delete always carries in the same place: the
+#   4 bytes at request 0x158, immediately in front of the record grid.
+#   Measured 2026-08-16 across seven consecutive delete attempts -- stable per
+#   row (`a21af5eb` for one friend, `e2b8e568` for another) and stable across
+#   attempts, while the record's own name field held heap. Two independent ids
+#   means a delete still matches when one of them is missing.
+#
+# friend.label
+#   THE PER-FRIEND LABEL -- what "rename a friend" actually writes. Measured
+#   2026-08-19 off retail (capture `grouplife.txt` @257632): renaming `Cyn` to
+#   "Cool friend :3" sends a plain `2:6 KPutFriendList` whose record carries
+#   that text in the slot the NAME normally occupies. It is not a new opcode
+#   and it is not the handle changing name -- it is a caption this account
+#   keeps for that person. Distinct from `comment`, which is the PEER's own
+#   profile text.
+#
+# friend.ignore_low, ignore_flag
+#   THE IGNORE STATE, round-tripped rather than interpreted. Same capture:
+#   ignoring somebody is not an opcode either, it is two flag bytes on their
+#   record inside the same 2:6 --
+#       normal      low=0x21  flag=0x00
+#       ignore ADD  low=0x31  flag=0x34
+#       scope->PoL  low=0x51  flag=0x00
+#       un-ignore   low=0x21  flag=0x40
+#   Four samples is not enough to name every bit, and the handoff is explicit
+#   that we need not: store them, serve them back, never drop them.
+#   `ignore_low` is the byte in front of the record grid, and `ignore_flag` the
+#   one at record +0x03 (see responders' `_FRIEND_PUT_FLAG_AT`).
+#
+# group_member.pending
+#   See [group_member] above.
+# --------------------------------------------------------------------------- #
 
 
-def _migrate_handle_profile(conn):
-    """Move a member-keyed `handle_profile` onto handle ids (2026-08-12).
+# --------------------------------------------------------------------------- #
+# the connection
+# --------------------------------------------------------------------------- #
+#: Kept for callers that still pass `os.environ.get("POL_ACCOUNTS_DB",
+#: accounts.DEFAULT_DB)` to connect(). The account data lives in PostgreSQL
+#: (POL_DATABASE_URL); a path argument is ignored.
+DEFAULT_DB = ""
 
-    ADD COLUMN cannot express this one -- the primary key itself changes -- so it
-    is a rebuild rather than a `_MIGRATIONS` entry. Rows land on the member's
-    PRIMARY handle, which for every account that exists today is the only handle
-    that ever had a profile: the client edits the profile of whichever handle is
-    active, and until now the server wrote them all to the same member row.
-
-    A member with no handle at all would have nowhere to put its rows; those are
-    dropped rather than orphaned, and counted in the log line so a surprise is
-    visible instead of silent.
-    """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(handle_profile)")}
-    if "member_id" not in cols:
-        return                                   # already handle-keyed
-    rows = list(conn.execute(
-        "SELECT p.member_id, p.field_id, p.val_int, p.val_text, p.updated_at,"
-        "       (SELECT id FROM handle WHERE member_id = p.member_id"
-        "         ORDER BY is_primary DESC, id ASC LIMIT 1) AS handle_id"
-        "  FROM handle_profile p"))
-    kept = [r for r in rows if r["handle_id"] is not None]
-    conn.execute("ALTER TABLE handle_profile RENAME TO handle_profile_by_member")
-    conn.executescript(SCHEMA)                   # recreate with the new key
-    conn.executemany(
-        "INSERT OR REPLACE INTO handle_profile (handle_id, field_id, val_int,"
-        " val_text, updated_at) VALUES (?,?,?,?,?)",
-        [(r["handle_id"], r["field_id"], r["val_int"], r["val_text"],
-          r["updated_at"]) for r in kept])
-    conn.commit()
-    # The old table is KEPT, not dropped: it is the only copy of the pre-move
-    # data, it is tiny, and a wrong primary-handle guess is recoverable from it.
-    print(f"[accounts] handle_profile: re-keyed {len(kept)} row(s) onto handle "
-          f"ids, {len(rows) - len(kept)} dropped (member had no handle); "
-          f"originals kept in handle_profile_by_member")
-
-
-def _migrate_handle_content_slots(conn):
-    """Give `handle_content` a `slot`, so one handle can hold SEVERAL Content IDs
-    for the SAME game (2026-09-03).
-
-    ADD COLUMN cannot express this one -- the primary key itself changes from
-    `(handle_id, content_code)` to `(handle_id, content_code, slot)` -- so it is a
-    rebuild, the same shape as `_migrate_handle_profile`.
-
-    WHY. FFXI issues one Content ID per CHARACTER, and the old key could express
-    exactly one per handle. A player who made a second character got no pairing
-    for it (`ffxi_bridge.content_id_for` refuses to bind one Content ID to two
-    charids, correctly -- a duplicate silently destroys the other character's
-    world identity), so the second character missed POL's 64-slot table and drew
-    **POL-0001** at char select, for ever, with nothing about creating it looking
-    wrong. Measured on Ironbadger 2026-08-28: charid 4 `Kharn` held 30000037 and
-    charid 6 `Blue` held nothing; five select attempts, five world-server pending
-    sessions, zero zone-ins.
-
-    Every existing row becomes slot 0, which is byte-for-byte the behaviour that
-    was there before -- no id moves, nothing is re-minted (see
-    `allocate_content_id`: the FFXI client names a character's local files after
-    its Content ID in hex, so re-minting orphans macros). Slots 1..N are minted
-    by `ensure_content_slots` and are purely additive.
-    """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(handle_content)")}
-    if "slot" in cols:
-        return                                   # already slotted
-    rows = list(conn.execute(
-        "SELECT handle_id, content_code, content_id, status, linked_at"
-        "  FROM handle_content"))
-    conn.execute("ALTER TABLE handle_content RENAME TO handle_content_pre_slots")
-    conn.executescript(SCHEMA)                   # recreate with the new key
-    conn.executemany(
-        "INSERT INTO handle_content (handle_id, content_code, slot, content_id,"
-        " status, linked_at) VALUES (?,?,0,?,?,?)",
-        [(r["handle_id"], r["content_code"], r["content_id"], r["status"],
-          r["linked_at"]) for r in rows])
-    conn.commit()
-    # Kept, not dropped, for the same reason `handle_profile_by_member` is: it is
-    # tiny and it is the only pre-migration copy of a value that must never be
-    # re-minted.
-    print(f"[accounts] handle_content: re-keyed {len(rows)} row(s) onto "
-          f"(handle, content, slot); originals kept in handle_content_pre_slots")
+#: Databases (by URL) whose migrations this PROCESS has already applied.
+_SCHEMA_READY = set()
+_SCHEMA_LOCK = threading.Lock()
 
 
 def _migrate(conn):
-    for table, cols in _MIGRATIONS.items():
-        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-        for name, decl in cols:
-            if name not in have:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-    conn.commit()
-    _migrate_handle_profile(conn)
-    _migrate_handle_content_slots(conn)
-    # Accounts that already exist get the extra Content IDs of a title that
-    # issues one per character here. New ones get them at registration, and
-    # every handle again at login (core/authserv.py); without this line an
-    # account nobody logs in with would keep the single-character ceiling, and
-    # the operator would have to know to run a tool nobody would think to look
-    # for. Additive and idempotent -- see ensure_content_slots. A no-op in a
-    # process that loads no title asking for more than one.
+    """Bring the schema up to date, then top up per-character Content IDs.
+
+    polcore.db.migrate() applies whatever numbered migration this database has
+    not seen, under an advisory lock, so several containers starting at once
+    take turns and nothing runs twice.
+
+    Accounts that already exist get the extra Content IDs of a title that
+    issues one per character here. New ones get them at registration, and
+    every handle again at login (core/authserv.py); without this line an
+    account nobody logs in with would keep the single-character ceiling, and
+    the operator would have to know to run a tool nobody would think to look
+    for. Additive and idempotent -- see ensure_content_slots. A no-op in a
+    process that loads no title asking for more than one.
+    """
+    db.migrate()
     minted = ensure_title_slots(conn)
     if minted:
         print(f"[accounts] minted {minted} additional Content ID(s) so existing "
               f"handles hold {title_content_slots()} (content code: ids)")
 
 
-#: Paths whose schema this PROCESS has already ensured. See connect().
-_SCHEMA_READY = set()
-_SCHEMA_LOCK = threading.Lock()
+def connect(path=None):
+    """A connection to the account database, with the schema brought up to date.
 
-#: Paths we have already complained about the journal mode for. The pragma now
-#: runs per connection (see connect()), so the warning needs its own latch.
-_JOURNAL_WARNED = set()
+    Returns a `polcore.db.CompatConnection` on the process's connection pool
+    (POL_DATABASE_URL, POL_DB_POOL): `conn.execute(sql, params)` with %s
+    placeholders returns a cursor-like result whose rows read by position and
+    by column name, `conn.commit()` ends the transaction the first write
+    opened, `with conn:` is one transaction, and `conn.close()` hands the
+    connection back. Every function in this module takes one as `conn`.
 
+    `path` is accepted and ignored, so the many callers that still pass
+    POL_ACCOUNTS_DB keep working. A `postgresql://` URL there points this
+    process at that database instead (the CLI's first argument).
 
-# --------------------------------------------------------------------------- #
-# THE CONNECTION POOL -- measured, not assumed (2026-08-19)
-#
-# Observed in live testing, retail SE side by side with this server: this
-# server ran visibly slower on almost everything -- friend-accept, group-list
-# and status-change round-trips were near-instant on SE and lagged here.
-#
-# `tools/lobby_profile.py` is that measurement, and it names the cost: ONE
-# friend-list serve opens **7 database connections** and one group-list serve
-# **9**, because every helper on the request path opens its own and closes it in
-# a `finally`. On the WINDOWS DEV BOX that was ~65% of the whole serve:
-#
-#     2:3  KGetFriendList     5.66 ms/op   7.0 conn/op   3.69 ms in connect/close
-#     7:12 KGetGroupList      6.73 ms/op   9.0 conn/op   4.57 ms in connect/close
-#     accounts.connect+close  0.49 ms/op                 -- the tax by itself
-#
-# WARNING: **SCOPE, HONESTLY: THOSE ARE DEV NUMBERS AND PROD IS NOT DEV.** Production is
-# an **Ubuntu VM** on an ordinary Linux filesystem,
-# where the same open+close measures **0.017 ms** bare and **0.038 ms** with the
-# row factory and the pragma -- so nine of them cost ~0.34 ms there, not ~4.4 ms.
-# The pool is worth roughly an order of magnitude less on prod than the numbers
-# above suggest, and it is NOT what made the lobby feel slow: that was the
-# reader's idle window, ~1.0 s per message (`_lobby_frame_complete` in
-# responders.py). Keep the pool -- it is correct, free, and the Windows dev box
-# is where most development happens -- but do not credit it with prod's latency.
-#
-# So a checked-out connection now comes from a free list and `close()` puts it
-# BACK rather than closing it. Nothing at the call sites changes -- they keep
-# their `try/finally: db.close()`, which is the point: 46 call sites in
-# `responders.py` alone, and a pool that needed any of them edited would have
-# been a refactor rather than a fix.
-#
-# WHY THIS DOES NOT REOPEN THE WAL HAZARD. `accounts-db-wal-hazard` is about the
-# JOURNAL MODE, not about connection lifetime: WAL on the WINDOWS DEV bind mount
-# truncated the database, which is why `JOURNAL_MODE` is TRUNCATE. Pooling does
-# not touch the journal mode -- it is set per connection in `connect()` below and
-# asserted by `tools/dbpool_test.py` after a pooled round-trip. Pooling in fact
-# reduces the concurrent-connection count, which is the direction that hazard
-# cares about.
-#
-# (WAL is measured USABLE on prod's Linux filesystem and would buy readers that
-# do not block behind a writer. Deliberately NOT done: with the database costing
-# ~0.34 ms of a serve there, it would be optimising something that is not the
-# problem -- see the scope note above.)
-#
-# `check_same_thread=False` is REQUIRED and is safe here for one reason: the
-# lobby is a thread PER CONNECTION and its threads are short-lived, so a
-# thread-local cache would never hit. A pooled connection is checked out
-# EXCLUSIVELY -- it is off the free list for as long as somebody holds it -- so
-# it is never touched by two threads at once, which is the only thing sqlite3's
-# same-thread check protects.
-#
-# POL_DB_POOL=0 disables it entirely and restores the open-per-call behaviour;
-# any other number is the per-path ceiling on IDLE connections.
-_POOL_MAX = int(os.environ.get("POL_DB_POOL", "8") or 0)
-_POOL = {}
-_POOL_LOCK = threading.Lock()
-
-
-class _PooledConnection(sqlite3.Connection):
-    """A connection whose `close()` hands it back instead of closing it.
-
-    Subclassing is what lets every existing `finally: db.close()` keep working
-    unchanged. `_pool_path` is set by `connect()`; a connection without one (a
-    caller that built it some other way) closes for real.
+    THE SCHEMA IS BROUGHT UP TO DATE ONCE PER PROCESS, not once per connection.
+    Under SQLite that was a correctness fix: the schema script took a WRITE
+    lock even when every statement was a no-op, and the lobby opens a
+    connection per request across many threads, so every read contended for a
+    write lock against every other read. Live 2026-08-12 that surfaced as a
+    member search reporting `database is locked`, which the caller turned into
+    "0 hits": the client told the user **"user not found"** for an account
+    that exists. The migration check is cheap on PostgreSQL, but running it
+    per request would still put an advisory lock on the lobby's hot path, so
+    it stays once per process. The first connect does it, inside the lock, so
+    a second thread cannot get a connection to a database whose tables do not
+    exist yet (`relation "member" does not exist` on a cold start, which is
+    exactly when several clients connect at once).
     """
-
-    _pool_path = None
-
-    def close(self):
-        if not _pool_put(self):
-            sqlite3.Connection.close(self)
-
-
-def _pool_get(key):
-    """A live pooled connection for `key`, or None.
-
-    Each candidate is PROBED before it is handed out. A connection can go bad
-    while it sits idle -- the file replaced under it, which is exactly what a
-    test fixture does -- and the failure would otherwise surface in whichever
-    unlucky request drew it, far from the cause.
-    """
-    if _POOL_MAX <= 0:
-        return None
-    while True:
-        with _POOL_LOCK:
-            lst = _POOL.get(key)
-            if not lst:
-                return None
-            conn = lst.pop()
+    if path and str(path).startswith(("postgresql://", "postgres://")):
         try:
-            conn.execute("SELECT 1").fetchone()
-            return conn
-        except sqlite3.Error:
-            try:
-                sqlite3.Connection.close(conn)
-            except sqlite3.Error:
-                pass
-
-
-def _pool_put(conn):
-    """Return `conn` to the free list. False means "close it for real".
-
-    The ROLLBACK is not optional. A caller that read a cursor without draining
-    it leaves an open read transaction behind, and a pooled connection carrying
-    one would block the next writer for as long as it sat idle -- a deadlock
-    with no statement to blame it on. A connection that will not roll back is
-    not fit to reuse, so it is dropped rather than parked.
-    """
-    key = getattr(conn, "_pool_path", None)
-    if _POOL_MAX <= 0 or key is None:
-        return False
-    try:
-        conn.rollback()
-    except sqlite3.Error:
-        return False
-    with _POOL_LOCK:
-        lst = _POOL.setdefault(key, [])
-        if len(lst) >= _POOL_MAX:
-            return False
-        lst.append(conn)
-    return True
+            current = db.database_url()
+        except db.DatabaseNotConfigured:
+            current = None
+        if current != str(path):
+            db.configure(str(path))
+    conn = db.compat_connect()
+    key = db.database_url()
+    if key not in _SCHEMA_READY:
+        with _SCHEMA_LOCK:
+            if key not in _SCHEMA_READY:
+                _migrate(conn)
+                _SCHEMA_READY.add(key)      # only after it is genuinely ready
+    return conn
 
 
 def pool_drain(path=None):
-    """Really close every IDLE pooled connection (all paths, or just one).
-
-    For the cases where holding the file open is the problem rather than the
-    cost of reopening it: a test that wants to delete its fixture, or a tool
-    that hands the database to another process. Checked-OUT connections are not
-    affected -- there is nothing to drain them from.
-    """
-    with _POOL_LOCK:
-        keys = [os.path.abspath(path)] if path else list(_POOL)
-        conns = [c for k in keys for c in _POOL.pop(k, [])]
-    for c in conns:
-        try:
-            sqlite3.Connection.close(c)
-        except sqlite3.Error:
-            pass
-    return len(conns)
+    """Close the process's database pool (every idle connection). The next
+    connect() opens a fresh one. `path` is ignored. Returns the number of
+    connections the pool held."""
+    n = sum(pool_stats().values())
+    db.close()
+    return n
 
 
 def pool_stats():
-    """`{path: idle count}` -- for the profiler and for a health line."""
-    with _POOL_LOCK:
-        return {k: len(v) for k, v in _POOL.items()}
-
-
-def connect(path=None):
-    """Open (creating if needed) the account DB with the schema applied.
-
-    THE SCHEMA IS APPLIED ONCE PER PROCESS, not once per connection, and that is
-    a correctness fix rather than an optimisation. `executescript(SCHEMA)` plus
-    `_migrate()` take a WRITE lock even when every statement is a no-op
-    (`CREATE TABLE IF NOT EXISTS` still acquires one). The lobby opens a fresh
-    connection per request, across many threads, so every read was contending
-    for a write lock against every other read.
-
-    Live 2026-08-12 that surfaced as a member search reporting
-    `OperationalError('database is locked')` -- which the caller turned into "0
-    hits", i.e. the client told the user **"user not found"** for an account that
-    exists. A lock is not an absence, and it should never have been able to look
-    like one.
-
-    Migrations still run: the first connect in the process does the full setup,
-    which is when a new column or table would be added. A schema change made by
-    ANOTHER process mid-run is not picked up, which is the same exposure as
-    before for anything already holding a connection.
-    """
-    path = path or DEFAULT_DB
-    key = os.path.abspath(path)
-    # AN IDLE CONNECTION FIRST. See the pool note above: this is the whole
-    # Track B fix, and it sits in front of the makedirs deliberately -- a pooled
-    # hit must cost no syscalls at all, or the pool is only half a saving.
-    pooled = _pool_get(key)
-    if pooled is not None:
-        return pooled
-    parent = os.path.dirname(key)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    # RETRY THE OPEN. On the Windows bind mount this database lives on, an
-    # ordinary open-for-write comes back `unable to open database file` every so
-    # often -- measured live on 2026-08-13, once, in the middle of a PS2 login.
-    # Every caller treats a failure as "no account", so a hiccup that lasts
-    # milliseconds costs a player their games menu for a whole session. Three
-    # tries over ~0.3s turns it into a slightly slower login instead.
-    conn = None
-    for attempt in range(3):
-        try:
-            # `check_same_thread=False` and the factory are what make this
-            # connection poolable; see the pool note above for why both are
-            # safe. With POL_DB_POOL=0 the factory's `close()` falls straight
-            # through to the real one, so the class costs nothing when off.
-            conn = sqlite3.connect(path, timeout=10, check_same_thread=False,
-                                   factory=_PooledConnection)
-            break
-        except sqlite3.OperationalError:
-            if attempt == 2:
-                raise
-            time.sleep(0.1 * (attempt + 1))
-    conn.row_factory = sqlite3.Row
-    conn._pool_path = key
-    # *** THE JOURNAL MODE IS PER CONNECTION, NOT PER FILE, AND THAT WAS A BUG. ***
-    #
-    # This pragma used to live inside the once-per-process schema block below,
-    # on the note that "the journal mode is a PERSISTENT property of the file".
-    # That is true of **WAL and only WAL**. For the rollback modes -- DELETE,
-    # TRUNCATE, PERSIST -- it is a property of the CONNECTION, and sqlite opens
-    # every new one in DELETE. So the first connection in a process ran in
-    # TRUNCATE and every other one ran in DELETE.
-    #
-    # Mixing them is not cosmetic ON WINDOWS. Measured 2026-08-19, two
-    # connections open on one file, one TRUNCATE and one DELETE:
-    #
-    #     A  PRAGMA journal_mode = TRUNCATE  -> truncate
-    #     C  (fresh connection)              -> delete
-    #     C  INSERT ...                      -> OperationalError: disk I/O error
-    #
-    # and the same INSERT succeeds the instant C is put into TRUNCATE too. The
-    # pool SURFACED it (an idle TRUNCATE connection now outlives the request that
-    # opened it, so the overlap is permanent rather than momentary) but did not
-    # cause it: any write from a second connection while the first was open could
-    # raise it.
-    #
-    # WARNING: **IT DOES NOT REPRODUCE ON LINUX** -- checked directly, the same two
-    # connections and the same INSERT succeed there -- so this is a DEV-BOX
-    # failure, not an explanation for anything seen on the Ubuntu prod VM. Do not
-    # cite it as one. The per-connection pragma is kept regardless: it is what the
-    # old comment always claimed to do, it costs one pragma per genuinely new
-    # connection, and it makes dev and prod behave the same way.
-    #
-    # Setting it on every connection also does what the old comment SAID it did
-    # -- convert a file left in WAL by an earlier run -- for every connection
-    # rather than for one. It costs one pragma per genuinely new connection, and
-    # the pool means there are very few of those.
-    got = conn.execute(f"PRAGMA journal_mode = {JOURNAL_MODE}").fetchone()
-    got = (got[0] if got else "?").lower()
-    if got != JOURNAL_MODE.lower() and key not in _JOURNAL_WARNED:
-        # Once per path: this now runs per connection, and a warning that
-        # repeats a few hundred times an hour is a warning nobody reads.
-        _JOURNAL_WARNED.add(key)
-        print(f"[accounts] journal_mode is {got!r}, not the requested "
-              f"{JOURNAL_MODE.lower()!r} -- another connection holds "
-              f"{path}; restart every service that opens it")
-    # The setup runs INSIDE the lock, not merely under a flag set inside it.
-    # Claiming the flag and then building the schema outside leaves a window
-    # where a second thread sees "ready" and gets a connection to a database
-    # whose tables do not exist yet -- `no such table: member`, on cold start,
-    # which is exactly when several clients connect at once. It costs nothing to
-    # hold: this whole block runs once per process.
-    with _SCHEMA_LOCK:
-        if key not in _SCHEMA_READY:
-            conn.executescript(SCHEMA)
-            _migrate(conn)
-            conn.commit()
-            _SCHEMA_READY.add(key)      # only after it is genuinely ready
-    return conn
+    """`{database: open connections}` -- for the profiler and a health line."""
+    pool = db._pool
+    if pool is None:
+        return {}
+    stats = pool.get_stats()
+    return {"postgres": int(stats.get("pool_size", 0))}
 
 
 # --------------------------------------------------------------------------- #
@@ -1148,7 +674,7 @@ def mint_polid(conn, shape=POLID_SHAPE):
     for _ in range(1000):
         cand = "".join(alphabet[secrets.randbelow(len(alphabet))]
                        for alphabet in shape)
-        if conn.execute("SELECT 1 FROM polid WHERE polid = ?",
+        if conn.execute("SELECT 1 FROM polid WHERE polid = %s",
                         (cand,)).fetchone() is not None:
             continue
         if polnick is not None and polnick.polid_for_nick(
@@ -1186,7 +712,7 @@ def create_polid(conn, polid, password, area_kbn="00", login_pf="01",
     conn.execute(
         "INSERT INTO polid (polid, pw_hash, pw_salt, status, area_kbn,"
         " login_pf, property, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (polid, pw_hash, pw_salt, status, area_kbn, login_pf, property_,
          now, now))
     conn.commit()
@@ -1207,44 +733,44 @@ def reissue_polid(conn, old, new=None):
     is renamed too, since that is the name the login path matches on.
     Returns the new ID.
     """
-    row = conn.execute("SELECT * FROM polid WHERE polid = ?", (old,)).fetchone()
+    row = conn.execute("SELECT * FROM polid WHERE polid = %s", (old,)).fetchone()
     if row is None:
         raise ValueError(f"no such PlayOnline ID: {old!r}")
     new = new or mint_polid(conn)
     bad = check_polid_policy(new)
     if bad:
         raise ValueError(bad)
-    if conn.execute("SELECT 1 FROM polid WHERE polid = ?", (new,)).fetchone():
+    if conn.execute("SELECT 1 FROM polid WHERE polid = %s", (new,)).fetchone():
         raise ValueError(f"{new!r} is already in use")
-    if conn.execute("SELECT 1 FROM member WHERE login_name = ? AND polid != ?",
+    if conn.execute("SELECT 1 FROM member WHERE login_name = %s AND polid != %s",
                     (new, old)).fetchone():
         raise ValueError(f"{new!r} is already some other member's login name")
     with conn:
         conn.execute(
             "INSERT INTO polid (polid, pw_hash, pw_salt, status, area_kbn,"
             " login_pf, property, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (new, row["pw_hash"], row["pw_salt"], row["status"],
              row["area_kbn"], row["login_pf"], row["property"],
              row["created_at"], _now()))
-        conn.execute("UPDATE member  SET polid = ? WHERE polid = ?", (new, old))
-        conn.execute("UPDATE profile SET polid = ? WHERE polid = ?", (new, old))
-        conn.execute("UPDATE regcode SET redeemed_by = ? WHERE redeemed_by = ?",
+        conn.execute("UPDATE member  SET polid = %s WHERE polid = %s", (new, old))
+        conn.execute("UPDATE profile SET polid = %s WHERE polid = %s", (new, old))
+        conn.execute("UPDATE regcode SET redeemed_by = %s WHERE redeemed_by = %s",
                      (new, old))
-        conn.execute("UPDATE member SET login_name = ? WHERE login_name = ?",
+        conn.execute("UPDATE member SET login_name = %s WHERE login_name = %s",
                      (new, old))
-        conn.execute("DELETE FROM polid WHERE polid = ?", (old,))
+        conn.execute("DELETE FROM polid WHERE polid = %s", (old,))
     # The nick follows the ID. Drop the old binding first: leaving it behind
     # would let the previous ID keep logging in, which is not what "reissue"
     # means -- and the old ID is un-typeable anyway, which is why we are here.
     if polnick is not None:
         try:
-            conn.execute("DELETE FROM login_alias WHERE nick = ?",
+            conn.execute("DELETE FROM login_alias WHERE nick = %s",
                          (polnick.nick_for_polid(old),))
             conn.commit()
         except ValueError:
             pass                        # the old ID was not an 8-char one
-        for row in conn.execute("SELECT id FROM member WHERE polid = ?", (new,)):
+        for row in conn.execute("SELECT id FROM member WHERE polid = %s", (new,)):
             bind_login_nick(conn, row["id"], new)
     return new
 
@@ -1256,16 +782,18 @@ def add_member(conn, polid, login_name, password, member_no=None,
     if member_no is None:
         row = conn.execute(
             "SELECT COALESCE(MAX(member_no) + 1, 0) AS n FROM member"
-            " WHERE polid = ?", (polid,)).fetchone()
+            " WHERE polid = %s", (polid,)).fetchone()
         member_no = row["n"]
     pw_hash, pw_salt = hash_password(password)
-    cur = conn.execute(
+    member_id = conn.execute(
         "INSERT INTO member (polid, member_no, login_name, pw_hash, pw_salt,"
-        " access_level, created_at) VALUES (?,?,?,?,?,?,?)",
-        (polid, member_no, login_name, pw_hash, pw_salt, access_level, _now()))
-    set_login_password_copy(conn, cur.lastrowid, password, commit=False)
+        " access_level, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+        " RETURNING id",
+        (polid, member_no, login_name, pw_hash, pw_salt, access_level,
+         _now())).fetchone()["id"]
+    set_login_password_copy(conn, member_id, password, commit=False)
     conn.commit()
-    return cur.lastrowid
+    return member_id
 
 
 #: Maps the client's PML variables to `profile` columns. The registration page
@@ -1309,8 +837,8 @@ def set_profile(conn, polid, **fields):
     cols = list(fields)
     conn.execute(
         "INSERT INTO profile (polid, updated_at" +
-        "".join(f", {c}" for c in cols) + ") VALUES (?,?" +
-        ",?" * len(cols) + ")"
+        "".join(f", {c}" for c in cols) + ") VALUES (%s,%s" +
+        ",%s" * len(cols) + ")"
         " ON CONFLICT(polid) DO UPDATE SET updated_at = excluded.updated_at" +
         "".join(f", {c} = excluded.{c}" for c in cols),
         [polid, _now()] + [fields[c] for c in cols])
@@ -1318,7 +846,7 @@ def set_profile(conn, polid, **fields):
 
 
 def get_profile(conn, polid):
-    return conn.execute("SELECT * FROM profile WHERE polid = ?",
+    return conn.execute("SELECT * FROM profile WHERE polid = %s",
                         (polid,)).fetchone()
 
 
@@ -1367,7 +895,7 @@ def set_handle_profile(conn, handle_id, fields):
         as_text = None if isinstance(val, int) else str(val)
         conn.execute(
             "INSERT INTO handle_profile (handle_id, field_id, val_int, val_text,"
-            " updated_at) VALUES (?,?,?,?,?)"
+            " updated_at) VALUES (%s,%s,%s,%s,%s)"
             " ON CONFLICT(handle_id, field_id) DO UPDATE SET"
             " val_int = excluded.val_int, val_text = excluded.val_text,"
             " updated_at = excluded.updated_at",
@@ -1379,7 +907,7 @@ def get_handle_profile(conn, handle_id):
     """{field_id: int|str} for one HANDLE."""
     out = {}
     for r in conn.execute("SELECT field_id, val_int, val_text FROM "
-                          "handle_profile WHERE handle_id = ?", (handle_id,)):
+                          "handle_profile WHERE handle_id = %s", (handle_id,)):
         out[r["field_id"]] = r["val_text"] if r["val_int"] is None else r["val_int"]
     return out
 
@@ -1437,11 +965,11 @@ def learn_client_guid(conn, handle_id, value):
     value = int(value) & 0xFFFFFFFFFFFFFFFF
     if not value:
         return False
-    row = conn.execute("SELECT client_guid FROM handle WHERE id = ?",
+    row = conn.execute("SELECT client_guid FROM handle WHERE id = %s",
                        (int(handle_id),)).fetchone()
     if row is None or (row["client_guid"] or 0) == value:
         return False
-    conn.execute("UPDATE handle SET client_guid = ? WHERE id = ?",
+    conn.execute("UPDATE handle SET client_guid = %s WHERE id = %s",
                  (value, int(handle_id)))
     conn.commit()
     return True
@@ -1451,7 +979,7 @@ def handle_by_client_guid(conn, value):
     """The handle that calls itself `value`, or None."""
     if not value:
         return None
-    return conn.execute("SELECT * FROM handle WHERE client_guid = ?",
+    return conn.execute("SELECT * FROM handle WHERE client_guid = %s",
                         (int(value) & 0xFFFFFFFFFFFFFFFF,)).fetchone()
 
 
@@ -1460,7 +988,7 @@ def handle_by_guid(conn, guid):
     guid = int(guid) & HANDLE_GUID_MASK
     if not guid or (guid & ~0xFFFFFFFF) != HANDLE_GUID_BASE:
         return None
-    return conn.execute("SELECT * FROM handle WHERE id = ?",
+    return conn.execute("SELECT * FROM handle WHERE id = %s",
                         (guid & 0xFFFFFFFF,)).fetchone()
 
 
@@ -1482,12 +1010,13 @@ def handle_by_name(conn, name):
     """
     if not name:
         return None
-    row = conn.execute("SELECT * FROM handle WHERE handle_name = ?",
+    row = conn.execute("SELECT * FROM handle WHERE handle_name = %s",
                        (name,)).fetchone()
     if row is not None or not handle_nocase():
         return row
-    rows = conn.execute("SELECT * FROM handle WHERE handle_name = ? COLLATE NOCASE"
-                        " LIMIT 2", (name,)).fetchall()
+    rows = conn.execute("SELECT * FROM handle"
+                        " WHERE lower(handle_name) = lower(%s) LIMIT 2",
+                        (name,)).fetchall()
     return rows[0] if len(rows) == 1 else None
 
 
@@ -1500,12 +1029,12 @@ def friend_row_name(conn, handle_id, peer_name):
     name has to find it by this route. Returns `peer_name` when nothing better
     is found, so callers behave exactly as before.
     """
-    if conn.execute("SELECT 1 FROM friend WHERE handle_id = ? AND peer_name = ?",
+    if conn.execute("SELECT 1 FROM friend WHERE handle_id = %s AND peer_name = %s",
                     (handle_id, peer_name)).fetchone() is not None \
             or not handle_nocase():
         return peer_name
-    rows = conn.execute("SELECT peer_name FROM friend WHERE handle_id = ?"
-                        " AND peer_name = ? COLLATE NOCASE LIMIT 2",
+    rows = conn.execute("SELECT peer_name FROM friend WHERE handle_id = %s"
+                        " AND lower(peer_name) = lower(%s) LIMIT 2",
                         (handle_id, peer_name)).fetchall()
     return rows[0]["peer_name"] if len(rows) == 1 else peer_name
 
@@ -1518,7 +1047,7 @@ def primary_handle_row(conn, member_id):
     per-handle profile are keyed on.
     """
     return conn.execute(
-        "SELECT * FROM handle WHERE member_id = ?"
+        "SELECT * FROM handle WHERE member_id = %s"
         " ORDER BY is_primary DESC, id ASC LIMIT 1", (member_id,)).fetchone()
 
 
@@ -1532,7 +1061,7 @@ def assign_mail_address(conn, member_id, local=None):
     if local is None:
         local = "x" + "".join(str(secrets.randbelow(10)) for _ in range(12))
     addr = f"{local}@pol.com"
-    conn.execute("UPDATE member SET mail_address = ? WHERE id = ?",
+    conn.execute("UPDATE member SET mail_address = %s WHERE id = %s",
                  (addr, member_id))
     conn.commit()
     return addr
@@ -1560,8 +1089,8 @@ def set_mail_password(conn, member_id, password, store_plain=True):
     note). Pass store_plain=False to keep hash-only and accept any APOP digest.
     """
     h, s = hash_password(password)
-    conn.execute("UPDATE member SET mail_pw_hash = ?, mail_pw_salt = ?, "
-                 "mail_pw_plain = ? WHERE id = ?",
+    conn.execute("UPDATE member SET mail_pw_hash = %s, mail_pw_salt = %s, "
+                 "mail_pw_plain = %s WHERE id = %s",
                  (h, s, password if store_plain else None, member_id))
     conn.commit()
 
@@ -1595,8 +1124,8 @@ def member_by_mail(conn, address):
     pat = (box.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
            + "@%")
     row = conn.execute(
-        "SELECT * FROM member WHERE lower(mail_address) = ? "
-        "   OR lower(mail_address) LIKE ? ESCAPE '\\' LIMIT 1",
+        "SELECT * FROM member WHERE lower(mail_address) = %s "
+        "   OR lower(mail_address) LIKE %s ESCAPE '\\' LIMIT 1",
         (box, pat)).fetchone()
     return row
 
@@ -1616,9 +1145,9 @@ def deliver_mail(conn, address, raw, sender=None, subject=None, uidl=None):
         uidl = hashlib.sha1(raw).hexdigest()[:24]
     member = member_by_mail(conn, box)
     conn.execute(
-        "INSERT OR IGNORE INTO mail (box, member_id, uidl, sender, subject, "
-        "                            raw, received_at) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO mail (box, member_id, uidl, sender, subject, "
+        "                  raw, received_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
         (box, member["id"] if member else None, uidl, sender, subject,
          raw, _now()))
     conn.commit()
@@ -1628,7 +1157,7 @@ def deliver_mail(conn, address, raw, sender=None, subject=None, uidl=None):
 def list_mail(conn, address, include_deleted=False):
     """Live messages in a mailbox, oldest first (POP3 numbers them 1..N)."""
     box = mail_box_name(address)
-    sql = "SELECT * FROM mail WHERE box = ?"
+    sql = "SELECT * FROM mail WHERE box = %s"
     if not include_deleted:
         sql += " AND deleted_at IS NULL"
     return conn.execute(sql + " ORDER BY id", (box,)).fetchall()
@@ -1637,7 +1166,7 @@ def list_mail(conn, address, include_deleted=False):
 def delete_mail(conn, mail_ids):
     """Commit a POP3 DELE set. Soft delete: the row stays for forensics."""
     now = _now()
-    conn.executemany("UPDATE mail SET deleted_at = ? WHERE id = ? "
+    conn.executemany("UPDATE mail SET deleted_at = %s WHERE id = %s "
                      "  AND deleted_at IS NULL",
                      [(now, i) for i in mail_ids])
     conn.commit()
@@ -1658,22 +1187,22 @@ def set_handle(conn, member_id, handle_name, primary=None):
     client's "set as primary" action, when we wire it, passes primary=True."""
     if primary is None:
         primary = conn.execute(
-            "SELECT 1 FROM handle WHERE member_id = ? AND is_primary = 1",
+            "SELECT 1 FROM handle WHERE member_id = %s AND is_primary = 1",
             (member_id,)).fetchone() is None
     if primary:
-        conn.execute("UPDATE handle SET is_primary = 0 WHERE member_id = ?",
+        conn.execute("UPDATE handle SET is_primary = 0 WHERE member_id = %s",
                      (member_id,))
     # An explicit (re)registration overrides a prior deletion: lift the tombstone
     # so the handle is allowed back. The 0:8 auto-capture never reaches here for a
     # tombstoned name (it is filtered first), so this only fires on a deliberate add.
-    conn.execute("DELETE FROM deleted_handle WHERE member_id = ? AND handle_name = ?",
+    conn.execute("DELETE FROM deleted_handle WHERE member_id = %s AND handle_name = %s",
                  (member_id, handle_name))
-    cur = conn.execute(
+    handle_id = conn.execute(
         "INSERT INTO handle (member_id, handle_name, is_primary, created_at)"
-        " VALUES (?,?,?,?)",
-        (member_id, handle_name, 1 if primary else 0, _now()))
+        " VALUES (%s,%s,%s,%s) RETURNING id",
+        (member_id, handle_name, 1 if primary else 0, _now())).fetchone()["id"]
     conn.commit()
-    return cur.lastrowid
+    return handle_id
 
 
 class RegistrationError(Exception):
@@ -1701,7 +1230,7 @@ def register_account(conn, handle, password, code=None, profile=None,
     bad = check_password_policy(password)
     if bad:
         raise RegistrationError(bad)
-    if conn.execute("SELECT 1 FROM handle WHERE handle_name = ?",
+    if conn.execute("SELECT 1 FROM handle WHERE handle_name = %s",
                     (handle,)).fetchone():
         raise RegistrationError(
             f"The handle {handle!r} is already in use. Please choose another.")
@@ -1719,32 +1248,33 @@ def register_account(conn, handle, password, code=None, profile=None,
             conn.execute(
                 "INSERT INTO polid (polid, pw_hash, pw_salt, status, area_kbn,"
                 " login_pf, property, created_at, updated_at)"
-                " VALUES (?,?,?,'active','00','01','00',?,?)",
+                " VALUES (%s,%s,%s,'active','00','01','00',%s,%s)",
                 (polid, pw_hash, pw_salt, now, now))
-            cur = conn.execute(
+            member_id = conn.execute(
                 "INSERT INTO member (polid, member_no, login_name, pw_hash,"
-                " pw_salt, access_level, created_at) VALUES (?,0,?,?,?,0,?)",
-                (polid, member_login or polid, pw_hash, pw_salt, now))
-            member_id = cur.lastrowid
-            hcur = conn.execute(
+                " pw_salt, access_level, created_at) VALUES (%s,0,%s,%s,%s,0,%s)"
+                " RETURNING id",
+                (polid, member_login or polid, pw_hash, pw_salt, now)
+            ).fetchone()["id"]
+            handle_id = conn.execute(
                 "INSERT INTO handle (member_id, handle_name, is_primary,"
-                " created_at) VALUES (?,?,1,?)", (member_id, handle, now))
-            handle_id = hcur.lastrowid
+                " created_at) VALUES (%s,%s,1,%s) RETURNING id",
+                (member_id, handle, now)).fetchone()["id"]
             if code:
                 row = conn.execute(
-                    "SELECT * FROM regcode WHERE code = ? COLLATE NOCASE"
+                    "SELECT * FROM regcode WHERE lower(code) = lower(%s)"
                     " AND redeemed_by IS NULL",
                     (normalise_regcode(code),)).fetchone()
                 if row is not None:
                     conn.execute(
-                        "UPDATE regcode SET redeemed_at = ?, redeemed_by = ?"
-                        " WHERE code = ?", (now, polid, row["code"]))
+                        "UPDATE regcode SET redeemed_at = %s, redeemed_by = %s"
+                        " WHERE code = %s", (now, polid, row["code"]))
                     granted = [int(c) for c in row["contents"].split(",")
                                if c.strip()] or granted
             for c in granted:
                 conn.execute(
                     "INSERT INTO content (member_id, content_code, status,"
-                    " registered_at) VALUES (?,?,'active',?)"
+                    " registered_at) VALUES (%s,%s,'active',%s)"
                     " ON CONFLICT(member_id, content_code) DO UPDATE SET"
                     " status = 'active'", (member_id, int(c), now))
                 # AND APPLY IT TO THE FIRST HANDLE, which is the one created
@@ -1778,9 +1308,9 @@ def register_account(conn, handle, password, code=None, profile=None,
                 conn.execute(
                     "INSERT INTO handle_content (handle_id, content_code,"
                     " slot, content_id, status, linked_at)"
-                    " VALUES (?,?,0,?,'active',?)"
+                    " VALUES (%s,%s,0,%s,'active',%s)"
                     " ON CONFLICT(handle_id, content_code, slot) DO UPDATE SET"
-                    " content_id = COALESCE(content_id, excluded.content_id),"
+                    " content_id = COALESCE(handle_content.content_id, excluded.content_id),"
                     " status = 'active'",
                     (handle_id, int(c), allocate_content_id(conn), now))
                 # A title that issues one Content ID per CHARACTER
@@ -1798,11 +1328,11 @@ def register_account(conn, handle, password, code=None, profile=None,
                 if cols:
                     conn.execute(
                         "INSERT INTO profile (polid, updated_at"
-                        + "".join(f", {c}" for c in cols) + ") VALUES (?,?"
-                        + ",?" * len(cols) + ")",
+                        + "".join(f", {c}" for c in cols) + ") VALUES (%s,%s"
+                        + ",%s" * len(cols) + ")",
                         [polid, now] + [profile[c] for c in cols])
             local = "x" + "".join(str(secrets.randbelow(10)) for _ in range(12))
-            conn.execute("UPDATE member SET mail_address = ? WHERE id = ?",
+            conn.execute("UPDATE member SET mail_address = %s WHERE id = %s",
                          (f"{local}@pol.com", member_id))
             # In the SAME transaction as the account: without it the account
             # exists but cannot be logged into, which is exactly the failure
@@ -1810,18 +1340,18 @@ def register_account(conn, handle, password, code=None, profile=None,
             if polnick is not None:
                 conn.execute(
                     "INSERT INTO login_alias (nick, member_id, note, created_at)"
-                    " VALUES (?,?,?,?) ON CONFLICT(nick) DO UPDATE SET"
+                    " VALUES (%s,%s,%s,%s) ON CONFLICT(nick) DO UPDATE SET"
                     " member_id = excluded.member_id, note = excluded.note",
                     (polnick.nick_for_polid(polid), member_id,
                      f"scrambled form of {polid}", now))
-    except sqlite3.IntegrityError as exc:
+    except db.IntegrityError as exc:
         raise RegistrationError(
             "That handle was taken while you were registering. "
             "Please choose another.") from exc
     # ARM THE NEW ACCOUNT. Whoever created it proved the password by choosing
     # it, and this is the one primitive every creation path goes through (the
     # in-client wizard, the admin panel, the CLI), so arming here covers them all.
-    # See the token_arm_until note in _MIGRATIONS.
+    # See the member.token_arm_until note above.
     try:
         arm_login_token(conn, member_id)
     except Exception:                            # noqa: BLE001 -- never fail a signup
@@ -1837,7 +1367,7 @@ def register_account(conn, handle, password, code=None, profile=None,
 def is_handle_deleted(conn, member_id, handle_name):
     """True if this handle was deleted (tombstoned) and must not be re-captured."""
     return conn.execute(
-        "SELECT 1 FROM deleted_handle WHERE member_id = ? AND handle_name = ?",
+        "SELECT 1 FROM deleted_handle WHERE member_id = %s AND handle_name = %s",
         (member_id, handle_name)).fetchone() is not None
 
 
@@ -1847,21 +1377,22 @@ def delete_handle(conn, member_id, handle_name):
     was the primary, the oldest remaining handle inherits the badge. Returns True
     if a handle row was actually removed."""
     row = conn.execute(
-        "SELECT id, is_primary FROM handle WHERE member_id = ? AND handle_name = ?",
+        "SELECT id, is_primary FROM handle WHERE member_id = %s AND handle_name = %s",
         (member_id, handle_name)).fetchone()
     conn.execute(
-        "INSERT OR IGNORE INTO deleted_handle (member_id, handle_name, deleted_at)"
-        " VALUES (?,?,?)", (member_id, handle_name, _now()))
+        "INSERT INTO deleted_handle (member_id, handle_name, deleted_at)"
+        " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+        (member_id, handle_name, _now()))
     if row is None:
         conn.commit()
         return False
-    conn.execute("DELETE FROM handle WHERE id = ?", (row["id"],))
+    conn.execute("DELETE FROM handle WHERE id = %s", (row["id"],))
     if row["is_primary"]:
         nxt = conn.execute(
-            "SELECT id FROM handle WHERE member_id = ? ORDER BY created_at LIMIT 1",
+            "SELECT id FROM handle WHERE member_id = %s ORDER BY created_at LIMIT 1",
             (member_id,)).fetchone()
         if nxt:
-            conn.execute("UPDATE handle SET is_primary = 1 WHERE id = ?", (nxt["id"],))
+            conn.execute("UPDATE handle SET is_primary = 1 WHERE id = %s", (nxt["id"],))
     conn.commit()
     return True
 
@@ -1890,30 +1421,31 @@ def rename_handle(conn, member_id, handle_id, new_name):
     bad = check_handle_policy(new_name)
     if bad:
         raise ValueError(bad)
-    row = conn.execute("SELECT id, handle_name FROM handle WHERE id = ? AND member_id = ?",
+    row = conn.execute("SELECT id, handle_name FROM handle WHERE id = %s AND member_id = %s",
                        (int(handle_id), int(member_id))).fetchone()
     if row is None:
         raise ValueError("That handle was not found.")
     old = row["handle_name"]
     if new_name == old:
         raise ValueError("That is already this handle's name.")
-    if conn.execute("SELECT 1 FROM handle WHERE handle_name = ? AND id != ?",
+    if conn.execute("SELECT 1 FROM handle WHERE handle_name = %s AND id != %s",
                     (new_name, int(handle_id))).fetchone():
         raise ValueError(f"The handle {new_name!r} is already in use. "
                          "Please choose another.")
     try:
         with conn:
-            conn.execute("UPDATE handle SET handle_name = ? WHERE id = ?",
+            conn.execute("UPDATE handle SET handle_name = %s WHERE id = %s",
                          (new_name, int(handle_id)))
-            conn.execute("UPDATE friend SET peer_name = ? WHERE peer_handle = ?",
+            conn.execute("UPDATE friend SET peer_name = %s WHERE peer_handle = %s",
                          (new_name, int(handle_id)))
-            conn.execute("UPDATE group_member SET member_name = ? WHERE member_handle = ?",
+            conn.execute("UPDATE group_member SET member_name = %s WHERE member_handle = %s",
                          (new_name, int(handle_id)))
-            conn.execute("DELETE FROM deleted_handle WHERE member_id = ? AND handle_name = ?",
+            conn.execute("DELETE FROM deleted_handle WHERE member_id = %s AND handle_name = %s",
                          (int(member_id), new_name))
-            conn.execute("INSERT OR IGNORE INTO deleted_handle (member_id, handle_name,"
-                         " deleted_at) VALUES (?,?,?)", (int(member_id), old, _now()))
-    except sqlite3.IntegrityError:
+            conn.execute("INSERT INTO deleted_handle (member_id, handle_name,"
+                         " deleted_at) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                         (int(member_id), old, _now()))
+    except db.IntegrityError:
         # Somebody's list already holds an unlinked entry under the new name.
         raise ValueError(f"The handle {new_name!r} cannot be used right now. "
                          "Please choose another.")
@@ -1925,10 +1457,10 @@ def rename_handle(conn, member_id, handle_id, new_name):
 def _account_ids(conn, polid):
     """(member ids, handle ids, handle names) belonging to `polid`."""
     members = [int(r["id"]) for r in conn.execute(
-        "SELECT id FROM member WHERE polid = ?", (polid,))]
+        "SELECT id FROM member WHERE polid = %s", (polid,))]
     handles, names = [], []
     if members:
-        q = ",".join("?" * len(members))
+        q = ",".join(["%s"] * len(members))
         for r in conn.execute(
                 f"SELECT id, handle_name FROM handle WHERE member_id IN ({q})",
                 members):
@@ -1946,7 +1478,7 @@ def account_footprint(conn, polid):
     people's friend lists name this account (those go too, or they would point
     at nobody), and whether it is signed in right now.
     """
-    row = conn.execute("SELECT * FROM polid WHERE polid = ?", (polid,)).fetchone()
+    row = conn.execute("SELECT * FROM polid WHERE polid = %s", (polid,)).fetchone()
     if row is None:
         return None
     members, handles, names = _account_ids(conn, polid)
@@ -1954,13 +1486,13 @@ def account_footprint(conn, polid):
     def count(sql, params):
         return int(conn.execute(sql, params).fetchone()[0])
 
-    mem_q = ",".join("?" * len(members)) or "NULL"
-    h_q = ",".join("?" * len(handles)) or "NULL"
-    n_q = ",".join("?" * len(names)) or "NULL"
+    mem_q = ",".join(["%s"] * len(members)) or "NULL"
+    h_q = ",".join(["%s"] * len(handles)) or "NULL"
+    n_q = ",".join(["%s"] * len(names)) or "NULL"
     boxes = [mail_box_name(r["mail_address"]) for r in conn.execute(
         f"SELECT mail_address FROM member WHERE id IN ({mem_q})", members)
         if r["mail_address"]]
-    b_q = ",".join("?" * len(boxes)) or "NULL"
+    b_q = ",".join(["%s"] * len(boxes)) or "NULL"
 
     out = {
         "polid": polid,
@@ -1992,7 +1524,7 @@ def account_footprint(conn, polid):
         "sessions": count(f"SELECT COUNT(*) FROM session WHERE member_id IN ({mem_q})",
                           members),
         "regcodes": [r["code"] for r in conn.execute(
-            "SELECT code FROM regcode WHERE redeemed_by = ?", (polid,))],
+            "SELECT code FROM regcode WHERE redeemed_by = %s", (polid,))],
     }
     out["online"] = any(member_online(conn, m) for m in members)
     return out
@@ -2005,13 +1537,14 @@ def delete_polid(conn, polid, release_codes=False):
     such account.
 
     Every child row is deleted EXPLICITLY rather than left to the schema's
-    `ON DELETE CASCADE`. Those cascades do not fire: `PRAGMA foreign_keys = ON`
-    is per-CONNECTION and only ever runs inside `connect`'s one-per-process
-    `executescript`, so every other connection this server opens has enforcement
-    OFF. Relying on the cascade would leave a database full of orphans -- handles
-    with no member, friend rows pointing at nothing -- that still answer lobby
-    queries. The order below is children-before-parents so a partial failure
-    inside the transaction cannot strand a parent either.
+    `ON DELETE CASCADE`. Under SQLite those cascades did not fire (foreign keys
+    were enforced on one connection per process only), and relying on them left
+    orphans -- handles with no member, friend rows pointing at nothing -- that
+    still answered lobby queries. PostgreSQL always enforces them, so the
+    cascades now back this up rather than replace it; several of the rows below
+    (a friend entry naming this account by NAME, a mailbox keyed on the box) are
+    not reachable by any cascade at all. The order is children-before-parents,
+    inside one transaction.
 
     Two kinds of row belong to somebody ELSE and are still removed: friend
     entries on other handles' lists that name this account, and its rows in other
@@ -2027,16 +1560,16 @@ def delete_polid(conn, polid, release_codes=False):
     if footprint is None:
         return None
     members, handles, names = _account_ids(conn, polid)
-    mem_q = ",".join("?" * len(members)) or "NULL"
-    h_q = ",".join("?" * len(handles)) or "NULL"
-    n_q = ",".join("?" * len(names)) or "NULL"
+    mem_q = ",".join(["%s"] * len(members)) or "NULL"
+    h_q = ",".join(["%s"] * len(handles)) or "NULL"
+    n_q = ",".join(["%s"] * len(names)) or "NULL"
     boxes = [mail_box_name(m["mail_address"]) for m in footprint["members"]
              if m["mail_address"]]
-    b_q = ",".join("?" * len(boxes)) or "NULL"
+    b_q = ",".join(["%s"] * len(boxes)) or "NULL"
     groups = [int(r["id"]) for r in conn.execute(
         f"SELECT id FROM friend WHERE handle_id IN ({h_q}) AND kind = {KIND_GROUP}",
         handles)]
-    g_q = ",".join("?" * len(groups)) or "NULL"
+    g_q = ",".join(["%s"] * len(groups)) or "NULL"
 
     with conn:
         # handle-scoped
@@ -2061,17 +1594,16 @@ def delete_polid(conn, polid, release_codes=False):
                      f" OR box IN ({b_q})", members + boxes)
         conn.execute(f"DELETE FROM member WHERE id IN ({mem_q})", members)
         # polid-scoped
-        conn.execute("DELETE FROM profile WHERE polid = ?", (polid,))
+        conn.execute("DELETE FROM profile WHERE polid = %s", (polid,))
         # `redeemed_by` is a foreign key into the row about to go, so it has to
-        # be cleared either way -- on the connection that DOES have
-        # `foreign_keys` on (see connect), leaving it dangling aborts the whole
-        # delete with an IntegrityError. `redeemed_at` is what keeps the code
-        # spent afterwards; check_regcode tests both for exactly this reason.
+        # be cleared either way -- leaving it dangling aborts the whole delete
+        # with an IntegrityError. `redeemed_at` is what keeps the code spent
+        # afterwards; check_regcode tests both for exactly this reason.
         conn.execute(
             "UPDATE regcode SET redeemed_by = NULL"
             + (", redeemed_at = NULL" if release_codes else "")
-            + " WHERE redeemed_by = ?", (polid,))
-        conn.execute("DELETE FROM polid WHERE polid = ?", (polid,))
+            + " WHERE redeemed_by = %s", (polid,))
+        conn.execute("DELETE FROM polid WHERE polid = %s", (polid,))
 
     footprint["released_codes"] = footprint["regcodes"] if release_codes else []
     footprint["files"] = purge_member_files(members)
@@ -2134,19 +1666,19 @@ def purge_member_files(member_ids, root=None):
 #: excluded. Used to keep a content code on exactly one handle at a time.
 _SIBLING_HANDLES = (
     "SELECT id FROM handle WHERE member_id ="
-    " (SELECT member_id FROM handle WHERE id = ?) AND id != ?")
+    " (SELECT member_id FROM handle WHERE id = %s) AND id != %s")
 
 #: Every handle of a member, by member id.
-_MEMBER_HANDLES = "SELECT id FROM handle WHERE member_id = ?"
+_MEMBER_HANDLES = "SELECT id FROM handle WHERE member_id = %s"
 
 
 def grant_content(conn, member_id, content_code, content_no=None):
     """Subscribe a member to a title. Idempotent: re-granting reactivates."""
     conn.execute(
         "INSERT INTO content (member_id, content_code, content_no, status,"
-        " registered_at) VALUES (?,?,?, 'active', ?)"
+        " registered_at) VALUES (%s,%s,%s, 'active', %s)"
         " ON CONFLICT(member_id, content_code) DO UPDATE SET"
-        " status = 'active', content_no = COALESCE(excluded.content_no, content_no)",
+        " status = 'active', content_no = COALESCE(excluded.content_no, content.content_no)",
         (member_id, content_code, content_no, _now()))
     # Re-granting has to revive the LINK as well, or the entitlement comes back
     # and the title still does not: lobby 1:3 reads handle_content, and
@@ -2155,7 +1687,7 @@ def grant_content(conn, member_id, content_code, content_no=None):
     # Nothing is created here -- an unplaced grant is placed by
     # link_member_content_to_primary.
     conn.execute(
-        f"UPDATE handle_content SET status = 'active' WHERE content_code = ?"
+        f"UPDATE handle_content SET status = 'active' WHERE content_code = %s"
         f" AND handle_id IN ({_MEMBER_HANDLES})", (content_code, member_id))
     conn.commit()
 
@@ -2176,9 +1708,9 @@ def revoke_content(conn, member_id, content_code):
     """
     conn.execute(
         "UPDATE content SET status = 'inactive'"
-        " WHERE member_id = ? AND content_code = ?", (member_id, content_code))
+        " WHERE member_id = %s AND content_code = %s", (member_id, content_code))
     conn.execute(
-        f"UPDATE handle_content SET status = 'inactive' WHERE content_code = ?"
+        f"UPDATE handle_content SET status = 'inactive' WHERE content_code = %s"
         f" AND handle_id IN ({_MEMBER_HANDLES})", (content_code, member_id))
     conn.commit()
 
@@ -2271,12 +1803,12 @@ def character_names(conn):
     Content ID list UI" as the later step and left this table standalone so it
     could land while other work was in flight. It has landed; this is that step.
 
-    WARNING: THE TABLE IS CREATED BY THAT TOOL, NOT BY `SCHEMA`, so a database the tool
-    has never been run against does not have it. That is not an error and must
-    not read like one -- it means "we know no character names yet", and the
-    caller falls back. Hence the `OperationalError` arm rather than a migration:
-    creating the table here would make an empty one look authoritative on every
-    server that has never imported a name.
+    The table used to be created by that tool, and a database it had never
+    run against simply did not have it. It is part of the schema now
+    (0001_accounts.sql), and an EMPTY table means the same thing a missing one
+    did: "we know no character names yet". The caller falls back for any
+    Content ID that is not in the result, so an empty dict is not an answer
+    that claims authority.
 
     Keyed on the id as a NUMBER (`content_id_int`) because `handle_content` and
     `content_character` both store it as TEXT in two different widths -- the
@@ -2284,17 +1816,47 @@ def character_names(conn):
     compare silently misses. Same trap, same fix, as `handle_by_content_id`.
     """
     out = {}
-    try:
-        rows = conn.execute("SELECT content_id, content_code, character_name "
-                            "FROM content_character").fetchall()
-    except sqlite3.OperationalError:
-        return out
+    rows = conn.execute("SELECT content_id, content_code, character_name "
+                        "FROM content_character").fetchall()
     for r in rows:
         cid = content_id_int(r["content_id"])
         name = (r["character_name"] or "").strip()
         if cid is not None and name:
             out[(cid, int(r["content_code"] or 0))] = name
     return out
+
+
+def record_character_name(conn, content_id, name, content_code=1,
+                          world_charid=None, world_name=None, when=None):
+    """Store the game character's name for one Content ID (the write side of
+    `character_names`). Returns (outcome, previous name): outcome is 'added',
+    'updated' (same name, refreshed) or 'renamed'. Commits.
+
+    For a title's bridge or import tool: CrystalBridge's ffxi_names.py wrote
+    this table with its own SQL against accounts.db.
+    """
+    now = when or _now()
+    row = conn.execute(
+        "SELECT character_name FROM content_character"
+        " WHERE content_id = %s AND content_code = %s",
+        (str(content_id), int(content_code))).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO content_character (content_id, content_code,"
+            " world_charid, character_name, world_name, first_seen, last_seen)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (str(content_id), int(content_code), world_charid, name,
+             world_name, now, now))
+        conn.commit()
+        return "added", None
+    conn.execute(
+        "UPDATE content_character SET world_charid = %s, character_name = %s,"
+        " world_name = COALESCE(%s, world_name), last_seen = %s"
+        " WHERE content_id = %s AND content_code = %s",
+        (world_charid, name, world_name, now, str(content_id), int(content_code)))
+    conn.commit()
+    old = row["character_name"]
+    return ("updated" if old == name else "renamed"), old
 
 
 def handle_by_content_id(conn, value, active_only=False):
@@ -2308,14 +1870,16 @@ def handle_by_content_id(conn, value, active_only=False):
     n = content_id_int(value)
     if n is None:
         return None
+    # text_int() is SQLite's CAST(x AS INTEGER): leading digits, 0 for none.
+    # A plain ::BIGINT would raise on an operator-typed id that is not numeric.
     q = ("SELECT handle_id FROM handle_content WHERE content_id IS NOT NULL"
-         " AND CAST(content_id AS INTEGER) = ?")
+         " AND text_int(content_id) = %s")
     if active_only:
         q += " AND status = 'active'"
     row = conn.execute(q, (n,)).fetchone()
     if row is None:
         return None
-    return conn.execute("SELECT * FROM handle WHERE id = ?",
+    return conn.execute("SELECT * FROM handle WHERE id = %s",
                         (int(row["handle_id"]),)).fetchone()
 
 
@@ -2328,10 +1892,10 @@ def _content_id_taken(conn, value):
     """
     return conn.execute(
         "SELECT 1 FROM handle_content WHERE content_id IS NOT NULL"
-        "   AND CAST(content_id AS INTEGER) = ?"
+        "   AND text_int(content_id) = %s"
         " UNION ALL"
         " SELECT 1 FROM content WHERE content_no IS NOT NULL"
-        "   AND CAST(content_no AS INTEGER) = ?"
+        "   AND text_int(content_no) = %s"
         " LIMIT 1", (int(value), int(value))).fetchone() is not None
 
 
@@ -2344,9 +1908,9 @@ def _content_id_seed(conn):
     this change exists to stop minting.
     """
     row = conn.execute(
-        "SELECT MAX(CAST(content_id AS INTEGER)) AS hi FROM handle_content"
+        "SELECT MAX(text_int(content_id)) AS hi FROM handle_content"
         " WHERE content_id IS NOT NULL"
-        "   AND CAST(content_id AS INTEGER) BETWEEN ? AND ?",
+        "   AND text_int(content_id) BETWEEN %s AND %s",
         (CONTENT_ID_FLOOR, CONTENT_ID_CEILING)).fetchone()
     return max(CONTENT_ID_FLOOR, int((row and row["hi"]) or 0) + 1)
 
@@ -2360,8 +1924,11 @@ def allocate_content_id(conn):
     consumes it belong in ONE transaction, or a rolled-back registration keeps
     the bump while `register_account`'s single-transaction guarantee says nothing
     happened. Every caller here is already inside a transaction; keep it that
-    way. Two connections allocating at once serialise on SQLite's write lock,
-    which is what makes the counter safe without a second mechanism.
+    way. Two connections allocating at once used to serialise on SQLite's
+    write lock; PostgreSQL does not serialise writers that way, so this takes
+    the `content_id_seq` advisory lock (opening the transaction if the caller
+    has not yet), held until the caller commits. A second allocator waits for
+    the first one's commit and then reads the counter it left.
 
     WHAT THIS REPLACED, AND WHY IT WAS WRONG IN KIND (2026-08-23). The old mint
     was `_default_content_id(member_id, content_code)` = `1000000000 +
@@ -2418,6 +1985,7 @@ def allocate_content_id(conn):
     `_content_id_taken` closes the remaining door by refusing a number any row
     already holds, including a hand-entered `content.content_no`.
     """
+    conn.begin(lock="content_id_seq")
     row = conn.execute("SELECT next_id FROM content_id_seq WHERE id = 1").fetchone()
     nxt = int(row["next_id"]) if row is not None else _content_id_seed(conn)
     nxt = max(nxt, CONTENT_ID_FLOOR)
@@ -2432,7 +2000,7 @@ def allocate_content_id(conn):
             f"widening it changes the DIGIT COUNT the client displays, so that "
             f"is a decision to take deliberately, not a bug to patch away")
     conn.execute(
-        "INSERT INTO content_id_seq (id, next_id) VALUES (1, ?)"
+        "INSERT INTO content_id_seq (id, next_id) VALUES (1, %s)"
         " ON CONFLICT(id) DO UPDATE SET next_id = excluded.next_id",
         (nxt + 1,))
     return str(nxt)
@@ -2464,30 +2032,30 @@ def link_content_to_handle(conn, handle_id, content_code, content_id=None,
     # were.
     row = conn.execute(
         "SELECT COALESCE(MAX(slot), -1) AS hi FROM handle_content"
-        " WHERE handle_id = ? AND content_code = ?",
+        " WHERE handle_id = %s AND content_code = %s",
         (handle_id, content_code)).fetchone()
     nxt = int(row["hi"]) + 1
     moving = list(conn.execute(
-        f"SELECT handle_id, slot FROM handle_content WHERE content_code = ?"
+        f"SELECT handle_id, slot FROM handle_content WHERE content_code = %s"
         f" AND handle_id IN ({_SIBLING_HANDLES}) ORDER BY handle_id, slot",
         (content_code, handle_id, handle_id)))
     for i, r in enumerate(moving):
         conn.execute(
-            "UPDATE handle_content SET handle_id = ?, slot = ?"
-            " WHERE handle_id = ? AND content_code = ? AND slot = ?",
+            "UPDATE handle_content SET handle_id = %s, slot = %s"
+            " WHERE handle_id = %s AND content_code = %s AND slot = %s",
             (handle_id, nxt + i, r["handle_id"], content_code, r["slot"]))
     conn.execute(
         "INSERT INTO handle_content (handle_id, content_code, slot, content_id,"
-        " status, linked_at) VALUES (?,?,0,?,?,?)"
+        " status, linked_at) VALUES (%s,%s,0,%s,%s,%s)"
         " ON CONFLICT(handle_id, content_code, slot) DO UPDATE SET"
-        " content_id = COALESCE(excluded.content_id, content_id),"
+        " content_id = COALESCE(excluded.content_id, handle_content.content_id),"
         " status = excluded.status",
         (handle_id, content_code, content_id, status, _now()))
     conn.commit()
 
 
 def unlink_content_from_handle(conn, handle_id, content_code):
-    conn.execute("DELETE FROM handle_content WHERE handle_id = ? AND content_code = ?",
+    conn.execute("DELETE FROM handle_content WHERE handle_id = %s AND content_code = %s",
                  (handle_id, content_code))
     conn.commit()
 
@@ -2505,19 +2073,51 @@ def member_content_id(conn, member_id, content_code, active_only=True):
     """
     q = ("SELECT hc.content_id AS cid FROM handle_content hc"
          " JOIN handle h ON h.id = hc.handle_id"
-         " WHERE h.member_id = ? AND hc.content_code = ?"
+         " WHERE h.member_id = %s AND hc.content_code = %s"
          "   AND hc.content_id IS NOT NULL")
     if active_only:
         q += " AND hc.status = 'active'"
     # `hc.slot ASC` is load-bearing: a game can hold several Content IDs now, and
     # every caller of this function wants the one that IS the account's identity
     # for that game (TM's ranking row, the bridge's member lookup) -- which is
-    # slot 0. Without it SQLite may return any slot and the answer moves between
+    # slot 0. Without it the database may return any slot and the answer moves between
     # calls for no visible reason.
     row = conn.execute(q + " ORDER BY h.is_primary DESC, h.id ASC, hc.slot ASC"
                            " LIMIT 1",
                        (member_id, int(content_code))).fetchone()
     return row["cid"] if row else None
+
+
+def member_content_id_list(conn, member_id, content_code, active_only=True):
+    """Every Content ID this member holds for one game, across all handles and
+    slots, as stored strings in (primary handle first, handle, slot) order.
+
+    `member_content_id` answers "the" id (slot 0); a title that issues one per
+    character (FFXI) needs the whole set -- the bridge offers a member's
+    unspent ids as empty character slots, and must never offer another
+    member's.
+    """
+    q = ("SELECT hc.content_id AS cid FROM handle_content hc"
+         " JOIN handle h ON h.id = hc.handle_id"
+         " WHERE h.member_id = %s AND hc.content_code = %s"
+         "   AND hc.content_id IS NOT NULL")
+    if active_only:
+        q += " AND hc.status = 'active'"
+    rows = conn.execute(q + " ORDER BY h.is_primary DESC, h.id ASC, hc.slot ASC",
+                        (int(member_id), int(content_code))).fetchall()
+    return [r["cid"] for r in rows]
+
+
+def content_id_list(conn, content_code, active_only=True):
+    """Every Content ID the server has issued for one game, as stored strings,
+    each once. Server-wide: use `member_content_id_list` for anything that
+    hands one out."""
+    q = ("SELECT DISTINCT content_id FROM handle_content"
+         " WHERE content_code = %s AND content_id IS NOT NULL")
+    if active_only:
+        q += " AND status = 'active'"
+    return [r["content_id"] for r in conn.execute(
+        q + " ORDER BY content_id", (int(content_code),)).fetchall()]
 
 
 def title_content_slots():
@@ -2559,7 +2159,7 @@ CONTENT_IDS_PER_HANDLE = 8
 def content_slot_count(conn, handle_id, content_code, active_only=True):
     """How many Content IDs this handle holds for one game."""
     q = ("SELECT COUNT(*) AS n FROM handle_content"
-         " WHERE handle_id = ? AND content_code = ?")
+         " WHERE handle_id = %s AND content_code = %s")
     if active_only:
         q += " AND status = 'active'"
     return int(conn.execute(q, (handle_id, int(content_code))).fetchone()["n"])
@@ -2573,7 +2173,7 @@ def handle_link_count(conn, handle_id):
     an active one (see CONTENT_IDS_PER_HANDLE).
     """
     return int(conn.execute(
-        "SELECT COUNT(*) AS n FROM handle_content WHERE handle_id = ?",
+        "SELECT COUNT(*) AS n FROM handle_content WHERE handle_id = %s",
         (int(handle_id),)).fetchone()["n"])
 
 
@@ -2611,14 +2211,14 @@ def ensure_content_slots(conn, handle_id, content_code, want, status="active"):
         return 0
     row = conn.execute(
         "SELECT COALESCE(MAX(slot), -1) AS hi FROM handle_content"
-        " WHERE handle_id = ? AND content_code = ?",
+        " WHERE handle_id = %s AND content_code = %s",
         (handle_id, int(content_code))).fetchone()
     nxt = int(row["hi"]) + 1
     now = _now()
     for i in range(want - have):
         conn.execute(
             "INSERT INTO handle_content (handle_id, content_code, slot,"
-            " content_id, status, linked_at) VALUES (?,?,?,?,?,?)",
+            " content_id, status, linked_at) VALUES (%s,%s,%s,%s,%s,%s)",
             (handle_id, int(content_code), nxt + i, allocate_content_id(conn),
              status, now))
     return want - have
@@ -2639,13 +2239,13 @@ def ensure_title_slots(conn, handle_id=None, member_id=None):
         return 0
     minted = 0
     for code, want in sorted(policy.items()):
-        q = "SELECT DISTINCT handle_id FROM handle_content WHERE content_code = ?"
+        q = "SELECT DISTINCT handle_id FROM handle_content WHERE content_code = %s"
         params = [code]
         if handle_id is not None:
-            q += " AND handle_id = ?"
+            q += " AND handle_id = %s"
             params.append(int(handle_id))
         elif member_id is not None:
-            q += " AND handle_id IN (SELECT id FROM handle WHERE member_id = ?)"
+            q += " AND handle_id IN (SELECT id FROM handle WHERE member_id = %s)"
             params.append(int(member_id))
         for r in conn.execute(q, params).fetchall():
             minted += ensure_content_slots(conn, int(r["handle_id"]), code, want)
@@ -2657,7 +2257,7 @@ def ensure_title_slots(conn, handle_id=None, member_id=None):
 def handle_content_list(conn, handle_id, active_only=True):
     """The Content IDs linked to a handle: [{content_code, content_id, status}]."""
     q = ("SELECT content_code, slot, content_id, status FROM handle_content"
-         " WHERE handle_id = ?")
+         " WHERE handle_id = %s")
     if active_only:
         q += " AND status = 'active'"
     # (content_code, slot) and not content_code alone: a game can hold several
@@ -2679,20 +2279,20 @@ def link_member_content_to_primary(conn, member_id):
     content must never rearrange content.
     """
     h = conn.execute(
-        "SELECT id FROM handle WHERE member_id = ? AND is_primary = 1", (member_id,)
+        "SELECT id FROM handle WHERE member_id = %s AND is_primary = 1", (member_id,)
     ).fetchone()
     if h is None:
-        h = conn.execute("SELECT id FROM handle WHERE member_id = ? ORDER BY created_at"
+        h = conn.execute("SELECT id FROM handle WHERE member_id = %s ORDER BY created_at"
                          " LIMIT 1", (member_id,)).fetchone()
     if h is None:
         return 0
     n = 0
     for row in conn.execute("SELECT content_code, content_no FROM content"
-                            " WHERE member_id = ? AND status = 'active'", (member_id,)):
+                            " WHERE member_id = %s AND status = 'active'", (member_id,)):
         # Already on one of this member's handles (any status -- a cancelled
         # licence keeps its placement so a re-register restores it)? Leave it.
         if conn.execute(
-                f"SELECT 1 FROM handle_content WHERE content_code = ?"
+                f"SELECT 1 FROM handle_content WHERE content_code = %s"
                 f" AND handle_id IN ({_MEMBER_HANDLES})",
                 (row["content_code"], member_id)).fetchone():
             continue
@@ -2758,15 +2358,20 @@ def issue_regcode(conn, code, contents=(1,), note=None):
     """
     canon = normalise_regcode(code)
     clash = conn.execute(
-        "SELECT code FROM regcode WHERE code = ? COLLATE NOCASE AND code <> ?",
+        "SELECT code FROM regcode WHERE lower(code) = lower(%s) AND code <> %s",
         (canon, canon)).fetchone()
     if clash is not None:
         raise RegistrationError(
             f"{canon!r} differs only by case from the existing code "
             f"{clash['code']!r}, and codes are redeemed case-insensitively.")
     conn.execute(
-        "INSERT OR REPLACE INTO regcode (code, contents, note, created_at)"
-        " VALUES (?,?,?,?)",
+        "INSERT INTO regcode (code, contents, note, created_at)"
+        " VALUES (%s,%s,%s,%s)"
+        # SQLite's OR REPLACE put back a WHOLE row, so re-issuing a code also
+        # cleared its redemption; the upsert says so column by column.
+        " ON CONFLICT (code) DO UPDATE SET contents = excluded.contents,"
+        " note = excluded.note, created_at = excluded.created_at,"
+        " redeemed_at = NULL, redeemed_by = NULL",
         (canon, ",".join(str(c) for c in contents), note, _now()))
     conn.commit()
 
@@ -2782,7 +2387,7 @@ def check_regcode(conn, code):
     code spent; see `delete_polid`, whose `release_codes` clears BOTH when
     returning a code to the pool is what the operator actually meant.
     """
-    row = conn.execute("SELECT * FROM regcode WHERE code = ? COLLATE NOCASE",
+    row = conn.execute("SELECT * FROM regcode WHERE lower(code) = lower(%s)",
                        (normalise_regcode(code),)).fetchone()
     if row is None or row["redeemed_by"] is not None \
             or row["redeemed_at"] is not None:
@@ -2796,7 +2401,7 @@ def redeem_regcode(conn, code, polid):
     if row is None:
         return None
     conn.execute(
-        "UPDATE regcode SET redeemed_at = ?, redeemed_by = ? WHERE code = ?",
+        "UPDATE regcode SET redeemed_at = %s, redeemed_by = %s WHERE code = %s",
         (_now(), polid, row["code"]))
     conn.commit()
     return [int(c) for c in row["contents"].split(",") if c.strip()]
@@ -2814,13 +2419,13 @@ def set_member_password(conn, login_name, password):
     pw_hash, pw_salt = hash_password(password)
     with conn:
         cur = conn.execute(
-            "UPDATE member SET pw_hash = ?, pw_salt = ? WHERE login_name = ?",
+            "UPDATE member SET pw_hash = %s, pw_salt = %s WHERE login_name = %s",
             (pw_hash, pw_salt, login_name))
         conn.execute(
-            "UPDATE polid SET pw_hash = ?, pw_salt = ?, updated_at = ?"
-            " WHERE polid = (SELECT polid FROM member WHERE login_name = ?)",
+            "UPDATE polid SET pw_hash = %s, pw_salt = %s, updated_at = %s"
+            " WHERE polid = (SELECT polid FROM member WHERE login_name = %s)",
             (pw_hash, pw_salt, _now(), login_name))
-        row = conn.execute("SELECT id FROM member WHERE login_name = ?",
+        row = conn.execute("SELECT id FROM member WHERE login_name = %s",
                            (login_name,)).fetchone()
         if row is not None:
             set_login_password_copy(conn, row["id"], password, commit=False)
@@ -2858,10 +2463,10 @@ def set_account_password(conn, ident, password):
         return None
     pw_hash, pw_salt = hash_password(password)
     with conn:
-        conn.execute("UPDATE member SET pw_hash = ?, pw_salt = ? WHERE id = ?",
+        conn.execute("UPDATE member SET pw_hash = %s, pw_salt = %s WHERE id = %s",
                      (pw_hash, pw_salt, row["id"]))
-        conn.execute("UPDATE polid SET pw_hash = ?, pw_salt = ?, updated_at = ?"
-                     " WHERE polid = ?",
+        conn.execute("UPDATE polid SET pw_hash = %s, pw_salt = %s, updated_at = %s"
+                     " WHERE polid = %s",
                      (pw_hash, pw_salt, _now(), row["polid"]))
         set_login_password_copy(conn, row["id"], password, commit=False)
     return get_member(conn, row["login_name"])
@@ -2882,12 +2487,12 @@ def clear_login_token(conn, member_id):
     It is deliberately a SEPARATE action from a password change -- clearing it
     means the next thing to connect as this account is trusted on sight.
     """
-    cur = conn.execute("UPDATE member SET login_token = NULL WHERE id = ?",
+    cur = conn.execute("UPDATE member SET login_token = NULL WHERE id = %s",
                        (member_id,))
     # Clear the per-client rows too. Leaving them would make this hatch a no-op
     # for the client that is actually locked out -- the scoped check below runs
     # FIRST and would still be holding the stale token.
-    conn.execute("DELETE FROM login_token_client WHERE member_id = ?",
+    conn.execute("DELETE FROM login_token_client WHERE member_id = %s",
                  (member_id,))
     conn.commit()
     return cur.rowcount
@@ -2909,20 +2514,26 @@ def clear_login_token(conn, member_id):
 #
 # The salt comes FIRST, so pw_hash (PBKDF2) cannot verify it: we keep the
 # password sealed under a server key. POL_LOGIN_PW_KEY sets the key; otherwise it
-# is generated once into `login-pw.key` beside the database. Stdlib only:
+# is generated once into a key file, POL_LOGIN_PW_KEYFILE or
+# `<POL_DATA_DIR, default /data>/login-pw.key` -- where it always lived, beside
+# the old accounts.db, so a server moved to PostgreSQL keeps unsealing the
+# passwords it sealed before. The key stays OUT of the database on purpose: a
+# copy of the database alone must not be enough to read them. Stdlib only:
 # HMAC-SHA256 in counter mode for the stream, HMAC-SHA256 tag over nonce+ct.
 
 _PW_SEAL_VER = "v1"
 _PW_KEY_CACHE = {}
 
 
-def _db_file(conn):
-    try:
-        for row in conn.execute("PRAGMA database_list").fetchall():
-            if row[1] == "main":
-                return row[2] or None
-    except sqlite3.Error:
-        pass
+def _pw_key_path():
+    """Where the sealing key lives, or None when there is nowhere to keep one
+    (no POL_LOGIN_PW_KEYFILE and no data directory: a bare test process)."""
+    path = os.environ.get("POL_LOGIN_PW_KEYFILE")
+    if path:
+        return path
+    data = os.environ.get("POL_DATA_DIR", "/data")
+    if os.path.isdir(data):
+        return os.path.join(data, "login-pw.key")
     return None
 
 
@@ -2930,11 +2541,15 @@ def _pw_seal_key(conn):
     env = os.environ.get("POL_LOGIN_PW_KEY", "")
     if env:
         return hashlib.sha256(env.encode("utf-8")).digest()
-    dbf = _db_file(conn)
-    path = os.environ.get("POL_LOGIN_PW_KEYFILE") or (
-        os.path.join(os.path.dirname(os.path.abspath(dbf)), "login-pw.key")
-        if dbf else None)
-    if path is None:                         # in-memory DB (tests): per process
+    path = _pw_key_path()
+    if path is None:                         # nowhere to keep it: per process
+        if None not in _PW_KEY_CACHE:
+            # Loud, because it is silent otherwise: a copy sealed here cannot
+            # be read by any other process, so the lobby falls back to the
+            # token check for everyone this process stores a password for.
+            print("[accounts] WARNING: no POL_LOGIN_PW_KEYFILE and no data "
+                  "directory; login passwords are sealed with a key that only "
+                  "this process holds", flush=True)
         return _PW_KEY_CACHE.setdefault(None, secrets.token_bytes(32))
     if path in _PW_KEY_CACHE:
         return _PW_KEY_CACHE[path]
@@ -2999,7 +2614,7 @@ def set_login_password_copy(conn, member_id, password, commit=True):
     POL_LOGIN_PW_STORE=0 turns the capture off (existing copies stay)."""
     if os.environ.get("POL_LOGIN_PW_STORE", "1") != "1" or password is None:
         return False
-    conn.execute("UPDATE member SET login_pw_sealed = ? WHERE id = ?",
+    conn.execute("UPDATE member SET login_pw_sealed = %s WHERE id = %s",
                  (seal_login_password(conn, password), int(member_id)))
     if commit:
         conn.commit()
@@ -3007,7 +2622,7 @@ def set_login_password_copy(conn, member_id, password, commit=True):
 
 
 def get_login_password(conn, member_id):
-    row = conn.execute("SELECT login_pw_sealed FROM member WHERE id = ?",
+    row = conn.execute("SELECT login_pw_sealed FROM member WHERE id = %s",
                        (int(member_id),)).fetchone()
     return unseal_login_password(conn, row["login_pw_sealed"] if row else None)
 
@@ -3037,7 +2652,7 @@ def login_digest_ok(digest, salts, password):
 def digest_client_proven(conn, client_sig):
     if not client_sig:
         return False
-    return conn.execute("SELECT 1 FROM login_digest_client WHERE client_sig = ?",
+    return conn.execute("SELECT 1 FROM login_digest_client WHERE client_sig = %s",
                         (client_sig,)).fetchone() is not None
 
 
@@ -3046,8 +2661,9 @@ def prove_digest_client(conn, client_sig, member_id):
     True the first time (worth a log line)."""
     if not client_sig:
         return False
-    cur = conn.execute("INSERT OR IGNORE INTO login_digest_client"
-                       " (client_sig, member_id, proven_at) VALUES (?,?,?)",
+    cur = conn.execute("INSERT INTO login_digest_client"
+                       " (client_sig, member_id, proven_at) VALUES (%s,%s,%s)"
+                       " ON CONFLICT DO NOTHING",
                        (client_sig, int(member_id), _now()))
     conn.commit()
     return cur.rowcount == 1
@@ -3058,18 +2674,18 @@ def record_login_failure(conn, member_id, peer_ip=None, client_sig=None,
     """Count one digest-refused wrong password against a member. Rows older than
     a day are pruned for that member on the way, so the table stays small."""
     now = time.time() if now is None else float(now)
-    conn.execute("DELETE FROM login_fail WHERE member_id = ? AND at < ?",
+    conn.execute("DELETE FROM login_fail WHERE member_id = %s AND at < %s",
                  (int(member_id), now - 86400))
     conn.execute("INSERT INTO login_fail (member_id, at, peer_ip, client_sig)"
-                 " VALUES (?,?,?,?)", (int(member_id), now, peer_ip, client_sig))
+                 " VALUES (%s,%s,%s,%s)", (int(member_id), now, peer_ip, client_sig))
     conn.commit()
 
 
 def login_failures(conn, member_id, window_s, now=None):
     """How many refused passwords this member has in the last `window_s` s."""
     now = time.time() if now is None else float(now)
-    return conn.execute("SELECT COUNT(*) FROM login_fail WHERE member_id = ?"
-                        " AND at > ?", (int(member_id), now - float(window_s))
+    return conn.execute("SELECT COUNT(*) FROM login_fail WHERE member_id = %s"
+                        " AND at > %s", (int(member_id), now - float(window_s))
                         ).fetchone()[0]
 
 
@@ -3084,8 +2700,8 @@ def login_lock_remaining(conn, member_id, fails, window_s, now=None):
     if fails <= 0 or window_s <= 0:
         return 0
     now = time.time() if now is None else float(now)
-    rows = conn.execute("SELECT at FROM login_fail WHERE member_id = ? AND at > ?"
-                        " ORDER BY at DESC LIMIT ?",
+    rows = conn.execute("SELECT at FROM login_fail WHERE member_id = %s AND at > %s"
+                        " ORDER BY at DESC LIMIT %s",
                         (int(member_id), now - float(window_s), int(fails))
                         ).fetchall()
     if len(rows) < fails:
@@ -3095,7 +2711,7 @@ def login_lock_remaining(conn, member_id, fails, window_s, now=None):
 
 def clear_login_failures(conn, member_id):
     """Forget a member's refused passwords (a proven login, or `unlock`)."""
-    n = conn.execute("DELETE FROM login_fail WHERE member_id = ?",
+    n = conn.execute("DELETE FROM login_fail WHERE member_id = %s",
                      (int(member_id),)).rowcount
     conn.commit()
     return n
@@ -3125,7 +2741,7 @@ def list_stamp(conn, member_id, kind, fingerprint, grow=False, now=None):
     now = int(time.time()) if now is None else int(now)
     fingerprint = str(fingerprint)
     row = conn.execute("SELECT fingerprint, stamp FROM list_stamp"
-                       " WHERE member_id = ? AND kind = ?",
+                       " WHERE member_id = %s AND kind = %s",
                        (int(member_id), kind)).fetchone()
     if row is not None:
         old = row["fingerprint"]
@@ -3139,7 +2755,7 @@ def list_stamp(conn, member_id, kind, fingerprint, grow=False, now=None):
         if not changed:
             return int(row["stamp"])
     conn.execute("INSERT INTO list_stamp (member_id, kind, fingerprint, stamp)"
-                 " VALUES (?,?,?,?) ON CONFLICT(member_id, kind) DO UPDATE SET"
+                 " VALUES (%s,%s,%s,%s) ON CONFLICT(member_id, kind) DO UPDATE SET"
                  " fingerprint = excluded.fingerprint, stamp = excluded.stamp",
                  (int(member_id), kind, fingerprint, now))
     conn.commit()
@@ -3150,14 +2766,14 @@ def friend_list_fingerprint(conn, member_id):
     rows = conn.execute(
         "SELECT f.handle_id, f.peer_name, f.kind, f.status, f.label,"
         " f.ignore_low, f.ignore_flag FROM friend f JOIN handle h"
-        " ON f.handle_id = h.id WHERE h.member_id = ?"
+        " ON f.handle_id = h.id WHERE h.member_id = %s"
         " ORDER BY f.handle_id, f.peer_name", (int(member_id),)).fetchall()
     return hashlib.sha1(repr([tuple(r) for r in rows]).encode()).hexdigest()
 
 
 def handle_list_fingerprint(conn, member_id):
     rows = conn.execute("SELECT id, handle_name, is_primary FROM handle"
-                        " WHERE member_id = ? ORDER BY id",
+                        " WHERE member_id = %s ORDER BY id",
                         (int(member_id),)).fetchall()
     return hashlib.sha1(repr([tuple(r) for r in rows]).encode()).hexdigest()
 
@@ -3166,13 +2782,13 @@ def handle_list_fingerprint(conn, member_id):
 # reads
 # --------------------------------------------------------------------------- #
 def get_member(conn, login_name):
-    return conn.execute("SELECT * FROM member WHERE login_name = ?",
+    return conn.execute("SELECT * FROM member WHERE login_name = %s",
                         (login_name,)).fetchone()
 
 
 def get_login_token(conn, member_id):
     """The stored NICK-line password token for a member, or None if never set."""
-    row = conn.execute("SELECT login_token FROM member WHERE id = ?",
+    row = conn.execute("SELECT login_token FROM member WHERE id = %s",
                        (member_id,)).fetchone()
     return row["login_token"] if row else None
 
@@ -3193,12 +2809,12 @@ def arm_login_token(conn, member_id, hours=None, days=None):
     span = datetime.timedelta(hours=hours) if hours is not None else \
         datetime.timedelta(days=days if days is not None else TOKEN_ARM_DAYS)
     until = (now + span).strftime("%Y-%m-%dT%H:%M:%SZ")
-    row = conn.execute("SELECT token_arm_until FROM member WHERE id = ?",
+    row = conn.execute("SELECT token_arm_until FROM member WHERE id = %s",
                        (int(member_id),)).fetchone()
     have = (row["token_arm_until"] if row else None) or ""
     if have >= until:                       # ISO-8601 compares as a string
         return have
-    conn.execute("UPDATE member SET token_arm_until = ? WHERE id = ?",
+    conn.execute("UPDATE member SET token_arm_until = %s WHERE id = %s",
                  (until, int(member_id)))
     conn.commit()
     return until
@@ -3206,7 +2822,7 @@ def arm_login_token(conn, member_id, hours=None, days=None):
 
 def login_token_armed(conn, member_id, now=None):
     """True while this account may bind a login token."""
-    row = conn.execute("SELECT token_arm_until FROM member WHERE id = ?",
+    row = conn.execute("SELECT token_arm_until FROM member WHERE id = %s",
                        (int(member_id),)).fetchone()
     until = (row["token_arm_until"] if row else None) or ""
     if not until:
@@ -3218,7 +2834,7 @@ def login_token_armed(conn, member_id, now=None):
 
 def set_login_token(conn, member_id, token):
     """Record the password token (trust-on-first-use). Idempotent per value."""
-    conn.execute("UPDATE member SET login_token = ? WHERE id = ?",
+    conn.execute("UPDATE member SET login_token = %s WHERE id = %s",
                  (token, member_id))
     conn.commit()
 
@@ -3235,7 +2851,7 @@ def get_client_token(conn, member_id, client_sig):
     """The token this member has already proven from THIS client, or None."""
     row = conn.execute(
         "SELECT token FROM login_token_client"
-        " WHERE member_id = ? AND client_sig = ?",
+        " WHERE member_id = %s AND client_sig = %s",
         (member_id, client_sig)).fetchone()
     return row["token"] if row else None
 
@@ -3248,7 +2864,7 @@ def set_client_token(conn, member_id, client_sig, token):
     conn.execute(
         "INSERT INTO login_token_client"
         " (member_id, client_sig, token, first_seen, last_seen)"
-        " VALUES (?, ?, ?, ?, ?)"
+        " VALUES (%s, %s, %s, %s, %s)"
         " ON CONFLICT(member_id, client_sig) DO UPDATE SET"
         "   token = excluded.token, last_seen = excluded.last_seen",
         (member_id, client_sig, token, now, now))
@@ -3258,8 +2874,8 @@ def set_client_token(conn, member_id, client_sig, token):
 def touch_client_token(conn, member_id, client_sig):
     """Stamp `last_seen` for a pair that just matched, without rewriting it."""
     conn.execute(
-        "UPDATE login_token_client SET last_seen = ?"
-        " WHERE member_id = ? AND client_sig = ?",
+        "UPDATE login_token_client SET last_seen = %s"
+        " WHERE member_id = %s AND client_sig = %s",
         (_now(), member_id, client_sig))
     conn.commit()
 
@@ -3269,7 +2885,7 @@ def list_client_tokens(conn, member_id):
     most recently used first. For the admin panel and the CLI."""
     return conn.execute(
         "SELECT client_sig, token, first_seen, last_seen"
-        " FROM login_token_client WHERE member_id = ?"
+        " FROM login_token_client WHERE member_id = %s"
         " ORDER BY last_seen DESC", (member_id,)).fetchall()
 
 
@@ -3299,12 +2915,12 @@ def clear_client_tokens(conn, member_id, client_sig=None):
     """Forget one client's recorded token, or all of them. The per-client half
     of `clear_login_token`'s lockout escape hatch."""
     if client_sig is None:
-        cur = conn.execute("DELETE FROM login_token_client WHERE member_id = ?",
+        cur = conn.execute("DELETE FROM login_token_client WHERE member_id = %s",
                            (member_id,))
     else:
         cur = conn.execute(
             "DELETE FROM login_token_client"
-            " WHERE member_id = ? AND client_sig = ?", (member_id, client_sig))
+            " WHERE member_id = %s AND client_sig = %s", (member_id, client_sig))
     conn.commit()
     return cur.rowcount
 
@@ -3314,7 +2930,7 @@ def member_by_handle(conn, handle_name):
     because what arrives on the wire is the NICK, not the login name."""
     return conn.execute(
         "SELECT m.* FROM member m JOIN handle h ON h.member_id = m.id"
-        " WHERE h.handle_name = ?", (handle_name,)).fetchone()
+        " WHERE h.handle_name = %s", (handle_name,)).fetchone()
 
 
 def member_by_alias(conn, nick):
@@ -3324,14 +2940,14 @@ def member_by_alias(conn, nick):
     the login name, so an alias can never shadow a real account."""
     return conn.execute(
         "SELECT m.* FROM member m JOIN login_alias a ON a.member_id = m.id"
-        " WHERE a.nick = ?", (nick,)).fetchone()
+        " WHERE a.nick = %s", (nick,)).fetchone()
 
 
 def set_login_alias(conn, nick, member_id, note=None):
     """Point a login NICK at an existing member. Idempotent."""
     conn.execute(
         "INSERT INTO login_alias (nick, member_id, note, created_at)"
-        " VALUES (?,?,?,?) ON CONFLICT(nick) DO UPDATE SET"
+        " VALUES (%s,%s,%s,%s) ON CONFLICT(nick) DO UPDATE SET"
         " member_id = excluded.member_id, note = excluded.note",
         (nick, member_id, note, _now()))
     conn.commit()
@@ -3388,7 +3004,7 @@ def member_by_polid(conn, polid):
     which is what someone typing the bare ID means.
     """
     return conn.execute(
-        "SELECT * FROM member WHERE polid = ? ORDER BY member_no LIMIT 1",
+        "SELECT * FROM member WHERE polid = %s ORDER BY member_no LIMIT 1",
         (polid,)).fetchone()
 
 
@@ -3417,7 +3033,7 @@ def verify_member(conn, login_name, password):
         return None
     if row["status"] != "active":
         return None
-    parent = conn.execute("SELECT status FROM polid WHERE polid = ?",
+    parent = conn.execute("SELECT status FROM polid WHERE polid = %s",
                           (row["polid"],)).fetchone()
     if parent is None or parent["status"] != "active":
         return None
@@ -3442,8 +3058,8 @@ def content_ids(conn, member_id, status="active"):
     Support's reactivation screen (kinou 15) offers back to the player.
     """
     return [r["content_code"] for r in conn.execute(
-        "SELECT content_code FROM content WHERE member_id = ?"
-        " AND status = ? ORDER BY content_code", (member_id, status))]
+        "SELECT content_code FROM content WHERE member_id = %s"
+        " AND status = %s ORDER BY content_code", (member_id, status))]
 
 
 # --------------------------------------------------------------------------- #
@@ -3506,14 +3122,14 @@ def add_friend(conn, handle_id, peer_name, kind=KIND_FRIEND, peer_handle=None,
         guid = _peer_guid(peer_handle, peer_name)
     conn.execute(
         "INSERT INTO friend (handle_id, peer_handle, peer_name, peer_guid, kind,"
-        " status, comment, created_at) VALUES (?,?,?,?,?,?,?,?)"
+        " status, comment, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
         " ON CONFLICT(handle_id, peer_name) DO UPDATE SET"
         " kind=excluded.kind, status=excluded.status, comment=excluded.comment,"
         " peer_handle=excluded.peer_handle",
         (handle_id, peer_handle, peer_name, guid, int(kind), status, comment,
          _now()))
     conn.commit()
-    row = conn.execute("SELECT id FROM friend WHERE handle_id = ? AND peer_name = ?",
+    row = conn.execute("SELECT id FROM friend WHERE handle_id = %s AND peer_name = %s",
                        (handle_id, peer_name)).fetchone()
     return row["id"] if row else None
 
@@ -3522,10 +3138,10 @@ def list_friends(conn, handle_id, status="active"):
     """Friend rows for a handle, groups last (SE's capture had them trailing)."""
     q = ("SELECT f.*, h.handle_name AS live_name FROM friend f"
          " LEFT JOIN handle h ON h.id = f.peer_handle"
-         " WHERE f.handle_id = ?")
+         " WHERE f.handle_id = %s")
     args = [handle_id]
     if status:
-        q += " AND f.status = ?"
+        q += " AND f.status = %s"
         args.append(status)
     q += " ORDER BY (f.kind = %d), f.id" % KIND_GROUP
     return list(conn.execute(q, args))
@@ -3543,7 +3159,7 @@ def set_friend_label(conn, handle_id, row_id, label):
     in which the name field no longer holds the name.
     """
     label = (label or "").strip() or None
-    conn.execute("UPDATE friend SET label = ? WHERE id = ? AND handle_id = ?",
+    conn.execute("UPDATE friend SET label = %s WHERE id = %s AND handle_id = %s",
                  (label, int(row_id), int(handle_id)))
     conn.commit()
     return label
@@ -3559,16 +3175,16 @@ def set_friend_flags(conn, handle_id, row_id, low=None, flag=None):
     """
     sets, args = [], []
     if low is not None:
-        sets.append("ignore_low = ?")
+        sets.append("ignore_low = %s")
         args.append(int(low) & 0xFF)
     if flag is not None:
-        sets.append("ignore_flag = ?")
+        sets.append("ignore_flag = %s")
         args.append(int(flag) & 0xFF)
     if not sets:
         return False
     args += [int(row_id), int(handle_id)]
     conn.execute("UPDATE friend SET " + ", ".join(sets) +
-                 " WHERE id = ? AND handle_id = ?", args)
+                 " WHERE id = %s AND handle_id = %s", args)
     conn.commit()
     return True
 
@@ -3598,7 +3214,7 @@ def friend_row_by_guid(conn, handle_id, guid):
     for r in conn.execute(
             "SELECT f.*, h.client_guid AS peer_client_guid FROM friend f"
             " LEFT JOIN handle h ON h.id = f.peer_handle"
-            " WHERE f.handle_id = ?", (int(handle_id),)):
+            " WHERE f.handle_id = %s", (int(handle_id),)):
         if int(r["peer_guid"] or 0) == guid:
             return r
         if r["peer_handle"] and handle_guid(int(r["peer_handle"])) == guid:
@@ -3638,13 +3254,13 @@ def _drop_friend_mirror(conn, handle_id, peer_name, kind):
         return None
     if os.environ.get("POL_FRIEND_DELETE_SYMMETRIC", "0") != "1":
         return None
-    me = conn.execute("SELECT handle_name FROM handle WHERE id = ?",
+    me = conn.execute("SELECT handle_name FROM handle WHERE id = %s",
                       (handle_id,)).fetchone()
     peer = _peer_handle_row(conn, peer_name)
     if me is None or peer is None or int(peer["id"]) == int(handle_id):
         return None
     cur = conn.execute(
-        "DELETE FROM friend WHERE handle_id = ? AND peer_name = ? AND kind = ?",
+        "DELETE FROM friend WHERE handle_id = %s AND peer_name = %s AND kind = %s",
         (int(peer["id"]), me["handle_name"], KIND_FRIEND))
     conn.commit()
     return int(peer["id"]) if cur.rowcount else None
@@ -3652,9 +3268,9 @@ def _drop_friend_mirror(conn, handle_id, peer_name, kind):
 
 def remove_friend(conn, handle_id, peer_name, mirror=True):
     row = conn.execute(
-        "SELECT id, kind FROM friend WHERE handle_id = ? AND peer_name = ?",
+        "SELECT id, kind FROM friend WHERE handle_id = %s AND peer_name = %s",
         (handle_id, peer_name)).fetchone()
-    conn.execute("DELETE FROM friend WHERE handle_id = ? AND peer_name = ?",
+    conn.execute("DELETE FROM friend WHERE handle_id = %s AND peer_name = %s",
                  (handle_id, peer_name))
     conn.commit()
     if row is not None and mirror:
@@ -3665,11 +3281,11 @@ def remove_friend_by_ref(conn, handle_id, client_ref):
     """Delete the row carrying exactly this client id. See below for the caller
     that should normally be used instead."""
     row = conn.execute("SELECT id, peer_name, kind FROM friend WHERE handle_id"
-                       " = ? AND client_ref = ?",
+                       " = %s AND client_ref = %s",
                        (handle_id, client_ref)).fetchone()
     if row is None:
         return None
-    conn.execute("DELETE FROM friend WHERE id = ?", (row["id"],))
+    conn.execute("DELETE FROM friend WHERE id = %s", (row["id"],))
     conn.commit()
     _drop_friend_mirror(conn, handle_id, row["peer_name"], row["kind"])
     return row["peer_name"]
@@ -3685,11 +3301,11 @@ def remove_friend_by_peer_handle(conn, handle_id, peer_handle):
     somebody else's list.
     """
     row = conn.execute("SELECT id, peer_name, kind FROM friend WHERE handle_id"
-                       " = ? AND peer_handle = ?",
+                       " = %s AND peer_handle = %s",
                        (handle_id, int(peer_handle))).fetchone()
     if row is None:
         return None
-    conn.execute("DELETE FROM friend WHERE id = ?", (row["id"],))
+    conn.execute("DELETE FROM friend WHERE id = %s", (row["id"],))
     conn.commit()
     _drop_friend_mirror(conn, handle_id, row["peer_name"], row["kind"])
     return row["peer_name"]
@@ -3703,11 +3319,11 @@ def remove_friend_by_row(conn, handle_id, row_id):
     the ones a client write has named. Scoped to the handle so a tag echoed by
     the wrong session cannot delete somebody else's row.
     """
-    row = conn.execute("SELECT id, peer_name, kind FROM friend WHERE id = ?"
-                       " AND handle_id = ?", (int(row_id), handle_id)).fetchone()
+    row = conn.execute("SELECT id, peer_name, kind FROM friend WHERE id = %s"
+                       " AND handle_id = %s", (int(row_id), handle_id)).fetchone()
     if row is None:
         return None
-    conn.execute("DELETE FROM friend WHERE id = ?", (row["id"],))
+    conn.execute("DELETE FROM friend WHERE id = %s", (row["id"],))
     conn.commit()
     _drop_friend_mirror(conn, handle_id, row["peer_name"], row["kind"])
     return row["peer_name"]
@@ -3731,7 +3347,7 @@ def remove_friend_in_record(conn, handle_id, record, wire_ref=None):
     Returns the peer name that went, or None if the record names nobody we know.
     """
     for row in conn.execute("SELECT id, peer_name, kind, client_ref, wire_ref"
-                            " FROM friend WHERE handle_id = ? AND (client_ref IS"
+                            " FROM friend WHERE handle_id = %s AND (client_ref IS"
                             " NOT NULL OR wire_ref IS NOT NULL)",
                             (handle_id,)).fetchall():
         ref = row["client_ref"]
@@ -3739,7 +3355,7 @@ def remove_friend_in_record(conn, handle_id, record, wire_ref=None):
         if not hit and wire_ref and row["wire_ref"]:
             hit = bytes(row["wire_ref"]) == bytes(wire_ref)
         if hit:
-            conn.execute("DELETE FROM friend WHERE id = ?", (row["id"],))
+            conn.execute("DELETE FROM friend WHERE id = %s", (row["id"],))
             conn.commit()
             _drop_friend_mirror(conn, handle_id, row["peer_name"], row["kind"])
             return row["peer_name"]
@@ -3757,7 +3373,7 @@ def remove_friend_in_record(conn, handle_id, record, wire_ref=None):
 # the guid it matches against the client's own id.
 #
 # The two ceilings below are the client's and are validated by it -- see the
-# `group_member` table comment in SCHEMA.
+# [group_member] note near the top of this file.
 # --------------------------------------------------------------------------- #
 
 #: Member slots per group (obj+0x30, stride 0xC0). The 07:12 count block's
@@ -3804,7 +3420,7 @@ GROUP_CLASS_MAX = 5
 def group_id(conn, handle_id, name):
     """The `friend` row id of the group `name` owned by `handle_id`, or None."""
     row = conn.execute(
-        "SELECT id FROM friend WHERE handle_id = ? AND peer_name = ? AND kind = ?",
+        "SELECT id FROM friend WHERE handle_id = %s AND peer_name = %s AND kind = %s",
         (int(handle_id), name, KIND_GROUP)).fetchone()
     return int(row["id"]) if row else None
 
@@ -3829,17 +3445,17 @@ def add_group_member(conn, gid, member_name, member_handle=None, guid=None,
     if guid is None:
         guid = _peer_guid(member_handle, member_name)
     present = conn.execute(
-        "SELECT 1 FROM group_member WHERE group_id = ? AND member_name = ?",
+        "SELECT 1 FROM group_member WHERE group_id = %s AND member_name = %s",
         (int(gid), member_name)).fetchone()
     if present is None and count_group_members(conn, gid) >= GROUP_MEMBER_MAX:
         return False
     conn.execute(
         "INSERT INTO group_member (group_id, member_handle, member_name,"
-        " member_guid, class, pending, created_at) VALUES (?,?,?,?,?,?,?)"
+        " member_guid, class, pending, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)"
         " ON CONFLICT(group_id, member_name) DO UPDATE SET"
         " member_handle=excluded.member_handle, member_guid=excluded.member_guid,"
         " class=excluded.class,"
-        " pending=min(group_member.pending, excluded.pending)",
+        " pending=LEAST(group_member.pending, excluded.pending)",
         (int(gid), member_handle, member_name, int(guid), int(cls),
          1 if pending else 0, _now()))
     conn.commit()
@@ -3856,8 +3472,8 @@ def confirm_group_member(conn, gid, member_name):
     never a demotion.
     """
     cur = conn.execute(
-        "UPDATE group_member SET pending = 0, class = MAX(class, ?) "
-        "WHERE group_id = ? AND member_name = ? AND pending = 1",
+        "UPDATE group_member SET pending = 0, class = GREATEST(class, %s) "
+        "WHERE group_id = %s AND member_name = %s AND pending = 1",
         (GROUP_CLASS_MEMBER, int(gid), member_name))
     conn.commit()
     return cur.rowcount > 0
@@ -3877,28 +3493,28 @@ def group_class_of(conn, gid, member_id=None, handle_ids=None):
     """
     if handle_ids is None:
         handle_ids = [int(r["id"]) for r in conn.execute(
-            "SELECT id FROM handle WHERE member_id = ?", (int(member_id),))]
+            "SELECT id FROM handle WHERE member_id = %s", (int(member_id),))]
     ids = {int(h) for h in handle_ids if h}
     if not ids:
         return None
-    g = conn.execute("SELECT handle_id FROM friend WHERE id = ? AND kind = ?",
+    g = conn.execute("SELECT handle_id FROM friend WHERE id = %s AND kind = %s",
                      (int(gid), KIND_GROUP)).fetchone()
     if g is None:
         return None
     if int(g["handle_id"]) in ids:
         return GROUP_CLASS_MASTER
-    marks = ",".join("?" * len(ids))
+    marks = ",".join(["%s"] * len(ids))
     names = {r["handle_name"] for r in conn.execute(
         f"SELECT handle_name FROM handle WHERE id IN ({marks})", tuple(ids))}
     for r in conn.execute("SELECT member_handle, member_name, class FROM group_member "
-                          "WHERE group_id = ? AND pending = 0", (int(gid),)):
+                          "WHERE group_id = %s AND pending = 0", (int(gid),)):
         if (r["member_handle"] and int(r["member_handle"]) in ids) or r["member_name"] in names:
             return int(r["class"])
     return None
 
 
 def remove_group_member(conn, gid, member_name):
-    conn.execute("DELETE FROM group_member WHERE group_id = ? AND member_name = ?",
+    conn.execute("DELETE FROM group_member WHERE group_id = %s AND member_name = %s",
                  (int(gid), member_name))
     conn.commit()
 
@@ -3910,19 +3526,19 @@ def delete_group(conn, gid, owner_handle_id=None):
     own it). The lobby's 7:2 KDeleteGroup arm is the caller.
 
     The membership is deleted explicitly rather than left to the FK cascade:
-    the cascade needs `PRAGMA foreign_keys = ON` on THIS connection and the
-    count is the useful thing to log either way.
+    the count is the useful thing to log, and under SQLite the cascade did not
+    fire on most connections.
     """
-    q = "SELECT id FROM friend WHERE id = ? AND kind = ?"
+    q = "SELECT id FROM friend WHERE id = %s AND kind = %s"
     args = [int(gid), KIND_GROUP]
     if owner_handle_id is not None:
-        q += " AND handle_id = ?"
+        q += " AND handle_id = %s"
         args.append(int(owner_handle_id))
     if conn.execute(q, args).fetchone() is None:
         return None
-    n = conn.execute("DELETE FROM group_member WHERE group_id = ?",
+    n = conn.execute("DELETE FROM group_member WHERE group_id = %s",
                      (int(gid),)).rowcount
-    conn.execute("DELETE FROM friend WHERE id = ?", (int(gid),))
+    conn.execute("DELETE FROM friend WHERE id = %s", (int(gid),))
     conn.commit()
     return n
 
@@ -3944,14 +3560,28 @@ def set_group_member_class(conn, gid, member_name, cls):
     if cls < GROUP_CLASS_MIN or cls > GROUP_CLASS_MAX:
         raise ValueError(f"group member class {cls} is outside polcore's 2..5")
     cur = conn.execute(
-        "UPDATE group_member SET class = ? WHERE group_id = ? AND member_name = ?",
+        "UPDATE group_member SET class = %s WHERE group_id = %s AND member_name = %s",
         (int(cls), int(gid), member_name))
     conn.commit()
     return cur.rowcount > 0
 
 
+def member_groups(conn, member_id):
+    """The groups a member has ACCEPTED membership of, through any handle:
+    [(group_id, class, formed_at)], where formed_at is the group's earliest
+    member row -- the owner's, since there is no group table of its own, only
+    members. Pending invitations are left out. For a title that mirrors POL
+    groups (FMO's squadrons)."""
+    rows = conn.execute(
+        "SELECT g.group_id, g.class, (SELECT MIN(created_at) FROM group_member"
+        "   WHERE group_id = g.group_id) AS formed_at"
+        " FROM group_member g JOIN handle h ON h.id = g.member_handle"
+        " WHERE h.member_id = %s AND g.pending = 0", (int(member_id),)).fetchall()
+    return [(int(r["group_id"]), int(r["class"]), r["formed_at"]) for r in rows]
+
+
 def count_group_members(conn, gid):
-    row = conn.execute("SELECT COUNT(*) AS n FROM group_member WHERE group_id = ?",
+    row = conn.execute("SELECT COUNT(*) AS n FROM group_member WHERE group_id = %s",
                        (int(gid),)).fetchone()
     return int(row["n"]) if row else 0
 
@@ -3978,12 +3608,12 @@ def backfill_group_owners(conn, dry=False):
     groups = conn.execute(
         "SELECT f.id, f.peer_name, f.handle_id, h.handle_name "
         "FROM friend f JOIN handle h ON h.id = f.handle_id "
-        "WHERE f.kind = ?", (KIND_GROUP,)).fetchall()
+        "WHERE f.kind = %s", (KIND_GROUP,)).fetchall()
     for g in groups:
         gid, owner_id = int(g["id"]), int(g["handle_id"])
         row = conn.execute(
             "SELECT member_handle, class FROM group_member "
-            "WHERE group_id = ? AND member_handle = ?",
+            "WHERE group_id = %s AND member_handle = %s",
             (gid, owner_id)).fetchone()
         if row is None:
             changed.append((g["peer_name"], g["handle_name"]))
@@ -3995,8 +3625,8 @@ def backfill_group_owners(conn, dry=False):
             fixed.append((g["peer_name"], g["handle_name"], int(row["class"])))
             if not dry:
                 conn.execute(
-                    "UPDATE group_member SET class = ? "
-                    "WHERE group_id = ? AND member_handle = ?",
+                    "UPDATE group_member SET class = %s "
+                    "WHERE group_id = %s AND member_handle = %s",
                     (GROUP_CLASS_MASTER, gid, owner_id))
     if not dry:
         conn.commit()
@@ -4026,9 +3656,9 @@ def list_group_members(conn, gid, limit=GROUP_MEMBER_MAX,
     """
     rows = conn.execute(
         "SELECT member_handle, member_name, member_guid, class, pending"
-        " FROM group_member WHERE group_id = ?" +
+        " FROM group_member WHERE group_id = %s" +
         ("" if include_pending else " AND pending = 0") +
-        " ORDER BY rowid LIMIT ?",
+        " ORDER BY seq LIMIT %s",
         (int(gid), int(limit))).fetchall()
     out = []
     for r in rows:
@@ -4071,7 +3701,7 @@ def friend_watchers(conn, member_id):
         "FROM friend f "
         "JOIN handle sub ON sub.id = f.peer_handle "
         "JOIN handle own ON own.id = f.handle_id "
-        "WHERE sub.member_id = ? AND f.kind = ? AND f.status = ?",
+        "WHERE sub.member_id = %s AND f.kind = %s AND f.status = %s",
         (int(member_id), KIND_FRIEND, STATUS_ACTIVE)).fetchall()
     return [(int(r["watcher_member"]), int(r["watcher_handle"]),
              int(r["subject_handle"])) for r in rows]
@@ -4134,16 +3764,16 @@ def request_friend(conn, handle_id, peer_name, kind=KIND_FRIEND, guid=None):
     it is driven entirely by which side already holds which row.
     """
     own = conn.execute(
-        "SELECT id, status FROM friend WHERE handle_id = ? AND peer_name = ?",
+        "SELECT id, status FROM friend WHERE handle_id = %s AND peer_name = %s",
         (handle_id, peer_name)).fetchone()
     peer = _peer_handle_row(conn, peer_name)
-    me = conn.execute("SELECT handle_name, member_id FROM handle WHERE id = ?",
+    me = conn.execute("SELECT handle_name, member_id FROM handle WHERE id = %s",
                       (handle_id,)).fetchone()
     if own is not None and peer is not None             and peer["handle_name"] != peer_name and handle_nocase():
         # A row filed under a mis-cased name before POL_HANDLE_NOCASE never
         # learned whose it is; tie it to the handle now, so 2:3 serves the
         # peer's real guid instead of a hash of the typed name.
-        conn.execute("UPDATE friend SET peer_handle = ? WHERE id = ?"
+        conn.execute("UPDATE friend SET peer_handle = %s WHERE id = %s"
                      " AND peer_handle IS NULL", (int(peer["id"]), own["id"]))
         conn.commit()
 
@@ -4210,7 +3840,7 @@ def request_friend(conn, handle_id, peer_name, kind=KIND_FRIEND, guid=None):
         # it acting on the notification. Their row is already active, so this is
         # the confirmation that closes the loop rather than a fresh request.
         theirs = conn.execute(
-            "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
+            "SELECT status FROM friend WHERE handle_id = %s AND peer_name = %s",
             (int(peer["id"]), friend_row_name(conn, int(peer["id"]),
                                               me["handle_name"]))).fetchone()
         if theirs is not None and theirs["status"] == STATUS_ACTIVE:
@@ -4277,7 +3907,7 @@ def _mirror_request(conn, handle_id, peer, me, kind):
             or int(peer["id"]) == int(handle_id):
         return None
     theirs = conn.execute(
-        "SELECT id, status FROM friend WHERE handle_id = ? AND peer_name = ?",
+        "SELECT id, status FROM friend WHERE handle_id = %s AND peer_name = %s",
         (int(peer["id"]), friend_row_name(conn, int(peer["id"]),
                                           me["handle_name"]))).fetchone()
     if theirs is not None:
@@ -4324,13 +3954,13 @@ def reconcile_pending(conn, handle_id, skip=()):
     if os.environ.get("POL_FRIEND_PENDING_RECONCILE", "1") != "1":
         return []
     skip = set(skip or ())
-    me = conn.execute("SELECT handle_name FROM handle WHERE id = ?",
+    me = conn.execute("SELECT handle_name FROM handle WHERE id = %s",
                       (handle_id,)).fetchone()
     if me is None:
         return []
     mine = conn.execute(
-        "SELECT peer_name FROM friend WHERE handle_id = ? AND status = ?"
-        " AND kind = ?", (handle_id, STATUS_PENDING, KIND_FRIEND)).fetchall()
+        "SELECT peer_name FROM friend WHERE handle_id = %s AND status = %s"
+        " AND kind = %s", (handle_id, STATUS_PENDING, KIND_FRIEND)).fetchall()
     done = []
     for row in mine:
         if row["peer_name"] in skip:
@@ -4339,7 +3969,7 @@ def reconcile_pending(conn, handle_id, skip=()):
         if peer is None or int(peer["id"]) == int(handle_id):
             continue                        # not one of ours, nothing to read
         theirs = conn.execute(
-            "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
+            "SELECT status FROM friend WHERE handle_id = %s AND peer_name = %s",
             (int(peer["id"]), friend_row_name(conn, int(peer["id"]),
                                               me["handle_name"]))).fetchone()
         if theirs is not None and theirs["status"] == STATUS_ACTIVE:
@@ -4351,7 +3981,7 @@ def reconcile_pending(conn, handle_id, skip=()):
 def accept_friend(conn, handle_id, peer_name):
     """Agree to an incoming request. Returns True if one was there to agree to."""
     own = conn.execute(
-        "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
+        "SELECT status FROM friend WHERE handle_id = %s AND peer_name = %s",
         (handle_id, peer_name)).fetchone()
     if own is None or own["status"] != STATUS_INVITED:
         return False
@@ -4372,7 +4002,7 @@ def decline_friend(conn, handle_id, peer_name):
     erasing the very fact the paragraph above exists to keep.
     """
     own = conn.execute(
-        "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
+        "SELECT status FROM friend WHERE handle_id = %s AND peer_name = %s",
         (handle_id, peer_name)).fetchone()
     if own is None or own["status"] != STATUS_INVITED:
         return False
@@ -4409,7 +4039,7 @@ def replace_friends(conn, handle_id, entries):
     note at the bottom of this function.
     """
     have = {r["peer_name"]: r for r in conn.execute(
-        "SELECT * FROM friend WHERE handle_id = ?", (handle_id,))}
+        "SELECT * FROM friend WHERE handle_id = %s", (handle_id,))}
     seen, added, accepted, updated = set(), 0, 0, 0
     for e in entries:
         name = e.get("name")
@@ -4442,18 +4072,18 @@ def replace_friends(conn, handle_id, entries):
         # carries no name -- and the client re-mints it on a delete-and-re-add,
         # so it is rewritten on every write rather than only on insert.
         if e.get("client_ref"):
-            conn.execute("UPDATE friend SET client_ref = ? WHERE handle_id = ?"
-                         " AND peer_name = ?",
+            conn.execute("UPDATE friend SET client_ref = %s WHERE handle_id = %s"
+                         " AND peer_name = %s",
                          (e["client_ref"], handle_id, name))
         if e.get("wire_ref"):
-            conn.execute("UPDATE friend SET wire_ref = ? WHERE handle_id = ?"
-                         " AND peer_name = ?",
+            conn.execute("UPDATE friend SET wire_ref = %s WHERE handle_id = %s"
+                         " AND peer_name = %s",
                          (e["wire_ref"], handle_id, name))
         if old is None or old["status"] == STATUS_INVITED:
             continue
         if int(old["kind"]) != kind or (guid and int(old["peer_guid"]) != guid):
             conn.execute(
-                "UPDATE friend SET kind = ?, peer_guid = ? WHERE id = ?",
+                "UPDATE friend SET kind = %s, peer_guid = %s WHERE id = %s",
                 (kind, guid or old["peer_guid"], old["id"]))
             updated += 1
     # *** 2:6 IS NOT A WHOLE-LIST PUT. Measured 2026-08-13. ***
@@ -4496,7 +4126,7 @@ def replace_friends(conn, handle_id, entries):
         else:
             gone.append(r["id"])
     if gone:
-        conn.executemany("DELETE FROM friend WHERE id = ?",
+        conn.executemany("DELETE FROM friend WHERE id = %s",
                          [(i,) for i in gone])
     conn.commit()
     # Groups are reported separately from held-back invitations: they are kept
@@ -4509,15 +4139,27 @@ def replace_friends(conn, handle_id, entries):
 def set_friend_status(conn, handle_id, peer_name, status):
     """Move one entry between 'pending'/'invited' and 'active'."""
     cur = conn.execute(
-        "UPDATE friend SET status = ? WHERE handle_id = ? AND peer_name = ?",
+        "UPDATE friend SET status = %s WHERE handle_id = %s AND peer_name = %s",
         (status, handle_id, peer_name))
     conn.commit()
     return cur.rowcount
 
 
+def member_id_by_handle_name(conn, name):
+    """The member owning the handle called `name`, case-insensitively, or None.
+    Several matches (two handles differing only in case) resolve to the one
+    that is a primary handle, then the oldest. For display lookups such as a
+    title's ranking board, where the name was typed by a person; the lobby
+    uses `handle_by_name`, which refuses an ambiguous match instead."""
+    row = conn.execute(
+        "SELECT member_id FROM handle WHERE lower(handle_name) = lower(%s)"
+        " ORDER BY is_primary DESC, id ASC LIMIT 1", (name,)).fetchone()
+    return int(row["member_id"]) if row else None
+
+
 def primary_handle(conn, member_id):
     row = conn.execute(
-        "SELECT handle_name FROM handle WHERE member_id = ?"
+        "SELECT handle_name FROM handle WHERE member_id = %s"
         " ORDER BY is_primary DESC, id ASC LIMIT 1", (member_id,)).fetchone()
     return row["handle_name"] if row else None
 
@@ -4525,7 +4167,7 @@ def primary_handle(conn, member_id):
 def ucs_params(conn, polid):
     """The (area_kbn, login_pf, property) triple the UCS CGI URL carries."""
     row = conn.execute(
-        "SELECT area_kbn, login_pf, property FROM polid WHERE polid = ?",
+        "SELECT area_kbn, login_pf, property FROM polid WHERE polid = %s",
         (polid,)).fetchone()
     if row is None:
         return ("00", "01", "00")
@@ -4542,7 +4184,7 @@ def open_session(conn, member_id, nick=None, peer_ip=None, iv=None,
     exp = now + datetime.timedelta(seconds=ttl_seconds)
     conn.execute(
         "INSERT INTO session (token, member_id, nick, peer_ip, iv, lobby_port,"
-        " created_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+        " created_at, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
         (token, member_id, nick, peer_ip,
          iv.hex() if isinstance(iv, (bytes, bytearray)) else iv,
          lobby_port,
@@ -4553,7 +4195,7 @@ def open_session(conn, member_id, nick=None, peer_ip=None, iv=None,
 
 
 def get_session(conn, token):
-    return conn.execute("SELECT * FROM session WHERE token = ?",
+    return conn.execute("SELECT * FROM session WHERE token = %s",
                         (token,)).fetchone()
 
 
@@ -4624,11 +4266,11 @@ def sole_online_member(conn, max_age_seconds=None):
              ).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = conn.execute(
         "SELECT DISTINCT s.member_id FROM session s"
-        " WHERE s.expires_at > ? AND s.created_at > ? LIMIT 2",
+        " WHERE s.expires_at > %s AND s.created_at > %s LIMIT 2",
         (_now(), fresh)).fetchall()
     if len(rows) != 1:
         return None
-    row = conn.execute("SELECT * FROM member WHERE id = ?",
+    row = conn.execute("SELECT * FROM member WHERE id = %s",
                        (rows[0]["member_id"],)).fetchone()
     if row is None or row["member_no"] != 0 or row["status"] != "active":
         return None
@@ -4646,19 +4288,19 @@ def record_login(conn, member_id, when=None):
     """
     now = when or _now()
     row = conn.execute(
-        "SELECT last_login_at, last_logout_at FROM member WHERE id = ?",
+        "SELECT last_login_at, last_logout_at FROM member WHERE id = %s",
         (member_id,)).fetchone()
     prev = row["last_login_at"] if row else None
     conn.execute(
-        "UPDATE member SET prev_login_at = last_login_at, last_login_at = ?"
-        " WHERE id = ?", (now, member_id))
+        "UPDATE member SET prev_login_at = last_login_at, last_login_at = %s"
+        " WHERE id = %s", (now, member_id))
     conn.commit()
     return prev, (row["last_logout_at"] if row else None)
 
 
 def record_logout(conn, member_id, when=None):
     """Stamp a logout. Called when the session socket goes away."""
-    conn.execute("UPDATE member SET last_logout_at = ? WHERE id = ?",
+    conn.execute("UPDATE member SET last_logout_at = %s WHERE id = %s",
                  (when or _now(), member_id))
     conn.commit()
 
@@ -4667,7 +4309,7 @@ def login_times(conn, member_id):
     """(prev_login_at, last_logout_at) for the lobby session record."""
     row = conn.execute(
         "SELECT prev_login_at, last_login_at, last_logout_at FROM member"
-        " WHERE id = ?", (member_id,)).fetchone()
+        " WHERE id = %s", (member_id,)).fetchone()
     if row is None:
         return None, None
     # First ever login has no previous one; showing this session's own login is
@@ -4684,7 +4326,7 @@ def member_online(conn, member_id):
     would be a second source of truth that could disagree with the first.
     """
     row = conn.execute(
-        "SELECT 1 FROM session WHERE member_id = ? AND expires_at > ? LIMIT 1",
+        "SELECT 1 FROM session WHERE member_id = %s AND expires_at > %s LIMIT 1",
         (int(member_id), _now())).fetchone()
     return row is not None
 
@@ -4700,22 +4342,52 @@ def member_online_from(conn, member_id, peer_ip):
     if not peer_ip:
         return False
     row = conn.execute(
-        "SELECT 1 FROM session WHERE member_id = ? AND peer_ip = ? "
-        "AND expires_at > ? LIMIT 1",
+        "SELECT 1 FROM session WHERE member_id = %s AND peer_ip = %s "
+        "AND expires_at > %s LIMIT 1",
         (int(member_id), str(peer_ip), _now())).fetchone()
     return row is not None
 
 
 def handle_online(conn, handle_id):
     """True if the handle's owning member is online."""
-    row = conn.execute("SELECT member_id FROM handle WHERE id = ?",
+    row = conn.execute("SELECT member_id FROM handle WHERE id = %s",
                        (int(handle_id),)).fetchone()
     return bool(row) and member_online(conn, row["member_id"])
 
 
+def sessions_by_ip(conn, peer_ip, window_seconds, limit=32):
+    """Session rows opened from `peer_ip` in the last `window_seconds`,
+    freshest first: [(member_id, nick, created_at)].
+
+    This is how a title server that sees only the player's address (FMO, FE)
+    learns which POL member is playing: the POL login a moment ago came from
+    the same address. It is a heuristic and the callers know it -- two POL
+    accounts behind one address both appear here, which is why this returns
+    every candidate rather than choosing.
+    """
+    if not peer_ip:
+        return []
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(seconds=int(window_seconds))
+              ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = conn.execute(
+        "SELECT member_id, nick, created_at FROM session"
+        " WHERE peer_ip = %s AND created_at >= %s"
+        " ORDER BY created_at DESC LIMIT %s",
+        (str(peer_ip), cutoff, int(limit))).fetchall()
+    return [(int(r["member_id"]), r["nick"], r["created_at"]) for r in rows]
+
+
+def session_by_ip(conn, peer_ip, window_seconds):
+    """The freshest (member_id, nick, created_at) from `peer_ip` inside the
+    window, or None. See `sessions_by_ip` for the caveat."""
+    rows = sessions_by_ip(conn, peer_ip, window_seconds, limit=1)
+    return rows[0] if rows else None
+
+
 def close_sessions(conn, member_id):
     """Drop a member's sessions -- they are logging out, so they go offline."""
-    cur = conn.execute("DELETE FROM session WHERE member_id = ?",
+    cur = conn.execute("DELETE FROM session WHERE member_id = %s",
                        (int(member_id),))
     conn.commit()
     return cur.rowcount
@@ -4723,7 +4395,7 @@ def close_sessions(conn, member_id):
 
 def purge_sessions(conn):
     """Drop expired sessions. Cheap enough to call on every login."""
-    cur = conn.execute("DELETE FROM session WHERE expires_at < ?", (_now(),))
+    cur = conn.execute("DELETE FROM session WHERE expires_at < %s", (_now(),))
     conn.commit()
     return cur.rowcount
 
@@ -4753,7 +4425,7 @@ def ensure_member(conn, nick, default_contents=(1, 2, 4, 11, 14)):
     # token, not a password we can see), so this is a placeholder that a real
     # registration flow later overwrites.
     polid = nick
-    if conn.execute("SELECT 1 FROM polid WHERE polid = ?", (polid,)).fetchone() is None:
+    if conn.execute("SELECT 1 FROM polid WHERE polid = %s", (polid,)).fetchone() is None:
         create_polid(conn, polid, secrets.token_hex(16))
     member_id = add_member(conn, polid, nick, secrets.token_hex(16))
     set_handle(conn, member_id, nick)
@@ -4764,7 +4436,7 @@ def ensure_member(conn, nick, default_contents=(1, 2, 4, 11, 14)):
     # account provisioned here without links owns every title on the panel and
     # refuses to launch any of them ("You have no Content ID for <game>").
     link_member_content_to_primary(conn, member_id)
-    return conn.execute("SELECT * FROM member WHERE id = ?",
+    return conn.execute("SELECT * FROM member WHERE id = %s",
                         (member_id,)).fetchone()
 
 
@@ -4792,7 +4464,8 @@ def _cmd_list(conn):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="PlayOnline account database")
-    ap.add_argument("db", help="path to accounts.db")
+    ap.add_argument("db", help="`-` for POL_DATABASE_URL, or a postgresql:// "
+                    "URL (an old accounts.db path is accepted and ignored)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init")
@@ -4949,11 +4622,16 @@ def main(argv=None):
     p = sub.add_parser("armed", help="show which accounts may bind a login "
                        "token right now, and which hold no token at all")
 
+    # The DB argument no longer chooses anything (POL_DATABASE_URL does), so it
+    # may be left out: `accounts.py arm FOO` means `accounts.py - arm FOO`.
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in sub.choices:
+        argv.insert(0, "-")
     args = ap.parse_args(argv)
     conn = connect(args.db)
 
     if args.cmd == "init":
-        print(f"initialised {args.db}")
+        print(f"initialised {db.database_url().rsplit('@', 1)[-1]}")
     elif args.cmd == "list":
         _cmd_list(conn)
     elif args.cmd == "addpolid":
@@ -5072,19 +4750,19 @@ def main(argv=None):
         print(f"{'deleted' if removed else 'tombstoned (was not present)'} "
               f"handle {args.handle!r} for member {mid}")
     elif args.cmd == "link-content":
-        h = conn.execute("SELECT id FROM handle WHERE handle_name = ?",
+        h = conn.execute("SELECT id FROM handle WHERE handle_name = %s",
                          (args.handle,)).fetchone()
         if h is None:
             raise SystemExit(f"no such handle: {args.handle}")
         link_content_to_handle(conn, h["id"], args.code, args.content_id)
-        row = conn.execute("SELECT content_id FROM handle_content WHERE handle_id = ?"
-                           " AND content_code = ?", (h["id"], args.code)).fetchone()
+        row = conn.execute("SELECT content_id FROM handle_content WHERE handle_id = %s"
+                           " AND content_code = %s", (h["id"], args.code)).fetchone()
         print(f"linked {CONTENT_NAMES.get(args.code, args.code)} "
               f"(Content ID {row['content_id']}) to handle {args.handle!r}")
     elif args.cmd in ("unlink-content", "move-content"):
         def _handle(name):
             row = conn.execute(
-                "SELECT id, member_id FROM handle WHERE handle_name = ?",
+                "SELECT id, member_id FROM handle WHERE handle_name = %s",
                 (name,)).fetchone()
             if row is None:
                 raise SystemExit(f"no such handle: {name}")
@@ -5093,8 +4771,8 @@ def main(argv=None):
         name = CONTENT_NAMES.get(args.code, args.code)
         if args.cmd == "unlink-content":
             h = _handle(args.handle)
-            if not conn.execute("SELECT 1 FROM handle_content WHERE handle_id = ?"
-                                " AND content_code = ?",
+            if not conn.execute("SELECT 1 FROM handle_content WHERE handle_id = %s"
+                                " AND content_code = %s",
                                 (h["id"], args.code)).fetchone():
                 raise SystemExit(f"{name} is not on handle {args.handle!r}")
             unlink_content_from_handle(conn, h["id"], args.code)
@@ -5111,7 +4789,7 @@ def main(argv=None):
                     f"{args.from_handle!r} and {args.to_handle!r} belong to "
                     "different members -- refusing to move content between accounts")
             row = conn.execute("SELECT content_id FROM handle_content"
-                               " WHERE handle_id = ? AND content_code = ?",
+                               " WHERE handle_id = %s AND content_code = %s",
                                (src["id"], args.code)).fetchone()
             if row is None:
                 raise SystemExit(f"{name} is not on handle {args.from_handle!r}")
@@ -5128,8 +4806,8 @@ def main(argv=None):
         print(f"linked {total} content(s) across all members")
     elif args.cmd == "arm":
         row = conn.execute(
-            "SELECT m.* FROM member m WHERE m.polid = ? OR m.login_name = ?"
-            " OR m.id IN (SELECT member_id FROM handle WHERE handle_name = ?)",
+            "SELECT m.* FROM member m WHERE m.polid = %s OR m.login_name = %s"
+            " OR m.id IN (SELECT member_id FROM handle WHERE handle_name = %s)",
             (args.ident, args.ident, args.ident)).fetchone()
         if row is None:
             raise SystemExit(f"no account matches {args.ident!r}")
@@ -5150,7 +4828,7 @@ def main(argv=None):
             print(f"  {r['polid']}  {tokens} token(s)  {state}")
     elif args.cmd == "unlock":
         row = conn.execute("SELECT id, polid, login_name FROM member"
-                           " WHERE polid = ? OR login_name = ?",
+                           " WHERE polid = %s OR login_name = %s",
                            (args.ident, args.ident)).fetchone()
         if row is None:
             raise SystemExit(f"no account matches {args.ident!r}")
@@ -5170,7 +4848,7 @@ def main(argv=None):
                   "SELECT client_sig FROM login_digest_client")) or "none yet"))
     elif args.cmd.startswith("friend"):
         def _hid(name):
-            row = conn.execute("SELECT id FROM handle WHERE handle_name = ?",
+            row = conn.execute("SELECT id FROM handle WHERE handle_name = %s",
                                (name,)).fetchone()
             if row is None:
                 raise SystemExit(f"no such handle: {name}")
@@ -5202,7 +4880,7 @@ def main(argv=None):
             print(f"removed {args.peer} from {args.handle}'s list")
     elif args.cmd.startswith("group"):
         def _hid(name):
-            row = conn.execute("SELECT id FROM handle WHERE handle_name = ?",
+            row = conn.execute("SELECT id FROM handle WHERE handle_name = %s",
                                (name,)).fetchone()
             if row is None:
                 raise SystemExit(f"no such handle: {name}")
@@ -5217,7 +4895,7 @@ def main(argv=None):
 
         owner = _hid(args.handle)
         if args.cmd == "group-add":
-            peer = conn.execute("SELECT id FROM handle WHERE handle_name = ?",
+            peer = conn.execute("SELECT id FROM handle WHERE handle_name = %s",
                                 (args.member,)).fetchone()
             gid = _gid(owner, args.group)
             ok = add_group_member(conn, gid, args.member,
@@ -5241,16 +4919,16 @@ def main(argv=None):
                 gid = _gid(owner, g)
                 mems = list_group_members(conn, gid, include_pending=True)
                 pend = {r["member_name"] for r in conn.execute(
-                    "SELECT member_name FROM group_member WHERE group_id = ?"
+                    "SELECT member_name FROM group_member WHERE group_id = %s"
                     " AND pending = 1", (int(gid),))}
                 print(f"  {g} -- {len(mems)}/{GROUP_MEMBER_MAX} member(s)")
                 for guid, nm, cls in mems:
                     print(f"      {nm:<16} class {cls}  guid 0x{guid:x}"
                           + ("  PENDING (invited, not accepted)"
                              if nm in pend else ""))
-    # Every subcommand above writes through `conn`; the pooled connection
-    # commits on release, which a one-shot process never reaches. Without this
-    # `add-account` printed its success and left nothing in the file.
+    # Every subcommand above writes through `conn`, and a write that nothing
+    # committed is rolled back when the connection is released. Under SQLite
+    # that once made `add-account` print its success and store nothing.
     conn.commit()
     conn.close()
     return 0
@@ -5258,11 +4936,14 @@ def main(argv=None):
 
 if __name__ == "__main__":
     if os.environ.get("POL_ACCOUNTS_SELFTEST") == "1":
-        # Self-check against an in-memory DB: the full shape this module claims.
-        c = sqlite3.connect(":memory:")
-        c.row_factory = sqlite3.Row
-        c.executescript(SCHEMA)
-        _migrate(c)
+        # Self-check against a fresh, empty PostgreSQL database (a throwaway
+        # container, or POL_TEST_DATABASE_URL; see tools/pgtest.py): the full
+        # shape this module claims.
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(
+            __file__)), "..", "tools"))
+        import pgtest
+        pgtest.use_fresh_database()
+        c = connect()
         create_polid(c, "TESTPOLID", "pw-polid", area_kbn="00", login_pf="01")
         mid = add_member(c, "TESTPOLID", "testmember", "pw-member")
         set_handle(c, mid, "Tarutaru")
@@ -5550,11 +5231,11 @@ if __name__ == "__main__":
         assert len(list_mail(c, addr)) == 1
         assert len(list_mail(c, addr, include_deleted=True)) == 2
         set_mail_password(c, mid, "mailpw")
-        row = c.execute("SELECT * FROM member WHERE id=?", (mid,)).fetchone()
+        row = c.execute("SELECT * FROM member WHERE id=%s", (mid,)).fetchone()
         assert row["mail_pw_plain"] == "mailpw"               # APOP needs it
         assert check_password("mailpw", row["mail_pw_hash"], row["mail_pw_salt"])
         set_mail_password(c, mid, "mailpw", store_plain=False)
-        assert c.execute("SELECT mail_pw_plain FROM member WHERE id=?",
+        assert c.execute("SELECT mail_pw_plain FROM member WHERE id=%s",
                          (mid,)).fetchone()[0] is None
         # a mail name containing LIKE's wildcards must not match another box
         assign_mail_address(c, mid, "a_b")
@@ -5579,7 +5260,7 @@ if __name__ == "__main__":
         # content_code`, which a real SE id proved wrong in kind.
         reg_cids = [r["content_id"] for r in c.execute(
             "SELECT hc.content_id FROM handle_content hc"
-            " JOIN handle h ON h.id = hc.handle_id WHERE h.member_id = ?",
+            " JOIN handle h ON h.id = hc.handle_id WHERE h.member_id = %s",
             (acct["member_id"],))]
         # SLOT 0 is "the" id for a title; a title that issues one id per
         # CHARACTER gets more (titles.Title.content_slots), so the row count is
@@ -5589,7 +5270,7 @@ if __name__ == "__main__":
         # belongs to exactly one handle (POL-7169/7187/5326).
         reg_primary = [r["content_id"] for r in c.execute(
             "SELECT hc.content_id FROM handle_content hc"
-            " JOIN handle h ON h.id = hc.handle_id WHERE h.member_id = ?"
+            " JOIN handle h ON h.id = hc.handle_id WHERE h.member_id = %s"
             "   AND hc.slot = 0",
             (acct["member_id"],))]
         assert len(reg_primary) == 2 and len(set(reg_primary)) == 2, (
@@ -5630,7 +5311,7 @@ if __name__ == "__main__":
         old = acct["polid"]
         new = reissue_polid(c, old, "REPAIRD9")
         assert new == "REPAIRD9"
-        assert c.execute("SELECT 1 FROM polid WHERE polid = ?", (old,)).fetchone() is None
+        assert c.execute("SELECT 1 FROM polid WHERE polid = %s", (old,)).fetchone() is None
         assert primary_handle(c, acct["member_id"]) == "Freshly"
         assert content_ids(c, acct["member_id"]) == [1, 2]
         assert get_member(c, "REPAIRD9")["id"] == acct["member_id"], \
@@ -5697,13 +5378,13 @@ if __name__ == "__main__":
         # it forward, so a change that touched only one would resurface later.
         pair = c.execute(
             "SELECT m.pw_hash AS m, p.pw_hash AS p FROM member m"
-            " JOIN polid p ON p.polid = m.polid WHERE m.id = ?",
+            " JOIN polid p ON p.polid = m.polid WHERE m.id = %s",
             (sym["member_id"],)).fetchone()
         assert pair["m"] == pair["p"], "member and polid hashes drifted apart"
         set_member_password(c, login["login_name"], "viakinou1")
         pair = c.execute(
             "SELECT m.pw_hash AS m, p.pw_hash AS p FROM member m"
-            " JOIN polid p ON p.polid = m.polid WHERE m.id = ?",
+            " JOIN polid p ON p.polid = m.polid WHERE m.id = %s",
             (sym["member_id"],)).fetchone()
         assert pair["m"] == pair["p"], "kinou-17 path left the polid hash stale"
 
@@ -5742,7 +5423,7 @@ if __name__ == "__main__":
         assert list_group_members(c, gid) == [(handle_guid(h1), "Tarutaru",
                                                GROUP_CLASS_MEMBER)]
         # ... and it is derived LIVE, so a stale stored value cannot drift
-        c.execute("UPDATE group_member SET member_guid = 999 WHERE group_id = ?",
+        c.execute("UPDATE group_member SET member_guid = 999 WHERE group_id = %s",
                   (gid,))
         assert list_group_members(c, gid)[0][0] == handle_guid(h1)
 
@@ -5834,6 +5515,29 @@ if __name__ == "__main__":
         assert login_failures(c, mid, 100, now=1011.0) == 2
         assert clear_login_failures(c, mid) == 2
         assert login_lock_remaining(c, mid, 2, 100, now=1011.0) == 0
+        # --- the lookups the title servers use ---------------------------------
+        assert session_by_ip(c, "198.51.100.4", 600) is None
+        open_session(c, mid, nick="Tarutaru", peer_ip="198.51.100.4")
+        open_session(c, m2, nick="othermember", peer_ip="198.51.100.4")
+        got = sessions_by_ip(c, "198.51.100.4", 600)
+        assert {r[0] for r in got} == {mid, m2}, got
+        assert session_by_ip(c, "198.51.100.4", 600)[0] in (mid, m2)
+        assert sessions_by_ip(c, "198.51.100.5", 600) == []
+        close_sessions(c, mid)
+        close_sessions(c, m2)
+        ids = member_content_id_list(c, acct["member_id"], 1)
+        assert ids and ids[0] == member_content_id(c, acct["member_id"], 1), ids
+        assert set(ids) <= set(content_id_list(c, 1))
+        assert member_id_by_handle_name(c, "freshly") == acct["member_id"]
+        assert member_id_by_handle_name(c, "NoSuchHandle") is None
+        _g2 = add_friend(c, h1, "TitleGroup", kind=KIND_GROUP)
+        add_group_member(c, _g2, "Tarutaru", member_handle=h1,
+                         cls=GROUP_CLASS_MASTER)
+        assert [(g, k) for g, k, _t in member_groups(c, mid)] ==             [(_g2, GROUP_CLASS_MASTER)]
+        assert record_character_name(c, ids[0], "Kharn", world_charid=4)             == ("added", None)
+        assert record_character_name(c, ids[0], "Kharn") == ("updated", "Kharn")
+        assert record_character_name(c, ids[0], "Blue") == ("renamed", "Kharn")
+        assert character_names(c)[(content_id_int(ids[0]), 1)] == "Blue"
         print("accounts.py self-test OK")
     else:
         raise SystemExit(main())

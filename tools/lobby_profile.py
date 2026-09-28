@@ -6,7 +6,8 @@ group-list and status-change round-trips were near-instant on SE and visibly
 lagged on ours. The working rule for that effort was to MEASURE one
 round-trip before changing anything, and this is that measurement.
 
-What it profiles, offline against a temporary DB -- no client, no container:
+What it profiles, offline against a throwaway PostgreSQL database
+(tools/pgtest.py) -- no client, no server:
 
     2:3   KGetFriendList      the friend list serve
     7:12  KGetGroupList       the group list serve (headers + member records)
@@ -14,8 +15,11 @@ What it profiles, offline against a temporary DB -- no client, no container:
 
 For each it reports the wall time and, separately, the time spent inside
 `accounts.connect()` and the NUMBER of connections opened -- the lead hypothesis
-going in, since `connect()` opens a fresh `sqlite3.connect` per call and
-the responders open one per lookup rather than one per request.
+going in (under SQLite, when `connect()` opened a fresh file handle per call and
+the responders open one per lookup rather than one per request). On PostgreSQL a
+connection object costs nothing to make; the server connection behind it is
+borrowed from the pool per statement, so the database's share of the time is
+the statements themselves.
 
     python tools/lobby_profile.py            # default fixture
     python tools/lobby_profile.py -n 50      # more iterations
@@ -25,12 +29,13 @@ It is a MEASUREMENT, not a test: it always exits 0 unless it cannot build the
 fixture. Compare two runs (before/after a change) rather than reading one in
 isolation -- the absolute numbers are this box's, not the server's.
 
-WARNING: **AND "THIS BOX" MATTERS MORE THAN IT SOUNDS.** On the Windows dev box a bare
-`sqlite3.connect`+`close` costs ~0.49 ms; on prod's Ubuntu VM it is ~0.017 ms.
-Run this ON THE MACHINE you mean to reason about -- a dev run overstates the
-connection tax by more than an order of magnitude, and reading it as a prod
-number is what nearly sent the 2026-08-19 performance work after the wrong
-cause. (It was the lobby reader's idle window, not the database.)
+WARNING: **AND "THIS BOX" MATTERS MORE THAN IT SOUNDS.** Under SQLite a bare
+connect+close cost ~0.49 ms on the Windows dev box and ~0.017 ms on prod's Ubuntu
+VM. Run this ON THE MACHINE you mean to reason about, against the database it
+really uses -- a dev run can overstate the tax by more than an order of
+magnitude, and reading it as a prod number is what nearly sent the 2026-08-19
+performance work after the wrong cause. (It was the lobby reader's idle window,
+not the database.)
 """
 import argparse
 import os
@@ -41,12 +46,15 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
-DB = os.path.join(tempfile.mkdtemp(prefix="lobby-profile-"), "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = DB
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pgtest                                                      # noqa: E402
+
+TMP = tempfile.mkdtemp(prefix="lobby-profile-")
+DB = pgtest.use_fresh_database()
 os.environ.setdefault("POL_LOBBY_LIST_MODE", "7:12=groups,2:3=friends")
-os.environ["POL_GROUP_CTL"] = os.path.join(os.path.dirname(DB), "no-such.ctl")
-os.environ["POL_SEARCH_CALIB"] = os.path.join(os.path.dirname(DB), "no-such.txt")
-os.environ["POL_LOG_DIR"] = os.path.dirname(DB)
+os.environ["POL_GROUP_CTL"] = os.path.join(TMP, "no-such.ctl")
+os.environ["POL_SEARCH_CALIB"] = os.path.join(TMP, "no-such.txt")
+os.environ["POL_LOG_DIR"] = TMP
 
 import accounts                                                    # noqa: E402
 import responders as R                                             # noqa: E402
@@ -70,8 +78,8 @@ class Counter:
         counter = self
 
         class Timed:
-            """A pass-through proxy. `sqlite3.Connection.close` is read-only, so
-            the only way to time the close is to own the attribute."""
+            """A pass-through proxy that owns `close`, so the close can be
+            timed without touching the connection class."""
 
             def __init__(self, conn):
                 object.__setattr__(self, "_conn", conn)
@@ -104,7 +112,7 @@ class Counter:
 
 
 def fixture(n_friends, n_group_members):
-    conn = accounts.connect(DB)
+    conn = accounts.connect()
     accounts.create_polid(conn, "PROFPOLID", "pw-polid", area_kbn="00",
                           login_pf="01")
     mid = accounts.add_member(conn, "PROFPOLID", "profmember", "pw-member")
@@ -150,7 +158,7 @@ def main():
 
     fixture(args.friends, args.members)
     print(f"fixture: {args.friends} friends, {args.members} group members, "
-          f"{args.n} iterations\ndb: {DB}\n")
+          f"{args.n} iterations\ndb: {DB.rsplit('@', 1)[-1]}\n")
 
     def serve(op1, op2):
         def go():
@@ -171,7 +179,7 @@ def main():
     print("\nBASELINE (the tax by itself)")
 
     def open_close():
-        accounts.connect(DB).close()
+        accounts.connect().close()
     bench("accounts.connect + close", open_close, args.n)
     return 0
 

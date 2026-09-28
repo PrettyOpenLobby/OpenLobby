@@ -1,8 +1,11 @@
 """Re-mint every legacy 10-digit Content ID as an allocated serial, and move
 everything that refers to one along with it.
 
-    python tools/content_id_migrate.py --db /data/accounts.db            # DRY RUN
-    python tools/content_id_migrate.py --db /data/accounts.db --apply
+    python tools/content_id_migrate.py                 # DRY RUN
+    python tools/content_id_migrate.py --apply
+
+The account database is POL_DATABASE_URL (or --db URL); the JSON stores are
+found under --data-dir, default POL_DATA_DIR or /data.
 
 DRY RUN IS THE DEFAULT. `--apply` is the only thing that writes.
 
@@ -60,7 +63,6 @@ import datetime
 import json
 import os
 import shutil
-import sqlite3
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -85,10 +87,10 @@ def classify(conn):
     """
     legacy, done, unknown = [], [], []
     for r in conn.execute(
-            "SELECT hc.rowid AS rid, hc.handle_id, hc.content_code, hc.content_id,"
+            "SELECT hc.handle_id, hc.content_code, hc.slot, hc.content_id,"
             "       hc.status, h.member_id, h.handle_name"
             "  FROM handle_content hc JOIN handle h ON h.id = hc.handle_id"
-            " ORDER BY h.member_id, hc.handle_id, hc.content_code"):
+            " ORDER BY h.member_id, hc.handle_id, hc.content_code, hc.slot"):
         row = dict(r)
         n = A.content_id_int(row["content_id"])
         if n is None:
@@ -197,8 +199,9 @@ def verify(conn, mapping, log):
     else:
         log("  OK   every row is in the allocated window")
     dupes = [(r["content_id"], r["n"]) for r in conn.execute(
-        "SELECT content_id, COUNT(*) n FROM handle_content WHERE content_id IS NOT NULL"
-        " GROUP BY CAST(content_id AS INTEGER) HAVING n > 1")]
+        "SELECT MIN(content_id) AS content_id, COUNT(*) AS n FROM handle_content"
+        " WHERE content_id IS NOT NULL"
+        " GROUP BY text_int(content_id) HAVING COUNT(*) > 1")]
     if dupes:
         log(f"  FAIL a Content ID is on two handles: {dupes}"); bad += 1
     else:
@@ -219,13 +222,13 @@ def verify(conn, mapping, log):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--db", default=None,
-                    help="accounts.db (default: accounts.DEFAULT_DB)")
+                    help="a postgresql:// URL (default: POL_DATABASE_URL)")
     ap.add_argument("--apply", action="store_true",
                     help="actually write; without it this is a dry run")
     ap.add_argument("--data-dir", default=None,
-                    help="where the JSON stores live (default: the DB's directory)")
+                    help="where the JSON stores live (default: POL_DATA_DIR or /data)")
     ap.add_argument("--map-out", default=None,
-                    help="where to write the old->new mapping (default: beside the DB)")
+                    help="where to write the old->new mapping (default: the data dir)")
     ap.add_argument("--store", action="append", default=[], metavar="PATH",
                     help="an EXTRA JSON store to rewrite, repeatable. The two "
                          "standard ones are found relative to --data-dir; this is "
@@ -235,8 +238,9 @@ def main():
                          "nothing will ever correct")
     args = ap.parse_args()
 
-    db_path = args.db or A.DEFAULT_DB
-    data_dir = args.data_dir or os.path.dirname(os.path.abspath(db_path))
+    conn = A.connect(args.db)
+    db_name = A.db.database_url().rsplit("@", 1)[-1]
+    data_dir = args.data_dir or os.environ.get("POL_DATA_DIR", "/data")
     out = []
 
     def log(msg):
@@ -244,16 +248,10 @@ def main():
         out.append(msg)
 
     log(f"Content ID migration -- {'APPLY' if args.apply else 'DRY RUN'}")
-    log(f"  db       {db_path}")
+    log(f"  db       {db_name}")
     log(f"  data dir {data_dir}")
     log(f"  window   {A.CONTENT_ID_FLOOR}..{A.CONTENT_ID_CEILING}")
     log("")
-
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(A.SCHEMA)          # the counter table, on an old DB
-    A._migrate(conn)
-    conn.commit()
 
     legacy, done, unknown = classify(conn)
     log(f"handle_content: {len(legacy)} legacy, {len(done)} already allocated, "
@@ -307,14 +305,20 @@ def main():
         return 0
 
     # --- apply ------------------------------------------------------------ #
-    backup = f"{db_path}.bak-cidmigrate-{stamp()}"
-    shutil.copy2(db_path, backup)
+    # The rows about to change, as they are now: enough to put every one back
+    # by hand. (Under SQLite this copied the whole database file.)
+    backup = os.path.join(data_dir, f"handle-content-backup-cidmigrate-{stamp()}.json")
+    with open(backup, "w", encoding="utf-8") as fh:
+        json.dump([{k: r[k] for k in ("handle_id", "content_code", "slot",
+                                      "content_id", "status", "member_id")}
+                   for r, _old, _new in plan], fh, indent=1)
     log("")
     log(f"backup: {backup}")
 
     for r, old, new in plan:
-        conn.execute("UPDATE handle_content SET content_id = ? WHERE rowid = ?",
-                     (str(new), r["rid"]))
+        conn.execute("UPDATE handle_content SET content_id = %s WHERE handle_id = %s"
+                     " AND content_code = %s AND slot = %s",
+                     (str(new), r["handle_id"], r["content_code"], r["slot"]))
     conn.commit()
     log(f"handle_content: {len(plan)} row(s) re-minted")
 
@@ -326,12 +330,11 @@ def main():
             log(f"    {p}: {n} value(s) moved")
 
     map_path = args.map_out or os.path.join(
-        os.path.dirname(os.path.abspath(db_path)),
-        f"content-id-migration-{stamp()}.json")
+        data_dir, f"content-id-migration-{stamp()}.json")
     with open(map_path, "w", encoding="utf-8") as fh:
         json.dump({
             "generated": stamp(),
-            "db": os.path.abspath(db_path),
+            "db": db_name,
             "note": "old -> new Content IDs. Feed to work/pc/ffxi_userdir_rename.py "
                     "on every machine with a FINAL FANTASY XI install.",
             "map": [{"member_id": r["member_id"], "handle": r["handle_name"],
