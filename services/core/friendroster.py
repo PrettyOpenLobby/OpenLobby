@@ -178,18 +178,17 @@ def _do_send_friend_roster(chat_sess, member_id):
 
 
 def _friend_push_slot_ok(slot):
-    """May a friend-row / presence push address `slot`? Only below the PC cap.
+    """May a friend-row / presence push address `slot`? Only below the list cap.
 
-    WARNING: A PC Viewer files a pushed friend row at `table + slot*0xB0` in a table
-    that holds `_LOBBY_LIST[(0x02, 0x03)][2]` (12) rows, and it does not bound
-    the slot -- so a push for slot 12+ is an OUT-OF-BOUNDS WRITE in any PC
-    session on that member. Slots 12+ exist only since the mobile 2:3 marker
-    (`_friends_cap`) serves the phone up to 64 rows, and the phone does not need
-    pushes for them: it re-reads 2:3 with the marker and uses the served online
-    byte (+0x09). So every friend push path -- the 2:3 presence burst, the
-    row/icon spool, login/logout/status presence, the accept pushes, the roster
-    load -- skips a slot this says no to, and the deliverers check it again so a
-    spool line from anywhere cannot get past.
+    A push files a friend row at `table + slot*0xB0`; the table holds 200 rows
+    (the blacklist table sits exactly 100*0xB0 below it at 0x386fc18), so any
+    slot the 2:3 list can serve (`_LOBBY_LIST[(0x02, 0x03)][2]`, 0x40) is in
+    bounds. The 2026-08 note here calling slot 12+ "an OUT-OF-BOUNDS WRITE"
+    rested on the 12-row misread corrected in `_LOBBY_LIST`. Every friend push
+    path -- the 2:3 presence burst, the row/icon spool, login/logout/status
+    presence, the accept pushes, the roster load -- skips a slot this says no
+    to, and the deliverers check it again so a spool line from anywhere cannot
+    get past; the push records' own slot byte (+0x1c) is documented `< 0x40`.
     """
     try:
         return 0 <= int(slot) < handlelists._LOBBY_LIST[(0x02, 0x03)][2]

@@ -45,7 +45,21 @@ _LOBBY_LIST = {
                                     # shows a wrong name, not a hang.
     (0x00, 0x09): (0x88, 1, 15),    # 136B records, count = BYTE 0
     (0x01, 0x03): (0x68, 1, 19),    # 104B records, count = BYTE 0
-    (0x02, 0x03): (0xA8, 4, 12),    # 168B records, count = U32
+    (0x02, 0x03): (0xA8, 4, 0x40),  # 168B records, count = U32. 0x40, NOT 12:
+                                    # polcore's 2:3 reader (0x037e38c9..0x037e3a57)
+                                    # takes the U32 count, then reads chunks of
+                                    # min(remaining*168, 0x7e0) = up to 12 records
+                                    # per socket read, files each at slot byte
+                                    # +0x08 (a FULL byte, table of 200), subtracts,
+                                    # and re-enters the read (state 5) until the
+                                    # count is spent. 12 was that chunk size read as
+                                    # a list cap (2026-08-13), which silently
+                                    # dropped every friend past the 12th (a member
+                                    # with 19 friends never saw 7 of them,
+                                    # 2026-09-28).
+                                    # 0x40 because the push records' slot byte
+                                    # (+0x1c) and the slot maps are `< 0x40`; 200
+                                    # once those are lifted.
     (0x07, 0x0C): (0x88, 1, 4),     # 136B records, count = BYTE 0, VALIDATED:
                                     # byte 0 <= 4 and bytes 1..4 each <= 0x40 or
                                     # the client fails with -5133. THE CAP IS 4,
@@ -316,13 +330,14 @@ def _friends_mobile_request(req_pt):
 
 
 def _friends_cap(req_pt=None):
-    """The 2:3 row cap for this request: the PC's 12, or POL_FRIENDS_MOBILE_CAP
-    (default 64) for a marked mobile request.
+    """The 2:3 row cap for this request: `_LOBBY_LIST`'s 0x40 for everyone, or
+    POL_FRIENDS_MOBILE_CAP (default 64) for a marked mobile request.
 
     Rows are served in the same `_db_friends` order with the same slot numbers
-    either way, so slot i is identical for a PC and a phone for i < 12 -- the
-    phone just keeps going. Clamped to 0x40: the presence/friend-load paths
-    skip slots >= 0x40, and never below the PC cap."""
+    either way, so slot i is identical for a PC and a phone. Clamped to 0x40:
+    the presence/friend-load paths skip slots >= 0x40, and never below the
+    list cap. (The PC's cap was 12 until 2026-09-28 -- a misread of polcore's
+    12-record READ CHUNK as a list limit; see `_LOBBY_LIST`.)"""
     cap = _LOBBY_LIST[(0x02, 0x03)][2]
     if not _friends_mobile_request(req_pt):
         return cap
@@ -357,10 +372,9 @@ def _list_count(op1, op2, req_pt=None):
         return min(len(_db_chars()), _LOBBY_LIST[(op1, op2)][2])
     if _list_mode(op1, op2) == "friends":
         # Count comes from the DB, so a friend added between logins appears with
-        # no config change -- same contract as `handles`. The per-read cap the
-        # client applies (0x7e0 / 168 = 12 records for 2:3) bounds it.
-        # _LOBBY_LIST[..][2] is already the client's per-read RECORD cap (12 for
-        # 2:3), not a byte cap -- dividing it by the record size floored to 0.
+        # no config change -- same contract as `handles`. `_LOBBY_LIST[..][2]`
+        # bounds it (0x40 for 2:3; the client reads any count in 12-record
+        # chunks, see the note there).
         return min(len(friendlist._db_friends(kinds=(accounts.KIND_FRIEND,))),
                    _friends_cap(req_pt) if (op1, op2) == (0x02, 0x03)
                    else _LOBBY_LIST[(op1, op2)][2])
