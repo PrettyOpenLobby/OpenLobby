@@ -22,6 +22,7 @@
     authserv.py            The auth node responder: line I/O, account resolution, the login exchange.
     authresume.py          The session channel loop and re-attaching a session after an authserv restart.
     authkick.py            Administrator kick: the admin panel's request to disconnect a PlayOnline ID's live channels.
+    lobbyrefuse.py         Refusing a lobby request: the error type a handler answers with instead of success.
     framing.py             Lobby band framing: headers, frame boundaries, reading one frame.
     lobbysession.py        Per-connection lobby session state, its on-disk mirror, and the session record.
     paylen.py              Lobby reply lengths per opcode and the constant-length fetch path tables.
@@ -81,6 +82,7 @@ MODULES = (
     "authserv",
     "authresume",
     "authkick",
+    "lobbyrefuse",
     "framing",
     "lobbysession",
     "paylen",

@@ -295,7 +295,10 @@ SUITES = [
     ("extmail",       [sys.executable, "extmail_test.py"], TOOLS, {}),
     # Group channels and group requests are for the group's members.
     ("group_gate",    [sys.executable, "group_gate_test.py"], TOOLS, {}),
-    # The mobile 2:3 marker lifts the 12-row cap; the PC reply is unchanged.
+    # What the lobby refuses (7:1, 7:2, 7:3, invites) and who hears about
+    # a disband, a removal or a decline.
+    ("group_refusal", [sys.executable, "group_refusal_test.py"], TOOLS, {}),
+    # The 2:3 list serves every friend up to 0x40 rows (12 was a read chunk).
     ("friends_mobile", [sys.executable, "friends_mobile_cap_test.py"], TOOLS, {}),
     ("contentauth",   [sys.executable, "contentauth.py"], SERVICES, {}),
     # The shared event calendar the title plugins' tournaments read.

@@ -4,7 +4,7 @@ import re
 import struct
 from srvcore import log
 from .deps import accounts
-from . import friendlist, friendput, handlelists, lobbymail, lobbysession, pushchannel, pushspool, resourcestore
+from . import friendlist, friendput, handlelists, lobbymail, lobbyrefuse, lobbysession, pushchannel, pushspool, resourcestore
 
 
 
@@ -709,6 +709,36 @@ def _group_create(pt):
                 log("lobby", f"  group 7:1: {name!r} but no handle for member "
                              f"{mid!r}; nothing stored")
                 return b""
+            # THE CLIENT'S OWN LIMITS, REFUSED WHERE IT CAN BE TOLD WHY.
+            # Nothing checked these before 2026-09-28 (GROUP_MAX was defined
+            # and never used): a fifth group was stored and then dropped by the
+            # client, which has four group slots, and a name that was already a
+            # row on this handle went through `add_friend`'s upsert -- which
+            # rewrites `kind`, so naming a group after an existing FRIEND turned
+            # that friend's row into a group, and repeating a group name
+            # silently answered with the old group's id. Project Crystal Server
+            # answers these two with 0x73 and 0x74. POL_GROUP_CREATE_LIMITS=0
+            # restores the old unchecked create.
+            if os.environ.get("POL_GROUP_CREATE_LIMITS", "1") == "1":
+                clash = db.execute(
+                    "SELECT kind FROM friend WHERE handle_id = %s"
+                    " AND peer_name = %s", (int(h["id"]), name)).fetchone()
+                if clash is not None:
+                    what = ("a group" if int(clash["kind"]) == accounts.KIND_GROUP
+                            else "a friend-list entry")
+                    lobbyrefuse._lobby_refuse(
+                        lobbyrefuse.LOBBY_ERR_GROUP_NAME,
+                        f"group 7:1: {name!r} is already {what} on handle "
+                        f"{h['handle_name']!r}", pt)
+                    return b""
+                held = accounts.count_handle_groups(db, int(h["id"]))
+                if held >= accounts.GROUP_MAX:
+                    lobbyrefuse._lobby_refuse(
+                        lobbyrefuse.LOBBY_ERR_GROUP_MAX,
+                        f"group 7:1: {h['handle_name']!r} already holds {held} "
+                        f"group(s), invites included; the client has "
+                        f"{accounts.GROUP_MAX} slots", pt)
+                    return b""
             gid = accounts.add_friend(db, int(h["id"]), name,
                                       kind=accounts.KIND_GROUP, guid=0)
             made = gid
@@ -850,6 +880,75 @@ def _group_mode_push(db, gid, member_name, op):
         log("lobby", f"  group 7:3: MODE push not spooled ({exc!r})")
 
 
+def _group_notice_tail(gid, gname):
+    """The block a group notice carries after its text: `{u64 group id; name}`.
+
+    Sized like the block the Viewer itself sends with an invitation
+    (`_GROUP_MSG_TAIL`, 0x20), which `_group_message` already parses; Project
+    Crystal Server sends 0x1C with the name capped at 0x13 characters, so the
+    name is capped the same way and the rest is zero.
+    """
+    t = bytearray(_GROUP_MSG_TAIL)
+    struct.pack_into("<Q", t, 0, int(gid) & 0xFFFFFFFFFFFFFFFF)
+    raw = str(gname).encode("cp932", "replace")[:0x13]
+    t[_GROUP_MSG_NAME_OFF:_GROUP_MSG_NAME_OFF + len(raw)] = raw
+    return bytes(t)
+
+
+def _group_notice(db, gid, gname, sender_hid, recipient_hid, kind):
+    """Mail one group notice (removed, disbanded) from `sender_hid` to
+    `recipient_hid`. Returns the message path, or None.
+
+    The shape is Project Crystal Server's, which it sends to the real Viewer:
+    subject and title are the group's name, the text is a single space, and the
+    group block follows the text. POL_GROUP_NOTICES=0 sends none.
+    """
+    if os.environ.get("POL_GROUP_NOTICES", "1") != "1":
+        return None
+    try:
+        s = db.execute("SELECT handle_name FROM handle WHERE id = %s",
+                       (int(sender_hid),)).fetchone()
+        if s is None:
+            return None
+        return lobbymail._mail_mint(
+            s["handle_name"], accounts.handle_guid(int(sender_hid)),
+            accounts.handle_guid(int(recipient_hid)), gname, " ", kind=kind,
+            tail=_group_notice_tail(gid, gname))
+    except Exception as exc:
+        log("lobby", f"  group notice {kind:#06x} for {gname!r} to handle "
+                     f"{recipient_hid} not sent ({exc!r})")
+        return None
+
+
+def _group_removed_push(db, gid, removed, recipients):
+    """Tell each of `recipients` (handle names) that the members in `removed`
+    ((guid, name) pairs) are out of group `gid`, live.
+
+    It is a roster push at class 1 (see `pushspool._push_deliver_grouprows`):
+    a recipient drops that member's row, and a recipient who is IN `removed`
+    drops the whole group. 7:12 is read at login only, so without this the
+    others kept a removed member, or a disbanded group, until they relogged.
+    POL_GROUP_REMOVE_PUSH=0 pushes nothing.
+    """
+    if os.environ.get("POL_GROUP_REMOVE_PUSH", "1") != "1" or not removed:
+        return 0
+    entries = [[int(gid), [[int(g), str(nm), 1] for g, nm in removed]]]
+    queued = 0
+    for nm in recipients:
+        try:
+            row = db.execute("SELECT member_id FROM handle WHERE handle_name = %s",
+                             (nm,)).fetchone()
+            if row is None or not row["member_id"]:
+                continue
+            pushspool.push_group_rosters(None, int(row["member_id"]), entries)
+            queued += 1
+        except Exception as exc:
+            log("lobby", f"  group {gid}: removal push to {nm!r} skipped ({exc!r})")
+    log("lobby", f"  group {gid}: removal of "
+                 f"{[nm for _g, nm in removed]} pushed to {queued} member(s)")
+    return queued
+
+
 def _group_delete(pt):
     """Apply a 07:02 KDeleteGroup. Returns b"" -- the reply is header-only.
 
@@ -863,9 +962,15 @@ def _group_delete(pt):
     "no group row", read the hexdump before touching this offset.
 
     Only the OWNER's request deletes. Leaving a group is a 7:3 with class 1 (the
-    ladder in accounts.py), so a 7:2 from a non-owner is logged and ignored
-    rather than guessed at. Other members' 7:12 is login-time-only, so they see
-    the group go at their next list refresh; nothing is pushed (unmeasured).
+    ladder in accounts.py). A 7:2 for a group we do not hold, or from anyone but
+    the owner, is REFUSED (type 0xFF, as Project Crystal Server answers it)
+    rather than answered as success.
+
+    THE OTHER MEMBERS ARE TOLD, twice, the way Project Crystal Server tells
+    them: a live class-1 push of each member's own row (their client drops the
+    group slot at once) and a "disbanded" notice in their mailbox (type 0x13),
+    so a member who was offline learns it too. Before 2026-09-28 nothing was
+    pushed and they kept the group until their next login.
     POL_GROUPS=0 disables this arm with the rest of the group family.
     """
     if accounts is None or pt is None:
@@ -883,20 +988,35 @@ def _group_delete(pt):
                                "WHERE id = %s AND kind = %s",
                                (int(gid), accounts.KIND_GROUP)).fetchone()
             if owner is None:
-                log("lobby", f"  group 7:2: no group row {gid} -- either the "
-                             f"client named an id we never served or the id is "
-                             f"not at payload +0x00; nothing changed")
+                lobbyrefuse._lobby_refuse(
+                    lobbyrefuse.LOBBY_ERR_GENERIC,
+                    f"group 7:2: no group row {gid} -- either the client named "
+                    f"an id we never served or the id is not at payload +0x00; "
+                    f"nothing changed", pt)
                 return b""
             hid = lobbysession._session_handle_id(db)
             if hid and int(owner["handle_id"]) != int(hid):
-                log("lobby", f"  group 7:2: {owner['peer_name']!r} (id {gid}) is "
-                             f"owned by handle {owner['handle_id']}, request came "
-                             f"from handle {hid} -- not the owner; nothing changed")
+                lobbyrefuse._lobby_refuse(
+                    lobbyrefuse.LOBBY_ERR_GENERIC,
+                    f"group 7:2: {owner['peer_name']!r} (id {gid}) is owned by "
+                    f"handle {owner['handle_id']}, request came from handle "
+                    f"{hid} -- not the owner; nothing changed", pt)
                 return b""
+            # The roster BEFORE the delete: it is who has to be told.
+            roster = list(accounts.list_group_members(db, int(gid),
+                                                      include_pending=True))
             n = accounts.delete_group(db, gid, owner_handle_id=owner["handle_id"])
             log("lobby", f"  group 7:2: deleted {owner['peer_name']!r} (id {gid}) "
-                         f"and {n} member row(s); other members see it go at "
-                         f"their next 7:12")
+                         f"and {n} member row(s)")
+            owner_hid = int(owner["handle_id"])
+            for g, nm, _c in roster:
+                m = db.execute("SELECT id FROM handle WHERE handle_name = %s",
+                               (nm,)).fetchone()
+                if m is None or int(m["id"]) == owner_hid:
+                    continue            # the owner's client clears off the reply
+                _group_removed_push(db, int(gid), [(int(g), nm)], [nm])
+                _group_notice(db, int(gid), owner["peer_name"], owner_hid,
+                              int(m["id"]), lobbymail.MAIL_KIND_GROUP_DISBANDED)
         finally:
             db.close()
     except Exception as exc:
@@ -979,7 +1099,9 @@ def _group_class_change(pt):
                                "WHERE id = %s AND kind = %s",
                                (int(gid), accounts.KIND_GROUP)).fetchone()
             if owner is None:
-                log("lobby", f"  group 7:3: no group row {gid}; nothing changed")
+                lobbyrefuse._lobby_refuse(
+                    lobbyrefuse.LOBBY_ERR_GENERIC,
+                    f"group 7:3: no group row {gid}; nothing changed", pt)
                 return b""
             # WHO MAY. Without this, any session could move any member of
             # any group (promote itself to master, remove the others). So:
@@ -996,6 +1118,11 @@ def _group_class_change(pt):
                                     (int(owner["handle_id"] or 0),)).fetchone()
             owner_name = owner_name["handle_name"] if owner_name else None
             cls_of = {nm: int(c) for _g, nm, c in roster}
+            guid_of = {nm: int(g) for g, nm, _c in roster}
+            # Who hears about a change: the roster as it stood, less the
+            # requester, whose client applies it off the reply.
+            watchers = [nm for _g, nm, _c in roster if nm not in my_names]
+            refused = []
             for i in range(count):
                 off = _GROUP_CLASS_ENTRY_OFF + i * _GROUP_CLASS_ENTRY
                 target = struct.unpack_from("<Q", body, off)[0]
@@ -1017,12 +1144,29 @@ def _group_class_change(pt):
                         log("lobby", f"  group 7:3: member {me_mid} (class {my_cls}) may "
                                      f"not move {name!r} to class {cls} in "
                                      f"{owner['peer_name']!r}; refused")
+                        refused.append(name)
                         continue
                 if cls < accounts.GROUP_CLASS_MIN:
                     # LEAVE / REMOVE. See the note above: class 1 is not a class.
                     accounts.remove_group_member(db, gid, name)
                     log("lobby", f"  group 7:3: {name!r} LEFT "
                                  f"{owner['peer_name']!r} (class {cls})")
+                    # TELL THE REST OF THE GROUP, and the member themself when
+                    # someone else removed them -- see `_group_removed_push`.
+                    # A member who left on their own needs no notice: their
+                    # client cleans up off the reply (Project Crystal Server
+                    # sends the "removed" message only for a removal).
+                    _group_removed_push(db, int(gid),
+                                        [(guid_of.get(name, target), name)],
+                                        watchers)
+                    if name not in my_names:
+                        rm = db.execute("SELECT id FROM handle WHERE "
+                                        "handle_name = %s", (name,)).fetchone()
+                        sender = lobbysession._session_handle_id(db)
+                        if rm is not None and sender:
+                            _group_notice(db, int(gid), owner["peer_name"],
+                                          int(sender), int(rm["id"]),
+                                          lobbymail.MAIL_KIND_GROUP_REMOVED)
                     # `friend.peer_name` is the GROUP's name, not the owner's --
                     # comparing the leaver's name against it never matches. The
                     # owner is named by `handle_id`, so compare the id we would
@@ -1043,12 +1187,35 @@ def _group_class_change(pt):
                         # visible without rejoining -- see _push_deliver_gmode.
                         _group_mode_push(db, gid, name,
                                          cls >= accounts.GROUP_CLASS_MASTER)
+                        # ...AND THE ROSTER. The MODE push moves the chat '@';
+                        # the others' group sections kept the old rank until
+                        # they relogged. Project Crystal Server pushes the
+                        # member's row at the new rank to the group, which is
+                        # the same record `push_group_rosters` carries.
+                        # POL_GROUP_CLASS_PUSH=0 turns it off.
+                        if os.environ.get("POL_GROUP_CLASS_PUSH", "1") == "1":
+                            entries = [[int(gid), [[guid_of.get(name, target),
+                                                    name, int(cls)]]]]
+                            for w in watchers:
+                                wr = db.execute(
+                                    "SELECT member_id FROM handle WHERE "
+                                    "handle_name = %s", (w,)).fetchone()
+                                if wr is not None and wr["member_id"]:
+                                    pushspool.push_group_rosters(
+                                        None, int(wr["member_id"]), entries)
                     else:
                         log("lobby", f"  group 7:3: {name!r} is in the roster but "
                                      f"no row moved; nothing changed")
                 else:
                     log("lobby", f"  group 7:3: class {cls} for {name!r} is above "
                                  f"polcore's {accounts.GROUP_CLASS_MAX}; ignored")
+            if refused:
+                # Answer the refusal instead of success, or the requester's
+                # screen shows a change the server never made.
+                lobbyrefuse._lobby_refuse(
+                    lobbyrefuse.LOBBY_ERR_GENERIC,
+                    f"group 7:3: member {me_mid} (class {my_cls}) may not make "
+                    f"the change for {refused} in {owner['peer_name']!r}", pt)
         finally:
             db.close()
     except Exception as exc:
@@ -1083,6 +1250,116 @@ _GROUP_CLASS_NAMES = {5: "master", 4: "sub-master", 3: "member", 2: "member"}
 #: matters because the text is localised and ours must work on a JP client too.
 _GROUP_MSG_TAIL = 0x20                  # u64 id + 24-byte name
 _GROUP_MSG_NAME_OFF = 0x08
+
+
+#: The group message TYPES (record +0x3E bits 7..11) that name their direction.
+_GROUP_MSG_TYPES = {0x0E: "invite", 0x0F: "accept", 0x10: "decline"}
+
+
+def _group_invite_refusal(path, data, req_pt):
+    """Refuse a 3:1 group INVITE the invitee could never accept. True = refused.
+
+    Project Crystal Server checks three things before it files an invitation,
+    and refuses with the code the Viewer shows the inviter:
+
+        0x75  the invitee is already in the group, or already invited
+        0x78  the group already has 64 members (the client's own limit)
+        0x73  the invitee already holds four groups, invites included
+
+    Before 2026-09-28 we filed and delivered every invitation first and only
+    logged the problem afterwards ("left as is", "REJECTED (full?)"), so the
+    invitee got an invitation that could not work and the inviter was told it
+    had gone out. POL_GROUP_INVITE_CHECKS=0 restores that.
+    """
+    if os.environ.get("POL_GROUP_INVITE_CHECKS", "1") != "1" or accounts is None:
+        return False
+    try:
+        meta = lobbymail._mail_meta(path)
+        if not meta or lobbymail._mail_kind_type(meta.get("kind")) != 0x0E:
+            return False
+        tagged = _group_message(data)
+        if tagged is None:
+            return False
+        gid, gname, _k = tagged
+        db = accounts.connect()
+        try:
+            if db.execute("SELECT 1 FROM friend WHERE id = %s AND kind = %s",
+                          (int(gid), accounts.KIND_GROUP)).fetchone() is None:
+                return False            # not ours; the join path logs it
+            peer = lobbymail._mail_recipient_row(db, meta["recipient_guid"])
+            if peer is None:
+                return False
+            pid = int(peer["id"])
+            h = db.execute("SELECT handle_name FROM handle WHERE id = %s",
+                           (pid,)).fetchone()
+            pname = h["handle_name"] if h else None
+            code, why = None, None
+            if db.execute("SELECT 1 FROM group_member WHERE group_id = %s AND "
+                          "(member_handle = %s OR member_name = %s)",
+                          (int(gid), pid, pname)).fetchone() is not None:
+                code = lobbyrefuse.LOBBY_ERR_GROUP_ALREADY
+                why = f"{pname!r} is already in {gname!r} or already invited"
+            elif accounts.count_group_members(db, int(gid)) >= \
+                    accounts.GROUP_MEMBER_MAX:
+                code = lobbyrefuse.LOBBY_ERR_GROUP_FULL
+                why = f"{gname!r} already has {accounts.GROUP_MEMBER_MAX} members"
+            else:
+                held = accounts.count_handle_groups(db, pid)
+                if held >= accounts.GROUP_MAX:
+                    code = lobbyrefuse.LOBBY_ERR_GROUP_MAX
+                    why = (f"{pname!r} already holds {held} group(s), invites "
+                           f"included")
+            if code is None:
+                return False
+            lobbyrefuse._lobby_refuse(
+                code, f"group invite to {gname!r} (id {gid}): {why}; the "
+                      f"invitation was not filed", req_pt)
+            return True
+        finally:
+            db.close()
+    except Exception as exc:
+        log("lobby", f"  group invite check skipped ({exc!r}); filed as before")
+        return False
+
+
+def _group_decline(gid, gname):
+    """Apply a DECLINE (type 0x10) to group `gid`: the sender is the invitee.
+
+    Only a still-PENDING row goes; a member who already accepted is left alone.
+    The rest of the group is told the way a removal is, so the owner's
+    "Inviting into group" row clears live (see `_group_removed_push`).
+    """
+    try:
+        db = accounts.connect()
+        try:
+            hid = lobbysession._session_handle_id(db)
+            h = db.execute("SELECT handle_name FROM handle WHERE id = %s",
+                           (int(hid or 0),)).fetchone()
+            if h is None:
+                log("lobby", f"  group decline for {gname!r}: no handle bound to "
+                             f"this session; nothing changed")
+                return
+            row = db.execute("SELECT pending, member_guid FROM group_member "
+                             "WHERE group_id = %s AND member_name = %s",
+                             (int(gid), h["handle_name"])).fetchone()
+            if row is None or not int(row["pending"] or 0):
+                log("lobby", f"  group decline: {h['handle_name']!r} holds no "
+                             f"pending invitation to {gname!r} (id {gid}); "
+                             f"nothing changed")
+                return
+            roster = list(accounts.list_group_members(db, int(gid),
+                                                      include_pending=True))
+            accounts.remove_group_member(db, int(gid), h["handle_name"])
+            log("lobby", f"  group decline: {h['handle_name']!r} declined "
+                         f"{gname!r} (id {gid}); invitation removed")
+            _group_removed_push(
+                db, int(gid),
+                [(accounts.handle_guid(int(hid)), h["handle_name"])],
+                [nm for _g, nm, _c in roster if nm != h["handle_name"]])
+        finally:
+            db.close()
+    except Exception as exc:
+        log("lobby", f"  group decline for {gname!r}: not applied ({exc!r})")
 
 
 def _group_message(data):
@@ -1339,6 +1616,15 @@ def _capture_group_invite(path, data):
         # \x00\x02\x00...\x00FoxGoons" is `\x00` end-of-body, then id 2, then the
         # name). It is kept for a message that carries no trailer at all.
         gid, gname, kind = tagged
+        # THE MESSAGE TYPE DECIDES WHEN IT IS ONE OF THE THREE. The body test
+        # ("invite" has text, "accept" has none) cannot see a DECLINE, which is
+        # type 0x10 in the same family and would have been read as one of the
+        # other two. Project Crystal Server keys all three on the type.
+        typ = lobbymail._mail_kind_type(meta.get("kind")) if meta else None
+        kind = _GROUP_MSG_TYPES.get(typ, kind)
+        if kind == "decline":
+            _group_decline(gid, gname)
+            return
         _group_join_from_message(gid, gname, kind, meta)
         return
     body = data.replace(b"\x07", b" ").decode("cp932", "replace")
