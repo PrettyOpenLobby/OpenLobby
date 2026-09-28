@@ -57,6 +57,13 @@ Logic that belongs to one game does not belong in `core/`; if a hook is
 missing, add the hook to `titles.py` with a no-op default and use it from the
 title.
 
+The account database follows the same rule. `accounts.py` knows content codes
+only as numbers; a title that issues one Content ID per character (FFXI)
+declares how many on its plugin (`Title.content_slots`), and the account code
+mints the extra ids when the title is granted and tops a member's handles up
+at login. Operator commands that only make sense for one game live in that
+game's plugin, not in `accounts.py`'s command line.
+
 ## Running the checks
 
 ```

@@ -503,8 +503,8 @@ def _identity_content_entries(db, hid):
     and +0x10 of the same character's 1:3 record -- SE's two carriers hold the
     same numbers, and serving two different identities for one character is the
     class of bug that made every friend row resolve to the same profile. So the
-    FFXI world-identity override is applied here from the same
-    `_ffxi_world_fields()` map rather than a second copy of the rule drifting
+    world identity is asked of the same title hook (`titles.character_world`)
+    that `_char_record` asks, rather than a second copy of the rule drifting
     beside it.
     """
     out = bytearray(profilerecord._IDREC_CONTENT_STRIDE * profilerecord._IDREC_CONTENT_MAX)

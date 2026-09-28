@@ -461,6 +461,18 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                             f"last logout={out}")
         except Exception as exc:               # a clock is never worth a login
             log("accounts", f"login clock not stamped ({exc!r})")
+        # A title that issues one Content ID per character (its plugin's
+        # `content_slots`) tops the member's handles up here, in the process
+        # that loads it. The sign-up page and the admin panel grant titles
+        # without loading any plugin, so an account they made gets the rest of
+        # its slots at its first login, before the lobby serves the list.
+        try:
+            minted = accounts.ensure_title_slots(db, member_id=member["id"])
+            if minted:
+                log("accounts", f"{peer_ip} {nick!r}: minted {minted} Content "
+                                f"ID(s) for the loaded titles' character slots")
+        except Exception as exc:               # never worth a login either
+            log("accounts", f"content slots not topped up ({exc!r})")
         log("accounts", f"{peer_ip} login {nick!r} polid={member['polid']} "
                         f"contents={accounts.content_ids(db, member['id'])} "
                         f"session={tok[:8]}...")

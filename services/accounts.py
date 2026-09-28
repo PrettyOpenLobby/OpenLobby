@@ -62,7 +62,6 @@ import binascii
 import datetime
 import hashlib
 import hmac
-import json
 import os
 import secrets
 import sqlite3
@@ -73,6 +72,11 @@ try:
     import polnick
 except ImportError:                     # a bare copy of this file, or a test
     polnick = None
+
+try:
+    import titles                       # per-title Content ID slots
+except ImportError:                     # a bare copy of this file
+    titles = None
 
 #: Where the DB lives inside the container; override with POL_ACCOUNTS_DB.
 DEFAULT_DB = os.environ.get("POL_ACCOUNTS_DB", "/data/accounts.db")
@@ -817,15 +821,17 @@ def _migrate(conn):
     conn.commit()
     _migrate_handle_profile(conn)
     _migrate_handle_content_slots(conn)
-    # Accounts that already exist get their FFXI slots here. New ones get
-    # them at registration; without this line every account created before
-    # 2026-09-03 would keep the single-character ceiling for ever, and the
-    # operator would have to know to run a tool nobody would think to look
-    # for. Additive and idempotent -- see ensure_content_slots.
-    minted = ensure_ffxi_character_slots(conn)
+    # Accounts that already exist get the extra Content IDs of a title that
+    # issues one per character here. New ones get them at registration, and
+    # every handle again at login (core/authserv.py); without this line an
+    # account nobody logs in with would keep the single-character ceiling, and
+    # the operator would have to know to run a tool nobody would think to look
+    # for. Additive and idempotent -- see ensure_content_slots. A no-op in a
+    # process that loads no title asking for more than one.
+    minted = ensure_title_slots(conn)
     if minted:
-        print(f"[accounts] FFXI: minted {minted} additional Content ID(s) "
-              f"so existing handles can hold {FFXI_CHARACTER_SLOTS} character(s)")
+        print(f"[accounts] minted {minted} additional Content ID(s) so existing "
+              f"handles hold {title_content_slots()} (content code: ids)")
 
 
 #: Paths whose schema this PROCESS has already ensured. See connect().
@@ -1777,16 +1783,16 @@ def register_account(conn, handle, password, code=None, profile=None,
                     " content_id = COALESCE(content_id, excluded.content_id),"
                     " status = 'active'",
                     (handle_id, int(c), allocate_content_id(conn), now))
-                # FFXI issues one Content ID per CHARACTER. Grant the whole set
-                # at sign-up rather than on demand: the bridge offers a member's
-                # unspent ids as the client's empty character slots, so slots
-                # that exist here are slots the player can actually create into,
-                # and slots that do not are POL-0001 with no explanation. Inside
-                # the same transaction as everything else -- ensure_content_slots
-                # does not commit, by contract.
-                if int(c) == FFXI_CONTENT_CODE:
-                    ensure_content_slots(conn, handle_id, FFXI_CONTENT_CODE,
-                                         FFXI_CHARACTER_SLOTS)
+                # A title that issues one Content ID per CHARACTER
+                # (titles.Title.content_slots) gets the whole set at sign-up
+                # rather than on demand: its server offers a member's unspent
+                # ids as the client's empty character slots, so slots that
+                # exist here are slots the player can actually create into.
+                # Inside the same transaction as everything else --
+                # ensure_content_slots does not commit, by contract.
+                want = content_slots_for(c)
+                if want > 1:
+                    ensure_content_slots(conn, handle_id, int(c), want)
             if profile:
                 cols = [k for k in PROFILE_COLUMNS if profile.get(k)]
                 if cols:
@@ -2260,7 +2266,8 @@ def character_names(conn):
     """{(content_id_int, content_code): character name} -- the GAME character's
     own name for each Content ID we know one for.
 
-    This is the read side of `tools/ffxi_names.py`, whose docstring named "the
+    This is the read side of CrystalBridge's `tools/ffxi_names.py` (any title
+    may fill the same table), whose docstring named "the
     Content ID list UI" as the later step and left this table standalone so it
     could land while other work was in flight. It has landed; this is that step.
 
@@ -2513,36 +2520,39 @@ def member_content_id(conn, member_id, content_code, active_only=True):
     return row["cid"] if row else None
 
 
-#: Content code 1 = FINAL FANTASY XI. Named because the slot rules below are
-#: FFXI's, not a general policy: it is the only title we serve that issues one
-#: Content ID per CHARACTER rather than one per account.
-FFXI_CONTENT_CODE = 1
+def title_content_slots():
+    """`{content code: Content IDs per handle}` for the titles loaded in this
+    process that issue more than one (titles.Title.content_slots). Empty when
+    no title asks for more, or when this module runs on its own.
 
-#: How many FFXI Content IDs a handle is given, i.e. how many FFXI characters it
-#: can actually play. SE sells these; we grant them, because nothing on our side
-#: sells anything and a player who makes a second character and cannot log into
-#: it has no way to tell that from a bug (they get POL-0001, which says nothing).
-#:
-#: WARNING: DEFAULT 1, AND EIGHT PER HANDLE IS A HARD CEILING. The ninth and
-#: later ids cannot be served "unbound but playable": the Viewer reads a
-#: present-but-unbound Content ID as one that still needs a handle and walks the
-#: player into the assign-a-handle flow, which dead-ends on that very ceiling:
-#: SE string 26069, "The handle "%s" is already linked to 8 Content IDs." FFXI
-#: then becomes unreachable from a handle where it worked.
-#:
-#: A handle holds one link per TITLE and there are eight titles, so 1 is the only
-#: value that cannot collide with a later title grant. Raising it is safe only on
-#: a deployment that grants fewer titles: `ensure_content_slots` clamps the mint
-#: to CONTENT_IDS_PER_HANDLE and `responders._db_chars` truncates the wire, but a
-#: title granted AFTER the extra ids exist still pushes them out -- and an FFXI
-#: character sitting on a pushed-out id is POL-0001 with no explanation.
-FFXI_CHARACTER_SLOTS = max(1, int(os.environ.get("POL_FFXI_CHARACTER_SLOTS") or 1))
+    Every other title gets one Content ID per handle, which is slot 0. A title
+    that issues one per CHARACTER declares its slot count on its plugin, and
+    `ensure_content_slots` mints the rest.
+    """
+    if titles is None:
+        return {}
+    return titles.content_slots()
+
+
+def content_slots_for(content_code):
+    """How many Content IDs a handle is given for one title: 1, unless a
+    loaded title plugin asks for more."""
+    return title_content_slots().get(int(content_code), 1)
+
 
 #: Content IDs one handle may hold, ever, across every game. SE's own limit
 #: (string 26069) and the shape of the wire record: the binding is one byte per
 #: position in the 8 bytes at handle_slot+0x20 and the record's position field is
 #: three bits. `responders._CHAR_PER_HANDLE` enforces the same number on the
 #: wire; this one stops us WRITING a ninth in the first place.
+#:
+#: WARNING: A NINTH CANNOT BE SERVED "UNBOUND BUT PLAYABLE". The Viewer reads a
+#: present-but-unbound Content ID as one that still needs a handle and walks
+#: the player into the assign-a-handle flow, which dead-ends on this very
+#: ceiling (string 26069, "The handle "%s" is already linked to 8 Content
+#: IDs."), and the title becomes unreachable from a handle where it worked. So
+#: a title's extra character slots compete with the other titles for these
+#: eight: a handle granted every title has room for one id each.
 CONTENT_IDS_PER_HANDLE = 8
 
 
@@ -2553,41 +2563,6 @@ def content_slot_count(conn, handle_id, content_code, active_only=True):
     if active_only:
         q += " AND status = 'active'"
     return int(conn.execute(q, (handle_id, int(content_code))).fetchone()["n"])
-
-
-#: The bridge's charid -> Content ID map. Same default as
-#: `responders._FFXI_IDMAP`; POL_FFXI_IDMAP overrides both.
-FFXI_IDMAP = os.environ.get("POL_FFXI_IDMAP", "/lsb/ffxi_idmap.json")
-
-
-def ffxi_ids_in_use(path=None):
-    """`{Content ID (str): character name}` for every FFXI character the bridge
-    has paired. Raises OSError or ValueError if the map cannot be read.
-
-    WARNING: **A FAILURE HERE IS NOT "NOTHING IS IN USE".** This is the check that
-    stands between an operator and deactivating the Content ID a live character
-    is named after -- that character then misses POL's table and is POL-0001 at
-    select, for ever, with nothing on screen to explain it. So it RAISES rather
-    than returning an empty dict, and `trim-ffxi-slots` refuses to write when it
-    does.
-
-    Both on-disk shapes `lsb/ffxi_bridge.save_idmap` has used are read: the
-    original flat `{"<charid>": <ContentID>}` and the current
-    `{"<charid>": {"content_id": N, "name": "Lex", ...}}`. An entry in neither
-    shape raises too -- a map we cannot parse is a map we cannot vouch for.
-    """
-    with open(path or FFXI_IDMAP, "r", encoding="utf-8") as fh:
-        raw = json.load(fh)
-    if not isinstance(raw, dict):
-        raise ValueError("%s: expected an object, got %s"
-                         % (path or FFXI_IDMAP, type(raw).__name__))
-    out = {}
-    for charid, val in raw.items():
-        if isinstance(val, dict):
-            out[str(int(val["content_id"]))] = val.get("name") or ("charid " + str(charid))
-        else:
-            out[str(int(val))] = "charid " + str(charid)
-    return out
 
 
 def handle_link_count(conn, handle_id):
@@ -2620,14 +2595,14 @@ def ensure_content_slots(conn, handle_id, content_code, want, status="active"):
 
     It does NOT grant the game itself: `content` is the entitlement and this is
     the per-handle link. A handle with no row for this code at all gets none,
-    because "how many FFXI characters may this handle have" is a different
-    question from "does this account own FFXI", and answering the second one here
-    would hand the title to everybody.
+    because "how many characters may this handle have in this title" is a
+    different question from "does this account own the title", and answering
+    the second one here would hand the title to everybody.
     """
     have = content_slot_count(conn, handle_id, content_code, active_only=False)
     # THE HANDLE'S HARD CEILING, and it is not this game's business alone: a
     # ninth Content ID on a handle is not a bonus that hides in the profile view,
-    # it is a dialog that makes the title unreachable (see FFXI_CHARACTER_SLOTS).
+    # it is a dialog that makes the title unreachable (see CONTENT_IDS_PER_HANDLE).
     # Clamp rather than refuse -- a handle with room for
     # one more gets one, which is what a deployment granting fewer titles wants.
     room = max(0, CONTENT_IDS_PER_HANDLE - handle_link_count(conn, handle_id))
@@ -2649,26 +2624,31 @@ def ensure_content_slots(conn, handle_id, content_code, want, status="active"):
     return want - have
 
 
-def ensure_ffxi_character_slots(conn, handle_id=None):
-    """Top every handle that HAS FFXI up to `FFXI_CHARACTER_SLOTS` Content IDs.
+def ensure_title_slots(conn, handle_id=None, member_id=None):
+    """Top every handle holding a title that issues one Content ID per
+    character up to that title's slot count (`title_content_slots`). Returns
+    the number of ids minted, and commits when it minted any.
 
-    Returns the number of ids minted. Idempotent, and a no-op for a handle that
-    does not hold FFXI at all.
-
-    This is what closes the gap for accounts that already exist. It runs from
-    `_migrate` after the slot rebuild, so an operator does not have to remember
-    it, and it is safe to run repeatedly (`ensure_content_slots` is additive).
+    Idempotent, and a no-op for a handle that does not hold such a title, or in
+    a process that loads none. `handle_id` or `member_id` narrows it to one
+    handle or one member's handles; with neither it walks the whole database,
+    which is what `_migrate` does so an operator does not have to remember it.
     """
-    if handle_id is not None:
-        hids = [int(handle_id)]
-    else:
-        hids = [int(r["handle_id"]) for r in conn.execute(
-            "SELECT DISTINCT handle_id FROM handle_content WHERE content_code = ?",
-            (FFXI_CONTENT_CODE,))]
+    policy = title_content_slots()
+    if not policy:
+        return 0
     minted = 0
-    for hid in hids:
-        minted += ensure_content_slots(conn, hid, FFXI_CONTENT_CODE,
-                                       FFXI_CHARACTER_SLOTS)
+    for code, want in sorted(policy.items()):
+        q = "SELECT DISTINCT handle_id FROM handle_content WHERE content_code = ?"
+        params = [code]
+        if handle_id is not None:
+            q += " AND handle_id = ?"
+            params.append(int(handle_id))
+        elif member_id is not None:
+            q += " AND handle_id IN (SELECT id FROM handle WHERE member_id = ?)"
+            params.append(int(member_id))
+        for r in conn.execute(q, params).fetchall():
+            minted += ensure_content_slots(conn, int(r["handle_id"]), code, want)
     if minted:
         conn.commit()
     return minted
@@ -2723,15 +2703,15 @@ def link_member_content_to_primary(conn, member_id):
         # collision that history is the reason this comment used to be here.
         cid = row["content_no"] or allocate_content_id(conn)
         link_content_to_handle(conn, h["id"], row["content_code"], cid)
-        # Same reason as at registration: FFXI is per CHARACTER, so placing the
-        # title has to place the whole set of character slots with it. This path
-        # is how a redeemed regcode (kinou 31) grants a title, so an account that
-        # gets FFXI from a code and one that gets it at sign-up end up identical.
+        # Same reason as at registration: a title that issues one Content ID
+        # per character places its whole set of slots with it. This path is how
+        # a redeemed regcode (kinou 31) grants a title, so an account that gets
+        # it from a code and one that gets it at sign-up end up identical.
         # `link_content_to_handle` has already committed, so this needs its own.
-        if int(row["content_code"]) == FFXI_CONTENT_CODE:
-            if ensure_content_slots(conn, h["id"], FFXI_CONTENT_CODE,
-                                    FFXI_CHARACTER_SLOTS):
-                conn.commit()
+        want = content_slots_for(row["content_code"])
+        if want > 1 and ensure_content_slots(conn, h["id"],
+                                             int(row["content_code"]), want):
+            conn.commit()
         n += 1
     return n
 
@@ -4915,25 +4895,6 @@ def main(argv=None):
     p = sub.add_parser("link-all", help="link every member's active content to "
                        "their primary handle (mints provisional Content IDs)")
 
-    p = sub.add_parser("trim-ffxi-slots", help="deactivate the EXTRA FFXI "
-                       "Content IDs (slot <> 0) that push a handle past its "
-                       "ceiling of %d, which makes the Viewer refuse to open "
-                       "FFXI from it at all (string 26069). Reports by default; "
-                       "--apply writes. Skips any id a character is already on"
-                       % CONTENT_IDS_PER_HANDLE)
-    p.add_argument("--apply", action="store_true",
-                   help="actually write; without it this only reports")
-    p.add_argument("--handle", help="just this handle (name), not every one")
-    p.add_argument("--idmap", help="path to the bridge's ffxi_idmap.json "
-                                   "(default POL_FFXI_IDMAP, else /lsb/ffxi_idmap.json)")
-    p.add_argument("--force", action="store_true",
-                   help="write even when the idmap is unreadable, or when a "
-                        "character IS on an id. That character becomes "
-                        "unplayable (POL-0001 at select). Say so out loud first")
-    p.add_argument("--restore", action="store_true",
-                   help="put back what a previous --apply deactivated "
-                        "(reads handle_content_trimmed)")
-
     # Friend commands. These exist because the friendship loop had NO operator
     # entry point at all -- every friend row in this database was hand-written
     # SQL -- and because they are the only way to exercise the loop without two
@@ -5165,89 +5126,6 @@ def main(argv=None):
             total += k
             print(f"  member {m['login_name']}: linked {k} content(s)")
         print(f"linked {total} content(s) across all members")
-    elif args.cmd == "trim-ffxi-slots":
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS handle_content_trimmed ("
-            " handle_id INTEGER NOT NULL, content_code INTEGER NOT NULL,"
-            " slot INTEGER NOT NULL, content_id TEXT, prev_status TEXT,"
-            " trimmed_at TEXT)")
-        if args.restore:
-            n = 0
-            for r in conn.execute("SELECT * FROM handle_content_trimmed").fetchall():
-                n += conn.execute(
-                    "UPDATE handle_content SET status = ? WHERE handle_id = ?"
-                    " AND content_code = ? AND slot = ?",
-                    (r["prev_status"], r["handle_id"], r["content_code"],
-                     r["slot"])).rowcount
-            conn.execute("DELETE FROM handle_content_trimmed")
-            conn.commit()
-            print("restored %d row(s)" % n)
-            raise SystemExit(0)
-
-        # WHAT IS ON THESE IDS COMES FIRST. A row here is only safe to
-        # deactivate if no character is named after its Content ID -- see
-        # ffxi_ids_in_use, which raises rather than shrugging.
-        inuse, why = {}, None
-        try:
-            inuse = ffxi_ids_in_use(args.idmap)
-        except Exception as exc:
-            why = "%s: %s" % (exc.__class__.__name__, exc)
-            print("WARNING: could not read the FFXI id map (%s)" % why)
-            print("  so this cannot tell which ids have a character on them.")
-
-        q = ("SELECT h.id AS hid, h.handle_name, c.slot, c.content_id, c.status"
-             "  FROM handle_content c JOIN handle h ON h.id = c.handle_id"
-             " WHERE c.content_code = ? AND c.slot <> 0")
-        params = [FFXI_CONTENT_CODE]
-        if args.handle:
-            q += " AND h.handle_name = ?"
-            params.append(args.handle)
-        rows = conn.execute(q + " ORDER BY h.id, c.slot", params).fetchall()
-        if not rows:
-            print("no extra FFXI Content IDs: every handle is already at one")
-            raise SystemExit(0)
-
-        free, skipped = 0, 0
-        for r in rows:
-            who = inuse.get(str(r["content_id"]))
-            if r["status"] == "active":
-                skipped += 1 if who else 0
-                free += 0 if who else 1
-            print("  handle %3d %-16s slot %d  id %-10s %-8s %s"
-                  % (r["hid"], r["handle_name"], r["slot"], r["content_id"],
-                     r["status"], ("<-- %s IS ON THIS ID" % who) if who else ""))
-        over = sum(1 for hid in set(r["hid"] for r in rows)
-                   if handle_link_count(conn, hid) > CONTENT_IDS_PER_HANDLE)
-        print("%d extra row(s); %d active and free to trim, %d active with a "
-              "character on them, %d handle(s) over the ceiling of %d"
-              % (len(rows), free, skipped, over, CONTENT_IDS_PER_HANDLE))
-
-        if not args.apply:
-            print("report only -- pass --apply to write")
-            raise SystemExit(0)
-        if why and not args.force:
-            raise SystemExit("REFUSING to write: the id map could not be read, so "
-                             "a trim could silently kill a live character. Fix the "
-                             "path (--idmap / POL_FFXI_IDMAP) or pass --force.")
-        now = _now()
-        n = 0
-        for r in rows:
-            if r["status"] != "active":
-                continue
-            if inuse.get(str(r["content_id"])) and not args.force:
-                continue
-            conn.execute(
-                "INSERT INTO handle_content_trimmed (handle_id, content_code,"
-                " slot, content_id, prev_status, trimmed_at) VALUES (?,?,?,?,?,?)",
-                (r["hid"], FFXI_CONTENT_CODE, r["slot"], r["content_id"],
-                 r["status"], now))
-            n += conn.execute(
-                "UPDATE handle_content SET status = 'inactive' WHERE handle_id = ?"
-                " AND content_code = ? AND slot = ?",
-                (r["hid"], FFXI_CONTENT_CODE, r["slot"])).rowcount
-        conn.commit()
-        print("deactivated %d row(s); `trim-ffxi-slots --restore` puts them back" % n)
-        print("read live per request -- do NOT restart anything to apply it")
     elif args.cmd == "arm":
         row = conn.execute(
             "SELECT m.* FROM member m WHERE m.polid = ? OR m.login_name = ?"
@@ -5703,9 +5581,9 @@ if __name__ == "__main__":
             "SELECT hc.content_id FROM handle_content hc"
             " JOIN handle h ON h.id = hc.handle_id WHERE h.member_id = ?",
             (acct["member_id"],))]
-        # SLOT 0 is "the" id for a title; FFXI additionally gets one id per
-        # CHARACTER (FFXI_CHARACTER_SLOTS), so the row count is no longer the
-        # title count. Both halves of the original property still hold and both
+        # SLOT 0 is "the" id for a title; a title that issues one id per
+        # CHARACTER gets more (titles.Title.content_slots), so the row count is
+        # no longer the title count. Both halves of the original property still hold and both
         # are still checked: one identity per title, and every id distinct --
         # which is the invariant that actually matters, since a Content ID
         # belongs to exactly one handle (POL-7169/7187/5326).
