@@ -94,6 +94,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = os.path.join(ROOT, "tools")
 SERVICES = os.path.join(ROOT, "services")
+TESTS = os.path.join(ROOT, "tests")
 
 #: (name, argv, cwd, extra_env). Ordered cheapest-and-most-foundational first,
 #: so a broken codec is reported before a suite that spends 30 s failing on it.
@@ -269,6 +270,21 @@ SUITES = [
     ("signup_mode",   [sys.executable, "signup_mode_test.py"], TOOLS, {}),
     ("signup_limit",  [sys.executable, "signup_limit_test.py"], TOOLS, {}),
     ("polserver2_slim", [sys.executable, "polserver2_slim_test.py"], TOOLS, {}),
+    # --- tests/: one script per behaviour, each with its own throwaway DB ---
+    ("mgkey",          [sys.executable, "test_mgkey.py"], TESTS, {}),
+    ("auth_rsa_ips",   [sys.executable, "test_auth_rsa_ips.py"], TESTS, {}),
+    ("auth_user_iv",   [sys.executable, "test_auth_user_iv.py"], TESTS, {}),
+    ("auth_rsa",       [sys.executable, "test_auth_rsa.py"], TESTS, {}),
+    ("auth_kill_dup",  [sys.executable, "test_auth_kill_dup.py"], TESTS, {}),
+    ("login_lockout",  [sys.executable, "test_login_lockout.py"], TESTS, {}),
+    ("gate_list_stamps", [sys.executable, "test_gate_list_stamps.py"], TESTS, {}),
+    ("lobby_split_frame", [sys.executable, "test_lobby_split_frame.py"], TESTS, {}),
+    ("ps2_pacing",     [sys.executable, "test_ps2_pacing.py"], TESTS, {}),
+    ("handle_nocase",  [sys.executable, "test_handle_nocase.py"], TESTS, {}),
+    ("handle_store_layout", [sys.executable, "test_handle_store_layout.py"], TESTS, {}),
+    ("friend_bitfield", [sys.executable, "test_friend_bitfield.py"], TESTS, {}),
+    ("friend_request_heal", [sys.executable, "test_friend_request_heal.py"], TESTS, {}),
+    ("profile_trailer", [sys.executable, "test_profile_trailer.py"], TESTS, {}),
     ("group_check",   [sys.executable, "group_check.py"],     TOOLS, {}),
     # The client's "N/M in chat" counter has two inputs served by two different
     # containers -- the 7:12 member total and the IRC roster -- so neither can
