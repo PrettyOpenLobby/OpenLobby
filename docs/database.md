@@ -14,9 +14,20 @@ Both services are part of the default `docker-compose.yml`, so
 `docker compose up -d` starts them with the rest of the stack. PostgreSQL
 keeps its files in the `pol-pgdata` volume. Valkey keeps nothing on disk.
 
-The services are moving onto this layer in stages. Until that work lands they
-still read and write `accounts.db` on the `pol-data` volume, so keep backing
-that volume up as before.
+The account data is in PostgreSQL: POL IDs, members, handles, Content IDs,
+friends and groups, mail, sessions, the admin panel's moderators and audit log,
+and the Discord links. Some state still lives in files on the `pol-data`
+volume while the rest of the services move over, so keep backing that volume
+up as well. One file there stays on purpose: `login-pw.key`, the key the
+Viewer login passwords are sealed with. It is kept out of the database so that
+a copy of the database alone cannot unseal them, and without it no sealed
+password can be read again, so back it up with the database.
+
+The bundled PostgreSQL is created with the C collation (`POSTGRES_INITDB_ARGS`
+in the compose file), so text sorts byte by byte and `lower()` folds only
+ASCII letters, which is what the account code was written against. A server
+you bring yourself works with other collations; lists sorted by name may come
+out in a different order.
 
 ## Settings
 
@@ -32,6 +43,13 @@ later also means running `ALTER USER openlobby PASSWORD '...'` inside it.
 Stick to letters and digits, because the password becomes part of a URL.
 
 `POL_DB_POOL` caps how many connections each process keeps open (default 8).
+
+`POL_DB_LOCK_TIMEOUT` is how long a write waits for a row another transaction
+holds before it fails (default `10s`, the busy timeout the SQLite version had).
+
+`POL_LOGIN_PW_KEYFILE` moves the password sealing key somewhere other than
+`<POL_DATA_DIR>/login-pw.key`; `POL_LOGIN_PW_KEY` replaces the file with a
+passphrase.
 
 `POL_VALKEY_URL` is the Valkey server, for example `valkey://valkey:6379/0`.
 Redis works as well (`redis://...`). When it is empty a service keeps its live
@@ -86,6 +104,56 @@ that reads a value and writes it back relied on that; with PostgreSQL such
 code names a lock, and only transactions naming the same lock wait for each
 other. `db.upsert()` builds `INSERT ... ON CONFLICT` for a dict of columns.
 
+### The account connection
+
+`accounts.connect()` returns a `polcore.db.CompatConnection`, the connection
+every function in `accounts.py` takes as `conn`. It keeps the shape of the
+SQLite connection the code was written against, so a title plugin or a tool
+that used to open `accounts.db` itself can move over by changing its SQL and
+nothing else:
+
+```python
+import accounts
+
+conn = accounts.connect()
+try:
+    row = conn.execute("SELECT * FROM handle WHERE id = %s", (hid,)).fetchone()
+    row["handle_name"], row[0], dict(row)      # by name, by position, as a dict
+    conn.execute("UPDATE handle SET is_primary = 1 WHERE id = %s", (hid,))
+    conn.commit()
+finally:
+    conn.close()
+```
+
+- A read outside a transaction runs on its own. The first INSERT, UPDATE or
+  DELETE opens a transaction, which lasts until `commit()` or `rollback()`.
+  `with conn:` commits at the end of the block, or rolls back if it raises,
+  and does not close the connection.
+- The connection holds a pooled server connection only while a transaction is
+  open, so keeping the object for a whole request costs nothing between
+  statements.
+- Inside a transaction a statement that fails undoes only itself and the
+  transaction carries on, as it did under SQLite. The error types are
+  `polcore.db.Error`, `IntegrityError` and `OperationalError`.
+- `close()` rolls back anything not committed and hands the connection back.
+  A connection dropped without `close()` is cleaned up when it is garbage
+  collected.
+- Integers and booleans are sent untyped, so a number compared with a text
+  column, or `True` stored in an integer flag column, works as it did.
+- There is no `lastrowid`: write `INSERT ... RETURNING id`. There is no
+  `rowid` either; order by a real column.
+- `conn.begin(lock="name")` opens a transaction now and takes a named advisory
+  lock in it, for code that must not run twice at once (the Content ID counter
+  uses it).
+
+`accounts.py` also has the lookups the title servers need, so they do not
+read its tables directly: `session_by_ip` and `sessions_by_ip` (which POL
+member logged in from this address), `member_content_id_list` and
+`content_id_list` (the Content IDs of one member, or of the whole server, for
+one title), `member_groups` (the groups a member belongs to),
+`member_id_by_handle_name` (a handle typed by a person) and
+`record_character_name` (the write side of `character_names`).
+
 `polcore.kv` has the same methods whichever backend is behind it: `get`,
 `set` with a `ttl` in seconds, `setnx` for a lock with a timeout, hashes
 (`hset`, `hgetall`), a FIFO queue (`push`, and `pop` with an optional
@@ -109,5 +177,13 @@ assertions.
 
 Without Docker, set `POL_TEST_DATABASE_URL` to a PostgreSQL server the tests
 may create databases on, and `POL_TEST_VALKEY_URL` to a Valkey server they
-may write keys to. With neither, the suites report SKIP and pass;
+may write keys to. With neither, these two suites report SKIP and pass;
 `POL_TEST_REQUIRE_DB=1` turns that into a failure, and CI sets it.
+
+Every other suite that touches the account code calls
+`pgtest.use_fresh_database()` at the top, which creates an empty database,
+points `POL_DATABASE_URL` at it for the suite and for any server the suite
+starts, and drops it when the suite exits. Those suites fail, rather than
+skip, when there is no database, because without one there is nothing to
+test. `run_all.py` starts one PostgreSQL container for the whole run and
+hands every suite its address, so a full run pays for one container.
