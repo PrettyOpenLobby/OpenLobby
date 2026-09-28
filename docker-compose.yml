@@ -172,13 +172,13 @@ services:
     environment:
       <<: *appenv
       # Mail to and from the internet (services/extmail.py). Inert unless both
-      # the key and the domain are set, and then only for members enabled on
-      # the admin panel. See .env.example.
-      POL_EXT_MAIL_PROVIDER: "${POL_EXT_MAIL_PROVIDER:-}"
-      POL_EXT_MAIL_KEY: "${POL_EXT_MAIL_KEY:-}"
+      # the SMTP relay and the domain are set, and then only for members
+      # enabled on the admin panel. See .env.example.
+      POL_EXT_MAIL_RELAY: "${POL_EXT_MAIL_RELAY:-}"
       POL_EXT_MAIL_DOMAIN: "${POL_EXT_MAIL_DOMAIN:-}"
       POL_EXT_MAIL_DAILY_OUT: "${POL_EXT_MAIL_DAILY_OUT:-}"
       POL_EXT_MAIL_DAILY_IN: "${POL_EXT_MAIL_DAILY_IN:-}"
+      POL_EXT_MAIL_IN_PER_IP_HOUR: "${POL_EXT_MAIL_IN_PER_IP_HOUR:-}"
       # Lobby record layouts learned from Project Crystal Server. All off when
       # unset (an empty value reads as off); see responders.py at each knob.
       #   POL_PROFILE_TRAILER=1            0xB0 trailer on profile records

@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """Pin mail to and from the internet (services/extmail.py).
 
-Drives the REAL SMTP handler over a socket, with the provider's HTTPS API
-stubbed, and extmail.receive for inbound. The outside domain is the reserved
-example.net. What it holds in place:
+Drives the REAL SMTP handler over a socket; the outbound SMTP relay is
+replaced by a fake that records what it was handed. The outside domain is the
+reserved example.net. What it holds in place:
 
   * an outside recipient is REFUSED at RCPT (visibly, 550) unless the sender
-    is enabled in the admin panel AND outbound is configured, rather than
-    accepted and silently dropped;
-  * an enabled sender's mail leaves as `"Name" <mailname@example.net>`,
-    whatever the client wrote, and is logged; the daily cap holds;
-  * a provider failure is a 554, not a false success;
-  * `name@example.net` from inside the game is delivered locally;
-  * inbound mail is flattened to Viewer-safe ISO-8859-1 text and reaches only
-    enabled members, by mail name or POL ID.
+    is enabled in the admin panel AND the relay and domain are configured,
+    rather than accepted and silently dropped;
+  * an enabled sender's mail goes to the relay as `"Name" <mailname@example.net>`
+    with that address as the envelope sender, whatever the client wrote; the
+    daily cap holds; a relay failure is a 554, not a false success;
+  * mail from OUTSIDE (another domain, or a bounce) reaches only enabled
+    members at example.net, flattened to Viewer-safe ISO-8859-1 text; it can
+    never be relayed on, never name a @pol.com box, never pose as our domains;
+  * a refused MAIL FROM ends the transaction: RCPT after it is 503;
+  * extmail.receive, for a relay that cannot speak SMTP, keeps its gates.
 
 Run: python tools/extmail_test.py
 """
 import base64
+import email.utils
 import os
+import smtplib
 import socket
 import sys
 import tempfile
@@ -32,9 +36,9 @@ import pgtest  # noqa: E402
 DB = pgtest.use_fresh_database()
 os.environ.update(POL_ACCOUNTS="1",
                   POL_LOG_DIR=os.path.join(_TMP, "logs"))
-for k in ("POL_EXT_MAIL_KEY", "POL_EXT_MAIL_DAILY_OUT", "POL_EXT_MAIL_DAILY_IN",
-          "POL_EXT_MAIL_DOMAIN", "POL_MAIL_STRICT", "POL_MAIL_SESSION_CHECK",
-          "POL_MAIL_SENDER_CHECK"):
+for k in ("POL_EXT_MAIL_RELAY", "POL_EXT_MAIL_DAILY_OUT", "POL_EXT_MAIL_DAILY_IN",
+          "POL_EXT_MAIL_DOMAIN", "POL_EXT_MAIL_IN_PER_IP_HOUR", "POL_MAIL_STRICT",
+          "POL_MAIL_SESSION_CHECK", "POL_MAIL_SENDER_CHECK"):
     os.environ.pop(k, None)
 
 import accounts  # noqa: E402
@@ -43,17 +47,6 @@ import responders as R  # noqa: E402
 
 DOMAIN = "example.net"
 os.environ["POL_EXT_MAIL_DOMAIN"] = DOMAIN
-
-
-class regapi:                                        # noqa: N801 -- test shim
-    """The inbound path, called the way a relay would call it."""
-    @staticmethod
-    def inbound_mail(rcpt, sender, raw_b64):
-        db = accounts.connect(DB)
-        try:
-            return extmail.receive(db, rcpt, sender, raw_b64)
-        finally:
-            db.close()
 
 FAILED = []
 
@@ -69,8 +62,8 @@ def check(label, got, want=True):
 c = accounts.connect(DB)
 accounts.create_polid(c, "EXTP1234", "polid-pw-1")
 eo = accounts.add_member(c, "EXTP1234", "eomember", "pw-eo-0001")
-accounts.assign_mail_address(c, eo, "pomona")
-accounts.open_session(c, eo, nick="Pom", peer_ip="127.0.0.1")
+accounts.assign_mail_address(c, eo, "ruuko")
+accounts.open_session(c, eo, nick="Eo", peer_ip="127.0.0.1")
 accounts.create_polid(c, "OFFP5678", "polid-pw-2")
 off = accounts.add_member(c, "OFFP5678", "offmember", "pw-off-0001")
 accounts.assign_mail_address(c, off, "offie")
@@ -78,23 +71,40 @@ accounts.open_session(c, off, nick="Off", peer_ip="127.0.0.1")
 c.commit()
 
 SENT = []
-PROVIDER = {"status": 200}
+RELAY = {"fail": None}
 
 
-def fake_post(url, headers, payload):
-    SENT.append((url, headers, payload))
-    if PROVIDER["status"] != 200:
-        return PROVIDER["status"], {"message": "provider says no"}
-    return 200, {"id": "prov-%d" % len(SENT)}
+class FakeRelay:
+    """Stands in for the relay named in POL_EXT_MAIL_RELAY."""
+    def __init__(self, host, port, timeout=None):
+        self.where = (host, port)
+        if RELAY["fail"] == "connect":
+            raise ConnectionRefusedError(111, "Connection refused")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def ehlo(self, name=""):
+        return 250, b"ok"
+
+    def send_message(self, msg, from_addr=None, to_addrs=None):
+        if RELAY["fail"] == "refuse":
+            raise smtplib.SMTPRecipientsRefused({a: (550, b"no") for a in to_addrs})
+        SENT.append((self.where, msg, from_addr, list(to_addrs)))
+        return {}
 
 
-extmail._post = fake_post
+extmail.smtplib.SMTP = FakeRelay
 
 
-def smtp(sender, rcpts, subject="hi", body="Hello there.", name="Pat Sample"):
-    """Run one SMTP session against handle_smtp. Returns {step: reply code}."""
+def smtp(sender, rcpts, subject="hi", body="Hello there.", name="Pat Sample",
+         ip="127.0.0.1", raw=None):
+    """One SMTP session against handle_smtp. Returns the reply codes."""
     a, b = socket.socketpair()
-    t = threading.Thread(target=R.handle_smtp, args=(b, ("127.0.0.1", 5555), 51261))
+    t = threading.Thread(target=R.handle_smtp, args=(b, (ip, 5555), 25))
     t.start()
     f = a.makefile("rwb")
     out = {"banner": f.readline()[:3].decode()}
@@ -103,15 +113,17 @@ def smtp(sender, rcpts, subject="hi", body="Hello there.", name="Pat Sample"):
         f.write(line.encode() + b"\r\n")
         f.flush()
         return f.readline()[:3].decode()
-    say("EHLO pol.com")
+    say("EHLO test")
     f.readline()                                     # the second EHLO line
-    out["from"] = say(f"MAIL FROM: {sender}")
-    out["rcpt"] = [say(f"RCPT TO: {r}") for r in rcpts]
+    out["from"] = say(f"MAIL FROM: <{sender}>")
+    out["rcpt"] = [say(f"RCPT TO: <{r}>") for r in rcpts]
     if "250" in out["rcpt"]:
         say("DATA")
-        f.write((f'From: "{name}" <{sender}>\r\nTo: {", ".join(rcpts)}\r\n'
-                 f"Subject: {subject}\r\nContent-Type: text/plain; charset=ISO-8859-1\r\n"
-                 f"\r\n{body}\r\n.\r\n").encode())
+        msg = raw if raw is not None else (
+            f'From: "{name}" <{sender}>\r\nTo: {", ".join(rcpts)}\r\n'
+            f"Subject: {subject}\r\nContent-Type: text/plain; charset=ISO-8859-1\r\n"
+            f"\r\n{body}\r\n").encode()
+        f.write(msg + b".\r\n")
         f.flush()
         out["data"] = f.readline()[:3].decode()
     say("QUIT")
@@ -125,46 +137,50 @@ def enable(mid, on=True):
     c.commit()
 
 
-print("\nThe gate: nobody mails outside unless enabled AND configured")
-r = smtp("EXTP1234@pol.com", ["friend@example.com"])
-check("not enabled: the outside RCPT is REFUSED (550), not accepted and dropped",
-      r["rcpt"], ["550"])
-enable(eo)
-r = smtp("EXTP1234@pol.com", ["friend@example.com"])
-check("enabled but no POL_EXT_MAIL_KEY: still 550 (the kill switch)", r["rcpt"], ["550"])
-os.environ["POL_EXT_MAIL_KEY"] = "test-key"
-os.environ["POL_EXT_MAIL_DOMAIN"] = ""
-r = smtp("EXTP1234@pol.com", ["friend@example.com"])
-check("key but no POL_EXT_MAIL_DOMAIN: still 550 (inert without its domain)",
-      r["rcpt"], ["550"])
-os.environ["POL_EXT_MAIL_DOMAIN"] = DOMAIN
-os.environ.pop("POL_EXT_MAIL_KEY")
-check("...and nothing reached the provider", len(SENT), 0)
-os.environ["POL_EXT_MAIL_KEY"] = "test-key"
-r = smtp("offie@pol.com", ["friend@example.com"])
-check("another member, never enabled: 550", r["rcpt"], ["550"])
-check("internal mail is untouched by the gate (offie -> pomona@pol.com)",
-      smtp("offie@pol.com", ["pomona@pol.com"])["data"], "250")
+def inbox(addr):
+    return accounts.list_mail(c, addr)
 
-print("\nAn enabled member, configured")
-r = smtp("EXTP1234@pol.com", ["friend@example.com", "pomona@pol.com"],
+
+print("\nThe gate: nobody mails outside unless enabled AND the relay is set")
+check("not enabled: the outside RCPT is REFUSED (550), not accepted and dropped",
+      smtp("EXTP1234@pol.com", ["friend@example.com"])["rcpt"], ["550"])
+enable(eo)
+check("enabled but no POL_EXT_MAIL_RELAY: still 550 (the kill switch)",
+      smtp("EXTP1234@pol.com", ["friend@example.com"])["rcpt"], ["550"])
+check("...and nothing reached the relay", len(SENT), 0)
+os.environ["POL_EXT_MAIL_RELAY"] = "192.0.2.25:2525"
+os.environ["POL_EXT_MAIL_DOMAIN"] = ""
+check("relay but no POL_EXT_MAIL_DOMAIN: still 550 (inert without its domain)",
+      smtp("EXTP1234@pol.com", ["friend@example.com"])["rcpt"], ["550"])
+os.environ["POL_EXT_MAIL_DOMAIN"] = DOMAIN
+check("another member, never enabled: 550",
+      smtp("offie@pol.com", ["friend@example.com"])["rcpt"], ["550"])
+check("internal mail is untouched by the gate (offie -> ruuko@pol.com)",
+      smtp("offie@pol.com", ["ruuko@pol.com"])["data"], "250")
+
+print("\nAn enabled member, relay configured")
+r = smtp("EXTP1234@pol.com", ["friend@example.com", "ruuko@pol.com"],
          subject="From the game", body="Can you read this?")
 check("RCPT outside accepted, local accepted", r["rcpt"], ["250", "250"])
 check("DATA 250", r["data"], "250")
-url, hdrs, payload = SENT[-1]
-check("sent through Resend by default", url, "https://api.resend.com/emails")
+where, msg, env_from, env_to = SENT[-1]
+check("handed to the relay named in POL_EXT_MAIL_RELAY", where, ("192.0.2.25", 2525))
 check("From is the member's OUTSIDE address with their display name",
-      payload["from"], '"Pat Sample" <pomona@example.net>')
-check("only the outside recipient went to the provider", payload["to"], ["friend@example.com"])
-check("reply_to is the outside address", payload["reply_to"], "pomona@example.net")
-check("subject and text carried", (payload["subject"], payload["text"].strip()),
+      email.utils.parseaddr(str(msg["From"])), ("Pat Sample", "ruuko@example.net"))
+check("envelope sender is the outside address (bounces come home)", env_from,
+      "ruuko@example.net")
+check("only the outside recipient went to the relay", env_to, ["friend@example.com"])
+check("Reply-To and Message-ID are ours",
+      (msg["Reply-To"], msg["Message-ID"].endswith("@example.net>")),
+      ("ruuko@example.net", True))
+check("subject and text carried", (msg["Subject"], msg.get_content().strip()),
       ("From the game", "Can you read this?"))
 check("the local copy was still delivered",
-      any(m["subject"] == "From the game" for m in accounts.list_mail(c, "pomona@pol.com")), True)
+      any(m["subject"] == "From the game" for m in inbox("ruuko@pol.com")), True)
 row = c.execute("SELECT * FROM ext_mail_log ORDER BY id DESC LIMIT 1").fetchone()
-check("logged: member, direction, address, ok, provider id",
-      (row["member_id"], row["direction"], row["peer_addr"], row["ok"], row["detail"]),
-      (eo, "out", "friend@example.com", 1, "prov-%d" % len(SENT)))
+check("logged: member, direction, address, ok",
+      (row["member_id"], row["direction"], row["peer_addr"], row["ok"]),
+      (eo, "out", "friend@example.com", 1))
 
 print("\nWhat the client writes cannot choose the outside From")
 n0 = len(SENT)
@@ -174,14 +190,17 @@ check("...and nothing was sent", len(SENT) - n0, 0)
 crafted = b'From: "The Bank <ceo@bank.com>" <EXTP1234@pol.com>\r\nSubject: s\r\n\r\nx\r\n'
 frm = extmail.outbound_parts(crafted, c.execute("SELECT * FROM member WHERE id=%s", (eo,)).fetchone())[0]
 check("an address hidden in the display name is defused",
-      frm, '"The Bank ceobank.com" <pomona@example.net>')
+      frm, '"The Bank ceobank.com" <ruuko@example.net>')
 
 print("\nFailures and limits")
-PROVIDER["status"] = 422
-check("provider refuses -> 554, never a false 250",
+RELAY["fail"] = "connect"
+check("relay unreachable -> 554, never a false 250",
       smtp("EXTP1234@pol.com", ["friend@example.com"])["data"], "554")
-PROVIDER["status"] = 200
-check("...and the failure is logged as not ok",
+RELAY["fail"] = "refuse"
+check("relay refuses the recipients -> 554",
+      smtp("EXTP1234@pol.com", ["friend@example.com"])["data"], "554")
+RELAY["fail"] = None
+check("...and failures are logged as not ok",
       c.execute("SELECT ok FROM ext_mail_log ORDER BY id DESC LIMIT 1").fetchone()[0], 0)
 sent_ok = extmail.count_today(c, eo, "out")
 check("a failed send does not count against the cap", sent_ok, 1)
@@ -197,46 +216,93 @@ check("the report/support aliases are not 'outside'",
 
 print("\n<name>@example.net from inside the game is local")
 n0 = len(SENT)
-r = smtp("offie@pol.com", ["pomona@example.net"], subject="via the outside name")
+r = smtp("offie@pol.com", ["ruuko@example.net"], subject="via the outside name")
 check("accepted without the gate (offie is not enabled)", (r["rcpt"], r["data"]), (["250"], "250"))
-check("...delivered to pomona's box, not the provider",
-      (any(m["subject"] == "via the outside name" for m in accounts.list_mail(c, "pomona@pol.com")),
+check("...delivered to ruuko's box, not the relay",
+      (any(m["subject"] == "via the outside name" for m in inbox("ruuko@pol.com")),
        len(SENT) - n0), (True, 0))
 
-print("\nInbound (extmail.receive)")
+print("\nMail from OUTSIDE (the outside domain's MX delivers to this handler)")
+OUT_IP = "203.0.113.7"
 RAW = (b"From: =?utf-8?q?Zo=C3=AB?= <zoe@example.com>\r\n"
-       b"To: pomona@example.net\r\nSubject: =?utf-8?b?SGnigJQgdGhlcmU=?=\r\n"
+       b"To: ruuko@example.net\r\nSubject: =?utf-8?b?SGnigJQgdGhlcmU=?=\r\n"
        b"MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=XX\r\n\r\n"
        b"--XX\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html only</p>\r\n"
        b"--XX\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
        b"It\xe2\x80\x99s caf\xc3\xa9 time \xf0\x9f\x98\x80\r\n--XX--\r\n")
-b64 = base64.b64encode(RAW).decode()
-st, _ = regapi.inbound_mail("pomona@example.net", "zoe@example.com", b64)
-check("to an enabled member's mail name: 200", st, 200)
-got = accounts.list_mail(c, "pomona@pol.com")[-1]
+r = smtp("zoe@example.com", ["ruuko@example.net"], raw=RAW, ip=OUT_IP)
+check("an outside sender to an enabled member: 250 all the way",
+      (r["from"], r["rcpt"], r["data"]), ("250", ["250"], "250"))
+got = inbox("ruuko@pol.com")[-1]
 raw = bytes(got["raw"])
 check("stored as ISO-8859-1 text/plain", b"charset=ISO-8859-1" in raw, True)
 check("the text/plain part won over the html one", (b"caf\xe9 time" in raw, b"html only" in raw), (True, False))
 check("a curly quote became a plain one; an emoji a '?'", b"It's caf\xe9 time ?" in raw, True)
 check("subject decoded, em dash made plain", got["subject"], "Hi- there")
-check("the From kept its decoded name", got["sender"].startswith("Zo"), True)
-check("addressed to the in-game box", b"To: pomona@pol.com" in raw, True)
-check("by POL ID in lower case: 200",
-      regapi.inbound_mail("extp1234@example.net", "zoe@example.com", b64)[0], 200)
-check("to a member NOT enabled: 404 (the relay bounces it)",
-      regapi.inbound_mail("offie@example.net", "zoe@example.com", b64)[0], 404)
-check("to nobody: 404", regapi.inbound_mail("ghost@example.net", "z@e.com", b64)[0], 404)
-check("another domain: 404", regapi.inbound_mail("pomona@pol.com", "z@e.com", b64)[0], 404)
-big = base64.b64encode(b"Subject: x\r\n\r\n" + b"a" * (extmail.MAX_IN_RAW + 1)).decode()
-check("too large: 413", regapi.inbound_mail("pomona@example.net", "z@e.com", big)[0], 413)
-os.environ["POL_EXT_MAIL_DAILY_IN"] = "2"
-check("past the inbound daily cap: 429",
-      regapi.inbound_mail("pomona@example.net", "zoe@example.com", b64)[0], 429)
-enable(eo, False)
+check("addressed to the in-game box", b"To: ruuko@pol.com" in raw, True)
+check("logged as inbound", c.execute(
+    "SELECT direction, peer_addr, ok FROM ext_mail_log ORDER BY id DESC LIMIT 1").fetchone()[:],
+    ("in", "zoe@example.com", 1))
+check("by POL ID in lower case: accepted",
+      smtp("zoe@example.com", ["extp1234@example.net"], ip=OUT_IP)["rcpt"], ["250"])
+check("a bounce (null sender) to an enabled member: accepted",
+      smtp("", ["ruuko@example.net"], ip=OUT_IP)["rcpt"], ["250"])
+check("to a member NOT enabled: 550",
+      smtp("zoe@example.com", ["offie@example.net"], ip=OUT_IP)["rcpt"], ["550"])
+check("to nobody: 550", smtp("zoe@example.com", ["ghost@example.net"], ip=OUT_IP)["rcpt"], ["550"])
+
+print("\n...and what it can never do")
+n0 = len(SENT)
+check("relay on to another outside domain (open relay): 550",
+      smtp("zoe@example.com", ["victim@example.org"], ip=OUT_IP)["rcpt"], ["550"])
+check("...nothing reached the relay", len(SENT) - n0, 0)
+check("name a @pol.com box directly: 550",
+      smtp("zoe@example.com", ["ruuko@pol.com"], ip=OUT_IP)["rcpt"], ["550"])
+check("a bounce to a @pol.com box: 550",
+      smtp("", ["offie@pol.com"], ip=OUT_IP)["rcpt"], ["550"])
+r = smtp("ruuko@example.net", ["ruuko@example.net"], ip=OUT_IP)
+check("pose as our outside domain from the internet: MAIL FROM refused, RCPT 503",
+      (r["from"], r["rcpt"]), ("550", ["503"]))
+r = smtp("ruuko@pol.com", ["offie@pol.com"], ip=OUT_IP)
+check("pose as a member from the internet: MAIL FROM refused, RCPT 503",
+      (r["from"], r["rcpt"]), ("550", ["503"]))
+os.environ["POL_EXT_MAIL_DAILY_IN"] = str(extmail.count_today(c, eo, "in"))
+check("the member's inbound daily cap: 452",
+      smtp("zoe@example.com", ["ruuko@example.net"], ip=OUT_IP)["rcpt"], ["452"])
 os.environ["POL_EXT_MAIL_DAILY_IN"] = "100"
-check("switched off in the panel: inbound 404 again",
-      regapi.inbound_mail("pomona@example.net", "zoe@example.com", b64)[0], 404)
+R._INBOUND_PER_IP_HOUR = 3
+R._INBOUND_SEEN.clear()
+codes = [smtp("zoe@example.com", ["ruuko@example.net"], ip="198.51.100.9")["from"]
+         for _ in range(4)]
+check("the per-address hourly limit: 4th MAIL FROM is 450", codes, ["250", "250", "250", "450"])
+check("...another address is not affected",
+      smtp("zoe@example.com", ["ruuko@example.net"], ip="198.51.100.10")["from"], "250")
+big = b"Subject: big\r\n\r\n" + b"a" * (extmail.MAX_IN_RAW + 10) + b"\r\n"
+check("too large: 552", smtp("zoe@example.com", ["ruuko@example.net"], raw=big,
+                             ip="198.51.100.11")["data"], "552")
+enable(eo, False)
+check("switched off in the panel: inbound 550 again",
+      smtp("zoe@example.com", ["ruuko@example.net"], ip="198.51.100.12")["rcpt"], ["550"])
 check("...and outbound 550 again", smtp("EXTP1234@pol.com", ["friend@example.com"])["rcpt"], ["550"])
+
+print("\nInbound through extmail.receive (a relay that calls in)")
+enable(eo)
+b64 = base64.b64encode(RAW).decode()
+
+
+def receive(rcpt, raw_b64):
+    db = accounts.connect(DB)
+    try:
+        return extmail.receive(db, rcpt, "zoe@example.com", raw_b64)[0]
+    finally:
+        db.close()
+
+
+check("to an enabled member's mail name: 200", receive("ruuko@example.net", b64), 200)
+check("to a member NOT enabled: 404", receive("offie@example.net", b64), 404)
+check("another domain: 404", receive("ruuko@pol.com", b64), 404)
+check("too large: 413", receive("ruuko@example.net", base64.b64encode(
+    b"Subject: x\r\n\r\n" + b"a" * (extmail.MAX_IN_RAW + 1)).decode()), 413)
 
 c.close()
 print()
