@@ -160,8 +160,41 @@ def suite(s, other):
     other.flush()
 
 
+def long_blocks(s):
+    """Blocks longer than valkey-py's default 5 s socket read timeout. Before
+    the blocking calls had their own pool, these raised "Timeout reading from
+    socket" at 5 s."""
+    print(" blocking calls longer than 5 s")
+    s.flush()
+    t0 = time.monotonic()
+    try:
+        got = s.pop("slow", timeout=6)
+    except Exception as exc:
+        got = "raised %r" % (exc,)
+    took = time.monotonic() - t0
+    chk("pop(timeout=6) on an empty list", got, None)
+    chk("...after about 6 s", 5.8 <= took < 7.5, True)
+    threading.Timer(5.5, lambda: s.push("slow", "late")).start()
+    t0 = time.monotonic()
+    try:
+        got = s.pop("slow", timeout=8)
+    except Exception as exc:
+        got = "raised %r" % (exc,)
+    took = time.monotonic() - t0
+    chk("pop(timeout=8) gets a value pushed after 5.5 s", got, "late")
+    chk("...at about 5.5 s", 5.3 <= took < 7.0, True)
+    t0 = time.monotonic()
+    try:
+        got = s.move("slow", "slow:work", timeout=6)
+    except Exception as exc:
+        got = "raised %r" % (exc,)
+    chk("move(timeout=6) on an empty list", got, None)
+    chk("...after about 6 s", 5.8 <= time.monotonic() - t0 < 7.5, True)
+    s.flush()
+
+
 print("MemoryKV")
-mem = kv.MemoryKV(prefix="test:")
+mem =kv.MemoryKV(prefix="test:")
 suite(mem, kv.MemoryKV(prefix="other:"))
 
 print("MemoryKV is thread-safe")
@@ -234,6 +267,7 @@ else:
                 raise
             time.sleep(0.2)
     suite(vk, kv.ValkeyKV(url, prefix="other:"))
+    long_blocks(vk)
     os.environ["POL_VALKEY_URL"] = url
     kv.reset()
     chk("set -> valkey", kv.default().backend, "valkey")
