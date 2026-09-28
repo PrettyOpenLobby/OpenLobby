@@ -921,7 +921,7 @@ function showIssue(r, refresh) {
     (note ? ` <span style="color:var(--muted)">${esc(note)}</span>` : "") + "<br>";
   let html = "<b>client</b><br>";
   (r.client_files || []).forEach((f) => {
-    html += link("client/" + f.name, f.name, `${f.bytes} B`);
+    html += link("client/" + f.name, f.name, fmtBytes(f.bytes));
   });
   html += "<br><b>server</b><br>";
   (r.server_files || []).forEach((n) => {
