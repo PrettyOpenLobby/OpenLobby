@@ -9,7 +9,7 @@ import time
 import threading
 from srvcore import log
 from .deps import accounts
-from . import handlelists, profilerecord
+from . import friendlist, handlelists, profilerecord
 
 
 
@@ -696,3 +696,14 @@ def _session_record(n):
                  f"[0x3835420]=statustable[byte2={out[2]}] (byte1={out[1]} "
                  f"non-zero keeps it live)")
     return bytes(out)
+
+
+def payload_my_status(n, req_pt):
+    """4:6 KGetMyStatus (lobby opcode table): the session record.
+
+    POL_FRIENDS=1 restores the pre-2026-08-12 behaviour (32-byte friend
+    entries here) for A/B. It is WRONG -- see _session_record -- and it is
+    what made the lobby clock read 12/31/1969."""
+    if os.environ.get("POL_FRIENDS", "0") == "1":
+        return friendlist._friend_payload(n)
+    return _session_record(n)

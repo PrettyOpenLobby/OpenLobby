@@ -5,7 +5,8 @@ import struct
 import time
 from srvcore import hexdump, log, save_capture
 from .deps import accounts
-from . import contentprofiles, friendlist, lobbyreply, lobbysession, memberstatus, pfc, pushchannel, pushrecord, pushspool
+from . import (contentprofiles, friendlist, lobbyreply, lobbysession, memberstatus, paylen, pfc,
+               pushchannel, pushrecord, pushspool)
 
 
 
@@ -1160,3 +1161,54 @@ def _capture_profile_write(pt):
 #: 0x28 is the start of the PAYLOAD proper (the same 0x28 the 07:01 note derives),
 #: so the whole 4:7 payload is `<flag><handle name>` and nothing else.
 _ACTIVE_HANDLE_OFF = 0x28
+
+
+# --------------------------------------------------------------------------- #
+# The lobby opcode table's entries for the profile (see lobbyops.py)
+# --------------------------------------------------------------------------- #
+def capture_profile_write(pt):
+    """5:1 profile write."""
+    _capture_profile_write(pt)
+    return True
+
+
+def capture_comment(pt):
+    """4:3 KPutMyCommentForFriend."""
+    _capture_comment(pt)
+    return True
+
+
+def paylen_profile(req_pt):
+    """5:4 SERVES TWO DIFFERENT RECORDS AND THE LENGTH DEPENDS ON THE REQUEST,
+    which a fixed table entry cannot express -- so the table's 604 is right for
+    the handle profile and wrong in KIND for the other one. Measured on retail:
+    a one-item TLV gets 604 (600 record + 4), a two-item TLV gets 284 (280 + 4).
+    Declaring 604 to a content request is a 320-byte overrun of what the client
+    will read, i.e. exactly the shape of the bug the 604 entry itself fixed.
+
+    AND THE CONTENT RECORD'S LENGTH IS PER TITLE, not a constant 280.
+    `prof_<code>.pib` carries it: 280 FFXI, 432 TM, 432 code 3, 280 FMO,
+    240 (code 10), 464 FE. Serving 284 to a title that reads 436 is the
+    same class of defect as the 604-to-a-content-request above, one layer
+    down. See `_CONTENT_SCHEMAS`. The POL_LOBBY_PAYLEN override still wins.
+    """
+    if not contentprofiles._is_content_profile_request(req_pt):
+        return None
+    forced = paylen.paylen_override(0x05, 0x04)
+    if forced is not None:
+        return forced
+    _s, rec_len, _p, _m = contentprofiles._content_schema_for(
+        contentprofiles._content_code_for_request(req_pt))
+    return rec_len + 4
+
+
+def payload_profile(n, req_pt):
+    """5:4 profile read-back: the CONTENT profile when the request is the
+    two-item TLV (see `_is_content_profile_request`; `n` is 284 = 280 record
+    + checksum), else the handle profile served unconditionally from the DB.
+    This is normal operation, not a probe, so it is deliberately NOT behind
+    POL_LOBBY_TAIL. `n` is 604 = 600 record + the 4-byte checksum the caller
+    appends, so the record itself is n-4."""
+    if contentprofiles._is_content_profile_request(req_pt):
+        return contentprofiles._content_profile_record(n - 4, req_pt)
+    return _profile_record(n - 4, req_pt)

@@ -4,7 +4,7 @@ import re
 import time
 from srvcore import hexdump, log
 from .deps import accounts
-from . import fetchpath, friendput, lobbybind, lobbysession, profilerecord, resourcestore
+from . import lobbyops, fetchpath, friendput, lobbybind, lobbysession, profilerecord, resourcestore
 
 
 
@@ -193,32 +193,8 @@ def _lobby_capture(pt):
         fetchpath._capture_fetch_subject(pt)
     if accounts is None:
         return
-    if (pt[1], pt[2]) == (0x03, 0x00):
-        # Read-only, and deliberately BEFORE the fetch is answered: this is where
-        # a client volunteers the id it knows itself by (see `_capture_self_guid`).
-        fetchpath._capture_self_guid(pt)
-        return
-    if (pt[1], pt[2]) == (0x04, 0x07):
-        _capture_active_handle(pt)
-        return
-    if (pt[1], pt[2]) == (0x05, 0x01):
-        profilerecord._capture_profile_write(pt)
-        return
-    if (pt[1], pt[2]) == (0x04, 0x03):
-        profilerecord._capture_comment(pt)
-        return
-    if (pt[1], pt[2]) in ((0x03, 0x01), (0x03, 0x02)) \
-            and os.environ.get("POL_RESOURCE_WRITE", "1") == "1":
-        # BOTH object writes. 03:02 is an UPDATE of an existing object; 03:01 is
-        # the MESSAGE SEND -- measured 2026-08-15 as a 461-byte request carrying
-        # `O/m/<path>` + 363 bytes at the same +0x38 the read uses. They have the
-        # same shape, so they store the same way.
-        #
-        # The earlier note here was right that 03:01 is the send and wrong to
-        # conclude it therefore is not a write: sending a message IS creating the
-        # object the recipient later reads. Storing only 03:02 meant a real send
-        # stored nothing at all, which is why the first fix changed nothing.
-        resourcestore._capture_resource_write(pt, f"{pt[1]:02x}:{pt[2]:02x}")
+    op = lobbyops.lookup(pt[1], pt[2])
+    if op is not None and op.capture is not None and op.capture(pt):
         return
     # WHICH OPCODE WRITES A RESOURCE? ANSWERED 2026-08-15: **BOTH 03:01 and
     # 03:02**, same shape, both now stored (see _capture_resource_write).
@@ -247,16 +223,11 @@ def _lobby_capture(pt):
                          f"{len(pt) - 0x28 - m.end()}B follow it.\n"
                          + hexdump(pt, 512))
             break
-    if (pt[1], pt[2]) == (0x02, 0x06) \
-            and os.environ.get("POL_FRIEND_PUT", "1") == "1":
-        # KPutFriendList. This is the ONLY way a friend is ever added, renamed or
-        # removed -- see the 02:06 note above. Without it the client's writes were
-        # answered with 168 zero bytes and dropped, which is why nothing the user
-        # did on the Friend List screen ever survived a relaunch.
-        friendput._capture_friend_put(pt)
-        return
-    if (pt[1], pt[2]) != (0x00, 0x08):
-        return
+
+
+def capture_handle_registration(pt):
+    """0:8 handle registration: the handle the client will play as, read
+    out of the request it registers it with."""
     # SHOW EVERY PRINTABLE RUN in the whole request, not just the 0x80-byte window
     # the generic hexdump prints. The 0:8 payload is 1608 bytes and we have been
     # reading two fixed offsets out of it (0x68 as a flavour, 0x70 as the name)
@@ -391,7 +362,7 @@ def _lobby_capture(pt):
     # which looks exactly like "registration does not work".
     for _off, _name in names:
         _capture_one_handle(_name.encode("ascii"))
-    return
+    return True
 
 
 #: 🔬 **POL_HANDLE_STORE_LAYOUT=crystal -- 0:8 IS 64 FIXED RECORDS, NOT A TABLE
@@ -576,3 +547,12 @@ def _capture_one_handle(raw):
             db.close()
     except Exception as exc:
         log("lobby", f"handle capture failed: {exc!r}")
+
+
+# --------------------------------------------------------------------------- #
+# The lobby opcode table's capture entries for handles (see lobbyops.py)
+# --------------------------------------------------------------------------- #
+def capture_active_handle(pt):
+    """4:7: the client names the handle it is logged in as."""
+    _capture_active_handle(pt)
+    return True

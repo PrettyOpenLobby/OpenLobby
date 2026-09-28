@@ -549,3 +549,11 @@ _NOHANDLER_LOG_MAX = int(os.environ.get("POL_NOHANDLER_LOG_MAX", "400"))
 #: So the recipient never needed the 363-byte body decoded: it is in the path,
 #: which both sides already exchange verbatim.
 _MAIL_PATH_PREFIX = "O/m/"
+
+
+def payload_search(n, req_pt):
+    """5:3 member search (lobby opcode table). POL_SEARCH=0 leaves the
+    generic reply in place."""
+    if req_pt is None or os.environ.get("POL_SEARCH", "1") != "1":
+        return None
+    return _search_payload(n, req_pt) or None

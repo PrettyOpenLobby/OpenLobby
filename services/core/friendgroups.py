@@ -1396,3 +1396,44 @@ def _capture_group_invite(path, data):
             db.close()
     except Exception as exc:
         log("lobby", f"  group invite: not stored ({exc!r})")
+
+
+# --------------------------------------------------------------------------- #
+# The lobby opcode table's entries for groups (see lobbyops.py). POL_GROUPS=0
+# turns every one of them off: the request then falls through to the generic
+# path, i.e. the old discard with an all-zero reply, which leaves a 7:1 tail
+# probe usable.
+# --------------------------------------------------------------------------- #
+def _groups_on():
+    return os.environ.get("POL_GROUPS", "1") == "1"
+
+
+def payload_create(n, req_pt):
+    """7:1 CREATE GROUP. Writes the DB row AND answers with the group's id,
+    which is what the client keys its `#XXL` channel on -- see _group_create."""
+    if not _groups_on():
+        return None
+    return _group_create(req_pt)
+
+
+def payload_class_change(n, req_pt):
+    """7:3 ROLE CHANGE. Called for its side effect -- the reply is header-only
+    (n = 0), so there is no payload to build and b"" is the whole answer."""
+    if not _groups_on():
+        return None
+    return _group_class_change(req_pt)
+
+
+def payload_delete(n, req_pt):
+    """7:2 DELETE GROUP. Header-only reply like the other group writes; the
+    side effect is the whole answer -- see _group_delete."""
+    if not _groups_on():
+        return None
+    return _group_delete(req_pt)
+
+
+def payload_my_status(n, req_pt):
+    """7:B MY GROUP STATUS. Parsed and logged only -- see _group_my_status."""
+    if not _groups_on():
+        return None
+    return _group_my_status(req_pt)

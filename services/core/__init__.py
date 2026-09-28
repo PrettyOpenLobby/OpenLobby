@@ -29,6 +29,7 @@
     friendput.py           The friend list write (lobby 2:6): parsing, applying, replying.
     lobbybind.py           Which member a lobby connection belongs to: IV recovery, binding, arbitration, checksums.
     lobbyreply.py          Building a lobby reply: the opcode dispatch, framing, encryption, probe payloads.
+    lobbyops.py            The lobby opcode table: one row per request opcode, naming what answers it.
     handlelists.py         Handle, character and list payloads served on the lobby band.
     friendgroups.py        Friend groups: configuration, membership, create/delete/class change, join and invite.
     ffxifields.py          FFXI world and character fields (to move into the FFXI bridge title).

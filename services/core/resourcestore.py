@@ -5,7 +5,7 @@ import struct
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
 from srvcore import log
 from .deps import accounts
-from . import fetchpath, friendgroups, lobbymail, lobbyreply, lobbysession, paylen, pfc
+from . import fetchpath, friendgroups, lobbymail, lobbyreply, lobbysearch, lobbysession, pacing, paylen, pfc
 
 
 RESOURCE_DIR = os.environ.get("POL_RESOURCE_DIR", "/data/resources")
@@ -394,3 +394,56 @@ def _capture_resource_write(pt, op=None):
 #: makes this parseable at all; the sibling line ("Would you like to join a
 #: friend group?") names no group and is deliberately NOT matched.
 _GROUP_INVITE_RE = re.compile(r'group\s+"([^"]{1,64})"')
+
+
+# --------------------------------------------------------------------------- #
+# The lobby opcode table's entries for resources (see lobbyops.py)
+# --------------------------------------------------------------------------- #
+def payload_fetch(n, req_pt):
+    """3:0 KGetDetailData. ONE OPCODE, MANY RESOURCES: 03:00 is keyed by the
+    path string. A `u/s/select` path is the member search's result, not a
+    stored resource. Any other path is served from the store, or built live
+    by a title. The account record (`u/account`, and an empty path) is left
+    to the generic path, so the POL_LOBBY_TAIL="3:0=acct" override cannot
+    reach a non-account path -- it would hand a game the account record
+    truncated to 200 bytes, which is the same path-mixing that broke
+    `u/s/select`."""
+    if req_pt is None:
+        return None
+    path = fetchpath._fetch_path(req_pt)
+    if path.startswith(paylen._SELECT_PATH):
+        return lobbysearch._search_result_payload(n, req_pt)
+    pacing._lobby_delay(path)
+    if not path or path == "u/account":
+        return None
+    # A TITLE MAY BUILD THIS FETCH LIVE (its lobby lists from the room
+    # registry, for a member it knows is in that title) and bypass the
+    # stored copy altogether.
+    live = titles.resource_live(path, n, req_pt)
+    if live is not None:
+        return live
+    blob = _resource_blob(path, n, fetchpath._fetch_subject(req_pt))
+    log("lobby", f"  3:0 {path!r}: serving {len(blob)}B"
+                 + ("" if blob.strip(b"\x00") else " (all zero = 'no data "
+                    "stored yet'. WARNING: That is not automatically SAFE -- a "
+                    "manifest read as count=0 is a fatal error on some "
+                    "titles; see RESOURCE_INIT and the title's own)"))
+    return blob
+
+
+def capture_write(pt):
+    """3:1 and 3:2, BOTH object writes. 03:02 is an UPDATE of an existing
+    object; 03:01 is the MESSAGE SEND -- measured 2026-08-15 as a 461-byte
+    request carrying `O/m/<path>` + 363 bytes at the same +0x38 the read uses.
+    They have the same shape, so they store the same way.
+
+    The earlier note here was right that 03:01 is the send and wrong to
+    conclude it therefore is not a write: sending a message IS creating the
+    object the recipient later reads. Storing only 03:02 meant a real send
+    stored nothing at all, which is why the first fix changed nothing.
+    POL_RESOURCE_WRITE=0 stores nothing and lets the generic resource scan
+    name the path instead."""
+    if os.environ.get("POL_RESOURCE_WRITE", "1") != "1":
+        return False
+    _capture_resource_write(pt, f"{pt[1]:02x}:{pt[2]:02x}")
+    return True

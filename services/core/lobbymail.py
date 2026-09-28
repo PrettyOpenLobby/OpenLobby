@@ -1146,3 +1146,28 @@ def _mail_read_len(req_pt):
     if req_pt is None or len(req_pt) < resourcestore._MAIL_OBJ_OFF + 4:
         return None
     return struct.unpack_from("<I", req_pt, resourcestore._MAIL_OBJ_OFF)[0]
+
+
+# --------------------------------------------------------------------------- #
+# The lobby opcode table's entries for the mailbox (see lobbyops.py)
+# --------------------------------------------------------------------------- #
+def paylen_mailbox(req_pt):
+    """3:3 mail list length. THE REAL MAILBOX: the length has to be declared
+    here, before the payload is built, so it is counted from the same
+    _mailbox() the payload will serve -- an empty box declares 12 (8 + 0 + 4),
+    which is exactly what SE sends for an empty mailbox. Stranded friend
+    requests come back first, so the count includes them
+    (POL_FRIEND_REQUEST_HEAL, default off). POL_LOBBY_MAIL's marker probe,
+    when set, declares its own count."""
+    if _mail_count():
+        return _mail_paylen(_mail_count())      # 8 + count*264 + 4
+    _friend_request_heal()
+    return _mail_paylen(len(_mailbox()))
+
+
+def payload_mailbox(n, req_pt):
+    """3:3 mail list: the POL_LOBBY_MAIL marker probe when set, else the
+    mailbox."""
+    if _mail_count():
+        return _mail_payload(n)
+    return _mailbox_payload(n)
