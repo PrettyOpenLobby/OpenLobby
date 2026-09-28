@@ -1499,7 +1499,8 @@ document.querySelectorAll(".gm-filter button").forEach((b) => {
 function gmRenderTicket() {
   const r = GM_CALLS.find((x) => x.id === GM_SEL);
   const sig = r ? [r.id, r.status, r.connected, gmAgo(gmIso(r.received_at)),
-                   r.knocked_at ? gmAgo(r.knocked_at) : ""].join(",") : "";
+                   r.knocked_at ? gmAgo(r.knocked_at) : "",
+                   (r.invited || []).map((i) => i.handle).join("|")].join(",") : "";
   if (sig === GM_TICKET_SIG) return;
   GM_TICKET_SIG = sig;
   $("#gmEmpty").hidden = !!r;
@@ -1533,18 +1534,46 @@ function gmRenderTicket() {
   const knock = r.status === "closed" ? ""
     : r.knocked_at ? `<button class="ghost" data-knock="0">Withdraw knock</button>`
     : `<button class="act" data-knock="1" title="Tell the player GM chat is ready">Knock</button>`;
+  // INVITE TO JOIN: another player into this request's chat. Their Viewer is
+  // knocked with this request's number, which is not theirs, so it offers Join.
+  const inv = r.status === "closed" ? "" :
+    `<div class="gm-invite">` +
+    (r.invited || []).map((i) => `<span class="gm-st live">${esc(i.handle)} invited ` +
+      `<a href="#" data-uninvite="${esc(i.handle)}" title="Withdraw the invitation">×</a></span>`).join("") +
+    `<input type="text" id="gmInvName" placeholder="Invite a player by handle" autocomplete="off">` +
+    `<button class="ghost" data-invite="1">Invite to join</button></div>`;
   $("#gmTActions").innerHTML = knock +
     (r.status === "open" ? btn("answered", "Mark answered", "ghost") + btn("closed", "Close", "ghost")
     : r.status === "answered" ? btn("closed", "Close", "ghost") + btn("open", "Reopen", "ghost")
-    : btn("open", "Reopen", "ghost"));
+    : btn("open", "Reopen", "ghost")) + inv;
 }
 
 $("#gmTActions").onclick = (e) => {
   const k = e.target.closest("button[data-knock]");
   if (k && GM_SEL) return gmKnock(GM_SEL, k.dataset.knock === "1");
+  if (e.target.closest("button[data-invite]") && GM_SEL) {
+    const name = ($("#gmInvName").value || "").trim();
+    return name ? gmInvite(GM_SEL, { invite: name }) : toast("Type the player's handle", true);
+  }
+  const u = e.target.closest("[data-uninvite]");
+  if (u && GM_SEL) { e.preventDefault(); return gmInvite(GM_SEL, { uninvite: u.dataset.uninvite }); }
   const b = e.target.closest("button[data-st]");
   if (b && GM_SEL) gmSetStatus(GM_SEL, b.dataset.st);
 };
+
+async function gmInvite(id, body) {
+  try {
+    const out = await api("/api/gm-ticket", gmPost({ id, ...body }));
+    const r = GM_CALLS.find((x) => x.id === id);
+    if (r) r.invited = (out.invited || []).map((i) => ({ handle: i.handle, at: i.at }));
+    GM_TICKET_SIG = "";
+    gmRenderTicket();
+    toast(body.uninvite ? `Invitation for ${body.uninvite} withdrawn`
+      : out.knock_message === "sent" ? `${body.invite} invited: their GM Call screen offers Join`
+      : `${body.invite} invited. They will see Join on their GM Call screen, but the live message was not sent: ${out.knock_message}`,
+      !body.uninvite && out.knock_message !== "sent");
+  } catch (e) { toast(e.message, true); }
+}
 
 async function gmKnock(id, on) {
   try {

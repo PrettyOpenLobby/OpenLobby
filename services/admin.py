@@ -2881,6 +2881,8 @@ class Handler(BaseHTTPRequestHandler):
             rec["status_by"], rec["status_at"] = mine.get("by"), mine.get("at")
             rec["knocked_at"], rec["knocked_by"] = (mine.get("knocked_at"),
                                                     mine.get("knocked_by"))
+            rec["invited"] = [{"handle": i.get("handle"), "at": i.get("at")}
+                              for i in mine.get("invited") or [] if isinstance(i, dict)]
             if rec.get("cancelled_at") and not mine:
                 # the player withdrew it from Confirm/Cancel (gmd, 0x1101)
                 rec["status"], rec["status_by"] = "closed", "the player"
@@ -2911,13 +2913,35 @@ class Handler(BaseHTTPRequestHandler):
         body = self._json_body()
         tid, status = (body.get("id") or "").strip(), body.get("status")
         knock = body.get("knock")
+        invite = (body.get("invite") or "").strip()
+        uninvite = (body.get("uninvite") or "").strip()
         if not self._TICKET_NAME.fullmatch(tid + ".json"):
             return self._send(400, {"error": "no such ticket"})
         if status is not None and status not in self.GM_TICKET_STATUSES:
             return self._send(400, {"error": "status must be open, answered "
                                              "or closed"})
-        if status is None and knock is None:
+        if status is None and knock is None and not invite and not uninvite:
             return self._send(400, {"error": "nothing to change"})
+        # AN INVITATION names a player by handle; gmd recognises a caller by the
+        # id their client calls itself (handle.client_guid), so that is what is
+        # stored. A handle that has never logged in has none yet.
+        invitee = None
+        if invite:
+            try:
+                db = _db()
+                try:
+                    h = accounts.handle_by_name(db, invite)
+                finally:
+                    db.close()
+            except Exception as exc:
+                return self._send(500, {"error": f"could not look the player up: {exc}"})
+            if h is None:
+                return self._send(404, {"error": f"no player named {invite!r}"})
+            if not h["client_guid"]:
+                return self._send(400, {"error": f"{h['handle_name']} has not logged "
+                                                 "in yet, so their Viewer cannot be "
+                                                 "recognised"})
+            invitee = {"handle": h["handle_name"], "guid": int(h["client_guid"])}
         if not os.path.exists(os.path.join(GM_CALL_DIR, tid + ".json")):
             return self._send(404, {"error": "no such ticket"})
         who = (self._session() or {}).get("user") or "operator"
@@ -2932,6 +2956,18 @@ class Handler(BaseHTTPRequestHandler):
             if knock is False or cur["status"] == "closed":
                 cur.pop("knocked_at", None)
                 cur.pop("knocked_by", None)
+            invited = [i for i in cur.get("invited") or []
+                       if isinstance(i, dict) and (
+                           (i.get("handle") or "").lower() not in
+                           {invite.lower(), uninvite.lower()} - {""})]
+            if invitee:
+                invited.append(dict(invitee, at=time.time(), by=who))
+            if cur["status"] == "closed":
+                invited = []
+            if invited:
+                cur["invited"] = invited
+            else:
+                cur.pop("invited", None)
             st[tid] = cur
             status = cur["status"]
             tmp = self.GM_TICKET_STATE + ".tmp"
@@ -2947,21 +2983,41 @@ class Handler(BaseHTTPRequestHandler):
         # The live half of a knock: the message that tells the player now,
         # rather than on their GM Call screen's next check-in. The flag above
         # stands either way, so a failure here is reported, not fatal.
+        # Closing sends retail's close knock (action 2, app.dll 0x4ab272c): the
+        # player's Viewer ends the call on receipt instead of on its next poll.
         message = None
-        if knock:
+        action = 0 if knock else 2 if body.get("status") == "closed" else None
+        if action is not None:
             try:
                 with open(os.path.join(GM_CALL_DIR, tid + ".json"),
                           encoding="utf-8", errors="replace") as f:
                     ticket = json.load(f)
-                got = _request_knock(ticket)
+                got = _request_knock(ticket, action=action)
                 message = "sent" if got.get("ok") else got.get("error") or "not sent"
             except TimeoutError as exc:
                 message = str(exc)
             except Exception as exc:
                 message = f"not sent ({exc})"
             print(f"[admin] knock message for {tid}: {message}", flush=True)
+        if invitee:
+            # The invitee's knock: this request's room and number, which is not
+            # theirs, so their Viewer offers Join (app.dll 0x4ab2656).
+            try:
+                with open(os.path.join(GM_CALL_DIR, tid + ".json"),
+                          encoding="utf-8", errors="replace") as f:
+                    ticket = json.load(f)
+                got = _request_knock(dict(ticket, handle=invitee["handle"],
+                                          guid=invitee["guid"]))
+                message = "sent" if got.get("ok") else got.get("error") or "not sent"
+            except TimeoutError as exc:
+                message = str(exc)
+            except Exception as exc:
+                message = f"not sent ({exc})"
+            print(f"[admin] {who} invited {invitee['handle']} into {tid}: "
+                  f"message {message}", flush=True)
         self._send(200, {"ok": True, "id": tid, "status": status,
                          "knocked_at": cur.get("knocked_at"),
+                         "invited": cur.get("invited") or [],
                          "knock_message": message})
 
     # -- the GM desk: queue control, and the room ----------------------------- #

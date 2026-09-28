@@ -304,6 +304,31 @@ def open_ticket_for(guid, req_no=0, ticket_dir=None):
     return None
 
 
+def invite_for(guid, ticket_dir=None):
+    """The room of an open request whose desk state invites this caller's
+    handle id (gm-tickets.json `invited`: [{"guid": ...}]), or None."""
+    import json
+    d = ticket_dir or TICKET_DIR
+    if not guid:
+        return None
+    state = _ticket_state(os.path.join(d, "gm-tickets.json"))
+    for tid, st in state.items():
+        if not isinstance(st, dict) or st.get("status") == "closed":
+            continue
+        if not any(isinstance(i, dict) and int(i.get("guid") or 0) == guid
+                   for i in st.get("invited") or []):
+            continue
+        try:
+            with open(os.path.join(d, tid + ".json"), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if rec.get("cancelled_at") or not rec.get("room"):
+            continue
+        return str(rec["room"]).encode("latin1", "replace")
+    return None
+
+
 def fill_held_ticket(m, rec, flags):
     """Write a held ticket into a stage-2 0x201, where the client rebuilds its
     request from. The content id / issue pair at body +0x30/+0x32 mirrors the
@@ -468,7 +493,8 @@ def fixed_len(t):
 class Session:
     __slots__ = ("sctx", "gctx", "zctx", "sctx_ready", "dwA", "dwB",
                  "echoA", "echoC", "peer", "last_seen", "req_no", "idx",
-                 "last_request", "last_request_at", "last_reply", "held")
+                 "last_request", "last_request_at", "last_reply", "held",
+                 "invite")
 
     def __init__(self, idx, sctx):
         self.idx = idx
@@ -484,6 +510,9 @@ class Session:
         #: Looked up again on every 0x801, so a close on the desk lands on the
         #: next poll.
         self.held = None
+        #: The room of an open request this caller was INVITED into (Join),
+        #: or None. Looked up again on every 0x801, like `held`.
+        self.invite = None
         #: The last request we read, when it arrived, and the exact ciphertext we
         #: answered it with. The client repeats a datagram verbatim when our answer
         #: does not satisfy it (2s, 4s, 8s, 16s, then it gives up), so an identical
@@ -746,8 +775,11 @@ class Gmd:
             body_edit(m)
         if rooms:
             room = room_for(ses)[:R_NAME_LEN - 1]
+            # Block A is the caller's own chat (Start), block B the one Join
+            # enters: an invitation's room when there is one.
+            join = (ses.invite if ses is not None and ses.invite else room)[:R_NAME_LEN - 1]
             m[R_ROOM_A:R_ROOM_A + len(room)] = room
-            m[R_ROOM_B:R_ROOM_B + len(room)] = room
+            m[R_ROOM_B:R_ROOM_B + len(join)] = join
             if CHAT_KEY:
                 m[R_KEY_A:R_KEY_A + len(CHAT_KEY)] = CHAT_KEY[:R_KEY_LEN - 1]
                 m[R_KEY_B:R_KEY_B + len(CHAT_KEY)] = CHAT_KEY[:R_KEY_LEN - 1]
@@ -760,6 +792,11 @@ class Gmd:
         caller leaves the queue and its room."""
         if not HOLD_TICKETS or not (ses.dwA or ses.dwB):
             return
+        inv = invite_for(session_guid(ses))
+        if inv != ses.invite:
+            log(f"    {'invited into ' + inv.decode('latin1') if inv else 'invitation withdrawn'}"
+                f" for handle {session_guid(ses):#x}: Join {'offered' if inv else 'off'}")
+        ses.invite = inv
         was = ses.held
         ses.held = open_ticket_for(session_guid(ses), ses.req_no)
         if ses.held:
@@ -780,6 +817,8 @@ class Gmd:
         flags &= ~(FLAG_START | FLAG_JOIN)
         if ses is not None and ses.held and ses.held[1].get("_knocked"):
             flags |= FLAG_START
+        if ses is not None and ses.invite:
+            flags |= FLAG_JOIN
         return flags
 
     def cancel_held(self, ses):
