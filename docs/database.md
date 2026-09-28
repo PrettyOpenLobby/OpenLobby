@@ -318,12 +318,18 @@ file names. It does not touch the filesystem.
 
 ## Moving an existing /data
 
-The import (`tools/db_import.py`, still to be written) maps the old files as
-follows. Everything live is simply left behind: the services rebuild it within
-minutes of starting, so only the durable rows need importing.
+A server that ran a release from before PostgreSQL keeps its accounts in
+SQLite files and its saves as files under `/data`. `tools/db_import.py` copies
+them into the database once. It never writes to the old files, so the volume
+stays a complete copy of the old server until you delete it.
+
+What it reads and where each part goes:
 
 | Old file | New home |
 | --- | --- |
+| `accounts.db` | the account tables of `0001_accounts.sql`, with every id kept |
+| `admin.db` | the `admin_*` tables (`moderator` becomes `admin_moderator`, and so on) |
+| `discord_links.db` | the `discord_*` tables |
 | `resources/<name>` (each top-level file) | a `blob` row: `blobs.split_name(name)` gives scope and path, the bytes are the file, `updated_at` is its mtime |
 | `resources/content-profiles.json` | stays a file for now (core/pfc.py) |
 | `auth-sessions.json` | not imported; `authsess:s:<sid>` is refilled at the next login |
@@ -335,6 +341,130 @@ minutes of starting, so only the durable rows need importing.
 | `<service>-sessions-live.json`, `tm-matches-live.json` | not imported; `live:<service>` (`live:tm` for Tetra Master) |
 | `/logs/client-builds.json` | not imported; `clientbuild:<address>`, refilled at each client's next launch |
 
+Everything live is left behind: the services rebuild it within minutes of
+starting. The title repositories' own files are theirs to import, and the
+tool ends by printing the commands for each of them.
+
+### The walkthrough
+
+The commands below run from the `openlobby` checkout. The volume names start
+with the compose project's name, which is the directory's name unless you set
+one; `docker volume ls` shows them.
+
+1. Stop everything. Stop each title with its own compose command (the one in
+   its README, ending in `stop`), then the core:
+
+   ```
+   docker compose stop
+   ```
+
+   If the old `authsess` had pushes waiting in `/logs/push-spool.jsonl`, let
+   it run until the spool is empty before you stop it. The new queue lives
+   in Valkey and does not read the old file.
+
+2. Back up both volumes, so the move can be undone:
+
+   ```
+   docker run --rm -v openlobby_pol-data:/data:ro -v "$PWD":/backup alpine \
+       tar czf /backup/pol-data.tgz -C /data .
+   docker run --rm -v openlobby_pol-logs:/logs:ro -v "$PWD":/backup alpine \
+       tar czf /backup/pol-logs.tgz -C /logs .
+   ```
+
+3. Update the checkout, build the new image and start only the database:
+
+   ```
+   git pull
+   docker compose build
+   docker compose up -d postgres
+   ```
+
+4. Run the importer in the new image, with the tools directory mounted. Try
+   it with `--dry-run` first, which reads everything, writes nothing and
+   prints what the real run would do:
+
+   ```
+   docker compose run --rm --no-deps -v "$PWD/tools:/tools:ro" \
+       --entrypoint python login /tools/db_import.py /data --logs /logs \
+       --i-stopped-the-stack --dry-run
+   ```
+
+   Then run the same command without `--dry-run`, and with
+   `--report /logs/db-import.txt` to keep a copy of the report on the logs
+   volume. `--i-stopped-the-stack` is needed because the source is `/data`,
+   the path the running containers use. Without it the tool refuses a source
+   that looks live, which also covers a SQLite file with a non-empty `-wal` or
+   `-journal` beside it and files written in the last ten minutes. To import
+   from a copy of the volume on another machine, run
+   `python tools/db_import.py <copy> --database-url postgresql://...` there.
+
+5. Read the report. Each source database is imported in one transaction,
+   and a source that fails is rolled back and named at the end. When
+   `accounts.db` fails, the saves are not imported either, because they link
+   to members. Beside the row counts per table the report lists:
+
+   - rows skipped because their parent row is gone. SQLite did not enforce
+     most foreign keys and PostgreSQL does, so a friend of a deleted handle,
+     or a session of a deleted member, cannot come across. They are counted
+     by table and reference.
+   - references cleared with the row kept, where the column may be empty and
+     deleting the parent would have emptied it: a friend's `peer_handle`, a
+     group member's handle, a registration code's `redeemed_by`. The code
+     keeps `redeemed_at`, so it stays spent.
+   - values a column cannot hold, such as text in a number column, by rowid.
+   - the tables left out: `handle_profile_by_member` and
+     `handle_content_pre_slots`, the copies two old schema rebuilds kept, and
+     anything else that is not part of the new schema.
+   - saves of members that no longer exist, which are stored but linked to
+     nobody, and title files found in `resources/`.
+   - the sequences it moved. Ids are kept, and each id sequence is then set
+     past the highest id, or past SQLite's own counter when that is higher,
+     so the id of a deleted member is never handed out again.
+
+   The tool refuses to import into tables that already hold rows. A second
+   run over the same database finds nothing missing, changes nothing and says
+   so. `--merge` imports into a database that is already in use: it adds only
+   the rows whose key is not there yet and lists the keys whose contents
+   differ, keeping the database's version of those. The Content ID counter
+   always ends at the higher of the two values.
+
+6. Import each title's files, from that title's checkout beside `openlobby`,
+   with the commands the importer printed. The order matters:
+
+   - The core import comes first, because the titles' rows refer to members.
+   - FINAL FANTASY XI: the bridge's `ffxi_idmap.json` and
+     `ffxi_accounts.json` go in before the new bridge starts for the first
+     time. A bridge that starts on an empty `ffxi_idmap` pairs every
+     character afresh, and a character the Viewer knows under another Content
+     ID gets POL-0001. Keep the bridge stopped until then.
+   - Dirge of Cerberus: `docdb.py import <store> /logs/doc-<store>.json` for
+     each store file, while the `doc` responder is stopped.
+   - Front Mission Online imports `fmo_characters.json`, `fmowar.json` and
+     `fmo_sector_wins.json` itself the first time it starts, so leave them in
+     `/data`.
+   - Fantasy Earth: `festore.py --import /data/fe_characters.json`, and only
+     on a server that never had `fe.db`.
+
+   Some title files have no importer yet, and the importer lists them as
+   gaps: `fe.db` and `fe_mail.db` (Fantasy Earth), `fmo.db` (Front Mission
+   Online), the bridge's two maps, Janhourou's event record, rank snapshot and
+   board state, and Tetra Master's collections and auctions, which Tetra
+   Master still reads as files. Keep those files on the volume.
+
+7. Start the stack and the titles:
+
+   ```
+   docker compose up -d
+   ```
+
+   and each title with the command in its README. The services apply any
+   migration still pending as they start.
+
+If something is wrong, stop the stack, remove the database volume
+(`docker volume rm openlobby_pol-pgdata`), start `postgres` again and run the
+importer again from step 4. The old files are untouched, and the backups from
+step 2 hold them as well.
+
 ## Tests
 
 ```
@@ -342,6 +472,7 @@ python tests/test_polcore_db.py
 python tests/test_polcore_kv.py
 python tests/test_polcore_blobs.py
 python tests/test_live_markers.py
+python tests/test_db_import.py
 ```
 
 All of them run as part of `python tools/run_all.py`. They need the Python packages
@@ -351,6 +482,11 @@ loopback port, gives each test its own empty database, and removes the
 container when the test exits. The Valkey test does the same with
 `valkey/valkey:8-alpine`, and checks the in-memory backend with the same
 assertions.
+
+`test_db_import.py` builds its old `/data` tree with the SQLite account code
+the importer reads from, which it takes from git (the commit before the move
+to PostgreSQL, named in the test). A shallow clone lacks it; run
+`git fetch --unshallow` first.
 
 Without Docker, set `POL_TEST_DATABASE_URL` to a PostgreSQL server the tests
 may create databases on, and `POL_TEST_VALKEY_URL` to a Valkey server they
