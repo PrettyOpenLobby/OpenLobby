@@ -297,6 +297,11 @@ services:
       POL_EXT_MAIL_DOMAIN: "${POL_EXT_MAIL_DOMAIN:-}"
     ports:
       - "127.0.0.1:8090:8090"
+    # The Overview's service checks dial the published ports on the host as
+    # host.docker.internal (services/adminops.py). Docker Desktop defines that
+    # name; on Linux it exists only through this entry.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck: *pyhc
 
   # The version-check server. The Viewer's FIRST connection is here (POL-1160
