@@ -331,6 +331,7 @@ What it reads and where each part goes:
 | `admin.db` | the `admin_*` tables (`moderator` becomes `admin_moderator`, and so on) |
 | `discord_links.db` | the `discord_*` tables |
 | `resources/<name>` (each top-level file) | a `blob` row: `blobs.split_name(name)` gives scope and path, the bytes are the file, `updated_at` is its mtime |
+| `resources/tmrank/<f>` (Tetra Master's weekly lists) | a `blob` row in scope `tmrank`, path `<f>`, the same way |
 | `resources/content-profiles.json` | stays a file for now (core/pfc.py) |
 | `auth-sessions.json` | not imported; `authsess:s:<sid>` is refilled at the next login |
 | `auth-stamps.json` | not imported; `authstamp:ip:<address>` (a client running across the move logs in again) |
@@ -429,27 +430,76 @@ one; `docker volume ls` shows them.
    always ends at the higher of the two values.
 
 6. Import each title's files, from that title's checkout beside `openlobby`,
-   with the commands the importer printed. The order matters:
+   with the commands the importer printed, while only `postgres` runs. Each
+   title's README sets `DC` to its compose command: for the bridge, Front
+   Mission Online and Dirge of Cerberus
+
+   ```
+   DC="docker compose --project-directory ../openlobby --env-file ../openlobby/.env --env-file .env -f ../openlobby/docker-compose.yml -f docker-compose.yml"
+   ```
+
+   and for Fantasy Earth and Janhourou the same without the two
+   `--env-file` options. The order matters:
 
    - The core import comes first, because the titles' rows refer to members.
-   - FINAL FANTASY XI: the bridge's `ffxi_idmap.json` and
-     `ffxi_accounts.json` go in before the new bridge starts for the first
-     time. A bridge that starts on an empty `ffxi_idmap` pairs every
-     character afresh, and a character the Viewer knows under another Content
-     ID gets POL-0001. Keep the bridge stopped until then.
-   - Dirge of Cerberus: `docdb.py import <store> /logs/doc-<store>.json` for
-     each store file, while the `doc` responder is stopped.
-   - Front Mission Online imports `fmo_characters.json`, `fmowar.json` and
-     `fmo_sector_wins.json` itself the first time it starts, so leave them in
-     `/data`.
-   - Fantasy Earth: `festore.py --import /data/fe_characters.json`, and only
-     on a server that never had `fe.db`.
+   - FINAL FANTASY XI, before the new bridge starts for the first time. A
+     bridge that starts on an empty `ffxi_idmap` pairs every character
+     afresh, and a character the Viewer knows under another Content ID gets
+     POL-0001. While the table is empty and `/data/ffxi_idmap.json` still
+     holds pairings, the bridge does not open its ports and logs what to run
+     (`FFXI_IDMAP_START_EMPTY=1` overrides that). From `crystalbridge`:
 
-   Some title files have no importer yet, and the importer lists them as
-   gaps: `fe.db` and `fe_mail.db` (Fantasy Earth), `fmo.db` (Front Mission
-   Online), the bridge's two maps, Janhourou's event record, rank snapshot and
-   board state, and Tetra Master's collections and auctions, which Tetra
-   Master still reads as files. Keep those files on the volume.
+     ```
+     $DC run --rm --no-deps --entrypoint python bridge ffxidb.py import idmap /data/ffxi_idmap.json
+     $DC run --rm --no-deps -v crystalbridge_bridge-state:/state:ro --entrypoint python bridge ffxidb.py import accounts /state/ffxi_accounts.json
+     ```
+
+   - Fantasy Earth, from `crystalring`:
+
+     ```
+     $DC run --rm --no-deps --entrypoint python feworld fedb.py import fe_db /data/fe.db
+     $DC run --rm --no-deps --entrypoint python feworld fedb.py import fe_mail_db /data/fe_mail.db
+     $DC run --rm --no-deps --entrypoint python feworld fedb.py import world /data
+     ```
+
+   - Front Mission Online, from `crystalfront`, before `fmo` first starts.
+     `fmo_characters.json`, `fmowar.json` and `fmo_sector_wins.json` need no
+     command: the service imports each the first time it finds its table
+     empty, so leave them in `/data`. Import `fmo.db` first, or the service
+     fills the pilot table from the older `fmo_characters.json` and the
+     import of `fmo.db` is refused. The second command matters only where
+     the City Control board posted to Discord:
+
+     ```
+     $DC run --rm --no-deps --entrypoint python fmo fmodb.py import fmo_db /data/fmo.db
+     $DC run --rm --no-deps -v crystalfront_fmo-board-state:/state:ro --entrypoint python fmo fmodb.py import board_state /state
+     ```
+
+   - Janhourou, from `crystalholo`. The third command matters only where
+     the web board posted to Discord:
+
+     ```
+     $DC run --rm --no-deps --entrypoint python jan janstore.py import event /data/resources/janevent.json
+     $DC run --rm --no-deps --entrypoint python jan janstore.py import rank_snapshot /data/resources/jan-rank-snapshot.json
+     $DC run --rm --no-deps -v crystalholo_jan-board-state:/state:ro --entrypoint python jan janstore.py import board_state /state
+     ```
+
+   - Dirge of Cerberus, from `crystaldirge`, while the `doc` responder is
+     stopped: `$DC run --rm --entrypoint python doc docdb.py import <store>
+     /logs/doc-<store>.json` for each store file the importer lists.
+
+   The `-v` volumes are the ones each title used when it was a compose
+   project of its own; `docker volume ls` shows the names on your host.
+   Every title import only reads its source, runs in one transaction,
+   prints what it imported and each row it could not map, and refuses a
+   table that already holds rows unless given `--merge`, which adds only
+   the keys the table lacks. `--dry-run` prints the same report and writes
+   nothing, and a second run changes nothing.
+
+   Tetra Master still reads its collections and auctions as files under
+   `resources/`, and has no importer onto the blob table yet. This tool
+   copies them into the blob table by name as well, and leaves the files
+   where they are, so keep them on the volume.
 
 7. Start the stack and the titles:
 
