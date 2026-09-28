@@ -71,7 +71,7 @@ import sys
 import time
 import threading
 
-from polcore import db
+from polcore import blobs, db
 
 try:
     import polnick
@@ -1592,6 +1592,9 @@ def delete_polid(conn, polid, release_codes=False):
         # the next account to be given that mail name inherits the old one's inbox.
         conn.execute(f"DELETE FROM mail WHERE member_id IN ({mem_q})"
                      f" OR box IN ({b_q})", members + boxes)
+        # Saved game state: every save, record and message the resource store
+        # holds under these members (the `blob` rows scoped to their ids).
+        files = purge_member_files(members, conn=conn)
         conn.execute(f"DELETE FROM member WHERE id IN ({mem_q})", members)
         # polid-scoped
         conn.execute("DELETE FROM profile WHERE polid = %s", (polid,))
@@ -1606,7 +1609,7 @@ def delete_polid(conn, polid, release_codes=False):
         conn.execute("DELETE FROM polid WHERE polid = %s", (polid,))
 
     footprint["released_codes"] = footprint["regcodes"] if release_codes else []
-    footprint["files"] = purge_member_files(members)
+    footprint["files"] = files
     print(f"[accounts] deleted {polid!r}: {len(footprint['members'])} member(s), "
           f"{len(footprint['handles'])} handle(s), {footprint['mail']} message(s), "
           f"{footprint['referenced_by']} entry/entries on other people's lists, "
@@ -1616,50 +1619,37 @@ def delete_polid(conn, polid, release_codes=False):
     return footprint
 
 
-def member_resource_dir():
-    """The per-member game state directory, resolved as janstats.stats_dir and
-    tetramaster._collection_dir resolve it."""
-    root = os.environ.get("POL_RESOURCE_DIR")
-    if not root:
-        root = os.path.join(os.environ.get("POL_DATA_DIR", "/data"), "resources")
-    return root
+def purge_member_files(member_ids, conn=None):
+    """Delete every saved resource of these members. Returns their old file
+    names (`<member id>.<what>`), sorted.
 
+    THE GAMES KEEP THEIR OWN STATE BESIDE THE ACCOUNT -- the Jan record, the TM
+    collection and prizes, every save the client stored -- in the `blob` table,
+    scoped to the member id (core/resourcestore.py and polcore/blobs.py; shared
+    lobby lists are scoped `s<hex>` and mail `mail`, so neither matches).
+    Deleting the account without these leaves a deleted player on a title's
+    ranking boards with a blank name, because a rank list is built from them.
 
-def purge_member_files(member_ids, root=None):
-    """Delete every `<member>.*` file in the resource directory. Returns the names.
-
-    THE GAMES KEEP THEIR OWN STATE OUTSIDE THIS DATABASE -- the Jan record, the
-    TM collection and prizes, every save the client stored -- and all of it is
-    named `<member id>.<what>` (responders._resource_file scopes a stored path
-    to the session's member; shared lobby lists are `s<hex>.` and mail is `m.`,
-    so neither matches). Deleting the account without these leaves a deleted
-    player on a title's ranking boards with a blank name, because a rank list
-    is built from the files.
-
-    A directory that cannot be read or a file that cannot be removed is logged
-    and skipped; the account itself is already gone by the time this runs.
+    With `conn` the rows go inside the caller's transaction; without, in one of
+    their own. Nothing on the filesystem is touched.
     """
-    root = root or member_resource_dir()
-    prefixes = tuple("%d." % int(m) for m in member_ids)
-    if not prefixes:
+    ids = [int(m) for m in member_ids]
+    if not ids:
         return []
+    q = ",".join(["%s"] * len(ids))
+    own = conn is None
+    if own:
+        conn = connect()
     try:
-        names = os.listdir(root)
-    except OSError as exc:
-        print(f"[accounts] cannot list {root!r} to purge game files ({exc!r})",
-              flush=True)
-        return []
-    gone = []
-    for name in sorted(names):
-        if not name.startswith(prefixes):
-            continue
-        try:
-            os.remove(os.path.join(root, name))
-            gone.append(name)
-        except OSError as exc:
-            print(f"[accounts] could not remove game file {name!r} ({exc!r})",
-                  flush=True)
-    return gone
+        rows = conn.execute(
+            f"DELETE FROM blob WHERE scope IN ({q}) OR member_id IN ({q})"
+            " RETURNING scope, path", [str(m) for m in ids] + ids).fetchall()
+        if own:
+            conn.commit()
+    finally:
+        if own:
+            conn.close()
+    return sorted(blobs.file_name(r["scope"], r["path"]) for r in rows)
 
 
 #: Every handle belonging to the member who owns this handle, the handle itself

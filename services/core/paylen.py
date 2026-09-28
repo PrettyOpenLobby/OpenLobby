@@ -570,8 +570,8 @@ def paylen_fetch(req_pt):
         # is the long stall before the error.
         want = lobbymail._mail_read_len(req_pt) or 0
         try:
-            have = os.path.getsize(resourcestore._resource_read_file(path))
-        except OSError:
+            have = resourcestore._res_size(resourcestore._resource_read_file(path)) or 0
+        except Exception:
             have = 0
         n = want or have
         if have and want and have != want:

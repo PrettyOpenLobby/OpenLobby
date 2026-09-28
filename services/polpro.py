@@ -352,9 +352,13 @@ def reply_spec():
     return merged
 
 
-#: Where the served blobs live -- the same directory `responders._resource_file`
-#: writes, so `$SERIAL` reads exactly the bytes the client will be handed.
-RESOURCE_DIR = os.environ.get("POL_RESOURCE_DIR", "/data/resources")
+#: The served blobs live in the resource store (polcore.blobs), under the
+#: names `responders._resource_file` gives them, so `$SERIAL` reads exactly the
+#: bytes the client will be handed.
+try:
+    from polcore import blobs as _blobs
+except ImportError:                     # standalone use outside services/
+    _blobs = None
 
 #: `b/g/PTL` +0x40 -- see tools/tmptl.py. The client echoes this back on every
 #: class-L <DR>, so it is both what we must answer with and how we know it read.
@@ -384,7 +388,7 @@ def _file_serial(path):
     WARNING: AND NEWEST-MATCH-WINS WAS ALWAYS A HEURISTIC. The store is keyed by the
     client's fetch SUBJECT (`responders._SUBJECT_KEYED_PATHS`) and this channel
     never sees it -- POLpro rides the auth band, the fetch rides lobby 3:0. With
-    one room in play the glob is exact; with two it answers whichever file was
+    one room in play the match is exact; with two it answers whichever blob was
     touched last, to both players. Passing the sequence in fixes both faults at
     once, because the caller knows WHO is asking and therefore which room.
 
@@ -397,21 +401,19 @@ def _file_serial(path):
     wrong high one starts exactly the re-fetch loop described above.
     """
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", path)
-    tail = ".%s.bin" % safe
-    try:
-        names = [n for n in os.listdir(RESOURCE_DIR) if n.endswith(tail)]
-    except OSError:
+    if _blobs is None:
         return None
-    names.sort(key=lambda n: (n.startswith("s"),
-                              os.path.getmtime(os.path.join(RESOURCE_DIR, n))))
-    for name in reversed(names):
+    try:
+        found = _blobs.listing(path="%s.bin" % safe)
+    except Exception:
+        return None
+    found.sort(key=lambda i: (i.scope.startswith("s"), i.updated_at))
+    for info in reversed(found):
         try:
-            with open(os.path.join(RESOURCE_DIR, name), "rb") as f:
-                f.seek(_SERIAL_OFF)
-                raw = f.read(4)
+            raw = (_blobs.get(info.scope, info.path) or b"")[_SERIAL_OFF:_SERIAL_OFF + 4]
             if len(raw) == 4:
                 return int.from_bytes(raw, "little")
-        except OSError:
+        except Exception:
             continue
     return None
 

@@ -183,12 +183,10 @@ def register_commands():
 # messages -> DMs
 # --------------------------------------------------------------------------- #
 
-def read_message(path):
-    """(subject, body) from a stored message object. The subject in the NAME is
-    cut to 15 bytes; the object carries it whole."""
-    with open(path, "rb") as f:
-        raw = f.read()
-    text = raw.split(b"\x00", 1)[0]
+def read_message(raw):
+    """(subject, body) from a stored message object (its bytes). The subject in
+    the NAME is cut to 15 bytes; the object carries it whole."""
+    text = (raw or b"").split(b"\x00", 1)[0]
     if b"\x07" in text:
         subj, _, body = text.partition(b"\x07")
     else:
@@ -231,10 +229,12 @@ def scan_once(now=None, min_age=None):
     now = time.time() if now is None else now
     min_age = MIN_AGE if min_age is None else min_age
     try:
-        names = sorted(n for n in os.listdir(rs.RESOURCE_DIR)
-                       if n.startswith(rs._MAIL_FILE_PREFIX) and n.endswith(".bin"))
-    except OSError:
+        stored = {n: at for n, _size, at in
+                  rs._res_list_info(scope="mail", suffix=".bin")}
+    except Exception as exc:
+        log("cannot list the message store (%r)" % (exc,))
         return 0
+    names = sorted(stored)
     ldb = discordlink.connect()
     try:
         if discordlink.get_meta(ldb, "baselined") is None:
@@ -248,12 +248,8 @@ def scan_once(now=None, min_age=None):
             for name in names:
                 if discordlink.is_notified(ldb, name):
                     continue
-                full = os.path.join(rs.RESOURCE_DIR, name)
-                try:
-                    if now - os.path.getmtime(full) < min_age:
-                        continue                 # still being written; next pass
-                except OSError:
-                    continue
+                if now - stored[name] < min_age:
+                    continue                     # still being written; next pass
                 path = rs._mail_path_of(name)
                 meta = rs._mail_meta(path) if path else None
                 if not meta or int(meta.get("kind") or 0) != rs.MAIL_KIND_MESSAGE:
@@ -266,7 +262,7 @@ def scan_once(now=None, min_age=None):
                 if link is None or not link["notify"]:
                     discordlink.mark_notified(ldb, name, now)
                     continue
-                subject, body = read_message(full)
+                subject, body = read_message(rs._res_read(name))
                 subject = subject or meta.get("subject") or ""
                 rid = discordlink.new_reply(ldb, row["member_id"], row["id"],
                                             meta["sender_guid"], meta.get("sender"),
