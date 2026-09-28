@@ -1860,12 +1860,20 @@ $("#revokeBtn").onclick = async () => {
 
 // ---- PML preview ----
 // A page browser on the left, the page drawn with the Viewer's own font in the
-// middle, and the source on the right. Links on the page navigate inside the
-// preview (with Back/Forward), `sd:show=1@panel` reveals a hidden panel, and
-// Inspect shows an element's settings and jumps the source to its line.
+// middle, and the source on the right. With Interactive on, the page runs the
+// way the Viewer runs it (pmlrt.js): buttons run their actions, sheets animate,
+// timers fire, focus follows the mouse and the arrow keys, and links open the
+// linked page here (with Back/Forward). With it off, links still navigate and
+// `sd:show=1@panel` reveals a hidden panel. Inspect shows an element's
+// settings and jumps the source to its line.
 const stage = $("#stage");
 // The file being previewed. Relative src/href resolve against it.
 let ACTIVE_FILE = null;
+// The query string the page was opened with (`crt_url=010`): the Viewer
+// defines each pair as a variable before the page runs.
+let ACTIVE_QUERY = "";
+let INTERACTIVE = store.get("pvInteractive", "1") === "1";
+let RT = null;              // the running page (PMLRuntime), when Interactive
 // Pages built from the template layer need the server-side expander first.
 const TEMPLATED = /<(for|if|include|array|define)\b|&var=|&calc=|="[^"]*\$[A-Za-z_]|\{\$/i;
 let REVEAL = null;          // a hidden panel to draw, or "all"
@@ -1882,11 +1890,13 @@ async function renderPreview() {
   const seq = ++renderSeq;
   let toRender = text;
   EXPAND_REPORT = {};
-  if (TEMPLATED.test(text)) {
+  // An interactive page also needs the variables its defines leave behind
+  // (the expander is owner-only, like the PML tab).
+  if (text.trim() && (TEMPLATED.test(text) || ACTIVE_QUERY || (INTERACTIVE && isOwner()))) {
     try {
       const r = await fetch("/api/pml-expand", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, path: ACTIVE_FILE || "" }),
+        body: JSON.stringify({ text, path: ACTIVE_FILE || "", query: ACTIVE_QUERY }),
       });
       if (r.ok) {
         const j = await r.json();
@@ -1898,13 +1908,15 @@ async function renderPreview() {
   }
   await PML.ready();
   if (seq !== renderSeq) return;
+  stopRuntime();
   try {
     MISSING_ART.clear();
     LAST_RENDER = PML.render(toRender, stage, ACTIVE_FILE || "", {
-      reveal: REVEAL, onMissing: noteMissingArt,
-      onRedraw: (r) => { LAST_RENDER = r; describeRender(r); },
+      reveal: REVEAL, onMissing: noteMissingArt, interactive: INTERACTIVE,
+      onRedraw: (r) => { LAST_RENDER = r; describeRender(r); startRuntime(r); },
     });
     describeRender(LAST_RENDER);
+    startRuntime(LAST_RENDER);
   } catch (e) {
     stage.innerHTML = `<div style="color:#ff8a8a;padding:12px;font:13px monospace">Could not draw this file: ${esc(e.message)}</div>`;
     $("#stageNote").textContent = "";
@@ -2028,9 +2040,95 @@ stage.addEventListener("click", async (e) => {
     if (hit) pickElement(hit);
     return;
   }
+  if (RT) return;              // the running page handles its own clicks
   const link = e.target.closest("[data-href]");
   if (link) followHref(link.dataset.href);
 });
+
+// ---- the running page ----
+function stopRuntime() {
+  if (RT) { RT.stop(); RT = null; }
+  $("#pvHelp").textContent = "";
+}
+
+function startRuntime(r) {
+  stopRuntime();
+  if (!INTERACTIVE || !window.PMLRuntime || !r || (r.mode !== "page" && r.mode !== "layout")) return;
+  clearEventLog();
+  try {
+    RT = PMLRuntime.start(stage, {
+      vars: EXPAND_REPORT.vars || {},
+      log: logEvent,
+      toast: (m) => toast(m),
+      onHelp: (t) => { $("#pvHelp").textContent = t; },
+      navigate: openLink,
+      history: (d) => { for (let i = 0; i < Math.abs(d); i++) $(d < 0 ? "#pvBack" : "#pvFwd").click(); },
+      reload: renderPreview,
+      paused: () => INSPECT,
+    });
+  } catch (e) {
+    RT = null;
+    logEvent("ignored", "The page could not start: " + e.message);
+  }
+}
+
+// Where a page action goes: a page in the mirror opens here, with the link's
+// query string applied; anything else is named in a toast.
+async function openLink(url) {
+  const href = String(url || "").trim();
+  const query = (href.split("#")[0].split("?")[1]) || "";
+  let r;
+  try { r = await api(`/api/pml-resolve?from=${encodeURIComponent(ACTIVE_FILE || "")}&href=${encodeURIComponent(href)}`); }
+  catch (e) { return toast(e.message, true); }
+  if (r.path) return openPmlFile(r.path, { push: true, query });
+  if (r.external) return toast("Link to " + r.external + " (outside the mirror)");
+  toast("Link target not found in the mirror: " + href, true);
+}
+
+// The event log under the stage: actions run, commands the page's elements
+// ignore, timers fired, focus moves.
+const EVENT_KIND = { action: "Action", ignored: "Ignored", timer: "Timer", nav: "Page", focus: "Focus",
+                     sound: "Sound", info: "Page" };
+const EVENT_MAX = 400;
+let EVENT_T0 = performance.now();
+function clearEventLog() {
+  $("#pvLogList").innerHTML = "";
+  EVENT_T0 = performance.now();
+  paintEventCounts({ actions: 0, ignored: 0, timers: 0 });
+}
+function paintEventCounts(st) {
+  $("#pvLogCounts").textContent = `${st.actions} action${st.actions === 1 ? "" : "s"}, ` +
+    `${st.ignored} ignored, ${st.timers} timer${st.timers === 1 ? "" : "s"} fired`;
+}
+function logEvent(kind, text, stats) {
+  const list = $("#pvLogList");
+  const row = document.createElement("div");
+  row.className = "pv-ev pv-ev-" + kind;
+  const t = ((performance.now() - EVENT_T0) / 1000).toFixed(2);
+  row.innerHTML = `<span class="t">${t}s</span><span class="k">${EVENT_KIND[kind] || kind}</span><span class="m"></span>`;
+  row.lastChild.textContent = text;
+  list.appendChild(row);
+  while (list.childElementCount > EVENT_MAX) list.firstElementChild.remove();
+  if ($("#pvLog").open && list.scrollHeight - list.scrollTop - list.clientHeight < 60) list.scrollTop = list.scrollHeight;
+  if (stats) paintEventCounts(stats);
+}
+$("#pvLogClear").onclick = (e) => { e.preventDefault(); clearEventLog(); };
+
+function paintInteractive() {
+  $("#pvInteractive").classList.toggle("on", INTERACTIVE);
+  $("#pvRestart").disabled = !INTERACTIVE;
+  $("#pvLog").hidden = !INTERACTIVE;
+  $("#pvHelp").hidden = !INTERACTIVE;
+}
+$("#pvInteractive").onclick = () => {
+  INTERACTIVE = !INTERACTIVE;
+  store.set("pvInteractive", INTERACTIVE ? "1" : "0");
+  paintInteractive();
+  renderPreview();
+  toast(INTERACTIVE ? "Interactive: the page runs as it does in the Viewer" : "Interactive off: the page is drawn as it loads");
+};
+$("#pvRestart").onclick = () => { renderPreview(); stage.focus({ preventScroll: true }); };
+paintInteractive();
 
 async function followHref(href) {
   href = String(href || "").trim();
@@ -2069,7 +2167,7 @@ $("#pvInspect").onclick = () => {
   INSPECT = !INSPECT;
   $("#pvInspect").classList.toggle("on", INSPECT);
   stage.classList.toggle("pml-inspect", INSPECT);
-  if (!INSPECT) { $("#pvInspector").hidden = true; if (PICKED) PICKED.classList.remove("pml-picked"); }
+  if (!INSPECT) { $("#pvInspector").hidden = true; if (PICKED) { PICKED.classList.remove("pml-picked"); PICKED = null; } }
   toast(INSPECT ? "Inspect: click any element" : "Inspect off");
 };
 
@@ -2433,24 +2531,30 @@ $("#fSort").addEventListener("change", () => store.set("pvSort", $("#fSort").val
 let searchTimer;
 $("#fSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderFileList, 120); });
 
+// A history entry is the file plus the query it was opened with: "a.pml?x=1".
+// Mirror file names never hold a literal "?" (a saved query is %3F).
+const histEntry = () => ACTIVE_FILE + (ACTIVE_QUERY ? "?" + ACTIVE_QUERY : "");
 async function openPmlFile(path, opts) {
   if (!path) return;
   opts = opts || {};
+  let query = opts.query || "";
+  if (path.includes("?")) { query = path.slice(path.indexOf("?") + 1); path = path.slice(0, path.indexOf("?")); }
   try {
     const r = await fetch("/api/pml-load?path=" + encodeURIComponent(path));
     const txt = await r.text();
     if (!r.ok) throw new Error(r.status === 404 ? "file not found" : txt);
-    if (opts.push && ACTIVE_FILE && ACTIVE_FILE !== path) { PV_HIST.push(ACTIVE_FILE); PV_FWD.length = 0; }
+    if (opts.push && ACTIVE_FILE && (ACTIVE_FILE !== path || ACTIVE_QUERY !== query)) { PV_HIST.push(histEntry()); PV_FWD.length = 0; }
     $("#pml").value = txt;
     updateGutter();
     const kind = r.headers.get("X-PML-Kind") || "";
     $("#pmlKind").textContent = kind.replace("plaintext/", "").replace("pmlus-cipher/", "encrypted, ");
     ACTIVE_FILE = path;
+    ACTIVE_QUERY = query;
     REVEAL = null;
     notePmlRecent(path);
     revealInTree(path);
     paintPinButton();
-    $("#pvPath").textContent = path;
+    $("#pvPath").textContent = path + (query ? "?" + query : "");
     writeHash("pml", path);
     if (Object.keys(SHAPES).length && !visibleUnderFilter(path)) $("#fKind").value = "";
     renderFileList();
@@ -2473,12 +2577,12 @@ function updateNavButtons() {
 }
 $("#pvBack").onclick = () => {
   if (!PV_HIST.length) return;
-  if (ACTIVE_FILE) PV_FWD.push(ACTIVE_FILE);
+  if (ACTIVE_FILE) PV_FWD.push(histEntry());
   openPmlFile(PV_HIST.pop());
 };
 $("#pvFwd").onclick = () => {
   if (!PV_FWD.length) return;
-  if (ACTIVE_FILE) PV_HIST.push(ACTIVE_FILE);
+  if (ACTIVE_FILE) PV_HIST.push(histEntry());
   openPmlFile(PV_FWD.pop());
 };
 document.addEventListener("keydown", (e) => {
@@ -2493,10 +2597,11 @@ $("#loadBtn").onclick = async () => {
     const r = await fetch(`/api/page?kinou_id=${kinou}&step=${step}`);
     const txt = await r.text();
     if (!r.ok) throw new Error(txt);
-    if (ACTIVE_FILE) { PV_HIST.push(ACTIVE_FILE); PV_FWD.length = 0; }
+    if (ACTIVE_FILE) { PV_HIST.push(histEntry()); PV_FWD.length = 0; }
     $("#pml").value = txt;
     updateGutter();
     ACTIVE_FILE = null;
+    ACTIVE_QUERY = "";
     paintPinButton();
     $("#pvPath").textContent = `registration wizard, step ${step}`;
     $("#stageRefs").innerHTML = "";

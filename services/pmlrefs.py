@@ -229,7 +229,8 @@ def build(site, files):
     `site` supplies what only the server knows about the mirror:
         site.roots(path)   -> (host_dirs, tree_dirs, start_dir), www-relative
         site.text(path)    -> the decoded file, comments stripped
-        site.expand(path)  -> (expanded text, [www-relative include targets])
+        site.expand(path)  -> (expanded text, [www-relative include targets],
+                               [href targets, optional])
         site.resolve(path, src) -> a www-relative target, or None
     """
     matcher = Matcher(files)
@@ -240,7 +241,8 @@ def build(site, files):
         raw_includes, raw_links = include_refs(text), link_refs(text)
         graph.parts[f] = len(raw_includes)
         try:
-            expanded, included = site.expand(f)
+            got = site.expand(f)
+            expanded, included = got[0], got[1]
         except Exception:
             continue                      # a file that will not evaluate has no edges
 
@@ -252,10 +254,13 @@ def build(site, files):
                                     {_basename(p) for p in included}):
             graph.add("include", f, target)
 
-        # 3. navigation, exact. The EXPANDED text is used because its attributes
-        #    have had their variables substituted, so most hrefs are now literal.
+        # 3. navigation, exact. The Viewer keeps an href as written until it is
+        #    clicked, so the expanded markup still has `$C_PATH1+'x.pml'` in
+        #    it; the evaluator reports where each href leads with the page's
+        #    variables as they stood, and those are the exact targets.
         links = set()
-        for href in link_refs(expanded):
+        hrefs = got[2] if len(got) > 2 else link_refs(expanded)
+        for href in hrefs:
             href = (href or "").split("?")[0]
             if _SKIP_RE.match(href) or "$" in href:
                 continue

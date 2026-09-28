@@ -10,19 +10,12 @@ only other oracle is the Viewer itself.
 
 WHAT THIS COVERS, AND WHAT IT DOES NOT.
 
-pmleval -- the admin preview's template layer -- cannot render this widget:
-`&var=$a[1];` is not substituted (subscripts are unsupported in _subst) and
-<multilink>/<addlink> are not emitted by _walk. It also compares strictly, and
-_build_array stores every cell as a STRING, so `$cnt_d[$j][$ar_or]==$i` is
-'0'==0 -> False. That is not a property of our edit: SE's own band-51300 page
-carries the identical comparison, and SE served it, so the Viewer coerces.
-Under unpatched pmleval, SE's original loop and ours both emit nothing.
-
-So this test:
+pmleval -- the admin preview's template layer, which follows the Viewer's
+engine -- evaluates the loop as the client does: `$cnt_d[$j][$ar_or]==$i` is
+'0'==0, two numeric strings compared as integers, and `!='#'` is a string
+compare. It does not draw <multilink>/<addlink>, so this test:
   * lifts the <for> body VERBATIM out of index.pml on disk (only <addlink>,
-    which pmleval cannot emit, is swapped for <text>);
-  * installs a narrow shim making == / != compare string forms, standing in for
-    the coercion the real client demonstrably does;
+    which the preview does not draw, is swapped for <text>);
   * drives the real $cnt_d tables through it and reads back the chosen slots.
 
 NOT covered: that the Viewer draws the resulting 8-item popup. Only the real
@@ -40,35 +33,6 @@ sys.path.insert(0, os.path.join(SRV, "services"))
 import pmleval  # noqa: E402
 
 CRLF = "\r\n"
-
-# --- the coercion shim ------------------------------------------------------ #
-_orig_to_py = pmleval._to_py
-
-
-def _loose(a, b):
-    return str(a).strip() == str(b).strip()
-
-
-def _to_py(expr):
-    py = _orig_to_py(expr)
-    py = re.sub(r"^(.*?)\s*!=\s*(.*)$", r"not _loose(\1, \2)", py) \
-        if "!=" in py else py
-    py = re.sub(r"^(.*?)\s*==\s*(.*)$", r"_loose(\1, \2)", py) \
-        if "==" in py and "_loose" not in py else py
-    return py
-
-
-def _eval(expr, V):
-    try:
-        return eval(_to_py(expr), {"__builtins__": {}, "_loose": _loose},
-                    {"V": V})
-    except Exception:
-        return None
-
-
-pmleval._to_py = _to_py
-pmleval._eval = _eval
-
 
 # --- pulling the real pieces off disk --------------------------------------- #
 def read(p):
@@ -100,7 +64,7 @@ def loop_from(index_file):
     body = s[i:s.index("</multilink>", i)]
     body = body[body.index(CRLF) + 2:]
     return re.sub(r'<addlink\b[^>]*?href="null:\$cnt_id=\{\$(\w)\}[^>]*>',
-                  r"<text>PICK=&calc=$\1;</text>", body)
+                  r"<text>PICK=&var=$\1;</text>", body)
 
 
 def run(index_file, lang_file, mutate=None):
