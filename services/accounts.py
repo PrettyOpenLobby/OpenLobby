@@ -3083,6 +3083,60 @@ def login_password_status(conn):
 
 
 # --------------------------------------------------------------------------- #
+# list change stamps (the login record's "last updated" times)
+# --------------------------------------------------------------------------- #
+def list_stamp(conn, member_id, kind, fingerprint, grow=False, now=None):
+    """The unix time `kind` last changed for this member, as the client should
+    be told it at login.
+
+    The stamp moves to `now` only when `fingerprint` differs from the one stored
+    with it, so logging in twice with nothing changed serves the SAME value.
+    With `grow=True` the fingerprint is a number that only counts when it goes
+    UP (the newest message's send time): a message leaving the mailbox because
+    it was read must not look like the mailbox changed. The first call for a
+    member stores and returns `now`.
+    """
+    now = int(time.time()) if now is None else int(now)
+    fingerprint = str(fingerprint)
+    row = conn.execute("SELECT fingerprint, stamp FROM list_stamp"
+                       " WHERE member_id = ? AND kind = ?",
+                       (int(member_id), kind)).fetchone()
+    if row is not None:
+        old = row["fingerprint"]
+        if grow:
+            try:
+                changed = int(fingerprint) > int(old)
+            except ValueError:
+                changed = fingerprint != old
+        else:
+            changed = fingerprint != old
+        if not changed:
+            return int(row["stamp"])
+    conn.execute("INSERT INTO list_stamp (member_id, kind, fingerprint, stamp)"
+                 " VALUES (?,?,?,?) ON CONFLICT(member_id, kind) DO UPDATE SET"
+                 " fingerprint = excluded.fingerprint, stamp = excluded.stamp",
+                 (int(member_id), kind, fingerprint, now))
+    conn.commit()
+    return now
+
+
+def friend_list_fingerprint(conn, member_id):
+    rows = conn.execute(
+        "SELECT f.handle_id, f.peer_name, f.kind, f.status, f.label,"
+        " f.ignore_low, f.ignore_flag FROM friend f JOIN handle h"
+        " ON f.handle_id = h.id WHERE h.member_id = ?"
+        " ORDER BY f.handle_id, f.peer_name", (int(member_id),)).fetchall()
+    return hashlib.sha1(repr([tuple(r) for r in rows]).encode()).hexdigest()
+
+
+def handle_list_fingerprint(conn, member_id):
+    rows = conn.execute("SELECT id, handle_name, is_primary FROM handle"
+                        " WHERE member_id = ? ORDER BY id",
+                        (int(member_id),)).fetchall()
+    return hashlib.sha1(repr([tuple(r) for r in rows]).encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
 # reads
 # --------------------------------------------------------------------------- #
 def get_member(conn, login_name):
