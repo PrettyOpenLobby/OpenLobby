@@ -146,11 +146,14 @@
     return FONT.promise;
   }
 
+  // The four ASCII marks whose JIS row-1 glyph does not decode to the U+FFxx
+  // twin (the atlas is read as EUC-JP): a news rule of "-" drew 120 stand-ins.
+  const ASCII_JIS = { "-": "−", "'": "’", "\"": "”", "~": "〜" };
   function glyphIndex(ch) {
     if (!FONT.map) return -1;
     const o = ch.codePointAt(0);
     if (o >= 0x21 && o <= 0x7e) {             // ASCII lives at its full-width twin
-      const i = FONT.map.get(String.fromCharCode(o + 0xfee0));
+      const i = FONT.map.get(ASCII_JIS[ch] || String.fromCharCode(o + 0xfee0));
       if (i !== undefined) return i;
     }
     const i = FONT.map.get(ch);
@@ -247,11 +250,22 @@
 
   const DEFAULT_STYLE = { size: 15, face: 6, fill: { r: 255, g: 255, b: 255, a: 1 },
                           outline: null, spacing: 0, vspacing: 0, bold: false };
+  // Styles a page uses but never defines (C17_2, W19, C19 on SE's story page)
+  // come from the Viewer's own stylesheet, which the mirror does not have. The
+  // ones SE does define follow one scheme -- letter = colour, digits = size:
+  // C = #333333 / #101010, W = #f0f0f0, B = #000000 -- so read the name the
+  // same way instead of drawing 15px white.
+  const NAMED_COLOR = { C: "#333333ff", W: "#f0f0f0ff", B: "#000000ff" };
+  function namedStyle(name) {
+    const m = /^([CWB])(\d{2})(?:_\d)?$/.exec(name || "");
+    return m ? { size: m[2], face: "2", proportional: "1", color: NAMED_COLOR[m[1]] } : null;
+  }
   function styleOf(ctx, name) {
-    const s = ctx.styles[name];
+    let s = ctx.styles[name];
     if (!s) {
       if (name) ctx.stats.missingStyles.add(name);
-      return DEFAULT_STYLE;
+      s = namedStyle(name);
+      if (!s) return DEFAULT_STYLE;
     }
     const [fill, outline] = pair(s.color);
     return {
@@ -272,14 +286,16 @@
     const items = [];
     const RE = /&(br|style|image|pre|pos|var|li|sp|size|a|table|calc)(?:=([^;]*))?;/g;
     let at = 0, m, style = baseStyle, link = null;
-    // Text written without any &br; breaks at its own newlines (the UTF-16
-    // help manual paragraphs); text that uses &br; treats newlines as layout
-    // of the source file. Inferred from SE's pages, not yet from the client.
-    const newlinesBreak = !/&br;/.test(text);
+    // `&pre=1;` switches the text to preformatted: from there on a newline is
+    // a line break. Otherwise a newline is only whitespace in the source file,
+    // and the box does the wrapping. SE writes `&pre=1;` (or `&pre=01;`) and
+    // nothing else, ~4,000 times; newsgen's Information page and the help
+    // manual both rely on it for their line breaks.
+    let pre = false;
     const pushText = (s) => {
       if (!s) return;
       s = s.replace(/\t+/g, "");
-      const parts = newlinesBreak ? s.split(/\r?\n/) : [s.replace(/[\r\n]+/g, "")];
+      const parts = pre ? s.split(/\r?\n/) : [s.replace(/\s*[\r\n]+\s*/g, " ")];
       parts.forEach((part, i) => {
         if (i) items.push({ t: "br" });
         const d = decodeEntities(part);
@@ -293,7 +309,7 @@
       if (kind === "br") items.push({ t: "br" });
       else if (kind === "style") style = arg === undefined ? baseStyle : styleOf(ctx, arg);
       else if (kind === "image") items.push({ t: "img", decl: ctx.inlineimgs[arg], name: arg });
-      else if (kind === "pre") items.push({ t: "pre", n: Math.min(+arg || 0, 60) });
+      else if (kind === "pre") pre = parseInt(arg || "1", 10) !== 0;
       else if (kind === "pos") items.push({ t: "pos", x: +arg || 0 });
       else if (kind === "li") {
         // `&li=pb;` names an <inlineimg> to use as the bullet; otherwise the
@@ -351,7 +367,6 @@
     };
     for (const it of items) {
       if (it.t === "br") { indent = 0; newLine(); continue; }
-      if (it.t === "pre") { place({ t: "gap" }, it.n * advance(" ", baseStyle), 0); continue; }
       if (it.t === "sp") { place({ t: "gap" }, it.px, 0); continue; }
       if (it.t === "pos") { if (it.x > line.w) line.w = it.x; continue; }
       if (it.t === "li") {
@@ -784,8 +799,10 @@
         const rec = recs ? recs[parseInt(a.index || "0", 10)] || "" : "";
         if (!recs) ctx.stats.missingData.add(a.ref || "?");
         const m = parseFloat(a.margin) || 0;
-        const r = textCanvas(d, w, 0, inlineItems(rec, ctx, st), st, a.align || "left", "top", ctx, [m, m, m, m]);
-        r.canvas.style.minHeight = h + "px";
+        // The box keeps its size; the canvas is only as tall as the text. (A
+        // min-height on the canvas itself scaled it up, aspect and all: a
+        // two-line story drew 3.5x too large.)
+        textCanvas(d, w, 0, inlineItems(rec, ctx, st), st, a.align || "left", "top", ctx, [m, m, m, m]);
         return;
       }
 

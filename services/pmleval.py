@@ -290,6 +290,18 @@ def _assign(expr, V):
 # --------------------------------------------------------------------------- #
 # building <array> literals into python nested lists
 # --------------------------------------------------------------------------- #
+class _Arr(list):
+    """A PML array. Its values are strings, and PML indexes with them as
+    numbers: index2.pml titles a story `$cat_d[$DETAILS[$ar_ct]]`, where the
+    category is the string "4". A python list refuses a str index, and the
+    title came out as "(Variable error)"."""
+
+    def __getitem__(self, i):
+        if isinstance(i, str):
+            i = int(i.strip())
+        return list.__getitem__(self, i)
+
+
 def _build_array(node, V):
     """An <array> is either a list of <array> rows or a flat list of scalars.
 
@@ -305,7 +317,7 @@ def _build_array(node, V):
         elif c["tag"] == "#text":
             for lit in re.findall(r'"([^"]*)"|\'([^\']*)\'', c["text"]):
                 scalars.append(lit[0] or lit[1])
-    return rows if rows else scalars
+    return _Arr(rows if rows else scalars)
 
 
 # --------------------------------------------------------------------------- #
@@ -335,9 +347,17 @@ def _branch_chain(node):
 
 
 def _resolve_conditionals(children, V):
-    """Return `children` with each if/elsif/else chain replaced by the one
-    branch whose condition holds. Non-conditional nodes pass through."""
-    out = []
+    """Yield `children` with each if/elsif/else chain replaced by the one
+    branch whose condition holds. Non-conditional nodes pass through.
+
+    LAZY, and that is load-bearing: a condition is evaluated only when the walk
+    REACHES it, after every sibling before it has run. Resolving the whole list
+    up front evaluated `<if expr="$nwTest==0">` before the `<define
+    name="$nwTest">` right above it, found no variable, and took the <else> --
+    the main menu then read its news from SE's `news_test/` folder. Any page
+    whose conditions read variables defined at the same level went wrong the
+    same way. Nested chains in a chosen branch are resolved as they are
+    reached too."""
     i = 0
     n = len(children)
     while i < n:
@@ -362,20 +382,28 @@ def _resolve_conditionals(children, V):
                     chosen = body
                     break
             if chosen is not None:
-                out.extend(chosen)
+                yield from _resolve_conditionals(chosen, V)
             i = j
         elif c["tag"] in ("elsif", "else"):
             i += 1                       # stray branch without an <if>; drop
         else:
-            out.append(c)
+            yield c
             i += 1
-    return out
 
 
 # --------------------------------------------------------------------------- #
 # substituting &var= / &calc= inside emitted text and attribute values
 # --------------------------------------------------------------------------- #
 def _subst(s, V):
+    # `{$x}` is the value of $x at the point the markup is emitted -- inside a
+    # <for> that is the loop counter: href="eval:$arBtDialog[{$j}][{$i}][6]".
+    # FIRST, because it feeds the rest: the main menu labels its buttons
+    # `&var=$arMenu1[{$i}][0];`, which is only an expression once {$i} is 0.
+    def brace(m):
+        v = V.get(m.group(1))
+        return m.group(0) if v is None else _fmt(v)
+    s = re.sub(r"\{\$([A-Za-z_]\w*)\}", brace, s)
+
     def var(m):
         v = V.get(m.group(1))
         return "" if v is None else _fmt(v)
@@ -391,13 +419,6 @@ def _subst(s, V):
             return m.group(0)
         return _fmt(v)
     s = re.sub(r"&var=(\$[A-Za-z_][^;]*);", var_expr, s)
-
-    # `{$x}` is the value of $x at the point the markup is emitted -- inside a
-    # <for> that is the loop counter: href="eval:$arBtDialog[{$j}][{$i}][6]".
-    def brace(m):
-        v = V.get(m.group(1))
-        return m.group(0) if v is None else _fmt(v)
-    s = re.sub(r"\{\$([A-Za-z_]\w*)\}", brace, s)
 
     def calc(m):
         v = _eval(m.group(1), V)
