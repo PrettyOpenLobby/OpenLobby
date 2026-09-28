@@ -212,6 +212,28 @@ def main():
     finally:
         R.PRESENCE.sessions_for = real
 
+    print("\nthe mailbox address matcher ->")
+    c = accounts.connect(DB)
+    try:
+        accounts.learn_client_guid(c, ids["Mika"][1], 0x0162E92CDC54)
+        accounts.learn_client_guid(c, ids["Nico"][1], 0x0162E92CDC54)    # shared
+        accounts.learn_client_guid(c, ids["Olive"][1], 0x014AB0FBD278)
+        samples = [guid["Mika"], guid["Nico"], guid["Olive"], 0,
+                   accounts.HANDLE_GUID_BASE | 999999, 0x014AB0FBD278,
+                   0x0162E92CDC54, 0x7777, guid["Mika"] | (1 << 60)]
+        for who in ("Mika", "Olive", "Mallory"):
+            m = R._mailbox_matcher(c, ids[who][0])
+            for g in samples:
+                row = R._mail_recipient_row(c, g)
+                old = row is not None and int(row["member_id"]) == ids[who][0]
+                new = m(g)
+                check(new is None or new == old,
+                      f"{who}: {g:#x} -> {new} agrees with the per-message lookup ({old})")
+        check(R._mailbox_matcher(c, ids["Mika"][0])(0x0162E92CDC54) is None,
+              "a client id two accounts share is left to the database")
+    finally:
+        c.close()
+
     print("\nhandle switch ->")
     calls = []
     real_bp = R._broadcast_presence
