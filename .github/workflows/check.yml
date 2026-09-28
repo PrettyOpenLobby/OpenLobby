@@ -19,5 +19,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pyyaml pycryptodome pillow
+      - run: pip install pyyaml pycryptodome pillow "psycopg[binary]==3.3.6" "psycopg-pool==3.3.3" "valkey==6.1.1"
+      # the polcore database suites start throwaway Postgres and Valkey
+      # containers; on a runner with Docker a skip is a failure
       - run: python tools/run_all.py
+        env:
+          POL_TEST_REQUIRE_DB: "1"
