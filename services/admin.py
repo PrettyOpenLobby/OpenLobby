@@ -650,6 +650,35 @@ def pml_link_target(frm, href):
     return {"path": os.path.relpath(target, root).replace(os.sep, "/")}
 
 
+def _pml_page_queries(rel, graph, limit=12):
+    """Query strings a page is opened with: the ones links carry into it
+    (the news ticker opens index2.pml?dat=..&seri=..), then the ones the
+    mirror saved copies under (`x.pml%3Fa%3D1`). A page that reads its
+    variables from the link has nothing to show without one."""
+    from urllib.parse import unquote
+    out, seen = [], set()
+    for src, q in sorted(getattr(graph, "link_queries", {}).get(rel, ())):
+        if q not in seen:
+            seen.add(q)
+            out.append({"query": q, "from": src})
+    # Read from the folder, not the file index: a copy saved as
+    # `mepm010.pml%3Fcrt_url%3D010` does not end in .pml and is not indexed.
+    root = os.path.abspath(WWW_ROOT)
+    folder = os.path.abspath(os.path.join(root, os.path.dirname(rel)))
+    pre = (os.path.basename(rel) + "%3f").lower()
+    try:
+        names = sorted(os.listdir(folder)) if folder.startswith(root) else []
+    except OSError:
+        names = []
+    for name in names:
+        if name.lower().startswith(pre):
+            q = unquote(name[len(pre):])
+            if q and q not in seen:
+                seen.add(q)
+                out.append({"query": q, "saved": posixpath.join(posixpath.dirname(rel), name)})
+    return out[:limit]
+
+
 def _pml_resolve_encoded(src, query, start, host_dirs, tree_dirs):
     """The mirror file named `<src>%3F...` for a link to `src?query`: the one
     whose decoded query matches, else the first such file in that folder."""
@@ -3607,6 +3636,7 @@ class Handler(BaseHTTPRequestHandler):
         out = {"path": rel, "parts": graph.parts.get(rel, 0)}
         for key in ("built_from", "included_by", "links_to", "linked_from"):
             out[key] = [label(p) for p in sorted(getattr(graph, key).get(rel, ()))]
+        out["queries"] = _pml_page_queries(rel, graph)
         self._send(200, out)
 
     def _pml_expand(self):

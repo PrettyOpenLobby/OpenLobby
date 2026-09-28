@@ -132,7 +132,7 @@ document.querySelectorAll("nav button").forEach((b) => {
     const tab = b.dataset.tab;
     const before = location.hash;
     location.hash = "#" + tab
-      + (tab === "pml" && ACTIVE_FILE ? "/" + encPath(ACTIVE_FILE) : "");
+      + (tab === "pml" && ACTIVE_FILE ? "/" + encPath(histEntry()) : "");
     // Clicking the tab you are already on fires no hashchange, so apply it
     // here -- but only then, or every tab click would load its data twice.
     if (location.hash === before) applyHash();
@@ -2268,7 +2268,33 @@ async function loadRefs(path) {
   line("Used by", j.included_by || []);
   line("Links to", j.links_to || []);
   line("Linked from", j.linked_from || []);
+  // How the page is reached: the query its links carry, or the query the
+  // mirror saved a copy under. A page like info/index2.pml reads the news
+  // item it shows from that query and has nothing to draw without one.
+  const qs = j.queries || [];
+  if (qs.length) {
+    const d = document.createElement("div");
+    const l = document.createElement("span");
+    l.className = "rl";
+    l.textContent = `Opened with (${qs.length})`;
+    d.appendChild(l);
+    qs.forEach((q) => {
+      const a = document.createElement("a");
+      a.textContent = "?" + q.query;
+      a.title = q.from ? "Linked from " + (TITLES[q.from] || q.from) : "Saved in the mirror as " + q.saved;
+      a.onclick = () => openPmlFile(path, { query: q.query, push: true });
+      d.appendChild(a);
+    });
+    box.appendChild(d);
+  }
 }
+
+// The query the page is opened with, editable: Enter reopens the page with it.
+$("#pvQuery").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !ACTIVE_FILE) return;
+  e.preventDefault();
+  openPmlFile(ACTIVE_FILE, { query: $("#pvQuery").value.trim().replace(/^\?/, ""), push: true });
+});
 
 // ---- the page browser ----
 // Grouped by folder unless a search is typed: 4,000-odd files read as one
@@ -2289,6 +2315,34 @@ const SHAPE_WORD = { page: "page", layout: "piece", content: "text", data: "data
 const SECTION_TOP_RE = /^(index|[a-z]{2,4}pm0*1)\.pml$/i;
 const MAIN_HOST = "wh000.pol.com";
 
+// What a page is for, from where it lives. The folder view opens on these,
+// in this order; each holds its own folder tree.
+const PV_CATEGORIES = [
+  ["portal", "Portal and main menu"],
+  ["games", "Game pages"],
+  ["news", "News and topics"],
+  ["help", "Help and manuals"],
+  ["support", "Support and account"],
+  ["magazine", "Magazine"],
+  ["updates", "Updates and downloads"],
+  ["other", "Other"],
+];
+const SUPPORT_HOSTS = new Set(["ucs.pol.com", "usercte.pol.com", "userctl.pol.com", "account.square-enix.com"]);
+function categoryOf(host, dirs) {
+  if (host === "info.playonline.com") return "news";
+  if (SUPPORT_HOSTS.has(host)) return "support";
+  if (host !== MAIN_HOST) return "other";
+  const top = dirs.slice(0, 2).join("/");
+  if (top === "pml/game") return "games";
+  if (/^(pml\/(info|event)|pcd\/(ntool|topics|tribune|urgent))$/.test(top)) return "news";
+  if (top === "pml/help" || top === "pml2/help") return "help";
+  if (top === "pml2/cs" || dirs[0] === "webapps") return "support";
+  if (top === "pml/magazine") return "magazine";
+  if (top === "pcd/update" || top === "pcd/sftp") return "updates";
+  if (/^(pml\/(main|pml_s|etc)|pcd\/mainmenu)$/.test(top) || (dirs[0] === "pml" && dirs.length === 1)) return "portal";
+  return "other";
+}
+
 function classify(path) {
   let segs = path.split("/");
   let game = null, locale = null, variant = "";
@@ -2307,7 +2361,7 @@ function classify(path) {
   const name = segs[segs.length - 1];
   const dirs = segs.slice(host === MAIN_HOST ? 1 : 0, -1);   // other hosts keep their name as the first folder
   const shape = SHAPES[path] || "";
-  return { path, host, game, locale, shape, variant, dirs, name,
+  return { path, host, game, locale, shape, variant, dirs, name, cat: categoryOf(host, dirs),
            title: TITLES[path] || "", label: TITLES[path] || LABELS[path] || "",
            top: shape === "page" && !!TITLES[path] && SECTION_TOP_RE.test(name)
              && !path.startsWith("_eras/") };
@@ -2489,8 +2543,20 @@ function renderFileList() {
     renderSection("#pinned", "Pinned", known(PV_PINS), out);
     renderSection("#recent", "Recent", known(PV_RECENT).filter((f) => !PV_PINS.includes(f.path)).slice(0, 6), out);
     renderSection("#tops", "Section top pages", FILE_ROWS.filter((f) => f.top).sort(byLabel), out);
-    out.push(`<div class="pv-dir sec plain">All files by folder<span class="n">${FILE_ROWS.length.toLocaleString()}</span></div>`);
-    renderTree(buildTree(FILE_ROWS), 0, out);
+    // Categories start closed (keys without "#"), so the list opens as a
+    // short table of contents.
+    for (const [id, label] of PV_CATEGORIES) {
+      const rows = FILE_ROWS.filter((f) => f.cat === id);
+      if (!rows.length) continue;
+      const key = "@cat:" + id;
+      out.push(dirRow(key, "", label, rows.length, 0, true));
+      if (!isOpen(key)) continue;
+      // A category whose files all sit under one folder chain (pml/game)
+      // starts at the first folder that branches.
+      let n = buildTree(rows);
+      while (!n.files.length && n.kids.size === 1) n = n.kids.values().next().value;
+      renderTree(n, 1, out);
+    }
     list.innerHTML = out.join("");
     return;
   }
@@ -2506,6 +2572,7 @@ function renderFileList() {
 function revealInTree(path) {
   const f = FILE_BY_PATH.get(path);
   if (!f) return;
+  PV_OPEN.add("@cat:" + f.cat);
   let key = "";
   for (const s of f.dirs) {
     key += "/" + s;
@@ -2554,8 +2621,9 @@ async function openPmlFile(path, opts) {
     notePmlRecent(path);
     revealInTree(path);
     paintPinButton();
-    $("#pvPath").textContent = path + (query ? "?" + query : "");
-    writeHash("pml", path);
+    $("#pvPath").textContent = path;
+    $("#pvQuery").value = query ? "?" + query : "";
+    writeHash("pml", histEntry());
     if (Object.keys(SHAPES).length && !visibleUnderFilter(path)) $("#fKind").value = "";
     renderFileList();
     // Scroll the LIST to the open file, never the window (that pushed the
@@ -2602,6 +2670,7 @@ $("#loadBtn").onclick = async () => {
     updateGutter();
     ACTIVE_FILE = null;
     ACTIVE_QUERY = "";
+    $("#pvQuery").value = "";
     paintPinButton();
     $("#pvPath").textContent = `registration wizard, step ${step}`;
     $("#stageRefs").innerHTML = "";

@@ -578,6 +578,10 @@
     .pv-title > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #pvTitle { font-weight: 600; }
     #pvPath { font: 11.5px 'Consolas', monospace; }
+    .pv-pathrow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .pv-pathrow #pvPath { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    #pvQuery { flex: 0 1 200px; min-width: 70px; font: 11.5px 'Consolas', monospace; color: var(--text);
+      background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
     #pvInspect.on { background: rgba(90,169,255,.2); border-color: var(--accent); }
     #pvInteractive.on { background: rgba(87,211,140,.16); border-color: var(--good); }
     .pv-help { min-height: 18px; margin: 6px 2px 0; font-size: 12.5px; color: var(--text); }
@@ -1242,7 +1246,7 @@
             <button class="ghost sm" id="pvFwd" title="Forward (Alt+Right)">&#8594;</button>
             <div class="pv-title">
               <div id="pvTitle">PML preview</div>
-              <div id="pvPath" class="muted"></div>
+              <div class="pv-pathrow"><span id="pvPath" class="muted"></span><input id="pvQuery" spellcheck="false" placeholder="?query" title="The query the page is opened with, as a link would pass it. Press Enter to reopen the page."></div>
             </div>
             <div class="seg" id="pvZoom">
               <button data-z="fit" class="on">Fit</button>
