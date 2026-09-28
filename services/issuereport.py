@@ -472,17 +472,36 @@ def _dir_bytes(path: str) -> int:
     return total
 
 
-def prune(keep_n: int = KEEP_N, keep_bytes: int = KEEP_BYTES):
-    """Drop the oldest bundles past either cap. Returns the ids removed.
+def closed_ids():
+    """Bundle ids the admin panel has marked resolved or won't fix (the
+    admin_triage table). An empty set when the database is not configured or
+    cannot be read: retention then falls back to plain oldest-first, which is
+    what it did before statuses existed."""
+    try:
+        from polcore import db
+        rows = db.query("SELECT id FROM admin_triage"
+                        " WHERE kind = 'issues' AND status != 'open'")
+    except Exception:
+        return set()
+    return {r["id"] for r in rows}
 
-    The box is 16 GiB and shares that volume with every channel log, so this is
-    not decorative: an unbounded report directory is a way to take the server
-    down with a feature meant to keep it up."""
+
+def prune(keep_n: int = KEEP_N, keep_bytes: int = KEEP_BYTES):
+    """Drop bundles past either cap. Returns the ids removed.
+
+    Closed reports go first, oldest first, and only then open ones, so an old
+    report nobody has dealt with outlives newer ones already resolved. Open
+    ones still go if closed ones are not enough: the reports share a volume
+    with every channel log, and an unbounded report directory is a way to take
+    the server down with a feature meant to keep it up."""
     try:
         ids = sorted(d for d in os.listdir(ISSUE_DIR)
                      if os.path.isdir(os.path.join(ISSUE_DIR, d)))
     except OSError:
         return []
+    closed = closed_ids()
+    # stable sort: closed before open, each group still oldest first
+    ids.sort(key=lambda i: i not in closed)
     dropped = []
     while len(ids) > keep_n:
         dropped.append(ids.pop(0))
@@ -821,6 +840,29 @@ def _selftest():
                   os.path.isdir(os.path.join(td, "20260904T000000Z-H-aaaa")))
         finally:
             globals()["ISSUE_DIR"] = saved_rd
+
+    # -- retention drops CLOSED reports first ---------------------------------- #
+    # The statuses come from the database (closed_ids); stood in for here, and
+    # read for real in tools/admin_triage_test.py.
+    with tempfile.TemporaryDirectory() as td:
+        saved_rd, saved_closed = globals()["ISSUE_DIR"], globals()["closed_ids"]
+        globals()["ISSUE_DIR"] = os.path.join(td, "issues")
+        try:
+            names = ["2026090%dT000000Z-H-aaaa" % i for i in range(5)]
+            for n in names:
+                os.makedirs(os.path.join(td, "issues", n))
+            globals()["closed_ids"] = lambda: {names[3], names[4]}
+            dropped = prune(keep_n=3, keep_bytes=1 << 30)
+            check("closed reports go first, even the newest",
+                  dropped == [names[3], names[4]])
+            check("the oldest OPEN report survives",
+                  os.path.isdir(os.path.join(td, "issues", names[0])))
+            dropped = prune(keep_n=1, keep_bytes=1 << 30)
+            check("open ones still go, oldest first, once no closed are left",
+                  dropped == [names[0], names[1]])
+        finally:
+            globals()["ISSUE_DIR"] = saved_rd
+            globals()["closed_ids"] = saved_closed
 
     # -- path safety --------------------------------------------------------- #
     check("id traversal neutralised", "/" not in _safe_id("../../etc"))
