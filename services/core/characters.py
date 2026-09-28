@@ -4,7 +4,7 @@ import struct
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
 from srvcore import log, save_capture
 from .deps import accounts
-from . import ffxifields, friendgroups, handlelists, lobbybind
+from . import friendgroups, handlelists, lobbybind
 
 
 
@@ -72,13 +72,11 @@ def _char_display_name(content_code, content_id, handle_name="", names=None):
         got = names.get((cid, int(content_code)))
         if got:
             return got
-    if content_code == 2:
-        pooled = titles.character_name(cid)
-        if pooled:
-            return pooled
-        if handle_name and os.environ.get("POL_CHAR_NAME_HANDLE", "1") == "1":
-            return handle_name
-        return content_id              # never empty -- the VS. COM seat banner
+    # A title may have its own rule (Tetra Master: its character pool, else
+    # the handle name, and never empty, because that is the VS. COM seat banner).
+    own = titles.character_display_name(int(content_code), cid, content_id, handle_name)
+    if own is not None:
+        return own
     # WARNING: EMPTY IS NOT A SAFE DEFAULT HERE, and shipping it cost the FFXI slot.
     #
     # This branch used to `return ""` for every non-TM content, reasoning that
@@ -280,14 +278,13 @@ def _char_record(rec, index, slot, pos, content_code, content_id="",
     # table slots as "Chara No" / "ContentsID" -- and for content code 3 that may
     # well be right. Two titles, two meanings, one struct: do not unify them
     # without a second measurement.
-    if content_code == handlelists._FFXI_CONTENT_CODE:
-        try:
-            cid_num = int(str(content_id).strip() or 0)
-        except ValueError:
-            cid_num = 0
-        world_field = ffxifields._ffxi_world_fields().get(cid_num)
-        if world_field is not None:
-            struct.pack_into("<I", out, 0x0C, world_field)
+    try:
+        cid_num = int(str(content_id).strip() or 0)
+    except ValueError:
+        cid_num = 0
+    world_field = titles.character_world(int(content_code), cid_num)
+    if world_field is not None:
+        struct.pack_into("<I", out, 0x0C, world_field)
     return bytes(out)
 
 

@@ -9,7 +9,7 @@ from srvcore import _LOGIN_TRACE, _trace, _trace_begin, _trace_done, _trace_dump
 from authtoken import _STAMPS, _STAMPS_LOCK, _stamps_refresh, build_redirect_token, build_session_token, remember_stamp, session_token_key
 import sessioncrypt
 from .deps import accounts, contentlist
-from . import authcap, authnode, authresume, chatsession, friendroster, ircband, lobbybind, lobbysession, logingate, presence, pushrecord, redirect, roomregistry
+from . import contentprofiles, authcap, authnode, authresume, chatsession, friendroster, ircband, lobbybind, lobbysession, logingate, presence, pushrecord, redirect, roomregistry
 
 
 # POL's Blowfish lives in sessioncrypt.py (bf_setkey / ofb_apply / recover_iv).
@@ -1141,8 +1141,7 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
                         log("authserv", f"{peer} games-menu from account "
                                         f"{member['login_name']}: {gids}")
                 if gids is None:
-                    gids = [int(x) for x in
-                            os.environ.get("POL_LOBBY_CONTENT_IDS", "1,2").split(",")]
+                    gids = contentprofiles.lobby_content_ids()
                 # CONTENT ID per game (entryA fieldC). A zero here is exactly what
                 # makes the client refuse to launch with "You have no content id for
                 # <game>". Fill each with a non-zero id so the title reads as
