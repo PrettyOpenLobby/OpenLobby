@@ -333,6 +333,8 @@ What it reads and where each part goes:
 | `resources/<name>` (each top-level file) | a `blob` row: `blobs.split_name(name)` gives scope and path, the bytes are the file, `updated_at` is its mtime |
 | `resources/tmrank/<f>` (Tetra Master's weekly lists) | a `blob` row in scope `tmrank`, path `<f>`, the same way |
 | `resources/content-profiles.json` | stays a file for now (core/pfc.py) |
+| `resources/*.bak`, `resources/*.bak-*` | not imported; an operator's backup copy is not a record |
+| `resources/janevent.json`, `resources/jan-rank-snapshot.json` | not imported here; Janhourou's own import reads them (step 6) |
 | `auth-sessions.json` | not imported; `authsess:s:<sid>` is refilled at the next login |
 | `auth-stamps.json` | not imported; `authstamp:ip:<address>` (a client running across the move logs in again) |
 | `title-zone.json`, `member-status.json` | not imported; `titlezone:<member>` and `memberstatus:<member>` |
