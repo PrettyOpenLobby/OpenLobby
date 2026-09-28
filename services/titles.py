@@ -179,6 +179,12 @@ class Title:
     #: `path -> exact length` of client WRITES (3:2) this title accepts; the
     #: core stores an object at such a path only when it has that length
     resource_write_len = {}
+    #: how many Content IDs one handle holds for this title. 1 for a title
+    #: that issues one per account; a title that issues one per CHARACTER sets
+    #: its character slots here, and the account database mints the rest when
+    #: the title is granted, placed, or when the handle logs in (see
+    #: accounts.ensure_content_slots, which never goes past eight a handle)
+    content_slots = 1
     #: True = ask `idle_pushes` even on a connection that has been quiet past
     #: the freshness window. For a title whose client waits for a record in
     #: silence; the title must then pin delivery to the live session itself.
@@ -590,6 +596,17 @@ def polpro_spec_files():
     out = []
     for t in _TITLES:
         out.extend(t.polpro_spec_files)
+    return out
+
+
+def content_slots():
+    """`{content code: Content IDs per handle}` for every loaded title that
+    wants more than one."""
+    out = {}
+    for t in _TITLES:
+        n = int(getattr(t, "content_slots", 1) or 1)
+        if t.content_code is not None and n > 1:
+            out[int(t.content_code)] = n
     return out
 
 

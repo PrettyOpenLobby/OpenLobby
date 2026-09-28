@@ -45,7 +45,6 @@ RELEASE_DEFAULTS = {
     "POL_AUTH_FRONT_PREAMBLE": "1",  # authrelay announces the real client address; consume it
     "POL_PRESENCE_PUSH": "1",
     "POL_FRIEND_ROW_PUSH": "1",
-    "POL_FFXI_IDMAP": "/data/ffxi_idmap.json",  # written by the FFXI bridge on the shared data volume
 }
 for _k, _v in RELEASE_DEFAULTS.items():
     os.environ.setdefault(_k, _v)

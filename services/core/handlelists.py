@@ -250,10 +250,11 @@ def _db_chars():
 
     WARNING: Which ones are dropped is chosen, not incidental. Positions go to every
     game's **slot 0 first**, in content-code order, and only then to a game's
-    extra slots, so what falls off the end is an extra FFXI character slot and
-    never a whole TITLE. It should not happen at all -- `accounts.FFXI_CHARACTER_SLOTS`
-    defaults to 1 and `ensure_content_slots` clamps the mint to eight per handle
-    -- so the drop is LOGGED: a handle that reaches here over the ceiling has an
+    extra slots, so what falls off the end is an extra character slot of a
+    title that issues one Content ID per character, and never a whole TITLE. It
+    should not happen at all -- `titles.Title.content_slots` defaults to 1 and
+    `accounts.ensure_content_slots` clamps the mint to eight per handle -- so
+    the drop is LOGGED: a handle that reaches here over the ceiling has an
     id no client can see, and if a character is bound to it that character is
     POL-0001 with no explanation.
     """
