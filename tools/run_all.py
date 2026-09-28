@@ -326,6 +326,7 @@ SUITES = [
     # Per-account refusals and notices leave the PS2 layout choice and the
     # old refusal for an inactive member as they were.
     ("notice_keeps_layouts", [sys.executable, "test_notice_keeps_layouts.py"], TESTS, {}),
+    ("title_core_binding", [sys.executable, "test_title_core_binding.py"], TESTS, {}),
     # The patch service with no archives, a partial one, and an empty re-login.
     ("polserver2_startup", [sys.executable, "test_polserver2_startup.py"], TESTS, {}),
     # Refusal codes, login notices, the admin panel's controls and Kick.

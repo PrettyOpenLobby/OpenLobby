@@ -26,6 +26,7 @@ titles.bind_core(
     _room_of_member=roomregistry._room_of_member, _resource_file=resourcestore._resource_file,
     _resource_read_file=resourcestore._resource_read_file, _resource_stored=resourcestore._resource_stored,
     _fetch_subject=fetchpath._fetch_subject, _peer_is_ps2=pacing._peer_is_ps2, _self_ip=authcap._self_ip,
+    _advertise_configured=authcap._advertise_configured,
     _mail_mint=lobbymail._mail_mint, _member_still_present=presence._member_still_present,
     _title_zone=titlezone._title_zone, _title_zone_lease=titlezone._title_zone_lease,
     _content_profiles=pfc._content_profiles, _peer_build=pacing._peer_build,
