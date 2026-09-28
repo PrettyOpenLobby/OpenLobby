@@ -8,10 +8,12 @@ from .deps import accounts, polpro
 
 
 
-#: Where per-Content-ID game profiles the CLIENT wrote are kept. A plain JSON
-#: file beside a title's character pool, deliberately NOT `accounts.db`: this is game data
-#: rather than identity, it is written on a client's timing rather than ours,
-#: and accounts.db has a documented WAL hazard under concurrent writers.
+#: Where per-Content-ID game profiles the CLIENT wrote are kept: a plain JSON
+#: file beside a title's character pool, kept apart from the account tables
+#: because it is game data rather than identity and is written on a client's
+#: timing rather than ours. It is a durable table and belongs in PostgreSQL;
+#: until it moves there it stays this file (docs/database.md, "Moving an
+#: existing /data").
 def _content_profile_file():
     root = os.environ.get("POL_RESOURCE_DIR")
     if not root:

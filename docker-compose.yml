@@ -47,6 +47,11 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    # Each process holds up to POL_DB_POOL connections (default 8). Ten
+    # containers take 80 and each title plugin's containers add more, which
+    # PostgreSQL's default of 100 cannot hold with tools and psql beside
+    # them; see docs/database.md.
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_USER: openlobby
       POSTGRES_PASSWORD: "${POL_DB_PASSWORD:-openlobby}"
