@@ -1,51 +1,30 @@
 #!/usr/bin/env python3
-"""Catch monkeypatches that a responders.py module split has silently defused.
+"""Prove that monkeypatching through the responders facade still reaches the code.
 
-    python tools/facade_rebind_check.py         # fail on any UNEXPLAINED rebinding
-    python tools/facade_rebind_check.py -v      # also list the explained ones
+    python tools/facade_rebind_check.py        # fail on any rebinding the facade does not forward
+    python tools/facade_rebind_check.py -v     # also list every rebinding found
 
-WHY. `responders.py` is being split by moving a block of it into its own module
-and re-exporting the names (`from srvcore import (...)`). That is transparent
-for READS -- `responders.log` IS `srvcore.log`, the same object -- and it is safe
-for the module-level dicts and sets, because responders.py contains no `global`
-statements at all: every one of them is mutated in place, never rebound, so
-`responders._STAMPS is authtoken._STAMPS` and both sides see every write.
+WHY. services/responders.py is a facade over the services/core package. Reads
+of `responders.<name>` go to the module that owns the name. That is not enough
+for the test tools: they REBIND names to fake a session or capture output,
 
-It is NOT transparent to REBINDING, and that is the whole reason this file
-exists:
+    R._session_member_id = lambda: 7      # tools/group_check.py
 
-    R._session_member_id = lambda: 7      # tools/group_check.py:78
+and a rebinding that lands on the facade alone would leave every caller inside
+the core still calling the real function. Nothing would raise and the test
+would keep printing [PASS] while testing nothing. A first attempt to cut
+responders.py (2026-08-27) was backed out for exactly this reason: 21 of the
+suite's rebindings target the session helpers, across 9 files.
 
-rebinds the name in RESPONDERS' namespace. If `_session_member_id` has been
-moved to another module, every caller inside THAT module still resolves it from
-its own globals and goes on calling the real function. The stub is simply never
-consulted -- and nothing raises, nothing logs, and the test still prints its
-[PASS] line, because the assertion it makes is usually about a value the real
-function is perfectly capable of producing. **A test that has stopped testing
-what it says it does still passes.** That is the failure mode this guards.
+The facade therefore forwards writes to the owning module, and for a name
+that modules import by copy (`log`, `accounts`, ...) to every module that
+holds a copy. This tool checks that promise against the rebindings the tools
+actually make, empirically: it sets a sentinel through the facade and reads it
+back through the owning module and every core module that has the name.
 
-It is worse than one-directional. Once a name is re-exported it is reachable
-through TWO namespaces, and a patch applied to either one misses the callers
-that resolve through the other. So a re-exported name that is called from both
-modules cannot be reliably monkeypatched anywhere, and the honest answer is to
-not move it.
-
-MEASURED, 2026-08-27. A second cut of responders.py -- the session table, lines
-~10654-11093 -- was written, verified byte-identical, verified to leave
-`dir(responders)` unchanged at all 832 names, and verified to preserve object
-identity on every shared container. It still broke 7 test tools, because 21 of
-this suite's 49 rebindings target exactly those session functions
-(`_session_member_id`, `_session_handle_id`, `_session_get`, `_session_current`)
-across 9 files, which use them as the seam for "pretend this thread is member N".
-The cut was backed out. The set of names below is therefore not a style rule --
-it is the measured ceiling on how far that refactor can go.
-
-THE RULE: every rebinding of a re-exported name is either listed in EXPECTED
-below, with a reason that says why it still works, or it is a finding.
-
-WARNING: Match aliases, not the literal module name. Nearly every tool here does
-`import responders as R`, so a scan for `responders.` finds almost none of them.
-That is why this walks the AST for the names actually bound to the module.
+Aliases matter: nearly every tool does `import responders as R`, so this walks
+the AST for the names bound to the module rather than grepping for
+`responders.`.
 """
 import argparse
 import ast
@@ -54,58 +33,22 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVICES = os.path.join(ROOT, "services")
-SCAN_DIRS = ("tools", "services", "lsb")
-
-#: (file, attr) -> why this rebinding still reaches the callers that matter.
-#: Keep the reason specific enough that the next reader can tell whether it
-#: still holds -- "it works" is not a reason, "the asserting caller lives in
-#: responders.py" is.
-EXPECTED = {
-    ("tools/lobby_bind_test.py", "log"):
-        "log now lives in srvcore, but every line this suite asserts on is "
-        "emitted by _lobby_arbitrate / _lobby_bind, which are still IN "
-        "responders.py and so resolve `log` from responders' globals -- the "
-        "tee. A log call made from inside srvcore or authtoken would NOT be "
-        "captured, so this holds only while the asserted lines stay put.",
-    ("tools/presence_grace_test.py", "log"):
-        "same shape as lobby_bind_test: the grace-timer lines it reads come "
-        "from _logout_grace / _broadcast_presence in responders.py.",
-}
+SCAN_DIRS = ("tools", "services", "tests", "lsb")
 
 
-def facade_map():
-    """name -> module it was moved to, read out of responders.py's own imports.
-
-    Discovered rather than hard-coded, so a new cut is covered the moment it
-    lands instead of when somebody remembers to update this list.
-    """
-    src = open(os.path.join(SERVICES, "responders.py"), encoding="utf-8").read()
-    owner = {}
-    for node in ast.parse(src).body:
-        if not isinstance(node, ast.ImportFrom) or not node.module:
-            continue
-        if not os.path.exists(os.path.join(SERVICES, node.module + ".py")):
-            continue                        # stdlib / third-party, not a cut
-        for a in node.names:
-            if a.name != "*":
-                owner[a.asname or a.name] = node.module
-    return owner
-
-
-def module_aliases(tree, targets):
-    """Every local name bound to one of `targets` in this file."""
+def module_aliases(tree):
     out = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
-                if a.name in targets:
+                if a.name == "responders":
                     out[a.asname or a.name] = a.name
     return out
 
 
-def scan(owner, verbose=False):
-    watched = {"responders"} | set(owner.values())
-    findings, explained = [], []
+def rebindings():
+    """[(file, line, attr)] for every `<alias>.<attr> = ...` on responders."""
+    found = []
     for d in SCAN_DIRS:
         base = os.path.join(ROOT, d)
         if not os.path.isdir(base):
@@ -120,81 +63,72 @@ def scan(owner, verbose=False):
                     tree = ast.parse(open(path, encoding="utf-8").read())
                 except (SyntaxError, UnicodeDecodeError):
                     continue
-                aliases = module_aliases(tree, watched)
+                aliases = module_aliases(tree)
                 if not aliases:
                     continue
                 for node in ast.walk(tree):
                     if not isinstance(node, ast.Assign):
                         continue
                     for tgt in node.targets:
-                        if not (isinstance(tgt, ast.Attribute)
+                        if (isinstance(tgt, ast.Attribute)
                                 and isinstance(tgt.value, ast.Name)
                                 and tgt.value.id in aliases):
-                            continue
-                        attr = tgt.attr
-                        if attr not in owner:
-                            continue        # not a moved name: patch is fine
-                        via = aliases[tgt.value.id]
-                        home = owner[attr]
-                        # Patching either namespace misses callers resolving
-                        # through the other one. Name both, so the reader can
-                        # see what is actually being missed.
-                        missed = home if via == "responders" else "responders"
-                        rec = (rel, node.lineno, f"{tgt.value.id}.{attr}",
-                               home, missed)
-                        if (rel, attr) in EXPECTED:
-                            explained.append(rec)
-                        else:
-                            findings.append(rec)
-    return findings, explained
+                            found.append((rel, node.lineno, tgt.attr))
+    return found
+
+
+def forwards(R, attr):
+    """Does a write of `attr` through the facade reach the owning module (and
+    every module holding a copy)? Returns a reason string on failure."""
+    owners = getattr(R, "_OWNERS", None)
+    modules = getattr(R, "_MODULES", None)
+    if owners is None or modules is None:
+        return "responders.py is not the facade (no _OWNERS/_MODULES)"
+    home = owners.get(attr)
+    if home is None:
+        return "not a name of the old responders.py; the patch lands on the facade only"
+    sentinel = object()
+    saved = {m: vars(mod)[attr] for m, mod in modules.items() if attr in vars(mod)}
+    try:
+        setattr(R, attr, sentinel)
+        if getattr(modules[home], attr, None) is not sentinel:
+            return f"write did not reach the owner core.{home}"
+        for m, mod in modules.items():
+            if m in saved and getattr(mod, attr) is not sentinel:
+                return f"core.{m} still holds the old copy"
+        if getattr(R, attr) is not sentinel:
+            return "read-back through the facade returned something else"
+    finally:
+        for m, old in saved.items():
+            setattr(modules[m], attr, old)
+    return None
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-v", "--verbose", action="store_true",
-                    help="also list the rebindings EXPECTED explains")
+    ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    sys.path.insert(0, SERVICES)
+    import responders as R
 
-    owner = facade_map()
-    if not owner:
-        print("no re-exported names in responders.py -- nothing to check")
-        return 0
-    mods = sorted(set(owner.values()))
-    print(f"responders.py re-exports {len(owner)} name(s) from: {', '.join(mods)}")
-
-    findings, explained = scan(owner, args.verbose)
-
-    # An allowlist entry that no longer matches anything is stale -- it will
-    # silently excuse a future rebinding at the same (file, attr).
-    live = {(r[0], r[2].split(".", 1)[1]) for r in explained}
-    stale = sorted(set(EXPECTED) - live)
-    if stale:
-        print("\n%d EXPECTED entr(ies) no longer match -- drop them: %s"
-              % (len(stale), ", ".join(f"{f}:{a}" for f, a in stale)))
-
-    if args.verbose and explained:
-        print(f"\n{len(explained)} explained rebinding(s):")
-        for rel, ln, what, home, missed in explained:
-            print(f"  {rel}:{ln}  {what}")
-            print(f"      {what.split('.')[1]} lives in {home}; "
-                  f"{EXPECTED[(rel, what.split('.', 1)[1])]}")
-
-    if not findings:
-        print("\nOK: every rebinding of a re-exported name is explained.")
-        return 0 if not stale else 1
-
-    print(f"\n{len(findings)} UNEXPLAINED rebinding(s) of a re-exported name:\n")
-    for rel, ln, what, home, missed in findings:
-        print(f"  {rel}:{ln}")
-        print(f"      {what}  --  '{what.split('.', 1)[1]}' now lives in "
-              f"{home}.py")
-        print(f"      callers inside {missed}.py resolve it from their OWN "
-              f"globals and will NOT see this patch")
-    print("\nEach is either a real defused monkeypatch, or belongs in EXPECTED "
-          "with a reason.\nIf the name is a test seam called from both modules, "
-          "the right fix is usually to\nmove it BACK -- see "
-          "responders-facade-rebinding-limit.")
-    return 1
+    found = rebindings()
+    attrs = sorted({a for _f, _l, a in found})
+    print(f"{len(found)} rebinding(s) of {len(attrs)} name(s) across the tools")
+    failures = []
+    for attr in attrs:
+        why = forwards(R, attr)
+        sites = [f"{f}:{l}" for f, l, a in found if a == attr]
+        if why:
+            failures.append((attr, why, sites))
+        elif args.verbose:
+            print(f"  [PASS] {attr:<28} -> core.{R._OWNERS[attr]}  ({', '.join(sites)})")
+    for attr, why, sites in failures:
+        print(f"  [FAIL] {attr}: {why}\n         at {', '.join(sites)}")
+    if failures:
+        print(f"\n{len(failures)} name(s) are patched by a tool but not forwarded by the facade")
+        return 1
+    print("every rebinding the tools make is forwarded to the module that runs it")
+    return 0
 
 
 if __name__ == "__main__":
