@@ -1992,7 +1992,14 @@ function describeRender(r) {
   if (miss.length && r.mode !== "page") warn.push("uses " + miss.map((v) => "$" + esc(v)).join(", ") + ", which the page that includes this defines");
   const unres = (EXPAND_REPORT.unresolved || []).slice(0, 3);
   if (unres.length) warn.push("included file not found: " + unres.map(esc).join(", "));
-  note.innerHTML = bits.join(" · ") + (warn.length ? `<br><span class="warn">${warn.join("<br>")}</span>` : "");
+  // A page opened without the query its links pass: the values the mirror
+  // holds for the missing piece, one click each.
+  const guesses = (EXPAND_REPORT.guesses || []).slice(0, 12);
+  const open = guesses.length
+    ? `<br><span class="pv-guess">This page gets its content from the link that opens it. Open it with: ` +
+      guesses.map((g) => `<a data-q="${esc(g.query)}">?${esc(g.query)}</a>`).join(" ") + `</span>`
+    : "";
+  note.innerHTML = bits.join(" · ") + (warn.length ? `<br><span class="warn">${warn.join("<br>")}</span>` : "") + open;
   $("#pvTitle").textContent = r.title || (ACTIVE_FILE ? ACTIVE_FILE.split("/").pop() : "Pasted PML");
 }
 
@@ -2308,6 +2315,11 @@ async function loadRefs(path) {
   }
 }
 
+$("#stageNote").addEventListener("click", (e) => {
+  const a = e.target.closest(".pv-guess a[data-q]");
+  if (a && ACTIVE_FILE) openPmlFile(ACTIVE_FILE, { query: a.dataset.q, push: true });
+});
+
 // The query the page is opened with, editable: Enter reopens the page with it.
 $("#pvQuery").addEventListener("keydown", (e) => {
   if (e.key !== "Enter" || !ACTIVE_FILE) return;
@@ -2486,14 +2498,14 @@ function fileRow(f, depth, full) {
     (depth ? ` style="padding-left:${12 + depth * 14}px"` : "") + ">" +
     `<div class="t${f.title ? "" : " fb"}"${f.title ? "" : ' title="No title in the file; this is its first line of text"'}>` +
     `${esc(f.label || f.name)}${kind}${variant}</div>` +
-    (sub ? `<div class="p" title="${esc(f.path)}">${esc(sub)}</div>` : "") + "</div>";
+    (sub ? `<div class="p" translate="no" title="${esc(f.path)}">${esc(sub)}</div>` : "") + "</div>";
 }
 
 function dirRow(key, name, label, count, depth, section) {
   return `<div class="pv-dir${section ? " sec" : ""}" data-d="${esc(key)}" style="padding-left:${10 + depth * 14}px">` +
     `<span class="tw">${isOpen(key) ? "▾" : "▸"}</span>` +
     (label ? `<span class="fl">${esc(label)}</span>` : "") +
-    (name ? `<span class="nm" title="${esc(name)}">${esc(name)}</span>` : "") +
+    (name ? `<span class="nm" translate="no" title="${esc(name)}">${esc(name)}</span>` : "") +
     `<span class="n">${count.toLocaleString()}</span></div>`;
 }
 

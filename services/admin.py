@@ -650,32 +650,58 @@ def pml_link_target(frm, href):
     return {"path": os.path.relpath(target, root).replace(os.sep, "/")}
 
 
+def _pml_page_key(rel):
+    """A page's identity across the mirror's copies: without the
+    `_lang/<locale>/` or `_eras/<era>/` prefix and without a saved query
+    (`x.pml%3Fa%3D1` is x.pml), lower-cased."""
+    segs = rel.replace("\\", "/").split("/")
+    if segs and segs[0] in ("_lang", "_eras"):
+        segs = segs[2:]
+    if segs:
+        segs[-1] = re.split(r"%3f", segs[-1], maxsplit=1, flags=re.I)[0]
+    return "/".join(segs).lower()
+
+
 def _pml_page_queries(rel, graph, limit=12):
     """Query strings a page is opened with: the ones links carry into it
     (the news ticker opens index2.pml?dat=..&seri=..), then the ones the
     mirror saved copies under (`x.pml%3Fa%3D1`). A page that reads its
-    variables from the link has nothing to show without one."""
+    variables from the link has nothing to show without one.
+
+    Links name the base path, and the index may have resolved one to a
+    saved copy, so every copy of the page counts: the `_lang/en-US/` copy of
+    kabegami/list/lspm01.pml is opened with the wallpaper links' queries."""
     from urllib.parse import unquote
+    key = _pml_page_key(rel)
     out, seen = [], set()
-    for src, q in sorted(getattr(graph, "link_queries", {}).get(rel, ())):
-        if q not in seen:
-            seen.add(q)
-            out.append({"query": q, "from": src})
-    # Read from the folder, not the file index: a copy saved as
-    # `mepm010.pml%3Fcrt_url%3D010` does not end in .pml and is not indexed.
-    root = os.path.abspath(WWW_ROOT)
-    folder = os.path.abspath(os.path.join(root, os.path.dirname(rel)))
-    pre = (os.path.basename(rel) + "%3f").lower()
-    try:
-        names = sorted(os.listdir(folder)) if folder.startswith(root) else []
-    except OSError:
-        names = []
-    for name in names:
-        if name.lower().startswith(pre):
-            q = unquote(name[len(pre):])
-            if q and q not in seen:
+    for dst, pairs in sorted(getattr(graph, "link_queries", {}).items()):
+        if _pml_page_key(dst) != key:
+            continue
+        for src, q in sorted(pairs):
+            if q not in seen:
                 seen.add(q)
-                out.append({"query": q, "saved": posixpath.join(posixpath.dirname(rel), name)})
+                out.append({"query": q, "from": src})
+    # Saved copies, read from the folders, not the file index: a copy saved
+    # as `mepm010.pml%3Fcrt_url%3D010` does not end in .pml and is not
+    # indexed. The page's own folder first, then the base host's.
+    root = os.path.abspath(WWW_ROOT)
+    dirs = [posixpath.dirname(rel)]
+    segs = rel.split("/")
+    if segs[0] in ("_lang", "_eras"):
+        dirs.append(posixpath.dirname("/".join(segs[2:])))
+    pre = (posixpath.basename(rel).split("%3F")[0].split("%3f")[0] + "%3f").lower()
+    for d in dirs:
+        folder = os.path.abspath(os.path.join(root, d))
+        try:
+            names = sorted(os.listdir(folder)) if folder.startswith(root) else []
+        except OSError:
+            names = []
+        for name in names:
+            if name.lower().startswith(pre):
+                q = unquote(name[len(pre):])
+                if q and q not in seen:
+                    seen.add(q)
+                    out.append({"query": q, "saved": posixpath.join(d, name)})
     return out[:limit]
 
 
@@ -744,9 +770,68 @@ def pml_expand_payload(text, path, query=""):
         env = None
     out = pmleval.expand(text, resolve_include=resolve, base=start_dir,
                          report=report, url=url, **kw)
+    unresolved = report.get("unresolved") or []
     return {"text": out, "missing": report.get("missing") or [],
-            "unresolved": report.get("unresolved") or [],
-            "vars": env if env is not None else {}}
+            "unresolved": unresolved,
+            "vars": env if env is not None else {},
+            "guesses": _pml_query_guesses(text, env or {}, unresolved,
+                                          host_dirs, tree_dirs, start_dir)}
+
+
+_VAR_ERROR = "(Variable error)"
+
+
+def _pml_query_guesses(text, env, unresolved, host_dirs, tree_dirs, start_dir, limit=12):
+    """Queries that would let a page find the includes it could not.
+
+    A page opened without the query its link passes names files like
+    `vana2/report/(Variable error)/remn01.pml`. The include that wrote it,
+    `$C_PATH1+'vana2/report/'+$No+'/remn01.pml'`, says which variable fills
+    the gap ($No, the one the page never defines), and the mirror's folders
+    say which values exist (05, 06, 12). Each match becomes a query:
+    `No=05`. Only includes of the page itself are read."""
+    import glob
+    exprs = re.findall(r'<include\b[^>]*?\bsrc\s*=\s*"([^"]*)"', text or "", re.I)
+    out, seen = [], set()
+    for src in unresolved:
+        if _VAR_ERROR not in src:
+            continue
+        parts = src.split(_VAR_ERROR)
+        for expr in exprs:
+            # The include that wrote this src: its quoted pieces appear in it,
+            # and it reads as many undefined variables as the src has gaps.
+            lits = [a or b for a, b in re.findall(r"'([^']*)'|\"([^\"]*)\"", expr)]
+            if not lits or not all(lit in src for lit in lits):
+                continue
+            free = [n for n in dict.fromkeys(re.findall(r"\$([A-Za-z_]\w*)", expr))
+                    if "$" + n not in env and not n.startswith("_")]
+            if len(free) != len(parts) - 1:
+                continue
+            rel = src.lstrip("/")
+            if src.startswith("file:"):
+                bases = list(tree_dirs)
+                rel = re.sub(r"^file:/*", "", src)
+            elif src.startswith("/"):
+                bases = list(host_dirs)
+            else:
+                bases = [start_dir]
+            pattern = glob.escape(rel).replace(glob.escape(_VAR_ERROR), "*")
+            grab = re.compile("^" + "([^/]+?)".join(re.escape(x) for x in rel.split(_VAR_ERROR)) + "$", re.I)
+            for base in bases:
+                for hit in sorted(glob.glob(os.path.join(base, pattern))):
+                    m = grab.match(os.path.relpath(hit, base).replace(os.sep, "/"))
+                    if not m:
+                        continue
+                    q = "&".join(f"{n}={v}" for n, v in zip(free, m.groups()))
+                    if q not in seen:
+                        seen.add(q)
+                        out.append({"query": q})
+            break
+    # SE's ids are numbers: when some are, a folder's other files
+    # (latestnews.pml beside the article serials) are not ids at all.
+    numeric = [g for g in out if all(v.isdigit() for v in re.findall(r"=([^&]*)", g["query"]))]
+    return (numeric or out)[:limit]
+
 
 #: The admin panel's Kick is carried out by authsess, which holds the sockets:
 #: the request goes through the live-state store to core/authkick.py, which
