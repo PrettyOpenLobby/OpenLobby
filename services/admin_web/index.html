@@ -608,6 +608,46 @@
       border-bottom: 1px solid #ddd6c8; }
     .pml-doc-body { position: relative; }
     .pml-doc-body .pml-text { position: relative; }
+
+    /* ---- News ---- */
+    .nw-bar { display: flex; justify-content: space-between; align-items: center;
+      gap: 12px; flex-wrap: wrap; }
+    .nw-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+    .nw-status { font-size: 12.5px; color: var(--muted); }
+    .nw-status .dot { margin-right: 6px; }
+    .nw-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+      gap: 16px; align-items: start; }
+    @media (max-width: 1100px) { .nw-grid { grid-template-columns: 1fr; } }
+    .nw-list-panel { padding: 6px 0; }
+    .nw-list { max-height: 260px; overflow-y: auto; }
+    .nw-item { display: grid; grid-template-columns: auto 1fr auto; gap: 10px;
+      align-items: center; padding: 9px 14px; cursor: pointer;
+      border-bottom: 1px solid rgba(51,57,73,.6); }
+    .nw-item:last-child { border-bottom: 0; }
+    .nw-item:hover { background: var(--panel2); }
+    .nw-item.active { background: rgba(90,169,255,.13); box-shadow: inset 3px 0 0 var(--accent); }
+    .nw-item .t { font-weight: 600; font-size: 13.5px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .nw-item .m { color: var(--muted); font-size: 12px; }
+    .nw-item .flag { font-size: 10.5px; padding: 1px 7px; border-radius: 10px;
+      background: rgba(255,207,107,.15); color: var(--warn); white-space: nowrap; }
+    .nw-empty { padding: 16px 14px; color: var(--muted); }
+    .nw-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; margin-top: 2px; }
+    .nw-row .nw-date { grid-column: 1 / -1; }
+    .nw-row .nw-date .datefield input { flex: 1; min-width: 0; }
+    @media (max-width: 700px) { .nw-row { grid-template-columns: 1fr; } }
+    .nw-pick { display: flex; gap: 8px; align-items: center; }
+    .nw-pick select { flex: 1; min-width: 0; }
+    .nw-pick .plate:empty { display: none; }
+    #newsForm textarea { font: 14px/1.5 'Segoe UI', system-ui, sans-serif; min-height: 180px; }
+    .nw-more { margin-top: 12px; }
+    .nw-more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+    .nw-formbtns { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
+    .nw-preview { position: sticky; top: 70px; }
+    .nw-pvbar { display: flex; justify-content: space-between; align-items: center;
+      gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+    .nw-raw { max-height: 360px; overflow: auto; white-space: pre-wrap; font-size: 12px;
+      background: var(--panel2); padding: 10px; border-radius: 8px; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -938,93 +978,104 @@
 
     <!-- NEWS -->
     <section id="tab-news" class="tab">
-      <div class="panel">
-        <h2>Announcements</h2>
-        <p class="hint">Announcements appear on the login-screen ticker, in the Information section, and on a detail page for each story. <b>Save</b> keeps your changes; <b>Publish</b> makes them visible to players.</p>
-        <div id="newsState" class="note" style="display:none"></div>
-        <div id="newsDraftNote" class="note" style="display:none"></div>
-        <div class="row" style="align-items:center">
-          <div class="btn"><button class="act" id="newsAddBtn">New announcement</button></div>
-          <div class="btn"><button class="ghost" id="newsSaveBtn">Save</button>
-            <span class="hint" id="newsDraftHint"
-                  style="margin:0 0 0 8px; display:inline"
-                  title="Edits are kept in this browser as you type, so a refresh does not lose them. Only Save writes the store."></span></div>
-          <div class="btn"><button class="act" id="newsPublishBtn">Publish</button></div>
-          <div class="btn"><button class="ghost" id="newsDryBtn">Preview changes</button></div>
-          <div style="flex:1 1 200px; min-width:0"><span class="hint" id="newsStoreHint" style="margin:0; overflow-wrap:anywhere"></span></div>
+      <div class="panel nw-bar">
+        <div>
+          <h2 style="margin:0 0 2px">Announcements</h2>
+          <div class="nw-status" id="nwStatus">&hellip;</div>
+        </div>
+        <div class="nw-acts">
+          <button class="ghost" id="newsAddBtn">New announcement</button>
+          <button class="ghost" id="newsSaveBtn">Save draft</button>
+          <button class="act" id="newsPublishBtn">Publish&hellip;</button>
+        </div>
+      </div>
+      <div id="newsState" class="note warn" hidden></div>
+      <div id="newsDraftNote" class="note" hidden></div>
+
+      <div class="nw-grid">
+        <div>
+          <div class="panel nw-list-panel">
+            <div id="newsList" class="nw-list"></div>
+          </div>
+
+          <div class="panel" id="newsForm">
+            <label for="nTitle">Headline <span class="hint" style="display:inline">(what the ticker shows)</span></label>
+            <input type="text" id="nTitle" spellcheck="true" maxlength="120">
+
+            <div class="nw-row">
+              <div class="nw-date">
+                <label for="nDate">Date</label>
+                <div class="datefield">
+                  <input type="text" id="nDate" spellcheck="false" placeholder="Sep. 27, 2026 20:00 [UTC]">
+                  <button class="ghost sm" id="nDateNow" title="This hour, in the usual format">Now</button>
+                </div>
+                <div class="hint" id="nDateHint"></div>
+              </div>
+              <div>
+                <label for="nKind">Category</label>
+                <div class="nw-pick"><span class="plate" id="nKindArt"></span><select id="nKind"></select></div>
+              </div>
+              <div>
+                <label for="nContent">Service</label>
+                <div class="nw-pick"><span class="plate" id="nContentArt"></span><select id="nContent"></select></div>
+              </div>
+            </div>
+
+            <label for="nBody">Story</label>
+            <textarea id="nBody" spellcheck="true" rows="10"></textarea>
+            <div class="hint">A blank line starts a new paragraph. Leave it empty for a headline with no story page.</div>
+
+            <details class="nw-more" id="nwMore">
+              <summary>More options</summary>
+              <label for="nLink">Link instead of a story page <span class="hint" style="display:inline">(optional; must end in ? or &amp;)</span></label>
+              <input type="text" id="nLink" spellcheck="false" class="mono" placeholder="http://...">
+              <label class="chip" style="display:inline-flex; margin-top:10px">
+                <input type="checkbox" id="nStatus"> Also list under Status / Maintenance (current or recent issues)
+              </label>
+              <div class="effect" id="nEffect"></div>
+            </details>
+
+            <div class="nw-formbtns">
+              <button class="ghost sm" id="nUpBtn">Move up</button>
+              <button class="ghost sm" id="nDownBtn">Move down</button>
+              <span style="flex:1"></span>
+              <button class="danger sm" id="nDelBtn">Delete</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel nw-preview">
+          <div class="nw-pvbar">
+            <div class="seg" id="nwView">
+              <button data-v="snews" class="on">Login news</button>
+              <button data-v="story">Story page</button>
+              <button data-v="ticker">Main menu</button>
+            </div>
+            <span class="muted" id="nwPvState" style="font-size:12px"></span>
+          </div>
+          <div class="pv-stagebox" id="newsStageBox">
+            <div class="pv-stagescale" id="newsStageScale"><div id="newsStage" class="pml-stage"></div></div>
+          </div>
+          <div id="newsNote" class="pv-note"></div>
+          <details class="nw-more">
+            <summary>Files a publish writes</summary>
+            <select id="newsOutput" style="margin-top:8px"></select>
+            <pre id="newsRaw" class="mono nw-raw"></pre>
+          </details>
         </div>
       </div>
 
-      <div class="panel">
-        <div class="editwrap">
-          <div>
-            <div id="newsList" class="filelist" style="max-height:210px"></div>
-            <div id="newsForm" style="margin-top:14px">
-              <div class="row">
-                <div style="flex:2"><label>Date <span class="hint" style="display:inline">(displayed as written)</span></label>
-                  <div class="datefield">
-                    <input type="text" id="nDate" spellcheck="false"
-                           placeholder="Aug. 20, 2026 19:00 [UTC]">
-                    <button class="ghost" id="nDateNow"
-                            title="This hour, UTC, in SE's format. Rounds DOWN so a story never claims a time that has not happened yet.">Now</button>
-                    <input type="datetime-local" id="nDatePick" step="3600"
-                           title="Pick a time; it is written into the box in SE's format.">
-                  </div>
-                  <p class="hint" id="nDateHint" style="margin-top:6px"></p></div>
-                <div style="flex:0 0 auto"><label>Serial</label>
-                  <input type="text" id="nSerial" class="mono" readonly
-                         style="width:90px" title="Used as the detail page file name."></div>
-              </div>
-              <label>Headline <span class="hint" style="display:inline">(this is all the ticker shows)</span></label>
-              <input type="text" id="nTitle" spellcheck="false">
-
-              <label>Kind <span class="hint" style="display:inline">(sets the category and list icon)</span></label>
-              <div class="pickstrip" id="nKindStrip"></div>
-
-              <label>Service <span class="hint" style="display:inline">(sets the ticker badge and which Information pages list it)</span></label>
-              <div class="pickstrip" id="nContentStrip"></div>
-              <p class="hint" id="nIconHint" style="margin-top:6px"></p>
-
-              <div class="row">
-                <div style="flex:1"><label>External link <span class="hint" style="display:inline">(optional; replaces the detail page)</span></label>
-                  <input type="text" id="nLink" spellcheck="false" class="mono"
-                         placeholder="http://... (must end in ? or &amp;)"></div>
-              </div>
-              <label style="display:flex; align-items:center; gap:8px">
-                <input type="checkbox" id="nStatus" style="width:auto; margin:0">
-                <span>Show in the Status / Maintenance panel</span></label>
-              <p class="hint" style="margin-top:2px">Use for current or recently resolved issues.</p>
-
-              <div class="effect" id="nEffect"></div>
-
-              <label>Body <span class="hint" style="display:inline">(a blank line starts a new paragraph; leave empty for a headline without a detail page)</span></label>
-              <textarea id="nBody" spellcheck="true" style="min-height:190px"></textarea>
-              <div class="row" style="margin-top:10px">
-                <div><button class="ghost" id="nUpBtn">Move up</button></div>
-                <div><button class="ghost" id="nDownBtn">Move down</button></div>
-                <div class="grow"></div>
-                <div><button class="ghost" id="nDelBtn">Delete</button></div>
-              </div>
-            </div>
-          </div>
-          <div class="stagewrap">
-            <div class="cap">
-              <select id="newsOutput" style="max-width:100%"></select>
-            </div>
-            <div id="newsPreviewWrap">
-              <div id="newsStage" class="pml-stage"></div>
-              <div id="newsNote" class="stagenote"></div>
-            </div>
-            <pre id="newsRaw" class="mono"
-                 style="display:none; margin:0; padding:10px; overflow:auto;
-                        max-height:470px; white-space:pre-wrap; font-size:12px"></pre>
-            <div class="stagelayers">
-              <button class="on" id="newsViewRender">Rendered</button>
-              <button id="newsViewRaw">PML</button>
-            </div>
+      <!-- Publish: what will change, then confirm. -->
+      <div class="modal" id="nwPubModal">
+        <div class="card">
+          <h3>Publish announcements</h3>
+          <p id="nwPubSummary"></p>
+          <div class="inv" id="nwPubList" style="max-height:220px; overflow:auto"></div>
+          <div class="foot">
+            <button class="ghost" id="nwPubCancel">Cancel</button>
+            <button class="act" id="nwPubGo">Publish now</button>
           </div>
         </div>
-        <p class="hint"><b>Rendered</b> previews the Information page. The other files are data and are shown as PML.</p>
       </div>
     </section>
 

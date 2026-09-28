@@ -88,7 +88,6 @@ our tree, `pcd/ntool/en-US/2194.pml` and `2195.pml`, and they are the model:
 import os
 import re
 import struct
-import textwrap
 
 try:
     import yaml
@@ -843,18 +842,24 @@ def news_file(items, content_id, existing=None):
 # --------------------------------------------------------------------------- #
 # info.playonline.com/snews/<loc>/index.pml -- our own substitute page
 # --------------------------------------------------------------------------- #
-#: Body text is wrapped to this many columns. The Information page's textbox is
-#: 608px wide at style Bw15; ~76 columns fills it without hitting the edge.
-WRAP = 76
+#: The rule between stories, in dashes. The textbox's text area is ~592px and a
+#: dash in face 6 at size 15 advances ~9.7px (live ppfont.bin), so 60 fits; the
+#: old 76 overflowed and wrapped onto a second line.
+RULE = 60
 
 
 def _doc_text(items):
     """The substitute page's scrolling document.
 
-    `&pre=1;` puts the record in preformatted mode, so our own wrapping is what
-    the reader sees. `&style=NAME; ... &style;` is a span. Both are SE's inline
-    syntax, from the Western registration screens' <data> records. Bare text in
-    a record renders as nothing, so everything sits inside a style span.
+    `&pre=1;` puts the record in preformatted mode: each newline is a line
+    break. Paragraphs are written as ONE line each and the textbox wraps them,
+    which is how SE's own help pages use `&pre=1;`. They used to be wrapped
+    here at 76 columns, but 76 columns of Bw15 measure ~690px against a ~592px
+    box, so the Viewer re-wrapped every line and left one or two words
+    stranded on a line of their own after each.
+
+    `&style=NAME; ... &style;` is a span. Bare text in a record renders as
+    nothing, so everything sits inside a style span.
     """
     out = ["&pre=1;&style=Bw15;"]
     for it in items:
@@ -864,12 +869,11 @@ def _doc_text(items):
         if body:
             out.append("")
             for para in body.split("\n\n"):
-                para = " ".join(para.split())
-                out.extend(textwrap.wrap(para, WRAP) or [""])
+                out.append(" ".join(para.split()))
                 out.append("")
         else:
             out.append("")
-        out.append("-" * WRAP)
+        out.append("-" * RULE)
         out.append("")
     out.append("&style;")
     return "\n".join(out).rstrip()

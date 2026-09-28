@@ -31,6 +31,7 @@ rule look correct for years while serving nothing.
 import io
 import os
 import shutil
+import re
 import sys
 import tempfile
 
@@ -317,8 +318,23 @@ got = E('<pml>\n<!-- two\nlines -->\n<text pos="1,1">x</text></pml>')
 check("elements carry their source line through comments",
       'pml-line="4"' in got, True)
 
+check("a condition sees the <define> right above it (evaluated when reached)",
+      E('<define name="$a" value="0"><if expr="$a==0">ZERO<else>OTHER</if>'
+        '<define name="$a" value="1"><if expr="$a==1">ONE<if expr="$a==1">'
+        'NESTED</if></if>').strip(), "ZEROONENESTED")
+
 check("<hr> is self-closing",
       E('<sheet><hr pos="0,0"><text>after</text></sheet>').count("</hr>"), 0)
+
+got = E('<array name="$m"><array>"Games" "x"</array><array>"Navigator" "y"</array></array>'
+        '<for init="$i=0" cond="$i<2" next="$i++"><text>&var=$m[{$i}][0];</text></for>')
+check("{$i} is filled in before &var= reads it (main menu labels)",
+      re.findall(r">([^<]*)</text>", got), ["Games", "Navigator"])
+
+got = E('<array name="$cat">"A" "B" "C" "D" "E"</array>'
+        '<array name="$d">"1" "null" "d" "h" "1" "4"</array><text>&var=$cat[$d[5]];</text>')
+check("an array takes a numeric string as its index (story page title)",
+      got[got.index("<text"):].split(">", 1)[1].split("<")[0], "E")
 
 print()
 print("pmleval_test: OK" if ok else "pmleval_test: FAILED")

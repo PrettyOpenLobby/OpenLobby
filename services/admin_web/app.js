@@ -1967,46 +1967,36 @@ if (store.get("pvSource", "0") === "1") showSource(true);
 updateNavButtons();
 
 // ---- news ----
-// One store, four output shapes. The panel edits the store and previews what a
-// publish would write; nothing here touches the served tree until Publish, so
-// a half-typed announcement can never reach a client.
+// The announcements store, edited here, published as every file the Viewer
+// reads (services/newsgen.py). The preview on the right renders the pages a
+// player sees -- our login news page, SE's story page, SE's main menu ticker --
+// from the edits AS TYPED: the server lays the files a publish would write
+// over the mirror in memory (/api/news/render), so nothing is saved to show it.
 let NEWS = [];            // the store, newest first -- the order players see
-let NEWS_SEL = 0;         // index of the entry the form is bound to
+let NEWS_SEL = 0;
 let NEWS_META = null;     // kinds/contents/categories, straight from newsgen.py
-let NEWS_ART = null;      // SE's own picker art as data URIs, from /api/news/art
+let NEWS_ART = null;      // SE's own marker/badge art as data URIs
 let NEWS_DIRTY = false;
 let NEWS_DRAFT_KEY = null;   // per-store, so a dev draft cannot land on prod
 let NEWS_DRAFT_TIMER = null;
+let NEWS_BASE = "";          // JSON of the store as last loaded or saved
+let NEWS_VIEW = store.get("newsView", "snews");
+let NEWS_PENDING = null;     // files a publish would change (saved store)
 
 // --- draft autosave ---------------------------------------------------------
-// Everything above lives in memory until Save, so a refresh, a crash or a
-// closed tab lost the lot. Drafts go to localStorage rather than to the server
-// on a timer, deliberately: the store IS what Publish reads, so autosaving
-// there would put half-typed headlines one click away from a client. This keeps
-// the Save/Publish gate exactly as it was and only protects the typing.
+// Edits live in memory until Save; a draft in localStorage survives a refresh.
+// It never goes to the server on its own: the store IS what Publish reads.
 function newsDraftSave() {
   if (!NEWS_DRAFT_KEY) return;
   try {
-    localStorage.setItem(NEWS_DRAFT_KEY, JSON.stringify({
-      at: Date.now(), sel: NEWS_SEL, items: NEWS,
-      // what the store held when this draft started, so a draft written against
-      // a since-changed store can say so instead of silently reverting it
-      base: NEWS_BASE,
-    }));
-    const t = new Date();
-    $("#newsDraftHint").textContent = "draft saved "
-      + String(t.getHours()).padStart(2, "0") + ":"
-      + String(t.getMinutes()).padStart(2, "0");
-  } catch (e) { /* private mode, or full: drafts are a bonus, not a dependency */ }
+    localStorage.setItem(NEWS_DRAFT_KEY, JSON.stringify({ at: Date.now(), sel: NEWS_SEL, items: NEWS, base: NEWS_BASE }));
+  } catch (e) { /* private mode or full */ }
 }
-
 function newsDraftClear() {
   if (!NEWS_DRAFT_KEY) return;
-  try { localStorage.removeItem(NEWS_DRAFT_KEY); } catch (e) { /* as above */ }
-  $("#newsDraftHint").textContent = "";
-  $("#newsDraftNote").style.display = "none";
+  try { localStorage.removeItem(NEWS_DRAFT_KEY); } catch (e) {}
+  $("#newsDraftNote").hidden = true;
 }
-
 function newsDraftRead() {
   if (!NEWS_DRAFT_KEY) return null;
   try {
@@ -2015,14 +2005,23 @@ function newsDraftRead() {
   } catch (e) { return null; }
 }
 
-let NEWS_BASE = "";          // JSON of the store as last loaded or saved
-
 function newsMarkDirty() {
   NEWS_DIRTY = true;
-  $("#newsSaveBtn").classList.add("act");
-  // Debounced: this fires on every keystroke in the body textarea.
   clearTimeout(NEWS_DRAFT_TIMER);
   NEWS_DRAFT_TIMER = setTimeout(newsDraftSave, 400);
+  renderNewsStatus();
+  scheduleNewsPreview();
+}
+
+function renderNewsStatus() {
+  const el = $("#nwStatus");
+  let dot = "ok", text;
+  if (NEWS_DIRTY) { dot = "warn"; text = "Unsaved changes (kept in this browser until you save)"; }
+  else if (NEWS_PENDING === null) { text = "Saved"; }
+  else if (NEWS_PENDING > 0) { dot = "warn"; text = `Saved, not published yet (${NEWS_PENDING} file${NEWS_PENDING === 1 ? "" : "s"} to update)`; }
+  else { text = "Published: players see what is here"; }
+  el.innerHTML = `<span class="dot ${dot}"></span>${esc(text)}`;
+  $("#newsSaveBtn").classList.toggle("act", NEWS_DIRTY);
 }
 
 async function loadNews() {
@@ -2031,205 +2030,134 @@ async function loadNews() {
     NEWS = j.items || [];
     NEWS_META = j;
     NEWS_DIRTY = false;
-    $("#newsSaveBtn").classList.remove("act");
-
-    // SE's own art for the two pickers. Fetched once, and failure is not fatal
-    // -- the strips fall back to text, which is what the old <select>s were.
     if (NEWS_ART === null) {
-      try { NEWS_ART = (await api("/api/news/art")).art || {}; }
-      catch (e) { NEWS_ART = {}; }
+      try { NEWS_ART = (await api("/api/news/art")).art || {}; } catch (e) { NEWS_ART = {}; }
     }
-    buildNewsPickers();
-
+    fillNewsPickers();
     const st = $("#newsState");
-    if (!j.writable) {
-      st.style.display = "";
-      st.className = "note warn";
-      st.innerHTML = `<b>Publishing is unavailable:</b> ${esc(j.www)} is read-only.`;
-    } else {
-      st.style.display = "none";
-    }
-    $("#newsStoreHint").textContent = j.using_store
-      ? `Saved to ${j.store}`
-      : `Showing the default announcements. Saving creates ${j.store}.`;
-
-    // Keyed by the store this panel writes, so a draft typed against a dev
-    // store is never offered on prod.
+    st.hidden = j.writable !== false;
+    if (!st.hidden) st.innerHTML = `<b>Publishing is unavailable:</b> ${esc(j.www)} is read-only.`;
     NEWS_DRAFT_KEY = "pol-admin:news-draft:" + (j.store || "?");
     NEWS_BASE = JSON.stringify(NEWS);
     newsRestoreDraft();
-
     if (NEWS_SEL >= NEWS.length) NEWS_SEL = Math.max(0, NEWS.length - 1);
     renderNewsList();
     bindNewsForm();
+    renderNewsStatus();
     loadNewsOutputs();
-  } catch (e) { toast("news: " + e.message, true); }
+    renderNewsPreview();
+  } catch (e) { toast("News: " + e.message, true); }
 }
 
-// Put a draft back on screen, if there is one and it still says something the
-// store does not. Restoring is silent-but-announced rather than a modal: the
-// work is already yours, and a prompt on every load would train you to dismiss
-// it. Discard is one click away in the banner.
 function newsRestoreDraft() {
   const d = newsDraftRead();
   const note = $("#newsDraftNote");
-  if (!d) { note.style.display = "none"; return; }
-  if (JSON.stringify(d.items) === NEWS_BASE) {
-    newsDraftClear();                 // already saved; nothing to restore
-    return;
-  }
+  if (!d) { note.hidden = true; return; }
+  if (JSON.stringify(d.items) === NEWS_BASE) { newsDraftClear(); return; }
   NEWS = d.items;
   NEWS_SEL = Math.min(d.sel || 0, Math.max(0, NEWS.length - 1));
   NEWS_DIRTY = true;
-  $("#newsSaveBtn").classList.add("act");
-
-  const when = new Date(d.at || Date.now());
   const moved = d.base !== undefined && d.base !== NEWS_BASE;
-  note.style.display = "";
+  note.hidden = false;
   note.className = moved ? "note warn" : "note";
-  note.innerHTML =
-    `<b>Unsaved draft restored</b> from ${esc(when.toLocaleString())}. It has not been
-     saved or published.
-     ${moved ? `<b>The saved announcements have changed since then</b>; saving will
-       replace them. ` : ""}
-     <button class="ghost" id="newsDraftDiscard"
-             style="padding:3px 10px; font-size:12px; margin-left:6px">Discard
-       draft</button>`;
-  $("#newsDraftDiscard").onclick = () => {
-    newsDraftClear();
-    loadNews();                       // straight back to the stored version
-  };
+  note.innerHTML = `<b>Unsaved changes restored</b> from ${esc(new Date(d.at || Date.now()).toLocaleString())}.` +
+    (moved ? " <b>The saved announcements changed since then;</b> saving will replace them." : "") +
+    ` <button class="ghost sm" id="newsDraftDiscard" style="margin-left:6px">Discard changes</button>`;
+  $("#newsDraftDiscard").onclick = () => { newsDraftClear(); loadNews(); };
 }
 
+// --- the list ------------------------------------------------------------------
+function newsBadge(key) {
+  const src = (NEWS_ART || {})[key];
+  return src ? `<span class="plate"><img src="${src}" alt=""></span>` : "";
+}
 function renderNewsList() {
   const box = $("#newsList");
   if (!NEWS.length) {
-    box.innerHTML = `<div class="empty">No announcements yet.</div>`;
+    box.innerHTML = `<div class="nw-empty">No announcements yet. Use <b>New announcement</b> to write one.</div>`;
     return;
   }
   box.innerHTML = NEWS.map((it, i) => {
-    const cat = NEWS_META ? (NEWS_META.categories[NEWS_META.kinds[it.kind].category] || "") : "";
-    const badges = [
-      `<span class="badge">${esc(cat)}</span>`,
-      it.status ? `<span class="badge built">status</span>` : "",
-      (it.body || "").trim() ? "" : `<span class="badge original">no body</span>`,
-    ].join("");
-    return `<div class="fileitem${i === NEWS_SEL ? " active" : ""}" data-i="${i}">
-      <span>${esc(it.title)}</span>
-      <span class="badges">${badges}<span class="badge">${esc(it.date)}</span></span>
-    </div>`;
+    const k = (NEWS_META.kinds || {})[it.kind] || {};
+    const cat = (NEWS_META.categories || [])[k.category] || "";
+    const flags = [];
+    if (!(it.body || "").trim() && !(it.link || "").trim()) flags.push("no story");
+    if (it.status) flags.push("status");
+    return `<div class="nw-item${i === NEWS_SEL ? " active" : ""}" data-i="${i}">` +
+      `${newsBadge("ticker:" + (it.content || "playonline")) || "<span></span>"}` +
+      `<div style="min-width:0"><div class="t">${esc(it.title || "(no headline)")}</div>` +
+      `<div class="m">${esc(it.date || "no date")} · ${esc(cat)}</div></div>` +
+      `<div>${flags.map((f) => `<span class="flag">${esc(f)}</span>`).join(" ")}</div></div>`;
   }).join("");
-  box.querySelectorAll(".fileitem").forEach((el) => {
-    el.onclick = () => { readNewsForm(); NEWS_SEL = +el.dataset.i; renderNewsList(); bindNewsForm(); };
-  });
 }
+$("#newsList").onclick = (e) => {
+  const row = e.target.closest(".nw-item");
+  if (!row) return;
+  readNewsForm();
+  NEWS_SEL = +row.dataset.i;
+  renderNewsList();
+  bindNewsForm();
+  renderNewsPreview();
+};
 
-// --- the two pickers -------------------------------------------------------
-// Kind and Service each choose a piece of SE's own art and a place the story
-// lands, and a <select> showed neither. These draw the actual icon the client
-// will render, which is the only way an operator finds out BEFORE publishing
-// that "Extras" wears a Front Mission Online badge.
-function newsArt(key) {
-  const src = (NEWS_ART || {})[key];
-  return src ? `<img src="${src}" alt="">` : "";
-}
-
-function buildNewsPickers() {
+// --- the form ------------------------------------------------------------------
+const KIND_WORDS = { info: "Information", maintenance: "Maintenance", recovery: "Recovery",
+                     issue: "Known issue", update: "Update" };
+function fillNewsPickers() {
   if (!NEWS_META) return;
-  const kinds = $("#nKindStrip");
-  kinds.innerHTML = Object.entries(NEWS_META.kinds).map(([k, v]) => {
-    const cat = (NEWS_META.categories || [])[v.category] || "?";
-    const art = newsArt("marker:" + v.marker);
-    return `<button type="button" class="pick" data-kind="${esc(k)}"
-              title="${esc(v.note || "")}">
-      <span class="art">${art || `<span class="sub">&lt;${esc(v.marker)}&gt;</span>`}</span>
-      <span class="nm">${esc(k)}</span>
-      <span class="sub">${esc(cat)}</span>
-    </button>`;
-  }).join("");
-  kinds.querySelectorAll(".pick").forEach((el) => {
-    el.onclick = () => pickNews("kind", el.dataset.kind);
-  });
-
-  const conts = $("#nContentStrip");
-  // Ordered by content id, not by however the JSON happened to arrive: the
-  // tiles read as a numbered list ("id 8", "id 9") and dict order silently put
-  // them out of sequence once two services swapped ids.
+  $("#nKind").innerHTML = Object.entries(NEWS_META.kinds).map(([k, v]) =>
+    `<option value="${esc(k)}">${esc(KIND_WORDS[k] || (NEWS_META.categories || [])[v.category] || k)}</option>`).join("");
   const byId = Object.entries(NEWS_META.contents).sort(
     (a, b) => (NEWS_META.content_ids[a[0]] || 0) - (NEWS_META.content_ids[b[0]] || 0));
-  conts.innerHTML = byId.map(([k, label]) => {
-    const info = (NEWS_META.content_icons || {})[k] || {};
-    const id = (NEWS_META.content_ids || {})[k];
-    const art = newsArt("ticker:" + k);
-    return `<button type="button" class="pick" data-content="${esc(k)}"
-              title="Content ID ${id}">
-      <span class="art">${art ? `<span class="plate">${art}</span>`
-                              : `<span class="sub">id ${id}</span>`}</span>
-      <span class="nm">${esc(label)}</span>
-      <span class="sub"${info.differs ? ' style="color:var(--warn)"' : ""}>${
-        info.differs ? "badge says " + esc(info.short) : "id " + id}</span>
-    </button>`;
-  }).join("");
-  conts.querySelectorAll(".pick").forEach((el) => {
-    el.onclick = () => pickNews("content", el.dataset.content);
-  });
-}
-
-// The strips write straight to the model -- there is no hidden <input> to keep
-// in step, so readNewsForm() deliberately does not touch kind/content.
-function pickNews(field, value) {
-  const it = NEWS[NEWS_SEL];
-  if (!it || it[field] === value) return;
-  it[field] = value;
-  newsMarkDirty();
-  renderNewsList();
-  markNewsPicks();
-  showIconHint();
-  renderNewsEffect();
-}
-
-function markNewsPicks() {
-  const it = NEWS[NEWS_SEL] || {};
-  $("#nKindStrip").querySelectorAll(".pick").forEach((el) =>
-    el.classList.toggle("on", el.dataset.kind === (it.kind || "info")));
-  $("#nContentStrip").querySelectorAll(".pick").forEach((el) =>
-    el.classList.toggle("on", el.dataset.content === (it.content || "playonline")));
+  $("#nContent").innerHTML = byId.map(([k, label]) => `<option value="${esc(k)}">${esc(label)}</option>`).join("");
 }
 
 function bindNewsForm() {
   const it = NEWS[NEWS_SEL];
-  $("#newsForm").style.display = it ? "" : "none";
+  $("#newsForm").hidden = !it;
   if (!it) return;
-  $("#nDate").value = it.date || "";
-  $("#nSerial").value = it.serial || "(on save)";
   $("#nTitle").value = it.title || "";
+  $("#nDate").value = it.date || "";
+  $("#nKind").value = it.kind || "info";
+  $("#nContent").value = it.content || "playonline";
+  $("#nBody").value = it.body || "";
   $("#nLink").value = it.link || "";
   $("#nStatus").checked = !!it.status;
-  $("#nBody").value = it.body || "";
-  markNewsPicks();
-  showIconHint();
+  $("#nwMore").open = !!(it.link || it.status);
+  paintPickArt();
   showDateHint();
   renderNewsEffect();
 }
 
-// The service choice is also the ticker icon: main/index.pml uses the content
-// id verbatim as the sprite sequence. Spell out which icon that lands on,
-// because for one value the two SE tables disagree -- id 5 is "Extras" in the
-// Information section's switcher and FMO in the icon strip.
-function showIconHint() {
-  const el = $("#nIconHint");
-  if (!el || !NEWS_META) return;
-  const key = (NEWS[NEWS_SEL] || {}).content || "playonline";
-  const info = (NEWS_META.content_icons || {})[key];
-  el.innerHTML = info && info.differs
-    ? `Note: this service shows the <b>${esc(info.icon)}</b> badge on the login ticker.`
-    : "";
+function paintPickArt() {
+  const it = NEWS[NEWS_SEL] || {};
+  const k = (NEWS_META.kinds || {})[it.kind] || {};
+  $("#nKindArt").innerHTML = (NEWS_ART || {})["marker:" + k.marker] ? `<img src="${NEWS_ART["marker:" + k.marker]}" alt="">` : "";
+  $("#nContentArt").innerHTML = (NEWS_ART || {})["ticker:" + it.content] ? `<img src="${NEWS_ART["ticker:" + it.content]}" alt="">` : "";
 }
 
-// --- "where this shows up" -------------------------------------------------
-// Every surface a single entry reaches, restated from the CURRENT form values.
-// The numbers behind each line are newsgen's, so this cannot drift from what
-// Publish actually writes.
+// Pull the form back into the model before anything changes the selection.
+function readNewsForm() {
+  const it = NEWS[NEWS_SEL];
+  if (!it) return;
+  it.title = $("#nTitle").value;
+  it.date = $("#nDate").value;
+  it.kind = $("#nKind").value;
+  it.content = $("#nContent").value;
+  it.body = $("#nBody").value;
+  it.link = $("#nLink").value.trim();
+  it.status = $("#nStatus").checked;
+}
+
+["nTitle", "nDate", "nBody", "nLink"].forEach((id) => $("#" + id).addEventListener("input", () => {
+  readNewsForm(); newsMarkDirty(); renderNewsList(); renderNewsEffect();
+  if (id === "nDate") showDateHint();
+}));
+["nKind", "nContent", "nStatus"].forEach((id) => $("#" + id).addEventListener("change", () => {
+  readNewsForm(); newsMarkDirty(); renderNewsList(); renderNewsEffect(); paintPickArt();
+}));
+
+// Where one announcement shows up, in words, from the current form values.
 function renderNewsEffect() {
   const box = $("#nEffect");
   const it = NEWS[NEWS_SEL];
@@ -2237,123 +2165,68 @@ function renderNewsEffect() {
   const k = NEWS_META.kinds[it.kind] || {};
   const cat = (NEWS_META.categories || [])[k.category] || "?";
   const label = (NEWS_META.contents || {})[it.content] || it.content;
-  const cid = (NEWS_META.content_ids || {})[it.content];
-  const link = (it.link || "").trim();
-  const body = (it.body || "").trim();
-  const badge = newsArt("ticker:" + it.content);
-  const marker = newsArt("marker:" + k.marker);
-  const title = esc(it.title || "(no headline yet)");
-
-  // $aMORE, straight out of newsgen.feed(): 2 = the raw link, 1 = our detail
-  // page, 0 = nothing, which is a headline the player cannot click through.
-  const target = link
-    ? `opens <span class="mono">${esc(link)}</span>`
-    : (body ? `opens the detail page <span class="mono">${it.serial || "…"}.pml</span>`
-            : `<b style="color:var(--warn)">has nothing to open</b>: add a body or a link`);
-
-  const pages = cid === 1
-    ? "every Information page"
-    : `the <b>${esc(label)}</b> page and <b>View All</b>`;
-
+  const body = (it.body || "").trim(), link = (it.link || "").trim();
   const rows = [
-    ["Login ticker", `<div class="tickerline">${
-        badge ? `<span class="plate">${badge}</span>` : ""
-      }<span class="hd">${title}</span></div>
-      <div class="sub" style="margin-top:5px; color:var(--muted); font-size:11.5px">${target}</div>`, true],
-    ["Information section",
-      `${marker ? `<span class="plate" style="vertical-align:middle; margin-right:6px">${marker}</span>` : ""}
-       filed under <b>${esc(cat)}</b>, on ${pages}.`, true],
-    ["Detail page",
-      body ? `<span class="mono">${it.serial || "…"}.pml</span>, with the body below.`
-           : (link ? "none (uses the external link)" : "none (no body)"),
-      !!body],
-    ["Status / Maintenance",
-      it.status ? `listed as <b>${k.maint === 2 ? "trouble" : k.maint === 3 ? "maintenance" : "other"}</b>.`
-                : "not listed.", !!it.status],
+    ["Ticker headline", link ? "opens the link" : body ? "opens the story page" : "<b style=\"color:var(--warn)\">opens nothing</b>: add a story or a link"],
+    ["Information section", `listed under <b>${esc(cat)}</b>` + (NEWS_META.content_ids[it.content] === 1 ? " on every service's page" : ` on the <b>${esc(label)}</b> page and View All`)],
+    ["Status panel", it.status ? `listed as ${k.maint === 2 ? "an issue" : k.maint === 3 ? "maintenance" : "other"}` : "not listed"],
   ];
-
-  box.innerHTML = `<h4>Where this shows up</h4>` + rows.map(([w, v, on]) =>
-    `<div class="er${on ? "" : " off"}"><span class="w">${w}</span>
-       <span class="v">${v}</span></div>`).join("")
-    ;
+  box.innerHTML = `<h4>Where this shows up</h4>` + rows.map(([w, v]) =>
+    `<div class="er"><span class="w">${w}</span><span class="v">${v}</span></div>`).join("");
 }
 
-// --- the date --------------------------------------------------------------
-// SE's own format, measured off the captured en-US news1.pml: "Sep. 16, 2025
-// 20:35 [PDT]" -- abbreviated month WITH a period except May, day NOT zero
-// padded, 24-hour clock, zone in brackets. The field stays free text because
-// the client only ever echoes it, but nobody should have to retype that shape.
+// --- the date ------------------------------------------------------------------
+// SE's format: "Sep. 16, 2025 20:35 [PDT]". The Viewer only echoes it.
 const NEWS_MONTHS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.",
                      "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."];
 const NEWS_DATE_RE =
   /^(Jan\.|Feb\.|Mar\.|Apr\.|May|Jun\.|Jul\.|Aug\.|Sep\.|Oct\.|Nov\.|Dec\.) \d{1,2}, \d{4} \d{2}:\d{2} \[[A-Z]{2,5}\]$/;
-
 function newsDateString(d) {
   const p = (n) => String(n).padStart(2, "0");
   return `${NEWS_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} `
        + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())} [UTC]`;
 }
-
-function setNewsDate(str) {
-  $("#nDate").value = str;
-  readNewsForm();
-  newsMarkDirty();
-  renderNewsList();
-  showDateHint();
-}
-
-// Floors to the hour rather than rounding to the nearest one: a story stamped
-// 20:00 while it is 19:47 is announcing itself in the future.
 $("#nDateNow").onclick = () => {
   const d = new Date();
   d.setUTCMinutes(0, 0, 0);
-  setNewsDate(newsDateString(d));
-  $("#nDatePick").value = "";
+  $("#nDate").value = newsDateString(d);
+  $("#nDate").dispatchEvent(new Event("input"));
 };
-$("#nDatePick").addEventListener("change", (e) => {
-  if (!e.target.value) return;
-  // A datetime-local reads as local wall-clock; the operator picked the time
-  // they mean to publish, so take those digits as the UTC stamp verbatim
-  // rather than shifting them by the browser's offset.
-  setNewsDate(newsDateString(new Date(e.target.value + ":00Z")));
-});
-
 function showDateHint() {
-  const el = $("#nDateHint");
-  if (!el) return;
   const v = $("#nDate").value.trim();
-  if (!v) { el.innerHTML = "Shown on the Information and detail pages."; return; }
-  el.innerHTML = NEWS_DATE_RE.test(v)
-    ? ""
-    : `Usual format: <code class="mono">${esc(newsDateString(new Date()))}</code>`;
+  $("#nDateHint").textContent = !v ? "Shown as written." : NEWS_DATE_RE.test(v) ? ""
+    : `Usual format: ${newsDateString(new Date())}`;
 }
 
-// Pull the form back into the model. Called before anything that changes which
-// entry is selected, so switching rows never silently drops an edit.
-// kind/content are absent on purpose: the pickers set them directly.
-function readNewsForm() {
+// --- list actions --------------------------------------------------------------
+$("#newsAddBtn").onclick = () => {
+  readNewsForm();
+  const d = new Date(); d.setUTCMinutes(0, 0, 0);
+  NEWS.unshift({ date: newsDateString(d), title: "", kind: "info", content: "playonline",
+                 body: "", status: false, link: "" });
+  NEWS_SEL = 0;
+  newsMarkDirty();
+  renderNewsList();
+  bindNewsForm();
+  $("#nTitle").focus();
+};
+$("#nDelBtn").onclick = () => {
   const it = NEWS[NEWS_SEL];
-  if (!it) return;
-  it.date = $("#nDate").value;
-  it.title = $("#nTitle").value;
-  it.link = $("#nLink").value.trim();
-  it.status = $("#nStatus").checked;
-  it.body = $("#nBody").value;
-}
-
-["nDate", "nTitle", "nLink", "nBody"].forEach((id) =>
-  $("#" + id).addEventListener("input", () => {
-    readNewsForm(); newsMarkDirty(); renderNewsList(); renderNewsEffect();
-    if (id === "nDate") showDateHint();
-  }));
-$("#nStatus").addEventListener("change", () => {
-  readNewsForm(); newsMarkDirty(); renderNewsList(); renderNewsEffect();
-});
-
-// The debounce above means the last few keystrokes before a refresh would not
-// be in the draft yet. `pagehide` fires on reload, navigation and tab close
-// (unlike `beforeunload`, it is reliable on mobile Safari), so flush there --
-// the whole point of this feature is the accidental refresh.
+  if (!it || !confirm(`Delete "${it.title || "this announcement"}"? Its story page goes on the next publish.`)) return;
+  NEWS.splice(NEWS_SEL, 1);
+  NEWS_SEL = Math.max(0, Math.min(NEWS_SEL, NEWS.length - 1));
+  newsMarkDirty(); renderNewsList(); bindNewsForm();
+};
+const newsMove = (d) => () => {
+  readNewsForm();
+  const j = NEWS_SEL + d;
+  if (j < 0 || j >= NEWS.length) return;
+  [NEWS[NEWS_SEL], NEWS[j]] = [NEWS[j], NEWS[NEWS_SEL]];
+  NEWS_SEL = j;
+  newsMarkDirty(); renderNewsList();
+};
+$("#nUpBtn").onclick = newsMove(-1);
+$("#nDownBtn").onclick = newsMove(1);
 window.addEventListener("pagehide", () => {
   if (!NEWS_DIRTY || !NEWS_DRAFT_KEY) return;
   clearTimeout(NEWS_DRAFT_TIMER);
@@ -2361,174 +2234,130 @@ window.addEventListener("pagehide", () => {
   newsDraftSave();
 });
 
-$("#newsAddBtn").onclick = () => {
-  readNewsForm();
-  // Newest first is the order the ticker shows, and the generator does not
-  // sort -- "newest" is not recoverable from a date string SE never parsed.
-  NEWS.unshift({ date: "", title: "New announcement", kind: "info",
-                 content: "playonline", body: "", status: false, link: "" });
-  NEWS_SEL = 0;
-  newsMarkDirty();
-  renderNewsList();
-  bindNewsForm();
-  $("#nTitle").focus();
-  $("#nTitle").select();
-};
-
-$("#nDelBtn").onclick = () => {
-  const it = NEWS[NEWS_SEL];
-  if (!it) return;
-  if (!confirm(`Delete “${it.title}”?\n\nIts detail page is removed on the next publish.`)) return;
-  NEWS.splice(NEWS_SEL, 1);
-  NEWS_SEL = Math.min(NEWS_SEL, NEWS.length - 1);
-  newsMarkDirty();
-  renderNewsList();
-  bindNewsForm();
-};
-
-const newsMove = (d) => () => {
-  readNewsForm();
-  const j = NEWS_SEL + d;
-  if (j < 0 || j >= NEWS.length) return;
-  [NEWS[NEWS_SEL], NEWS[j]] = [NEWS[j], NEWS[NEWS_SEL]];
-  NEWS_SEL = j;
-  newsMarkDirty();
-  renderNewsList();
-};
-$("#nUpBtn").onclick = newsMove(-1);
-$("#nDownBtn").onclick = newsMove(1);
-
+// --- save and publish ------------------------------------------------------------
 async function saveNews(quiet) {
   readNewsForm();
-  const j = await api("/api/news", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items: NEWS }),
-  });
-  NEWS = j.items || [];          // comes back serial-stamped
+  const j = await post("/api/news", { items: NEWS });
+  NEWS = j.items || [];
   NEWS_DIRTY = false;
-  $("#newsSaveBtn").classList.remove("act");
-  // The store now holds this, so the draft has nothing left to protect.
   NEWS_BASE = JSON.stringify(NEWS);
   clearTimeout(NEWS_DRAFT_TIMER);
   newsDraftClear();
   renderNewsList();
   bindNewsForm();
-  loadNewsOutputs();
-  if (!quiet) toast(`Saved ${NEWS.length} announcement(s)`);
+  $("#nwPvState").textContent = "";
+  await loadNewsOutputs();
+  if (!quiet) toast(`Saved ${NEWS.length} announcement${NEWS.length === 1 ? "" : "s"}`);
   return j;
 }
-
 $("#newsSaveBtn").onclick = async () => {
-  try { await saveNews(); } catch (e) { toast("save failed: " + e.message, true); }
+  try { await saveNews(); } catch (e) { toast("Save failed: " + e.message, true); }
 };
 
-async function newsPublish(dry) {
+// Publish shows what will change first, then writes.
+$("#newsPublishBtn").onclick = async () => {
   try {
-    // Publish reads the STORE, not the form, so an unsaved edit would publish
-    // the previous text. Save first rather than publishing something the
-    // operator can see on screen but did not commit.
     if (NEWS_DIRTY) await saveNews(true);
-    const r = await api("/api/news/publish", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dry_run: !!dry }),
-    });
-    const bits = [`${r.written.length} file(s)`];
-    if (r.pruned.length) bits.push(`${r.pruned.length} removed`);
-    if (r.backed_up.length) bits.push(`${r.backed_up.length} kept as .se-orig`);
-    toast((dry ? "Would write " : "Published ") + bits.join(", "));
-    if (dry) {
-      $("#newsViewRaw").click();
-      $("#newsRaw").textContent =
-        [`${r.written.length} of ${r.total} file(s) would change:`,
-         ...r.written.map((p) => "  " + p),
-         r.pruned.length ? "\nwould remove (announcement deleted):" : "",
-         ...r.pruned.map((p) => "  " + p),
-         r.backed_up.length ? "\nwould keep a .se-orig copy of:" : "",
-         ...r.backed_up.map((p) => "  " + p),
-        ].filter(Boolean).join("\n");
-    } else {
-      loadNewsOutputs();
-    }
-  } catch (e) { toast("publish failed: " + e.message, true); }
-}
-$("#newsPublishBtn").onclick = () => newsPublish(false);
-$("#newsDryBtn").onclick = () => newsPublish(true);
+    const r = await post("/api/news/publish", { dry_run: true });
+    const n = r.written.length + r.pruned.length;
+    $("#nwPubSummary").textContent = n
+      ? `${n} file${n === 1 ? "" : "s"} will be updated on the server. Players see the change the next time the Viewer loads the news.`
+      : "Nothing to publish: players already see these announcements.";
+    $("#nwPubList").innerHTML = [...r.written.map((p) => ["update", p]), ...r.pruned.map((p) => ["remove", p])]
+      .map(([w, p]) => `<div><span>${w}</span><span class="mono" style="font-size:11.5px">${esc(p)}</span></div>`).join("");
+    $("#nwPubGo").disabled = !n;
+    $("#nwPubModal").classList.add("show");
+  } catch (e) { toast("Publish failed: " + e.message, true); }
+};
+$("#nwPubCancel").onclick = () => $("#nwPubModal").classList.remove("show");
+$("#nwPubModal").onclick = (e) => { if (e.target === $("#nwPubModal")) $("#nwPubModal").classList.remove("show"); };
+$("#nwPubGo").onclick = async () => {
+  $("#nwPubGo").disabled = true;
+  try {
+    const r = await post("/api/news/publish", { dry_run: false });
+    $("#nwPubModal").classList.remove("show");
+    toast(`Published: ${r.written.length} file${r.written.length === 1 ? "" : "s"} updated`);
+    await loadNewsOutputs();
+  } catch (e) { toast("Publish failed: " + e.message, true); }
+  finally { $("#nwPubGo").disabled = false; }
+};
 
+// The saved store's output files (for the "Files a publish writes" panel) and
+// whether what players see is up to date.
 async function loadNewsOutputs() {
   try {
     const j = await api("/api/news/outputs");
-    const sel = $("#newsOutput");
-    const keep = sel.value;
-    sel.innerHTML = "";
-    // Only en-US is offered: every other locale gets a byte-identical copy of
-    // the same text, so listing all five would be forty near-duplicate rows.
-    for (const f of j.files) {
-      if (!/\/(en-US)\//.test(f.path) && !/snews\/en-US\//.test(f.path)
-          && !f.path.endsWith("pml/info/news0.pml")) continue;
-      sel.add(new Option(`${f.path}  (${f.bytes} B)`, f.path));
-    }
+    NEWS_PENDING = typeof j.pending === "number" ? j.pending : null;
+    renderNewsStatus();
+    const sel = $("#newsOutput"), keep = sel.value;
+    sel.innerHTML = j.files.filter((f) => /\/en-US\//.test(f.path) || f.path.endsWith("pml/info/news0.pml"))
+      .map((f) => `<option value="${esc(f.path)}">${esc(f.path)} (${f.bytes} B)</option>`).join("");
     if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
-    else {
-      // Default to the page that actually draws something.
-      const page = [...sel.options].find((o) => o.value.includes("snews/"));
-      if (page) sel.value = page.value;
-    }
-    showNewsOutput();
-  } catch (e) { /* the tab is still usable without the preview */ }
+    showNewsFile();
+  } catch (e) { /* the tab still works without it */ }
 }
-
-let NEWS_VIEW = "render";
-async function showNewsOutput() {
+async function showNewsFile() {
   const path = $("#newsOutput").value;
   if (!path) return;
-  let text = "";
   try {
     const r = await fetch("/api/news/preview?path=" + encodeURIComponent(path));
-    text = await r.text();
-    if (!r.ok) throw new Error(text);
-  } catch (e) { text = "preview failed: " + e.message; }
-  $("#newsRaw").textContent = text;
-  // Only the substitute Information page is a page. The rest are data arrays
-  // SE's own pages read, so there is nothing for the renderer to draw and
-  // pretending otherwise would show a convincing blank stage.
-  const drawable = /snews\//.test(path);
-  $("#newsViewRender").disabled = !drawable;
-  const view = drawable ? NEWS_VIEW : "raw";
-  $("#newsPreviewWrap").style.display = view === "render" ? "" : "none";
-  $("#newsRaw").style.display = view === "render" ? "none" : "";
-  $("#newsViewRender").classList.toggle("on", view === "render");
-  $("#newsViewRaw").classList.toggle("on", view !== "render");
-  if (view === "render") {
-    try {
-      describeRenderInto(PML.render(text, $("#newsStage"), path, {}), "#newsNote");
-    } catch (e) {
-      $("#newsStage").innerHTML =
-        `<div style="color:#ff8a8a;padding:12px;font:13px monospace">render error: ${esc(e.message)}</div>`;
-    }
-  }
+    $("#newsRaw").textContent = await r.text();
+  } catch (e) { $("#newsRaw").textContent = ""; }
 }
-$("#newsOutput").addEventListener("change", showNewsOutput);
-$("#newsViewRender").onclick = () => { NEWS_VIEW = "render"; showNewsOutput(); };
-$("#newsViewRaw").onclick = () => { NEWS_VIEW = "raw"; showNewsOutput(); };
+$("#newsOutput").addEventListener("change", showNewsFile);
 
-// A one-line "what did the renderer actually find" note. The PML tab's own
-// describeRender() writes into #stageNote and reads ACTIVE_FILE, so it cannot
-// be reused here; this is the same answer in the same field names PML.render
-// returns (mode / placed / records / title).
-function describeRenderInto(r, sel) {
-  const el = $(sel);
-  if (!el) return;
-  if (!r) { el.textContent = ""; return; }
-  const bits = [];
-  if (r.title) bits.push(`&ldquo;${esc(r.title)}&rdquo;`);
-  if (r.mode === "page" || r.mode === "layout") {
-    bits.push(`<b>${r.placed}</b> element${r.placed === 1 ? "" : "s"} placed`);
-  } else if (r.mode === "document") {
-    bits.push(`<b>${r.records}</b> text record${r.records === 1 ? "" : "s"}`);
-  } else {
-    bits.push("<b>No layout</b> (data file)");
+// --- the live preview ---------------------------------------------------------------
+let NEWS_PV_TIMER = null, NEWS_PV_SEQ = 0;
+function scheduleNewsPreview() {
+  clearTimeout(NEWS_PV_TIMER);
+  NEWS_PV_TIMER = setTimeout(renderNewsPreview, 450);
+}
+function fitNewsStage() {
+  const boxEl = $("#newsStageBox"), s = $("#newsStage");
+  const z = Math.min(2, Math.max(0.5, (boxEl.clientWidth - 22) / 640));
+  s.style.transform = `scale(${z})`;
+  s.style.transformOrigin = "0 0";
+  $("#newsStageScale").style.width = 640 * z + "px";
+  $("#newsStageScale").style.height = 480 * z + "px";
+}
+window.addEventListener("resize", () => { if (CUR_TAB === "news") fitNewsStage(); });
+
+const NEWS_VIEW_NOTE = {
+  snews: "The page players see around login.",
+  story: "SE's story page, for the selected announcement.",
+  ticker: "SE's main menu. The headline scrolls in the ticker bar near the top.",
+};
+document.querySelectorAll("#nwView button").forEach((b) => {
+  b.classList.toggle("on", b.dataset.v === NEWS_VIEW);
+  b.onclick = () => {
+    NEWS_VIEW = b.dataset.v;
+    store.set("newsView", NEWS_VIEW);
+    document.querySelectorAll("#nwView button").forEach((x) => x.classList.toggle("on", x === b));
+    renderNewsPreview();
+  };
+});
+
+async function renderNewsPreview() {
+  if (!NEWS_META) return;
+  readNewsForm();
+  const seq = ++NEWS_PV_SEQ;
+  $("#nwPvState").textContent = "Updating...";
+  let r;
+  try {
+    r = await post("/api/news/render", { items: NEWS, view: NEWS_VIEW, index: NEWS_SEL });
+  } catch (e) {
+    if (seq !== NEWS_PV_SEQ) return;
+    $("#nwPvState").textContent = "";
+    $("#newsNote").innerHTML = `<span class="warn">Cannot preview: ${esc(e.message)}</span>`;
+    return;
   }
-  el.innerHTML = bits.join(" &middot; ");
+  if (seq !== NEWS_PV_SEQ) return;
+  await PML.ready();
+  fitNewsStage();
+  const res = PML.render(r.text, $("#newsStage"), r.path, {});
+  $("#nwPvState").textContent = NEWS_DIRTY ? "Showing unsaved changes" : "";
+  $("#newsNote").textContent = NEWS_VIEW_NOTE[NEWS_VIEW] +
+    (res.standIn ? ` ${res.standIn} character${res.standIn === 1 ? "" : "s"} are not in the Viewer font.` : "");
 }
 
 // ---- overview ----

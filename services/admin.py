@@ -156,6 +156,8 @@ SESSION_STORE = os.environ.get(
 LOCKOUT_AFTER = 10
 LOCKOUT_WINDOW = 300.0
 WWW_ROOT = os.environ.get("POL_ADMIN_WWW", "/www")
+#: The mirror's copy of the Viewer's local tree, which every `file:` src names.
+CLIENT_TREE = os.path.join("wh000.pol.com", "pml")
 
 # pmlus text cipher (worker-out/pmlcodec.py::decode_text, inlined so the admin
 # container needs no extra mount). Most portal pages under www/wh000.pol.com are
@@ -522,6 +524,13 @@ def _pml_roots(rel_path):
     start_dir = os.path.abspath(os.path.join(root, *dirs))
     if not host_dirs or not os.path.isdir(start_dir):
         return [root], [root], root
+    # `file:` names the Viewer's OWN local copy of the portal (viewer/data/
+    # pmlus), whichever host served the page -- newsgen's Information page on
+    # info.playonline.com draws its buttons from `file:/img_s/...`. The mirror
+    # holds that tree as wh000.pol.com/pml, so it is the last place to look.
+    client = os.path.join(root, CLIENT_TREE)
+    if os.path.isdir(client) and client not in tree_dirs:
+        tree_dirs.append(client)
     return host_dirs, tree_dirs or host_dirs, start_dir
 
 
@@ -545,9 +554,12 @@ def _pml_resolve(src, base, host_dirs, tree_dirs):
         cands = ([os.path.join(base, s)]
                  + [os.path.join(t, s) for t in tree_dirs]
                  + [os.path.join(h, s) for h in host_dirs])
+    # A result must stay inside the page's hosts -- or the Viewer's local tree,
+    # which _pml_roots puts last in tree_dirs for `file:` srcs.
+    allowed = list(host_dirs) + [t for t in tree_dirs if t not in host_dirs]
     for cand in cands:
         fp = os.path.abspath(cand)
-        if any(fp == h or fp.startswith(h + os.sep) for h in host_dirs) \
+        if any(fp == h or fp.startswith(h + os.sep) for h in allowed) \
                 and os.path.isfile(fp):
             return fp
     return None
@@ -1892,6 +1904,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._news_save()
         if path == "/api/news/publish":
             return self._news_publish()
+        if path == "/api/news/render":
+            return self._news_render()
         return self._send(404, {"error": "not found"})
 
     # -- static / art -------------------------------------------------------- #
@@ -3171,6 +3185,9 @@ class Handler(BaseHTTPRequestHandler):
             "files": [{"path": rel, "bytes": len(text.encode("utf-8"))}
                       for rel, text in sorted(files.items(), key=lambda kv: rank(kv[0]))],
             "stale": newsgen.stale_details(items, WWW_ROOT),
+            # How many files a publish of the SAVED store would change: 0 means
+            # what players see is up to date. A dry run writes nothing.
+            "pending": self._news_pending(items),
         })
 
     def _news_preview(self):
@@ -3186,6 +3203,116 @@ class Handler(BaseHTTPRequestHandler):
         if rel not in files:
             return self._send(404, {"error": "not an output of this store"})
         self._send(200, files[rel], "text/plain; charset=utf-8")
+
+    #: The pages a player sees the news on, as SE wrote them. Each reads the
+    #: files newsgen writes, so rendering them with those files swapped in
+    #: shows a publish before it happens.
+    _NEWS_VIEWS = {
+        "ticker": "wh000.pol.com/pml/main/index.pml",       # the main menu ticker
+        "info": "wh000.pol.com/pml/info/index.pml",         # the Information section
+        "story": "wh000.pol.com/pml/info/index2.pml",       # one story's page
+        "snews": "info.playonline.com/snews/en-US/index.pml",   # our Information page
+    }
+
+    def _news_render(self):
+        """Render a news page from UNSAVED announcements: {items, view, serial,
+        cnt} -> {text, path}. Nothing is written; the files a publish would
+        produce are laid over the mirror in memory, so the page includes them
+        exactly as a client would after publishing."""
+        body = self._json_body()
+        view = body.get("view") or "snews"
+        page = self._NEWS_VIEWS.get(view)
+        if not page:
+            return self._send(400, {"error": "unknown view"})
+        # A preview follows the typing: an announcement just added has no
+        # headline yet, and that must not blank the page. Save still refuses it.
+        raw = [dict(it, title=str(it.get("title") or "").strip() or "(no headline)",
+                    date=str(it.get("date") or "").strip() or "(no date)")
+               if isinstance(it, dict) else it for it in (body.get("items") or [])]
+        try:
+            items = newsgen.validate(raw)
+            newsgen.assign_serials(items)
+            files = newsgen.outputs(items, WWW_ROOT)
+        except newsgen.NewsError as exc:
+            return self._send(400, {"error": str(exc)})
+        overlay = {k.replace("\\", "/"): v for k, v in files.items()}
+        root = os.path.abspath(WWW_ROOT)
+        host_dirs, tree_dirs, start = _pml_roots(page)
+
+        def rel_of(fs):
+            return os.path.relpath(fs, root).replace(os.sep, "/")
+
+        def resolve(src, base):
+            s = (src or "").strip()
+            base = base or start
+            # the overlay first: a new story's <serial>.pml exists only there
+            if s.startswith("/"):
+                cands = [os.path.join(h, s.lstrip("/")) for h in host_dirs]
+            elif re.match(r"^file:", s):
+                cands = [os.path.join(t, re.sub(r"^file:/*", "", s)) for t in tree_dirs]
+            else:
+                cands = [os.path.join(base, s)]
+            for c in cands:
+                key = rel_of(os.path.abspath(c))
+                if key in overlay:
+                    return overlay[key], os.path.dirname(os.path.abspath(c))
+            got = _pml_resolve(s, base, host_dirs, tree_dirs)
+            if not got:
+                return None
+            try:
+                return _load_pml_text(got)[0], os.path.dirname(got)
+            except Exception:
+                return None
+
+        if page in overlay:
+            text = overlay[page]
+        else:
+            try:
+                text = _load_pml_text(os.path.join(root, page))[0]
+            except OSError:
+                return self._send(404, {"error": f"{page} is not in the mirror"})
+        # The story to show: by position (a new, unsaved story has no serial
+        # until this copy assigns one), else by serial, else the first.
+        idx = body.get("index")
+        if isinstance(idx, int) and 0 <= idx < len(items):
+            item = items[idx]
+        else:
+            item = next((it for it in items if str(it["serial"]) == str(body.get("serial"))),
+                        items[0] if items else None)
+        serial = str(item["serial"]) if item else ""
+        sysvars = {"seri": serial,
+                   "_LAST_LOGIN": "", "_GM_CALL_STATUS": 0, "_CONTENTPLAYING": 0,
+                   "_PLAYINGCLASSID": -1, "_LAST_PLAYED_CONTENT": 0, "_FALSE": 0,
+                   "_RND": 0}
+        if view == "info" and item is not None:
+            # Open SE's Information section on the story's own category tab,
+            # the way its ticker link does: $dat = -1000009900 - cat*10000,
+            # and index.pml unpacks the category from that (newsgen.feed).
+            sysvars["dat"] = -1000009900 - newsgen.KINDS[item["kind"]][1] * 10000
+        elif view == "story" and item is not None:
+            # As a click from that service's list sends it: index.pml passes
+            # $dat = cnt_id + bk_cnt*100 + cat_id*10000, and index2.pml takes
+            # its backdrop from cnt_id ($bg[$cnt_id]; 0 = none, dark text on
+            # black).
+            cid = newsgen.CONTENTS.get(item["content"], 1)
+            sysvars["dat"] = cid + cid * 100 + newsgen.KINDS[item["kind"]][1] * 10000
+        report = {}
+        try:
+            out = pmleval.expand(text, resolve_include=resolve, sysvars=sysvars,
+                                 base=start, report=report)
+        except Exception as exc:
+            return self._send(500, {"error": str(exc)})
+        self._send(200, {"text": out, "path": page, "serial": serial,
+                         "missing": report.get("missing") or [],
+                         "unresolved": report.get("unresolved") or []})
+
+    @staticmethod
+    def _news_pending(items):
+        try:
+            r = newsgen.publish(items, WWW_ROOT, dry_run=True)
+            return len(r.get("written") or []) + len(r.get("pruned") or [])
+        except Exception:
+            return None
 
     def _news_publish(self):
         body = self._json_body()
