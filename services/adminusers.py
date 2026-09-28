@@ -336,6 +336,40 @@ def alerted_recent(conn, limit=10):
                         (limit,)).fetchall()
 
 
+#: Where a user report or an issue report stands (admin_triage, migration
+#: 0006). No row = open. Kept here, not beside the reports: issue bundles and
+#: user reports are written by other services, and neither should change to
+#: track a status.
+TRIAGE_KINDS = ("issues", "reports")
+TRIAGE_STATUSES = ("open", "resolved", "wontfix")
+TRIAGE_NOTE_MAX = 500
+
+
+def triage_map(conn, kind):
+    """{id: {status, note, by, at}} for one kind. Reports with no row are open."""
+    return {r["id"]: {"status": r["status"], "note": r["note"] or "",
+                      "by": r["by"], "at": r["at"]}
+            for r in conn.execute("SELECT * FROM admin_triage WHERE kind = %s",
+                                  (kind,))}
+
+
+def triage_set(conn, kind, rid, status, note="", by=None):
+    if kind not in TRIAGE_KINDS:
+        raise ModError("unknown report kind")
+    if status not in TRIAGE_STATUSES:
+        raise ModError("status must be open, resolved or wontfix")
+    rid = str(rid or "").strip()
+    if not rid:
+        raise ModError("missing report id")
+    note = str(note or "").strip()[:TRIAGE_NOTE_MAX]
+    conn.execute('INSERT INTO admin_triage (kind, id, status, note, "by", at) '
+                 "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (kind, id) DO UPDATE SET "
+                 "status = excluded.status, note = excluded.note, "
+                 '"by" = excluded."by", at = excluded.at',
+                 (kind, rid, status, note, by, time.time()))
+    conn.commit()
+
+
 def codes_made_since(conn, by, since):
     return conn.execute('SELECT COUNT(*) FROM admin_code_origin WHERE lower("by")'
                         " = lower(%s) AND at >= %s", (by, since)).fetchone()[0]

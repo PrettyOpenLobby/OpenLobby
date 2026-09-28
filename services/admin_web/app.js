@@ -842,41 +842,61 @@ async function toggleExtMail(r, btn) {
 // innerHTML: every byte in a bundle came off a client machine, and a log line
 // can contain anything at all. The screenshot is the one exception and it goes
 // through an <img src>, where bytes cannot become markup.
+let ISSUES = [], ISSUE_SEL = null;
+const issFilter = segControl("#issFilter", "issFilter", "open", () => renderIssues());
 async function loadIssues() {
-  const body = $("#issuesBody");
   try {
     const rows = await api("/api/issues");
     if (rows.error) { toast(rows.error, true); return; }
-    body.innerHTML = "";
-    $("#issueDetail").style.display = "none";
-    if (!rows.length) {
-      body.innerHTML = `<tr><td colspan="5" style="color:var(--muted)">` +
-        `No issue reports filed.</td></tr>`;
-      return;
-    }
-    rows.forEach((r) => {
-      const w = r.window || {};
-      const first = String(r.description || "").split("\n")[0];
-      const tr = document.createElement("tr");
-      tr.style.cursor = "pointer";
-      tr.innerHTML =
-        `<td style="color:var(--muted)">${esc((r.received_at || "").slice(0, 19).replace("T", " "))}</td>` +
-        `<td><b>${esc(r.handle) || "-"}</b><br>` +
-          `<span style="color:var(--muted)">${esc(r.host) || ""}</span></td>` +
-        `<td>${esc(r.title) || "-"}</td>` +
-        `<td>${esc(first) || "<i>(no description)</i>"}</td>` +
-        // The honest-negative column. A bundle whose lines could not be tied to
-        // this client is the case you must not read as "the server was quiet".
-        `<td>${w.correlation_warning
-          ? `<span title="${esc(w.correlation_warning)}">WARNING: ${esc(w.correlated_lines || 0)}</span>`
-          : esc(w.correlated_lines ?? "-")}</td>`;
-      tr.onclick = () => showIssue(r);
-      body.appendChild(tr);
-    });
+    ISSUES = Array.isArray(rows) ? rows : [];
+    triFillSelect("#issTitle", ISSUES.map((r) => r.title));
+    renderIssues();
+    const cur = ISSUES.find((r) => r.id === ISSUE_SEL);
+    if (cur) showIssue(cur, true); else $("#issueDetail").style.display = "none";
   } catch (e) { toast(e.message, true); }
 }
 
-function showIssue(r) {
+function renderIssues() {
+  const body = $("#issuesBody");
+  const f = issFilter(), t = $("#issTitle").value;
+  const q = $("#issSearch").value.trim().toLowerCase();
+  const rows = ISSUES.filter((r) => triMatch(r, f) && (!t || r.title === t) &&
+    (!q || [r.handle, r.host, r.title, r.description, r.id].join(" ").toLowerCase().includes(q)));
+  $("#issCount").textContent = triCount(rows.length, ISSUES);
+  body.innerHTML = "";
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">` +
+      (ISSUES.length ? "No issue reports match." : "No issue reports filed.") + `</td></tr>`;
+    return;
+  }
+  rows.forEach((r) => {
+    const w = r.window || {};
+    const first = String(r.description || "").split("\n")[0];
+    const tr = document.createElement("tr");
+    tr.style.cursor = "pointer";
+    tr.className = (triClosed(r) ? "tri-closed" : "") + (r.id === ISSUE_SEL ? " tri-sel-row" : "");
+    tr.innerHTML =
+      `<td style="color:var(--muted)">${esc((r.received_at || "").slice(0, 19).replace("T", " "))}</td>` +
+      `<td><b>${esc(r.handle) || "-"}</b><br>` +
+        `<span style="color:var(--muted)">${esc(r.host) || ""}</span></td>` +
+      `<td>${esc(r.title) || "-"}</td>` +
+      `<td>${esc(first) || "<i>(no description)</i>"}</td>` +
+      // The honest-negative column. A bundle whose lines could not be tied to
+      // this client is the case you must not read as "the server was quiet".
+      `<td>${w.correlation_warning
+        ? `<span title="${esc(w.correlation_warning)}">WARNING: ${esc(w.correlated_lines || 0)}</span>`
+        : esc(w.correlated_lines ?? "-")}</td>` +
+      `<td>${triChip(r)}</td>`;
+    tr.onclick = () => { ISSUE_SEL = r.id; renderIssues(); showIssue(r); };
+    body.appendChild(tr);
+  });
+}
+$("#issTitle").addEventListener("change", () => renderIssues());
+$("#issSearch").addEventListener("input", () => renderIssues());
+
+function showIssue(r, refresh) {
+  triPaint("iss", "issues", r, () => renderIssues());
+  if (refresh) return;          // a reload keeps the file already open
   const w = r.window || {};
   $("#issueId").textContent = r.id || "";
   $("#issueDesc").textContent = r.description || "(no description)";
@@ -943,37 +963,112 @@ async function openIssueFile(id, rel) {
 // pseudo-XML <harassment_form_*> tags, parsed server-side and filed as JSON; this
 // only renders them. The attached transcript is the client's own, so it is shown
 // verbatim rather than reformatted.
+let REPORTS = [], REPORT_SEL = null;
+const repFilter = segControl("#repFilter", "repFilter", "open", () => renderReports());
 async function loadReports() {
-  const body = $("#reportsBody");
   try {
     const rows = await api("/api/reports");
     if (rows.error) { toast(rows.error, true); return; }
-    body.innerHTML = "";
-    $("#reportLogPanel").style.display = "none";
-    if (!rows.length) {
-      body.innerHTML = `<tr><td colspan="5" style="color:var(--muted)">No reports filed.</td></tr>`;
-      return;
-    }
-    rows.forEach((r) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML =
-        `<td style="color:var(--muted)">${esc((r.received_at || "").slice(0, 19).replace("T", " "))}</td>` +
-        `<td><b>${esc(r.suspect) || "-"}</b></td>` +
-        `<td>${esc(r.application) || "-"}</td>` +
-        `<td><code class="mono">${esc(r.from) || "-"}</code></td>` +
-        `<td>${esc(r.explanation) || "-"}</td>`;
-      if (r.log) {
-        tr.style.cursor = "pointer";
-        tr.title = "Show the attached transcript";
-        tr.onclick = () => {
-          $("#reportLogWho").textContent = r.suspect || "(unnamed)";
-          $("#reportLog").textContent = r.log;
-          $("#reportLogPanel").style.display = "";
-        };
-      }
-      body.appendChild(tr);
-    });
+    REPORTS = Array.isArray(rows) ? rows : [];
+    triFillSelect("#repTitle", REPORTS.map((r) => r.application));
+    renderReports();
+    const cur = REPORTS.find((r) => r.id === REPORT_SEL);
+    if (cur) showReport(cur); else $("#reportLogPanel").style.display = "none";
   } catch (e) { toast(e.message, true); }
+}
+
+function renderReports() {
+  const body = $("#reportsBody");
+  const f = repFilter(), t = $("#repTitle").value;
+  const q = $("#repSearch").value.trim().toLowerCase();
+  const rows = REPORTS.filter((r) => triMatch(r, f) && (!t || r.application === t) &&
+    (!q || [r.suspect, r.from, r.contact, r.application, r.explanation].join(" ").toLowerCase().includes(q)));
+  $("#repCount").textContent = triCount(rows.length, REPORTS);
+  body.innerHTML = "";
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">` +
+      (REPORTS.length ? "No reports match." : "No reports filed.") + `</td></tr>`;
+    return;
+  }
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    tr.style.cursor = "pointer";
+    tr.className = (triClosed(r) ? "tri-closed" : "") + (r.id === REPORT_SEL ? " tri-sel-row" : "");
+    tr.innerHTML =
+      `<td style="color:var(--muted)">${esc((r.received_at || "").slice(0, 19).replace("T", " "))}</td>` +
+      `<td><b>${esc(r.suspect) || "-"}</b></td>` +
+      `<td>${esc(r.application) || "-"}</td>` +
+      `<td><code class="mono">${esc(r.from) || "-"}</code></td>` +
+      `<td>${esc(r.explanation) || "-"}</td>` +
+      `<td>${triChip(r)}</td>`;
+    tr.onclick = () => { REPORT_SEL = r.id; renderReports(); showReport(r); };
+    body.appendChild(tr);
+  });
+}
+$("#repTitle").addEventListener("change", () => renderReports());
+$("#repSearch").addEventListener("input", () => renderReports());
+
+// The attached transcript is the client's own, so it is shown verbatim.
+function showReport(r) {
+  $("#reportLogWho").textContent = r.suspect || "(unnamed)";
+  $("#reportExpl").textContent = r.explanation || "(no explanation)";
+  $("#reportLogHint").hidden = !r.log;
+  $("#reportLog").hidden = !r.log;
+  $("#reportLog").textContent = r.log || "";
+  triPaint("rep", "reports", r, () => renderReports());
+  $("#reportLogPanel").style.display = "";
+}
+
+// ---- report status, shared by Issues and Reports ----
+// Open / Resolved / Won't fix, kept in the admin database. Changing it tells
+// the player nothing; it is how the team sees what is still waiting.
+const TRI_LABEL = { open: "Open", resolved: "Resolved", wontfix: "Won't fix" };
+const triClosed = (r) => !!r.status && r.status !== "open";
+const triMatch = (r, f) => f === "all" || (f === "closed") === triClosed(r);
+const triChip = (r) =>
+  `<span class="tri-st ${esc(r.status || "open")}">${TRI_LABEL[r.status] || "Open"}</span>`;
+function triCount(shown, all) {
+  const open = all.filter((r) => !triClosed(r)).length;
+  return `${shown} shown, ${open} open of ${all.length}`;
+}
+function triFillSelect(sel, values) {
+  const el = $(sel), keep = el.value;
+  const opts = [...new Set(values.filter(Boolean))].sort();
+  el.innerHTML = el.options[0].outerHTML +
+    opts.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+  el.value = opts.includes(keep) ? keep : "";
+}
+function triPaint(pfx, kind, r, after) {
+  const st = r.status || "open";
+  const chip = $(`#${pfx}StChip`);
+  chip.className = "tri-st " + st;
+  chip.textContent = TRI_LABEL[st] || "Open";
+  $(`#${pfx}StBy`).textContent = r.status_by && r.status_at
+    ? `${TRI_LABEL[st]} by ${r.status_by}, ${ago(r.status_at * 1000)}` : "";
+  const note = $(`#${pfx}StNote`);
+  note.value = r.status_note || "";
+  const btn = (s, label, cls) => `<button class="${cls} sm" data-st="${s}">${label}</button>`;
+  const acts = $(`#${pfx}StActs`);
+  acts.innerHTML = st === "open"
+    ? btn("resolved", "Mark resolved", "act") + btn("wontfix", "Won't fix", "ghost")
+    : btn("open", "Reopen", "ghost") + btn(st, "Save note", "ghost");
+  acts.onclick = async (e) => {
+    const b = e.target.closest("button[data-st]");
+    if (!b) return;
+    b.disabled = true;
+    try {
+      const status = b.dataset.st, text = note.value.trim();
+      await api("/api/triage", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, id: r.id, status, note: text }) });
+      const changed = status !== st;
+      Object.assign(r, { status, status_note: text, status_by: SESSION.user || "you",
+                         status_at: Date.now() / 1000 });
+      toast(!changed ? "Note saved" : status === "open" ? "Reopened"
+            : `Marked ${TRI_LABEL[status].toLowerCase()}`);
+      triPaint(pfx, kind, r, after);
+      after();
+    } catch (err) { toast(err.message, true); b.disabled = false; }
+  };
 }
 
 // ---- the GM desk: requests, the duty switch, and the room ----
@@ -2601,6 +2696,7 @@ async function loadOverview() {
   const unused = C.filter((r) => !codeUsed(r)).length;
   const openCalls = G.filter((r) => r.status === "open");
   const newI = countNew("issues", I), newR = countNew("reports", R);
+  const openI = I.filter((r) => !triClosed(r)).length, openR = R.filter((r) => !triClosed(r)).length;
   const week = Date.now() - 7 * 86400e3;
   const newAcc = A.filter((r) => isoMs(r.created_at) > week).length;
   const card = (go, lab, num, sub, cls) => !tabAllowed(go) ? "" :
@@ -2614,10 +2710,10 @@ async function loadOverview() {
     card("codes", "Unused codes", codes ? unused : "?", `of ${C.length} total`) +
     card("gmcalls", "Open GM calls", calls ? openCalls.length : "?", duty,
          openCalls.length ? "warn" : "") +
-    card("issues", "Issue reports", issues ? I.length : "?",
-         newI ? `${newI} new` : "none new", newI ? "warn" : "") +
-    card("reports", "User reports", reports ? R.length : "?",
-         newR ? `${newR} new` : "none new", newR ? "warn" : "") +
+    card("issues", "Open issue reports", issues ? openI : "?",
+         (newI ? `${newI} new, ` : "") + `${I.length} in total`, newI ? "warn" : "") +
+    card("reports", "Open user reports", reports ? openR : "?",
+         (newR ? `${newR} new, ` : "") + `${R.length} in total`, newR ? "warn" : "") +
     card("news", "Announcements", news && news.items ? news.items.length : "?",
          news && news.writable === false ? "publishing unavailable" : "published",
          news && news.writable === false ? "warn" : "");
@@ -2675,7 +2771,7 @@ document.addEventListener("click", (e) => {
 function countNew(kind, rows) {
   const seen = +store.get("seen:" + kind, 0);
   if (!seen) { store.set("seen:" + kind, String(Date.now())); return 0; }
-  return rows.filter((r) => isoMs(r.received_at) > seen).length;
+  return rows.filter((r) => !triClosed(r) && isoMs(r.received_at) > seen).length;
 }
 function markSeen(kind) {
   store.set("seen:" + kind, String(Date.now()));

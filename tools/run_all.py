@@ -331,6 +331,8 @@ SUITES = [
     # Refusal codes, login notices, the admin panel's controls and Kick.
     ("account_state", [sys.executable, "account_state_test.py"], TOOLS, {}),
     ("kick_cleanup",  [sys.executable, "kick_cleanup_test.py"], TOOLS, {}),
+    # Open / resolved / won't fix on the admin panel's report tabs.
+    ("admin_triage",  [sys.executable, "admin_triage_test.py"], TOOLS, {}),
     ("group_check",   [sys.executable, "group_check.py"],     TOOLS, {}),
     # The client's "N/M in chat" counter has two inputs served by two different
     # containers -- the 7:12 member total and the IRC roster -- so neither can
