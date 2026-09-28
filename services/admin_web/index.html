@@ -707,7 +707,7 @@
           <div id="ovGames" class="chiprow"></div>
           <ul class="feed" id="ovOnline"></ul>
         </div>
-        <div class="panel" data-owner>
+        <div class="panel" data-perm="health">
           <h2>Services</h2>
           <ul class="feed" id="ovHealth"></ul>
           <div class="hint" id="ovHealthFoot"></div>
@@ -726,11 +726,11 @@
       <div class="panel">
         <h2>Quick actions</h2>
         <div class="quick">
-          <button class="act" data-go="accounts:newHandle" data-owner>Create an account</button>
+          <button class="act" data-go="accounts:newHandle" data-perm="accounts_manage">Create an account</button>
           <button class="ghost" data-go="codes:code" data-perm="codes">Make registration codes</button>
-          <button class="ghost" data-go="accounts:grantPol" data-owner>Grant content</button>
+          <button class="ghost" data-go="accounts:grantPol" data-perm="accounts_manage">Grant content</button>
           <button class="ghost" data-go="gmcalls" data-perm="gm">Open the GM desk</button>
-          <button class="ghost" data-go="news" data-owner>Write an announcement</button>
+          <button class="ghost" data-go="news" data-perm="news_edit">Write an announcement</button>
         </div>
         <p class="hint">Shortcuts: <span class="kbd">/</span> search the current list,
           <span class="kbd">R</span> refresh, <span class="kbd">1</span>-<span class="kbd">9</span>
@@ -783,7 +783,7 @@
                placeholder="Search code, note, content or who redeemed it"></div>
           <span class="count" id="codeCountLbl"></span>
           <button class="ghost sm" id="codeCopyShown">Copy shown</button>
-          <button class="danger sm" id="codeVoidShown" data-owner>Void shown</button>
+          <button class="danger sm" id="codeVoidShown" data-perm="codes_void">Void shown</button>
           <button class="ghost sm" id="codeCsv">Export CSV</button>
         </div>
         <p class="hint" id="codeLimitHint" hidden></p>
@@ -812,7 +812,7 @@
           <th>Playable</th><th>Clients</th><th>Login status</th><th>Created</th><th></th></tr></thead>
           <tbody id="accountsBody"></tbody></table></div>
       </div>
-      <div class="grid2" id="acctForms" data-owner>
+      <div class="grid2" id="acctForms" data-perm="accounts_manage">
       <div class="panel" id="grantPanel">
         <h2>Grant content to an account</h2>
         <p class="hint">Adds titles to an account directly, without a registration code.</p>
@@ -1049,7 +1049,7 @@
         <div class="nw-acts">
           <button class="ghost" id="newsAddBtn">New announcement</button>
           <button class="ghost" id="newsSaveBtn">Save draft</button>
-          <button class="act" id="newsPublishBtn">Publish&hellip;</button>
+          <button class="act" id="newsPublishBtn" data-perm="news_publish">Publish&hellip;</button>
         </div>
       </div>
       <div id="newsState" class="note warn" hidden></div>
@@ -1269,7 +1269,7 @@
       </div>
       <div class="panel" id="modsPanel" data-owner>
         <h2>Moderators</h2>
-        <p class="hint">Additional logins with limited access. A moderator can only use the areas ticked for them. Account management, news, PML and this tab remain owner-only.</p>
+        <p class="hint">Additional logins with limited access. A moderator can only use the areas ticked for them. Adding moderators and the operator sign-in stay with the owner.</p>
         <div class="toolbar">
           <button class="act sm" id="modAdd">Add moderator</button>
           <span class="count" id="modCount"></span>
@@ -1281,7 +1281,7 @@
           <tbody id="modsBody"></tbody></table></div>
       </div>
 
-      <div class="panel" id="alertsPanel" data-owner>
+      <div class="panel" id="alertsPanel" data-perm="settings">
         <h2>GM call alerts</h2>
         <p class="hint">New GM calls are posted to a Discord channel and sent to every
           device that turned alerts on from the GM Calls tab.</p>
@@ -1307,7 +1307,7 @@
         </details>
       </div>
 
-      <div class="panel" id="checksPanel" data-owner>
+      <div class="panel" id="checksPanel" data-perm="settings">
         <h2>Service checks</h2>
         <p class="hint">Shown on the Overview. One per line: a name and a port, or a
           name and <code class="mono">host:port</code>.</p>
@@ -1320,7 +1320,7 @@
         <div style="margin-top:12px"><button class="act sm" id="checksSave">Save checks</button></div>
       </div>
 
-      <div class="panel" id="auditPanel" data-owner>
+      <div class="panel" id="auditPanel" data-perm="audit">
         <h2>Activity</h2>
         <p class="hint">Changes made through the panel, newest first. Passwords are never recorded.</p>
         <div class="toolbar">
@@ -1462,7 +1462,7 @@
         <button class="ghost sm" id="acctClose">Close</button>
       </div>
       <div id="acctBody"></div>
-      <div class="foot" id="acctActions" data-owner></div>
+      <div class="foot" id="acctActions"></div>
     </div>
   </div>
 

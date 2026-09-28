@@ -333,6 +333,8 @@ SUITES = [
     ("kick_cleanup",  [sys.executable, "kick_cleanup_test.py"], TOOLS, {}),
     # Open / resolved / won't fix on the admin panel's report tabs.
     ("admin_triage",  [sys.executable, "admin_triage_test.py"], TOOLS, {}),
+    # Each moderator permission opens its own endpoints and no others.
+    ("admin_perms",   [sys.executable, "admin_perms_test.py"], TOOLS, {}),
     # A GM Call ticket keeps the raw 0x102 body beside the decoded fields.
     ("gmd_ticket_raw", [sys.executable, "test_gmd_ticket_raw.py"], TESTS, {}),
     ("group_check",   [sys.executable, "group_check.py"],     TOOLS, {}),

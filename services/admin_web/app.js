@@ -70,7 +70,7 @@ function writeHash(tab, path) {
 const isOwner = () => SESSION.role !== "mod";
 const can = (p) => isOwner() || (SESSION.perms || []).includes(p);
 const TAB_PERM = { accounts: "accounts_view", codes: "codes", reports: "reports",
-                   issues: "reports", gmcalls: "gm", news: "owner", pml: "owner" };
+                   issues: "reports", gmcalls: "gm", news: "news_edit", pml: "pml" };
 const tabAllowed = (t) => !TAB_PERM[t] || (TAB_PERM[t] === "owner" ? isOwner() : can(TAB_PERM[t]));
 const visibleTabs = () => TABS.filter(tabAllowed);
 
@@ -112,7 +112,9 @@ function loadTab(name, refresh) {
   if (name === "pml" && refresh) PML_LIST_READY = loadPmlFileList();
   if (name === "security") {
     loadSession(); loadSessions();
-    if (isOwner()) { loadMods(); loadAudit(); loadAlerts(); }
+    if (isOwner()) loadMods();
+    if (can("audit")) loadAudit();
+    if (can("settings")) loadAlerts();
   }
 }
 
@@ -374,7 +376,7 @@ function renderCodes() {
       `<td class="muted" style="white-space:nowrap">${r.expires_at && !used
         ? esc(new Date(r.expires_at * 1000).toLocaleDateString()) : ""}</td>` +
       `<td><span class="pill ${used ? "used" : "open"}" title="${esc(r.redeemed_at || "")}">${used ? by : "unused"}</span></td>` +
-      `<td style="text-align:right">${used || !isOwner() ? "" :
+      `<td style="text-align:right">${used || !can("codes_void") ? "" :
         `<button class="danger sm" data-void="${esc(r.code)}" title="Delete this unused code">Void</button>`}</td>` +
       `</tr>`;
   }).join("");
@@ -575,23 +577,23 @@ function renderAccounts() {
       `<td class="clients">${clients.length ? esc(clients.join(", ")) : "never signed in"}</td>` +
       `<td><div class="account-state"><span class="kind">Refusal</span>` +
         `<span class="pill ${r.effective_reject_code ? "used" : "open"}" title="${esc(refusal + refusalTime)}">${esc(refusal)}</span>` +
-        (isOwner() ? `<button class="ghost" data-i="${i}" data-act="refusal">Set</button>` : "") + `</div>` +
+        (can("accounts_manage") ? `<button class="ghost" data-i="${i}" data-act="refusal">Set</button>` : "") + `</div>` +
         `<div class="account-state"><span class="kind">Notice</span>` +
         `<span class="pill open" title="${esc(notice + noticeDelivery)}">${esc(notice)}</span>` +
-        (isOwner() ? `<button class="ghost" data-i="${i}" data-act="notice">Set</button>` : "") + `</div></td>` +
+        (can("accounts_manage") ? `<button class="ghost" data-i="${i}" data-act="notice">Set</button>` : "") + `</div></td>` +
       `<td class="muted" style="white-space:nowrap" title="${esc(r.created_at || "")}">${esc(fmtWhen(r.created_at))}</td>` +
-      (!isOwner() ? `<td><div class="rowacts"><button class="ghost" data-i="${i}" data-act="detail">Details</button></div></td>` :
       `<td><div class="rowacts">` +
         `<button class="ghost" data-i="${i}" data-act="detail">Details</button>` +
-        `<button class="ghost" data-i="${i}" data-act="grant" title="Grant or revoke content">Content</button>` +
-        `<button class="ghost" data-i="${i}" data-act="pw">Password</button>` +
-        `<button class="ghost" data-i="${i}" data-act="tok">Tokens</button>` +
-        `<button class="ghost" data-i="${i}" data-act="kick">Kick</button>` +
-        `<button class="${r.ext_mail ? "act" : "ghost"}" data-i="${i}" data-act="ext" ` +
-          `title="Mail to and from the internet as ${esc(outsideAddr(r))}">` +
-          `Ext mail: ${r.ext_mail ? "on" : "off"}</button>` +
-        `<button class="danger" data-i="${i}" data-act="del">Delete</button>` +
-      `</div></td>`) + `</tr>`;
+        (can("accounts_manage") ?
+          `<button class="ghost" data-i="${i}" data-act="grant" title="Grant or revoke content">Content</button>` +
+          `<button class="ghost" data-i="${i}" data-act="pw">Password</button>` +
+          `<button class="ghost" data-i="${i}" data-act="tok">Tokens</button>` +
+          `<button class="ghost" data-i="${i}" data-act="kick">Kick</button>` +
+          `<button class="${r.ext_mail ? "act" : "ghost"}" data-i="${i}" data-act="ext" ` +
+            `title="Mail to and from the internet as ${esc(outsideAddr(r))}">` +
+            `Ext mail: ${r.ext_mail ? "on" : "off"}</button>` : "") +
+        (can("accounts_delete") ? `<button class="danger" data-i="${i}" data-act="del">Delete</button>` : "") +
+      `</div></td>` + `</tr>`;
   }).join("");
 }
 
@@ -1506,11 +1508,10 @@ async function gmSetStatus(id, status, quiet) {
 // never only visible to someone who happens to be looking at this one.
 setInterval(() => { if (!GM_TIMER) loadGmCallsBadge(); }, 30000);
 async function loadGmCallsBadge() {
-  if (SESSION.role && !can("gm")) return;
+  if (!can("gm")) return;
   try { const rows = await api("/api/gm-calls"); if (Array.isArray(rows)) gmBadge(rows); }
   catch (e) {}
 }
-loadGmCallsBadge();
 
 // ---- delete an account ----
 // Two-step on purpose: the server is asked what the deletion would destroy, the
@@ -2688,7 +2689,7 @@ async function loadOverview() {
     get("/api/accounts", can("accounts_view")), get("/api/codes", can("codes")),
     get("/api/issues", can("reports")), get("/api/reports", can("reports")),
     get("/api/gm-calls", can("gm")), get("/api/gm-desk", can("gm")),
-    get("/api/news", isOwner())]);
+    get("/api/news", can("news_edit"))]);
   const A = Array.isArray(acc) ? acc : [], C = Array.isArray(codes) ? codes : [];
   const I = Array.isArray(issues) ? issues : [], R = Array.isArray(reports) ? reports : [];
   const G = Array.isArray(calls) ? calls : [];
@@ -2742,7 +2743,7 @@ async function loadOverview() {
   setBadge("#issuesBadge", newI);
   setBadge("#reportsBadge", newR);
   loadOnline();
-  if (isOwner()) loadHealth();
+  if (can("health")) loadHealth();
 }
 
 // Anything with data-go="tab" or "tab:fieldId" navigates; data-q pre-fills the
@@ -3171,13 +3172,14 @@ async function openAccount(polid) {
                       : none("No changes recorded."));
   html += `</div>`;
   $("#acctBody").innerHTML = html;
-  $("#acctActions").innerHTML = isOwner()
+  $("#acctActions").innerHTML = (can("accounts_manage")
     ? `<button class="ghost" data-a="grant">Content</button><button class="ghost" data-a="pw">Password</button>` +
       `<button class="ghost" data-a="tok">Tokens</button>` +
       `<button class="ghost" data-a="refusal">Refusal</button>` +
       `<button class="ghost" data-a="notice">Notice</button>` +
-      `<button class="ghost" data-a="kick">Kick</button><button class="danger" data-a="del">Delete</button>`
-    : "";
+      `<button class="ghost" data-a="kick">Kick</button>` : "") +
+    (can("accounts_delete") ? `<button class="danger" data-a="del">Delete</button>` : "");
+  $("#acctActions").hidden = !$("#acctActions").innerHTML;
   $("#acctModal").classList.add("show");
 }
 function closeAccount() { $("#acctModal").classList.remove("show"); ACCT = null; }
@@ -3358,9 +3360,10 @@ renderAppState();
   await loadSession();
   applyRole();
   renderMeState();
+  loadGmCallsBadge();       // after the session: a moderator without GM gets no call
   await loadContentNames();
   limitCodeChips();
-  if (isOwner()) PML_LIST_READY = loadPmlFileList();
+  if (can("pml")) PML_LIST_READY = loadPmlFileList();
   // Seed the editor with a tiny sample so the preview isn't blank -- but not
   // when the hash names a file, or the restore would flash the sample first.
   if (!parseHash().path) $("#pml").value =

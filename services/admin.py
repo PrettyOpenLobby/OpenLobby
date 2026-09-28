@@ -983,8 +983,18 @@ _GET_PERMS = {
     "/api/codes": "codes",
     "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
     "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
+    "/api/account-clients": "accounts_manage",
+    "/api/account-footprint": ("accounts_manage", "accounts_delete"),
     "/api/online": "any", "/api/push/key": "gm",
+    "/api/news": "news_edit", "/api/news/outputs": "news_edit",
+    "/api/news/preview": "news_edit", "/api/news/art": "news_edit",
+    "/api/pml-list": "pml", "/api/pml-load": "pml", "/api/pml-refs": "pml",
+    "/api/pml-resolve": "pml", "/api/page": "pml",
+    "/api/audit": "audit", "/api/health": "health", "/api/alerts": "settings",
 }
+#: Path prefixes, for routes that carry a path of their own. /art/ draws the
+#: pictures in both the PML preview and the news preview.
+_GET_PREFIX_PERMS = {"/art/": ("pml", "news_edit")}
 _POST_PERMS = {
     "/api/sessions/revoke": "any", "/api/me/password": "any",
     "/api/codes": "codes", "/api/codes/random": "codes",
@@ -992,6 +1002,19 @@ _POST_PERMS = {
     "/api/push/subscribe": "gm", "/api/push/test": "gm",
     "/api/push/unsubscribe": "any",
     "/api/triage": "reports",
+    "/api/codes/void": "codes_void",
+    "/api/account-create": "accounts_manage", "/api/account-password": "accounts_manage",
+    "/api/account-state": "accounts_manage", "/api/account-info": "accounts_manage",
+    "/api/account-kick": "accounts_manage", "/api/account-clear-token": "accounts_manage",
+    "/api/account-extmail": "accounts_manage",
+    "/api/grant": "accounts_manage", "/api/revoke": "accounts_manage",
+    "/api/account-delete": "accounts_delete",
+    # Saving is news_edit; publishing checks news_publish itself, because a
+    # dry run (the "what will change" list) is part of editing.
+    "/api/news": "news_edit", "/api/news/render": "news_edit",
+    "/api/news/publish": "news_edit",
+    "/api/pml-expand": "pml",
+    "/api/alerts": "settings",
 }
 
 #: What the audit log calls each change. A POST not named here is not logged
@@ -1124,6 +1147,10 @@ class Handler(BaseHTTPRequestHandler):
     def _is_owner(self):
         return self._caller()[1] == "owner"
 
+    def _can(self, perm):
+        _u, role, perms = self._caller()
+        return role == "owner" or perm in perms
+
     def _permit(self, path, table):
         """Owner: everything. Moderator: only what `table` gives their perms."""
         user, role, perms = self._caller()
@@ -1132,7 +1159,11 @@ class Handler(BaseHTTPRequestHandler):
         need = table.get(path)
         if path.startswith("/static/") and table is _GET_PERMS:
             need = "any"
-        if need == "any" or (need and need in perms):
+        if need is None and table is _GET_PERMS:
+            need = next((v for k, v in _GET_PREFIX_PERMS.items()
+                         if path.startswith(k)), None)
+        needs = need if isinstance(need, tuple) else (need,)
+        if need == "any" or any(n and n in perms for n in needs):
             return True
         self._send(403, {"error": "You don't have permission to do that.",
                          "forbidden": True})
@@ -1677,7 +1708,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
             out["gm_calls"] = got[:20]
-        if owner:
+        if owner or "audit" in perms:
             mdb = adminusers.connect()
             try:
                 out["activity"] = [dict(r) for r in mdb.execute(
@@ -3514,6 +3545,10 @@ class Handler(BaseHTTPRequestHandler):
     def _news_publish(self):
         body = self._json_body()
         dry = bool(body.get("dry_run"))
+        if not dry and not self._can("news_publish"):
+            return self._send(403, {"error": "You don't have permission to "
+                                             "publish announcements.",
+                                    "forbidden": True})
         if not dry and not _www_writable():
             return self._send(409, {
                 "error": f"{WWW_ROOT} is mounted read-only, so nothing can be "
