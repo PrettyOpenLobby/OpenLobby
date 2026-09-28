@@ -343,6 +343,20 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                             _rec = _p[2][1:] if _p[2][:1] == b":" else _p[2]
                             if _rec:
                                 gmchat.record(gm_room, "in", nick, _rec)
+                            # THE GM ANSWERS THE ROLL CALL. A newcomer's `HR`
+                            # asks every member for an `HA`; the GM has no
+                            # client to answer it, so we do. The `G` in it is
+                            # what makes the client draw the GM with the phoenix
+                            # (gmchat.encode_roster). Straight to this socket,
+                            # not the spool: only the asker needs it.
+                            if _rec and gmchat.is_roster_request(_rec):
+                                _ha = gmchat.encode_roster(gm_room)
+                                if chat_sess.send([gmchat.privmsg(
+                                        gm_room, _ha,
+                                        ircband._irc_host(prefix[1:]))]):
+                                    gmchat.record(gm_room, "out",
+                                                  gmchat.GM_NICK, _ha,
+                                                  note="GM roster answer")
                 # A fault in here must NOT tear down the connection: the old
                 # behaviour was silence, and silence is the safe fallback.
                 # Learned the hard way -- a str/bytes TypeError in the reply
