@@ -1,4 +1,4 @@
-"""Per-connection lobby session state, its on-disk mirror, and the session record."""
+"""Per-connection lobby session state, its shared mirror, and the session record."""
 import datetime
 import hashlib
 import json
@@ -7,6 +7,7 @@ import secrets
 import struct
 import time
 import threading
+from polcore import kv
 from srvcore import log
 from .deps import accounts
 from . import friendlist, handlelists, profilerecord
@@ -68,7 +69,7 @@ _SESSIONS = {}                  # sid -> {"iv":..., "member_id":..., "peer_ip":.
 #: raised off (see its note above): a Viewer stays open for an entire evening,
 #: and NOTHING refreshes `at` while it sits on a menu. `_session_put` is called
 #: on auth events, not on the keepalive, so a client that has been up an hour
-#: doing nothing but PONG ages out of `_SESSIONS` and out of the shared file --
+#: doing nothing but PONG ages out of `_SESSIONS` and out of the shared store --
 #: while its socket is still open and its IV is still the one it encrypts with.
 #: The lobby then finds no candidate IV that validates the frame, logs "no
 #: session claims this frame", and answers 36 bytes of nothing. The read never
@@ -96,9 +97,9 @@ def _sid_for_user_token(token, peer_ip=""):
     """A short, stable session id for one launch, from its USER token.
 
     The token itself is 48 bytes of client-chosen text that ends up in log lines
-    and in a JSON file shared with another container, so it is hashed rather than
+    and in state shared with another container, so it is hashed rather than
     used raw: same launch -> same id, and nothing about the client's token has to
-    round-trip through a filename-safe encoding.
+    round-trip through a key-safe encoding.
     """
     if isinstance(token, str):
         token = token.encode("latin-1", "replace")
@@ -127,8 +128,8 @@ def _session_sid():
     return getattr(_session_current, "sid", None)
 
 
-#: ...and on disk, for the SAME reason _STAMPS is (see _STAMP_FILE), but for a
-#: different consumer.
+#: ...and in the live-state store, for the SAME reason _STAMPS is (see
+#: authtoken), but for a different consumer.
 #:
 #: `authserv` is the only thing that FILLS this table -- it is where a client's
 #: IV and key are recovered. The LOBBY only reads it (_lobby_iv_candidates), and
@@ -140,13 +141,18 @@ def _session_sid():
 #: it enters the lobby. That is not hypothetical -- it is exactly what happened
 #: on 2026-08-13, and it is why the split was reverted.
 #:
-#: Same shape as the stamp file: atomic write, mtime-gated re-read, MERGE rather
-#: than replace. The contents are session crypto for a live connection, not
-#: durable secrets, and they expire with _SESSION_TTL.
-_SESSION_FILE = os.environ.get(
-    "POL_SESSION_FILE", os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
-                                     "auth-sessions.json"))
-_SESSIONS_MTIME = [0.0]
+#: One key per session, `authsess:s:<sid>` = the slot as JSON, expiring
+#: _SESSION_TTL after the slot's own `at`, and a counter `authsess:ver` bumped
+#: on every write so a reader re-reads only when something moved (what the
+#: file's mtime used to tell it). MERGE rather than replace, as before. The
+#: contents are session crypto for a live connection, not durable secrets.
+_SESSION_KEY = "authsess:s:"
+_SESSION_VER_KEY = "authsess:ver"
+#: The `authsess:ver` this process last folded in.
+_SESSIONS_VER = [None]
+#: sid -> the JSON last written or read for it, so a save sends only slots
+#: that changed.
+_SESSIONS_WRITTEN = {}
 
 
 def _sess_enc(v):
@@ -171,77 +177,101 @@ def _session_is_empty(slot):
 
     A connection binds a provisional session before the client has said anything,
     so most slots in a lobby/world process are placeholders. Writing those to the
-    shared file is pure noise -- and, before the merge below existed, actively
+    shared store is pure noise -- and, before the merge below existed, actively
     harmful.
     """
     return not (slot.get("iv") or slot.get("ivs") or slot.get("key")
                 or slot.get("member_id") or slot.get("handle_id"))
 
 
+def _slot_json(slot):
+    return json.dumps({k: _sess_enc(v) for k, v in slot.items()},
+                      sort_keys=True, separators=(",", ":"))
+
+
+def _sessions_load_remote():
+    """{sid: (decoded slot, its JSON)} for every session in the store."""
+    out = {}
+    for name in kv.keys(_SESSION_KEY + "*"):
+        raw = kv.get(name)
+        if raw is None:
+            continue                          # expired between the scan and now
+        try:
+            slot = {k: _sess_dec(v) for k, v in json.loads(raw).items()}
+        except (ValueError, AttributeError):
+            continue
+        out[name[len(_SESSION_KEY):]] = (slot, raw)
+    return out
+
+
+def _sessions_stored():
+    """{sid: slot as stored (JSON-decoded, bytes still tagged)} -- what the other
+    process sees. For tests and operators."""
+    return {sid: json.loads(raw)
+            for sid, (_slot, raw) in _sessions_load_remote().items()}
+
+
 def _sessions_save_locked():
-    """Persist `_SESSIONS`, MERGED over whatever is already on disk.
+    """Publish `_SESSIONS`, MERGED with what the other process has published.
 
     Caller holds _SESSIONS_LOCK.
 
-    THE MERGE IS THE POINT. This file is how the `authsess` container hands a
+    THE MERGE IS THE POINT. This is how the `authsess` container hands a
     recovered IV and member to the `login` container (they are separate
-    processes; see _SESSION_FILE). A plain overwrite means the last writer's view
-    of the world is the only one that survives -- and on 2026-08-13 that is
-    exactly what happened: the lobby handler started binding a session per
-    connection, so `login` wrote its own placeholder-only table over the top of
-    `authsess`'s real sessions, the lobby then had no IV for anyone, every reply
-    fell back to the XOR path, and the PS2 Viewer sat waiting until it reported
-    POL-0010 ("disconnected from the server").
+    processes; see _SESSION_KEY). If the last writer's view of the world were
+    the only one that survived -- and on 2026-08-13 that is exactly what
+    happened with the old shared file: the lobby handler started binding a
+    session per connection, so `login` wrote its own placeholder-only table over
+    the top of `authsess`'s real sessions, the lobby then had no IV for anyone,
+    every reply fell back to the XOR path, and the PS2 Viewer sat waiting until
+    it reported POL-0010 ("disconnected from the server").
 
-    So: read what is there, keep any session we do not have, and write the union.
-    Empty placeholder slots are not written at all.
+    So: sessions are stored one key each, a session we do not have is adopted
+    rather than overwritten, and empty placeholder slots are not written at all.
     """
     try:
-        os.makedirs(os.path.dirname(_SESSION_FILE), exist_ok=True)
-        out = {}
-        try:
-            with open(_SESSION_FILE, "r", encoding="utf-8") as f:
-                out = json.load(f) or {}
-        except (OSError, ValueError):
-            out = {}                      # absent or torn: ours becomes the file
         now = time.time()
-        for sid, slot in list(out.items()):
-            try:
-                if now - float(slot.get("at") or 0) > _SESSION_TTL:
-                    del out[sid]          # expire theirs on the same clock as ours
-            except (TypeError, ValueError):
-                del out[sid]
-        # ADOPT IN BOTH DIRECTIONS. We have the other process's table in hand, so
-        # take it into memory too -- otherwise it would go back out to disk with
-        # our own write, our recorded mtime would match, and `_sessions_refresh`
-        # would never re-read a session we had already seen and dropped on the
-        # floor.
-        for sid, slot in out.items():
-            if sid not in _SESSIONS:
-                try:
-                    _SESSIONS[sid] = {k: _sess_dec(v) for k, v in slot.items()}
-                except Exception:
-                    pass
+        ver = kv.get(_SESSION_VER_KEY)
+        if ver is None and _SESSIONS_VER[0] is not None:
+            _SESSIONS_WRITTEN.clear()         # the store was emptied: resend all
+        if ver != _SESSIONS_VER[0]:
+            # ADOPT IN BOTH DIRECTIONS. Take the other process's sessions into
+            # memory too, so one we had not seen is not lost from our view.
+            for sid, (slot, raw) in _sessions_load_remote().items():
+                if sid not in _SESSIONS:
+                    _SESSIONS[sid] = slot
+                    _SESSIONS_WRITTEN[sid] = raw
+        for sid in [k for k in _SESSIONS_WRITTEN if k not in _SESSIONS]:
+            del _SESSIONS_WRITTEN[sid]
+        wrote = 0
         for sid, slot in _SESSIONS.items():
             if _session_is_empty(slot):
                 continue
             try:
-                out[sid] = {k: _sess_enc(v) for k, v in slot.items()}
+                enc = _slot_json(slot)
+                left = _SESSION_TTL - (now - float(slot.get("at") or 0))
             except Exception:
                 continue        # never let one odd field lose the whole table
-        tmp = _SESSION_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(out, f)
-        os.replace(tmp, _SESSION_FILE)        # atomic
-        _SESSIONS_MTIME[0] = os.stat(_SESSION_FILE).st_mtime
-    except (OSError, TypeError, ValueError) as exc:
-        log("authserv", f"could not persist session state: {exc}")
+            if left <= 0 or _SESSIONS_WRITTEN.get(sid) == enc:
+                continue
+            kv.set(_SESSION_KEY + sid, enc, ttl=left)
+            _SESSIONS_WRITTEN[sid] = enc
+            wrote += 1
+        if wrote:
+            new = kv.incr(_SESSION_VER_KEY)
+            # Our own write is the newest state; do not read it back in -- unless
+            # somebody else wrote between our read of the counter and now.
+            if ver == _SESSIONS_VER[0] and new == int(ver or 0) + 1:
+                _SESSIONS_VER[0] = str(new)
+    except Exception as exc:
+        log("authserv", f"could not publish session state: {exc!r}")
 
 
 def _sessions_refresh():
-    """Fold in session state recorded by ANOTHER process (see _SESSION_FILE).
+    """Fold in session state recorded by ANOTHER process (see _SESSION_KEY).
 
-    Cheap: one stat() when the file has not moved. Merge rules, per SESSION --
+    Cheap: one read of `authsess:ver` when nothing has moved. Merge rules, per
+    SESSION --
       * unknown session         -> adopt it
       * their slot is newer     -> adopt their fields
       * either way              -> UNION the IV list, newest first
@@ -251,21 +281,17 @@ def _sessions_refresh():
     free while a missing one is fatal.
     """
     try:
-        mtime = os.stat(_SESSION_FILE).st_mtime
-    except OSError:
+        ver = kv.get(_SESSION_VER_KEY)
+        if ver is None or ver == _SESSIONS_VER[0]:
+            return
+        remote = _sessions_load_remote()
+    except Exception as exc:
+        log("authserv", f"could not read session state: {exc!r}")
         return
-    if mtime <= _SESSIONS_MTIME[0]:
-        return
-    try:
-        with open(_SESSION_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
-        return                            # torn read; try again next time
     now = time.time()
     with _SESSIONS_LOCK:
-        _SESSIONS_MTIME[0] = mtime
-        for sid, slot in (raw or {}).items():
-            slot = {k: _sess_dec(v) for k, v in slot.items()}
+        _SESSIONS_VER[0] = ver
+        for sid, (slot, _raw) in remote.items():
             if now - float(slot.get("at") or 0) > _SESSION_TTL:
                 continue
             mine = _SESSIONS.get(sid)
@@ -356,8 +382,8 @@ def _session_put(sid, **fields):
                 for k in [k for k in claims if k not in keep]:
                     del claims[k]
         # Publish for the other container (lobby/world run separately when the
-        # authsess split is enabled). No-op cost in the single-process case
-        # beyond one small atomic write per auth connection.
+        # authsess split is enabled). In the single-process case the store is
+        # in memory and this costs a dict write per changed session.
         if os.environ.get("POL_SESSION_SHARE", "1") == "1":
             _sessions_save_locked()
 

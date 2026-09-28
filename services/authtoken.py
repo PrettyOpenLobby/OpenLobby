@@ -11,6 +11,7 @@ import struct
 import threading
 import time
 
+from polcore import kv
 from srvcore import (
     log,
 )
@@ -173,7 +174,7 @@ _STAMPS = {}                    # peer ip -> [(stamp, issued_at), ...] newest la
 #: sign in".
 #:
 #: 12 hours covers a play session. The cost is bounded and small: _STAMP_KEEP
-#: (512) still caps the list, the file stays tiny, and the only per-login cost is
+#: (512) still caps the list, the stored list stays tiny, and the only per-login cost is
 #: a few hundred Blowfish key schedules in `key_candidates()` on the failure path
 #: -- microseconds, and only when the fast path has already missed.
 _STAMP_TTL = 12 * 3600
@@ -183,13 +184,13 @@ _STAMP_TTL = 12 * 3600
 #: evicted the very token the stuck client is still keyed to, and recovery becomes
 #: impossible for the rest of the loop. The client then spins on POL-0008 forever.
 #: Seen live 2026-08-13. A client dialing every 45s issues ~80 stamps/hour; 512
-#: covers even a pathological 7s loop, the file stays ~15 KB, and _STAMP_TTL still
+#: covers even a pathological 7s loop, the stored list stays ~15 KB, and _STAMP_TTL still
 #: bounds it. Used at all three trim sites (load_stamps, _stamps_refresh,
 #: remember_stamp).
 _STAMP_KEEP = 512
 
-#: ...and on disk, because otherwise RESTARTING THIS SERVICE STRANDS EVERY
-#: CLIENT THAT IS ALREADY RUNNING.
+#: ...and in the live-state store, because otherwise RESTARTING THIS SERVICE
+#: STRANDS EVERY CLIENT THAT IS ALREADY RUNNING.
 #:
 #: The failure, observed live: a Viewer keeps the Blowfish key from a session
 #: token it was given earlier. If we restart, `_STAMPS` comes back empty, so
@@ -200,34 +201,62 @@ _STAMP_KEEP = 512
 #: lost server state.
 #:
 #: The stamps are not secret in any useful sense -- they are session tokens we
-#: broadcast to the client in the clear -- and they expire in an hour, so this
-#: is a small file that removes a whole class of confusing breakage during
-#: development, when this service is restarted constantly.
-_STAMP_FILE = os.environ.get(
-    "POL_STAMP_FILE", os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
-                                   "auth-stamps.json"))
+#: broadcast to the client in the clear -- and they expire with _STAMP_TTL. One
+#: key per address, `authstamp:ip:<address>` = [[stamp, issued_at], ...] as
+#: JSON, expiring _STAMP_TTL after its newest stamp, and a counter
+#: `authstamp:ver` bumped on every write so another process re-reads only when
+#: something moved.
+_STAMP_KEY = "authstamp:ip:"
+_STAMP_VER_KEY = "authstamp:ver"
+
+#: Names the stamps had while they lived in a file. Nothing here reads them;
+#: they stay importable for code written against the single-file responders.py
+#: (tools/friends_mobile_cap_test.py loads that version as its baseline).
+_STAMP_FILE = os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
+                           "auth-stamps.json")
+_STAMPS_MTIME = [0.0]
 
 
-def _stamps_save_locked():
-    """Persist `_STAMPS`. Caller holds _STAMPS_LOCK."""
+def _stamps_save_locked(peer_ip=None):
+    """Publish `_STAMPS` for one address (or every address). Caller holds
+    _STAMPS_LOCK."""
     try:
-        os.makedirs(os.path.dirname(_STAMP_FILE), exist_ok=True)
-        tmp = _STAMP_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({ip: [[int(s), float(t)] for s, t in v]
-                       for ip, v in _STAMPS.items()}, f)
-        os.replace(tmp, _STAMP_FILE)          # atomic: never a half-written file
-    except OSError as exc:
-        log("authserv", f"could not persist session stamps: {exc}")
+        ips = list(_STAMPS) if peer_ip is None else [peer_ip]
+        now = time.time()
+        for ip in ips:
+            rows = _STAMPS.get(ip) or []
+            if not rows:
+                continue
+            left = _STAMP_TTL - (now - float(rows[-1][1]))
+            if left <= 0:
+                continue
+            kv.set(_STAMP_KEY + ip,
+                   json.dumps([[int(st), float(t)] for st, t in rows]), ttl=left)
+    except Exception as exc:
+        log("authserv", f"could not publish session stamps: {exc!r}")
+
+
+def _stamps_load_remote():
+    """{peer ip: [[stamp, issued_at], ...]} from the live-state store."""
+    out = {}
+    for name in kv.keys(_STAMP_KEY + "*"):
+        raw = kv.get(name)
+        if raw is None:
+            continue
+        try:
+            out[name[len(_STAMP_KEY):]] = json.loads(raw) or []
+        except ValueError:
+            continue
+    return out
 
 
 def load_stamps():
     """Reload the stamp history at startup. Expired entries are dropped."""
     now = time.time()
     try:
-        with open(_STAMP_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
+        raw = _stamps_load_remote()
+    except Exception as exc:
+        log("authserv", f"could not read session stamps: {exc!r}")
         return 0
     kept = 0
     with _STAMPS_LOCK:
@@ -238,14 +267,15 @@ def load_stamps():
                 _STAMPS[ip] = fresh[-_STAMP_KEEP:]
                 kept += len(_STAMPS[ip])
     if kept:
-        log("authserv", f"reloaded {kept} session stamp(s) from {_STAMP_FILE} "
-                        "-- clients running across the restart can still log in")
+        log("authserv", f"reloaded {kept} session stamp(s) from the live-state "
+                        "store -- clients running across the restart can still "
+                        "log in")
     return kept
 
 
-#: Last mtime of _STAMP_FILE we folded in, so the common case (file unchanged)
-#: costs one stat() and nothing else.
-_STAMPS_MTIME = [0.0]
+#: The `authstamp:ver` this process last folded in, so the common case (nothing
+#: new) costs one read and nothing else.
+_STAMPS_VER = [None]
 
 
 def _stamps_refresh():
@@ -255,29 +285,25 @@ def _stamps_refresh():
     channel, so it is restarted rarely), while `lobby`/`world`/`mail` restart
     every time that code is edited. Only authserv issues session tokens, but the
     lobby needs them to recover a client's key -- and with the two split across
-    processes, `_STAMPS` in the lobby's memory would never see them. The file is
-    already written atomically on every issue, so re-reading it when its mtime
-    moves is enough to share the history both ways.
+    processes, `_STAMPS` in the lobby's memory would never see them. Every issue
+    is published, so re-reading when `authstamp:ver` moves is enough to share
+    the history both ways.
 
     MERGES rather than replaces: this process's own issuances must survive, and
-    the file is only ever appended to per IP, so a union by token value is
+    the history is only ever appended to per IP, so a union by token value is
     exactly right.
     """
     try:
-        mtime = os.stat(_STAMP_FILE).st_mtime
-    except OSError:
-        return
-    if mtime <= _STAMPS_MTIME[0]:
-        return
-    try:
-        with open(_STAMP_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
-        return                       # a torn read is harmless; try again later
+        ver = kv.get(_STAMP_VER_KEY)
+        if ver is None or ver == _STAMPS_VER[0]:
+            return
+        raw = _stamps_load_remote()
+    except Exception:
+        return                       # the store is away; try again later
     now = time.time()
     added = 0
     with _STAMPS_LOCK:
-        _STAMPS_MTIME[0] = mtime
+        _STAMPS_VER[0] = ver
         for ip, rows in (raw or {}).items():
             have = {s for s, _ in _STAMPS.get(ip, [])}
             fresh = [(int(s), float(t)) for s, t in rows
@@ -301,9 +327,13 @@ def remember_stamp(peer_ip, stamp):
         seen = _STAMPS.setdefault(peer_ip, [])
         seen.append((stamp, now))
         del seen[:-_STAMP_KEEP]
-        _stamps_save_locked()
-        # Our own write is the newest state; don't re-read it back in.
         try:
-            _STAMPS_MTIME[0] = os.stat(_STAMP_FILE).st_mtime
-        except OSError:
-            pass
+            before = kv.get(_STAMP_VER_KEY)
+            _stamps_save_locked(peer_ip)
+            after = kv.incr(_STAMP_VER_KEY)
+            # Our own write is the newest state; don't re-read it back in --
+            # unless another process wrote since we last looked.
+            if before == _STAMPS_VER[0] and after == int(before or 0) + 1:
+                _STAMPS_VER[0] = str(after)
+        except Exception as exc:
+            log("authserv", f"could not publish session stamps: {exc!r}")
