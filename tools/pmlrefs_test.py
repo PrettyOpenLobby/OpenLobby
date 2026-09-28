@@ -134,6 +134,17 @@ write(f"{HOST}/pml/main/index.pml",
 write(f"{HOST}/pml/broken/index.pml",
       '<pml><body><include src="/pml/broken/gone.pml"></body></pml>\n')
 
+# the news ticker opens the detail page with the article in its query; the
+# mirror also saved a copy of it under another query
+write(f"{HOST}/pml/info/index2.pml",
+      '<pml><body><text pos="0,0" size="9,9">d</text></body></pml>\n')
+write(f"{HOST}/pml/info/index2.pml%3Fseri%3D900003",
+      '<pml><body><text pos="0,0" size="9,9">d</text></body></pml>\n')
+write(f"{HOST}/pml/info/ticker.pml",
+      '<pml><body>'
+      '<img src="art.png" href="/pml/info/index2.pml?dat=1&seri=900002">'
+      '</body></pml>\n')
+
 files, shapes, g = admin._pml_scan(os.path.abspath(WWW))
 built_from = g.sorted("built_from")
 included_by = g.sorted("included_by")
@@ -219,6 +230,15 @@ check("a layout piece is named by its visible text",
 check("attribute values and sd: commands are not names",
       L('<style name="x" font="proportional"><img href="sd:enable=1@shBTNxt,'
         'sd:alt=Go to the next page.@imBTNxt">', "layout"), None)
+
+# The query a link carries is kept, so the preview can open the page as the
+# link would; the mirror's saved copies add theirs.
+
+got = admin._pml_page_queries(f"{HOST}/pml/info/index2.pml", g)
+check("a link's query is kept for the page it opens",
+      [q["query"] for q in got], ["dat=1&seri=900002", "seri=900003"])
+check("and says which page carries it",
+      got[0].get("from"), f"{HOST}/pml/info/ticker.pml")
 
 print()
 print("pmlrefs_test: OK" if ok else "pmlrefs_test: FAILED")

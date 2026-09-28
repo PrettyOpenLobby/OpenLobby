@@ -174,6 +174,9 @@ class Graph:
         self.included_by = collections.defaultdict(set)
         self.links_to = collections.defaultdict(set)
         self.linked_from = collections.defaultdict(set)
+        #: dst -> {(src, query)}: the query strings links carry into a page
+        #: (index2.pml?seri=..), so the preview can open it as it is reached.
+        self.link_queries = collections.defaultdict(set)
         self.parts = {}
 
     def add(self, kind, src, dst):
@@ -261,7 +264,7 @@ def build(site, files):
         links = set()
         hrefs = got[2] if len(got) > 2 else link_refs(expanded)
         for href in hrefs:
-            href = (href or "").split("?")[0]
+            href, _, query = (href or "").split("#")[0].partition("?")
             if _SKIP_RE.match(href) or "$" in href:
                 continue
             if not href.lower().endswith(TARGET_EXTS):
@@ -269,6 +272,8 @@ def build(site, files):
             got = site.resolve(f, href)
             if got:
                 links.add(got)
+                if query and "$" not in query and "error)" not in query and got != f:
+                    graph.link_queries[got].add((f, query))
         # 4. navigation, guessed.
         links |= _glob_targets(matcher, site, f, raw_links,
                                {_basename(p) for p in links})
