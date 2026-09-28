@@ -322,6 +322,19 @@
     .gm-st.answered { background: rgba(90,169,255,.15); color: var(--accent); }
     .gm-st.closed { background: rgba(154,162,180,.15); color: var(--muted); }
     .gm-st.live { background: rgba(87,211,140,.15); color: var(--good); }
+    .tri-st { font-size: 10.5px; padding: 1px 8px; border-radius: 20px; white-space: nowrap;
+      background: rgba(255,207,107,.15); color: var(--warn); }
+    .tri-st.resolved { background: rgba(87,211,140,.15); color: var(--good); }
+    .tri-st.wontfix { background: rgba(154,162,180,.15); color: var(--muted); }
+    .tri-sel { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 8px; max-width: 200px; }
+    .tri-box { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+      padding: 10px 12px; margin: 4px 0 14px; display: grid; gap: 8px; }
+    .tri-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .tri-by { color: var(--muted); font-size: 12px; }
+    .tri-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+    tr.tri-closed td { opacity: .6; }
+    tr.tri-sel-row td { background: rgba(90,169,255,.10); }
     .gm-ticket-empty { color: var(--muted); padding: 6px 0 14px; }
     .gm-ticket-head { display: flex; justify-content: space-between; gap: 12px;
       align-items: flex-start; flex-wrap: wrap; }
@@ -840,13 +853,33 @@
     <section id="tab-reports" class="tab">
       <div class="panel">
         <h2>User reports</h2>
-        <p class="hint">Sent from the Viewer's <b>Report User</b> dialog. Click a row to read the chat log attached to the report.</p>
+        <p class="hint">Sent from the Viewer's <b>Report User</b> dialog. Click a row to read it and mark it resolved.</p>
+        <div class="toolbar">
+          <div class="seg" id="repFilter">
+            <button data-f="open" class="on">Open</button>
+            <button data-f="closed">Closed</button>
+            <button data-f="all">All</button>
+          </div>
+          <select id="repTitle" class="tri-sel"><option value="">All services</option></select>
+          <div class="grow"><input type="search" id="repSearch" data-search
+               placeholder="Search reported player, reporter or explanation"></div>
+          <span class="count" id="repCount"></span>
+        </div>
         <table class="cards"><thead><tr><th>Received</th><th>Reported</th><th>Where</th>
-          <th>Reporter</th><th>Explanation</th></tr></thead>
+          <th>Reporter</th><th>Explanation</th><th>Status</th></tr></thead>
           <tbody id="reportsBody"></tbody></table>
       </div>
       <div class="panel" id="reportLogPanel" style="display:none">
-        <h2>Attached chat log: <span id="reportLogWho"></span></h2>
+        <h2>Report on <span id="reportLogWho"></span></h2>
+        <div class="tri-box" id="repStatus">
+          <div class="tri-head"><span class="tri-st" id="repStChip"></span>
+            <span class="tri-by" id="repStBy"></span></div>
+          <input type="text" id="repStNote" maxlength="500"
+                 placeholder="Note (optional), e.g. fixed in the next update">
+          <div class="tri-acts" id="repStActs"></div>
+        </div>
+        <pre id="reportExpl" style="white-space:pre-wrap"></pre>
+        <p class="hint" id="reportLogHint">Attached chat log:</p>
         <pre id="reportLog" style="white-space:pre-wrap; overflow-x:auto"></pre>
       </div>
     </section>
@@ -860,12 +893,30 @@
       <div class="panel">
         <h2>Issue reports</h2>
         <p class="hint">Bug reports sent from the in-game report shortcut, with the client logs and the matching server logs. Click a row to open one.</p>
+        <div class="toolbar">
+          <div class="seg" id="issFilter">
+            <button data-f="open" class="on">Open</button>
+            <button data-f="closed">Closed</button>
+            <button data-f="all">All</button>
+          </div>
+          <select id="issTitle" class="tri-sel"><option value="">All titles</option></select>
+          <div class="grow"><input type="search" id="issSearch" data-search
+               placeholder="Search player, machine or description"></div>
+          <span class="count" id="issCount"></span>
+        </div>
         <table class="cards"><thead><tr><th>Received</th><th>Who</th><th>Title</th>
-          <th>What they said</th><th>Correlated</th></tr></thead>
+          <th>What they said</th><th>Correlated</th><th>Status</th></tr></thead>
           <tbody id="issuesBody"></tbody></table>
       </div>
       <div class="panel" id="issueDetail" style="display:none">
         <h2>Bundle <span id="issueId" class="mono"></span></h2>
+        <div class="tri-box" id="issStatus">
+          <div class="tri-head"><span class="tri-st" id="issStChip"></span>
+            <span class="tri-by" id="issStBy"></span></div>
+          <input type="text" id="issStNote" maxlength="500"
+                 placeholder="Note (optional), e.g. fixed in the next update">
+          <div class="tri-acts" id="issStActs"></div>
+        </div>
         <p class="hint" id="issueWarn" style="display:none; color:var(--warn,#c80)"></p>
         <pre id="issueDesc" style="white-space:pre-wrap"></pre>
         <div id="issueShot"></div>

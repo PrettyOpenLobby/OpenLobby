@@ -991,6 +991,7 @@ _POST_PERMS = {
     "/api/gm-control": "gm", "/api/gm-say": "gm", "/api/gm-ticket": "gm",
     "/api/push/subscribe": "gm", "/api/push/test": "gm",
     "/api/push/unsubscribe": "any",
+    "/api/triage": "reports",
 }
 
 #: What the audit log calls each change. A POST not named here is not logged
@@ -1002,6 +1003,7 @@ _AUDIT_ACTIONS = {
     "/api/grant": "granted content", "/api/revoke": "revoked content",
     "/api/gm-control": "changed the GM desk", "/api/gm-say": "wrote in GM chat",
     "/api/gm-ticket": "set a GM call's status",
+    "/api/triage": "set a report's status",
     "/api/account-create": "created an account",
     "/api/account-password": "changed an account password",
     "/api/account-state": "changed an account login refusal",
@@ -1933,6 +1935,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._gm_say()
         if path == "/api/gm-ticket":
             return self._gm_ticket()
+        if path == "/api/triage":
+            return self._triage()
         if path == "/api/account-create":
             return self._account_create()
         if path == "/api/account-password":
@@ -2187,7 +2191,7 @@ class Handler(BaseHTTPRequestHandler):
                 "contact": f.get("sender"),
                 "log": f.get("log"),
             })
-        self._send(200, out)
+        self._send(200, self._with_triage("reports", out))
 
     # -- tester issue reports ------------------------------------------------ #
     #
@@ -2202,7 +2206,53 @@ class Handler(BaseHTTPRequestHandler):
     def _issues_list(self):
         if issuereport is None:
             return self._send(200, {"error": "issuereport module not loaded"})
-        self._send(200, issuereport.list_reports())
+        self._send(200, self._with_triage("issues", issuereport.list_reports()))
+
+    # -- report status: open / resolved / won't fix --------------------------- #
+    # Bookkeeping in the admin_triage table only; nothing is sent to the player, and the
+    # report files themselves are never touched.
+    @staticmethod
+    def _with_triage(kind, rows):
+        try:
+            db = adminusers.connect()
+            try:
+                tri = adminusers.triage_map(db, kind)
+            finally:
+                db.close()
+        except Exception as exc:                 # a status we cannot read
+            print(f"[admin] triage read failed: {exc}", flush=True)
+            tri = {}
+        for r in rows:
+            t = tri.get(r.get("id")) or {}
+            r["status"] = t.get("status", "open")
+            r["status_note"] = t.get("note", "")
+            r["status_by"] = t.get("by")
+            r["status_at"] = t.get("at")
+        return rows
+
+    def _triage(self):
+        body = self._json_body()
+        kind = body.get("kind")
+        rid = str(body.get("id") or "").strip()
+        exists = {"reports": lambda: os.path.isfile(
+                      os.path.join(REPORT_DIR, os.path.basename(rid) + ".json")),
+                  "issues": lambda: issuereport is not None
+                      and issuereport.read_manifest(rid) is not None}
+        if kind not in exists:
+            return self._send(400, {"error": "unknown report kind"})
+        if not rid or os.path.basename(rid) != rid or not exists[kind]():
+            return self._send(404, {"error": "no such report"})
+        who = (self._session() or {}).get("user") or "operator"
+        try:
+            db = adminusers.connect()
+            try:
+                adminusers.triage_set(db, kind, rid, body.get("status"),
+                                      body.get("note"), by=who)
+            finally:
+                db.close()
+        except adminusers.ModError as exc:
+            return self._send(400, {"error": str(exc)})
+        self._send(200, {"ok": True, "id": rid, "status": body.get("status")})
 
     #: Which extensions the panel will hand back inline, and as what. Anything
     #: not named here is served as PLAIN TEXT rather than guessed at: these are

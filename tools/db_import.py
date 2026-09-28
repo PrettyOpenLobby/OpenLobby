@@ -128,7 +128,8 @@ SOURCES = (
     ("admin", "admin.db", {
         "moderator": "admin_moderator", "audit": "admin_audit",
         "code_origin": "admin_code_origin", "setting": "admin_setting",
-        "push_sub": "admin_push_sub", "alerted": "admin_alerted"}, {}),
+        "push_sub": "admin_push_sub", "alerted": "admin_alerted",
+        "triage": "admin_triage"}, {}),
     ("discord", "discord_links.db", {
         "link": "discord_link", "code": "discord_code",
         "notified": "discord_notified", "reply": "discord_reply",
