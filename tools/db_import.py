@@ -16,7 +16,9 @@ stopped). What is read from it:
     resources/tmrank/<f> one `blob` row per file, scope `tmrank`, path <f>
 
 `resources/content-profiles.json` stays a file, and so do backup copies
-(`*.bak`, `*.bak-*`) and `janevent.json` and `jan-rank-snapshot.json`, which
+(a name that goes on past its extension with `.bak`, `.pre-`, `.stale-` or
+`.orig`: `*.json.bak`, `*.bin.bak-*`, `*.json.pre-*`, `*.bin.stale-*`; see
+_is_backup) and `janevent.json` and `jan-rank-snapshot.json`, which
 Janhourou's own import reads. Nothing live is imported
 (sessions, stamps, rooms, the push spool): the services rebuild that in
 Valkey. The report lists what was found and left behind. --logs names the old
@@ -146,10 +148,31 @@ TITLE_OWNED_RESOURCES = {
 }
 
 
+#: What starts an operator's suffix after a file's real extension:
+#: <name>.bak, <name>.bak-<note>, <name>.pre-<note>, <name>.stale-<note>,
+#: <name>.orig.
+BACKUP_SUFFIXES = (".bak", ".pre-", ".stale-", ".orig")
+
+
 def _is_backup(name):
-    """An operator's copy of a file (<name>.bak, <name>.bak-<note>): kept
-    beside the file on the volume, never a record of its own."""
-    return name.endswith(".bak") or ".bak-" in name
+    """An operator's copy of a file, kept beside it on the volume and never a
+    record of its own. The name is a whole file name with a dot in it (a
+    resource's <scope>.<path>, or <file>.<ext>) followed by a suffix that
+    starts with one of BACKUP_SUFFIXES: N.jan_stats.json.bak,
+    N.tm_collection.json.pre-lastplayed,
+    auction-1.bids.bin.stale-settled-20260820, r1.bin.orig. A name that
+    ends in .bak is a copy whatever comes before it. The dot before the
+    suffix is what keeps a record whose path starts with one of these words
+    (N.bakery.bin: scope N, path bakery.bin) a record."""
+    if name.endswith(".bak"):
+        return True
+    for suffix in BACKUP_SUFFIXES:
+        at = name.find(suffix, 1)
+        while at > 0:
+            if "." in name[1:at]:
+                return True
+            at = name.find(suffix, at + 1)
+    return False
 
 #: Live state that stays behind (docs/database.md): (where, name or suffix, what).
 LIVE_FILES = (
@@ -853,7 +876,7 @@ def _resource_files(root):
                     elif f.is_dir():
                         skipped.append((name + "/", "a directory inside %s/" % e.name))
                     elif _is_backup(f.name):
-                        skipped.append((name, "a backup copy (.bak), not a record"))
+                        skipped.append((name, "a backup copy (.bak, .pre-, .stale-, .orig), not a record"))
                     else:
                         files.append((f, e.name, f.name))
         elif e.is_dir():
@@ -865,7 +888,7 @@ def _resource_files(root):
             skipped.append((e.name, "the title's own import reads it (%s)"
                             % TITLE_OWNED_RESOURCES[e.name]))
         elif _is_backup(e.name):
-            skipped.append((e.name, "a backup copy (.bak), not a record"))
+            skipped.append((e.name, "a backup copy (.bak, .pre-, .stale-, .orig), not a record"))
         elif blobs.split_name(e.name) is None:
             skipped.append((e.name, "not a resource name (no scope before a dot)"))
         else:
