@@ -481,15 +481,18 @@ one; `docker volume ls` shows them.
      ```
 
    - Front Mission Online, from `crystalfront`, before `fmo` first starts.
-     `fmo_characters.json`, `fmowar.json` and `fmo_sector_wins.json` need no
-     command: the service imports each the first time it finds its table
-     empty, so leave them in `/data`. Import `fmo.db` first, or the service
-     fills the pilot table from the older `fmo_characters.json` and the
-     import of `fmo.db` is refused. The second command matters only where
-     the City Control board posted to Discord:
+     `fmo_characters.json` and `fmo_sector_wins.json` need no command: the
+     service imports each the first time it finds its table empty, so leave
+     them in `/data`. Import `fmo.db` first, or the service fills the pilot
+     table from the older `fmo_characters.json` and the import of `fmo.db` is
+     refused. The service also imports `fmowar.json` when it starts and finds
+     `fmo_war` empty, and logs the number of sectors or why it could not;
+     the second command does the same by hand and prints the report. The
+     third matters only where the City Control board posted to Discord:
 
      ```
      $DC run --rm --no-deps --entrypoint python fmo fmodb.py import fmo_db /data/fmo.db
+     $DC run --rm --no-deps --entrypoint python fmo fmodb.py import war /data/fmowar.json
      $DC run --rm --no-deps -v crystalfront_fmo-board-state:/state:ro --entrypoint python fmo fmodb.py import board_state /state
      ```
 
@@ -516,15 +519,20 @@ one; `docker volume ls` shows them.
      ```
 
    - Dirge of Cerberus, from `crystaldirge`, while the `doc` responder is
-     stopped: `$DC run --rm --entrypoint python doc docdb.py import <store>
-     /logs/doc-<store>.json` for each store file the importer lists.
+     stopped: `$DC run --rm --no-deps --entrypoint python doc docdb.py import
+     <store> /logs/doc-<store>.json` for each store file the importer lists.
 
    The `-v` volumes are the board and bridge state volumes the titles used
    before. The bridge and Front Mission Online ran as compose projects of
    their own, so theirs start with `crystalbridge_` and `crystalfront_`;
    the Janhourou and Tetra Master boards already ran in the core's project,
    so theirs start with `openlobby_`. `docker volume ls` shows the names on
-   your host.
+   your host. Where every board shared one state volume, each title's
+   `board_state` import takes only its own board's files (`fmo_*`, `jan_*`,
+   `tm_*`, ending `_discord.json`) and `discord_channels.json`, and lists
+   the rest as another board's. `discord_channels.json` is one file for
+   every board, keyed by feed, so each title gets a copy of all of it; a
+   board only reads its own feeds' entries.
    Every title import only reads its source, runs in one transaction,
    prints what it imported and each row it could not map, and refuses a
    table that already holds rows unless given `--merge`, which adds only

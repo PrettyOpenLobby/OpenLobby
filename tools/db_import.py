@@ -253,7 +253,13 @@ TITLES = (
          "the pilots and squadron insignia. Import it before fmo first "
          "starts, or the service fills the table from the older "
          "fmo_characters.json and this import is refused"),
-        ("crystalfront_fmo-board-state volume", "*_discord.json, discord_channels.json",
+        ("data", "fmowar.json",
+         "run --rm --no-deps --entrypoint python fmo fmodb.py import war "
+         "/data/fmowar.json",
+         "the war state. The fmo service also imports it when it starts and "
+         "finds the table empty; running it here says what came in, and "
+         "compares the file with a table that already holds a state"),
+        ("crystalfront_fmo-board-state volume", "fmo_*_discord.json, discord_channels.json",
          "run --rm --no-deps -v crystalfront_fmo-board-state:/state:ro "
          "--entrypoint python fmo fmodb.py import board_state /state",
          "the City Control board's Discord bookkeeping; only where the board "
@@ -261,8 +267,6 @@ TITLES = (
         ("data", "fmo_characters.json", None,
          "imported by the fmo service on its first start into an empty "
          "table; leave it in /data"),
-        ("data", "fmowar.json", None,
-         "imported by the fmo service on its first start; leave it in /data"),
         ("data", "fmo_sector_wins.json", None,
          "imported by the fmo service on its first start; leave it in /data"),
     ], []),
@@ -274,7 +278,7 @@ TITLES = (
          "run --rm --no-deps --entrypoint python jan janstore.py import "
          "rank_snapshot /data/resources/jan-rank-snapshot.json",
          "the ranking's previous order"),
-        ("openlobby_jan-board-state volume", "*_discord.json, discord_channels.json",
+        ("openlobby_jan-board-state volume", "jan_*_discord.json, discord_channels.json",
          "run --rm --no-deps -v openlobby_jan-board-state:/state:ro "
          "--entrypoint python jan janstore.py import board_state /state",
          "the web board's Discord bookkeeping; only where the board posted "
@@ -291,7 +295,7 @@ TITLES = (
          "run --rm --no-deps --entrypoint python tmrank tmstore.py import "
          "champion /data/tm-champion.json",
          "the weekly champion the card shop names"),
-        ("openlobby_tm-board-state volume", "*_discord.json, discord_channels.json",
+        ("openlobby_tm-board-state volume", "tm_*_discord.json, discord_channels.json",
          "run --rm --no-deps -v openlobby_tm-board-state:/state:ro "
          "--entrypoint python tmrank tmstore.py import board_state /state",
          "the web board's Discord bookkeeping; only where the board posted "
@@ -306,7 +310,7 @@ TITLES = (
          "(TM_RANK_AT=now publishes at start)"),
     ], []),
     ("Dirge of Cerberus", "crystaldirge", _DC_ENV, [
-        ("logs", fn, "run --rm --entrypoint python doc docdb.py import %s /logs/%s"
+        ("logs", fn, "run --rm --no-deps --entrypoint python doc docdb.py import %s /logs/%s"
          % (store, fn), None)
         for fn, store in DOC_STORES
     ], []),
