@@ -148,6 +148,9 @@ CHAT_KEY = os.environ.get("POL_GMD_CHAT_KEY", "").encode()
 #: not treat the room as GM chat. Empty = the old single shared room.
 ROOM_PER_REQUEST = os.environ.get("POL_GMD_ROOM_PER_REQUEST", "#gmcall").encode()
 TICKET_DIR = os.environ.get("POL_GMD_TICKET_DIR", "/data/gm-calls")
+#: The 0x102 body is 0x1E0 bytes (its own +0x00 says so); the datagram after it
+#: is padding and the checksum, which are not part of the ticket.
+TICKET_BODY_LEN = 0x1E0
 #: The operator's live desk, written by the admin panel (or tools/gmctl.py) and
 #: read here on every 0x801. A FILE, for the same reason a GM chat line is a file
 #: (see gmchat.py): gmd has no inbound API, adding a control port would be a new
@@ -550,7 +553,18 @@ class Gmd:
             "room": (ROOM_PER_REQUEST + b"%03d" % req_no).decode("latin1")
                     if (ROOM_PER_REQUEST and CHAT_ROOM)
                     else (CHAT_ROOM.decode("latin1") or None),
+            # The whole body as it came. In-game GM Calls from Front Mission
+            # Online arrive with +0x40 empty, issue 0 and subject "GM Call";
+            # the raw 0x1E0 bytes are kept to show whether the title names its
+            # caller some other way (a Content ID, a character name).
+            "raw": bytes(body[:TICKET_BODY_LEN]).hex(),
         }
+        # Nonzero bytes outside the decoded fields: the place to look first.
+        extra = [o for o in range(0x10, 0x40) if o < len(body) and body[o]]
+        if extra:
+            log(f"  ticket body has bytes in the undecoded +0x10..+0x3F block at "
+                f"{', '.join('+0x%02X' % o for o in extra[:24])}"
+                f"{' ...' if len(extra) > 24 else ''}")
         try:
             os.makedirs(TICKET_DIR, exist_ok=True)
             name = time.strftime("gm-%Y%m%dT%H%M%S", time.gmtime()) + f"-{req_no}.json"
