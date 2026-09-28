@@ -1,8 +1,8 @@
 """Member status (online, away, invisible) as published across processes and framed in pushes."""
-import json
 import os
 import struct
 import time
+from polcore import kv
 from srvcore import log
 from .deps import contentauth
 from . import lobbysession, titlezone
@@ -108,37 +108,49 @@ def _status_is_away(code):
 
 
 #: WHERE THE STATUS CROSSES THE CONTAINER BOUNDARY. Exactly the problem
-#: `_TITLE_ZONE_FILE` solves and for exactly the same reason: the 4:5 request
-#: lands on the LOBBY (`login`) while the in-room WHO and the friend push are
-#: served by `authsess`. One writer, an atomic replace, an mtime-cached read.
+#: `titlezone` solves and for exactly the same reason: the 4:5 request lands on
+#: the LOBBY (`login`) while the in-room WHO and the friend push are served by
+#: `authsess`. One hash per member in the live-state store,
+#: `memberstatus:<member id>` = {code, at}, announced on the `presence` channel.
 #:
-#: Kept as its OWN file rather than a key in title-zone.json: that file is
-#: written by `_publish_title_zone`, which DELETES a member's key when they leave
-#: a title, and a presence status must not evaporate because somebody quit Tetra
-#: Master.
-_MEMBER_STATUS_FILE = os.environ.get(
-    "POL_MEMBER_STATUS_FILE",
-    os.path.join(os.environ.get("POL_DATA_DIR", "/data"), "member-status.json"))
-_MEMBER_STATUS_CACHE = {"mtime": -1.0, "data": {}}
+#: Kept apart from the title zone rather than as a field of it: that entry is
+#: DELETED when a member leaves a title, and a presence status must not
+#: evaporate because somebody quit Tetra Master.
+_MEMBER_STATUS_KEY = "memberstatus:"
 #: Same backstop as the title zone, and for the same case: a client that dies
 #: without logging out. Long enough never to expire a real session.
 _MEMBER_STATUS_TTL = 12 * 3600
 
 
-def _live_member_status():
-    """Per-member 4:5 status, re-read only when the file's mtime moves."""
+def _member_status_row(raw):
+    if not raw or raw.get("code") is None:
+        return None
     try:
-        mtime = os.stat(_MEMBER_STATUS_FILE).st_mtime
-    except OSError:
+        return {"code": int(raw["code"]), "at": float(raw.get("at") or 0)}
+    except (TypeError, ValueError):
+        return None
+
+
+def _member_status_get(key):
+    """One member's {code, at}, or {} (a live-state failure reads as none)."""
+    try:
+        return _member_status_row(kv.hgetall(_MEMBER_STATUS_KEY + key)) or {}
+    except Exception as exc:
+        log("lobby", f"  4:5 status: cannot read ({exc!r})")
         return {}
-    if mtime != _MEMBER_STATUS_CACHE["mtime"]:
-        try:
-            with open(_MEMBER_STATUS_FILE, "r", encoding="utf-8") as f:
-                _MEMBER_STATUS_CACHE["data"] = json.load(f) or {}
-            _MEMBER_STATUS_CACHE["mtime"] = mtime
-        except (OSError, ValueError):
-            return _MEMBER_STATUS_CACHE["data"]   # torn write: last good view
-    return _MEMBER_STATUS_CACHE["data"]
+
+
+def _live_member_status():
+    """Per-member 4:5 status: {member id (str): {code, at}}."""
+    out = {}
+    try:
+        for name in kv.keys(_MEMBER_STATUS_KEY + "*"):
+            row = _member_status_row(kv.hgetall(name))
+            if row is not None:
+                out[name[len(_MEMBER_STATUS_KEY):]] = row
+    except Exception as exc:
+        log("lobby", f"  4:5 status: cannot read ({exc!r})")
+    return out
 
 
 def _publish_member_status(member_id, code):
@@ -146,8 +158,8 @@ def _publish_member_status(member_id, code):
 
     Writes only when the value actually MOVES. 4:5 arrives twice per toggle and
     the client re-sends its status on every fresh lobby connection, so an
-    unconditional write would rewrite this file -- which two containers
-    read-modify-write -- several times a minute for no change at all.
+    unconditional write would announce a change several times a minute for no
+    change at all.
     """
     if member_id is None:
         return False
@@ -155,27 +167,22 @@ def _publish_member_status(member_id, code):
         key = str(int(member_id))
     except (TypeError, ValueError):
         return False
-    have = (_live_member_status() or {}).get(key) or {}
+    have = _member_status_get(key)
     if code is None:
         if not have:
             return False                      # nothing to clear, nothing to write
     elif int(have.get("code", -1)) == int(code):
         return False
+    name = _MEMBER_STATUS_KEY + key
     try:
-        state = dict(_live_member_status())
-        if code is None:
-            state.pop(key, None)
-        else:
-            state[key] = {"code": int(code), "at": time.time()}
-        os.makedirs(os.path.dirname(_MEMBER_STATUS_FILE), exist_ok=True)
-        tmp = _MEMBER_STATUS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-        os.replace(tmp, _MEMBER_STATUS_FILE)  # atomic
-        _MEMBER_STATUS_CACHE["mtime"] = -1.0  # our own next read re-stats
+        kv.delete(name)
+        if code is not None:
+            kv.hset(name, mapping={"code": int(code), "at": time.time()})
+            kv.expire(name, _MEMBER_STATUS_TTL + 60)
+        kv.publish(titlezone.PRESENCE_CHANNEL, name)
         return True
-    except (OSError, ValueError) as exc:
-        log("lobby", f"  4:5 status: cannot publish ({exc})")
+    except Exception as exc:
+        log("lobby", f"  4:5 status: cannot publish ({exc!r})")
         return False
 
 
@@ -184,7 +191,7 @@ def _member_status(member_id):
     if os.environ.get("POL_MEMBER_STATUS", "1") != "1":
         return 0
     try:
-        row = _live_member_status().get(str(int(member_id))) or {}
+        row = _member_status_get(str(int(member_id)))
     except (TypeError, ValueError):
         return 0
     if time.time() - row.get("at", 0) > _MEMBER_STATUS_TTL:
