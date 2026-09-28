@@ -6,7 +6,7 @@ import time
 import threading
 from polcore import kv
 from srvcore import log
-from .deps import accounts
+from .deps import accounts, titles
 from . import framing, friendgroups, friendroster, handlelists, memberstatus, presence, profilerecord, pushchannel, pushrecord, roomregistry, titlezone
 
 
@@ -771,25 +771,26 @@ def _push_deliver_presencerows(rec, db=None):
             if state is None:
                 continue
             zone = pushrecord._presence_zone(fmember, state)
-            resolved.append((slot, guid, state, zone))
+            resolved.append((slot, guid, state, zone,
+                             pushrecord._presence_character(fmember, zone)))
         if not resolved:
             return 0
         when = int(time.time())
         sent = 0
         for ts in sessions:
             lines = []
-            for slot, guid, state, zone in resolved:
+            for slot, guid, state, zone, char in resolved:
                 try:
                     lines += pushrecord.field_push_lines(
                         ts.nick, guid, slot, state=state, zone=zone,
-                        seq=next(_ROW_PUSH_SEQ), when=when)
+                        character=char, seq=next(_ROW_PUSH_SEQ), when=when)
                 except ValueError as exc:
                     log("authserv",
                         f"push[presence-burst]: slot {slot} skipped ({exc})")
             if lines and ts.send(lines):
                 sent += 1
         log("authserv", "push[presence-burst]: "
-                        f"{[(s, f'+0x11={st}', f'zone={z}') for s, _g, st, z in resolved]}"
+                        f"{[(s, f'+0x11={st}', f'zone={z}') for s, _g, st, z, _c in resolved]}"
                         f" -> member {member}, {sent}/{len(sessions)} session(s)")
         return sent
     finally:
@@ -1166,6 +1167,30 @@ def _presence_wake_event():
                 log("authserv", f"presence: no change notifications ({exc!r}); "
                                 "polling every second")
     return ev
+
+
+def _title_character_watcher():
+    """Daemon: a member starting or stopping play as a character is a
+    presence change. Same shape as `_title_zone_watcher`, over what the title
+    plugins report (`titles.playing_characters`); a title that does not track
+    characters reports nothing and this never pushes."""
+    seen = {}
+    while True:
+        try:
+            now = titles.playing_characters()
+            for key in set(now) | set(seen):
+                if now.get(key) == seen.get(key):
+                    continue
+                _code, mid = key
+                if not presence.PRESENCE.is_online(mid):
+                    continue
+                log("authserv", f"presence[character]: member={mid} title {_code} "
+                                f"character={now.get(key, 'none')} -- pushing")
+                pushrecord._broadcast_presence(mid, "online")
+            seen = now
+        except Exception as exc:
+            log("authserv", f"presence[character] error: {exc!r}")
+        time.sleep(1.0)
 
 
 def _title_zone_watcher():

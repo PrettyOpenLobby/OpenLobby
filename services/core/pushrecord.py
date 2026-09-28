@@ -5,7 +5,7 @@ import struct
 import time
 from srvcore import log
 from authtoken import TOKEN_ALPHABET
-from .deps import accounts
+from .deps import accounts, titles
 from . import friendlist, friendroster, handlelists, logingate, memberstatus, presence, pushchannel, pushspool, roomregistry, titlezone
 
 
@@ -168,6 +168,22 @@ def _presence_zone(member_id, state):
     return memberstatus._PRESENCE_ZONE_VIEWER
 
 
+def _presence_character(member_id, zone):
+    """The character this member is playing in the title `zone` names, as
+    `(content code, sub id, user id)` for the record's 0x08 field, or None.
+
+    The title plugin answers (`titles.Title.presence_character`), and only
+    while the member's own 4:5 zone is that title, so the character and the
+    zone the rest of the row shows can never disagree on screen."""
+    if zone is None:
+        return None
+    try:
+        return titles.presence_character(int(member_id), int(zone))
+    except Exception as exc:
+        log("authserv", f"presence: character lookup failed ({exc!r})")
+        return None
+
+
 def _presence_field_state(state):
     """`+0x11` for a state name, honouring POL_PRESENCE_STATE_MAP."""
     table = dict(_PRESENCE_FIELD_STATE)
@@ -185,7 +201,7 @@ def _presence_field_state(state):
 def build_field_push_record(subject_guid, slot, icon=None, name=None,
                             comment=None, seq=0, when=None, hslot=0,
                             block=False, state=None, zone=None, group=None,
-                            gpacked=None):
+                            gpacked=None, character=None):
     """A long push record: `<main 96 chars><field chunk>`, ready for a NOTICE.
 
     `slot` is the friend's 2:3 record index (the same number that record carries
@@ -227,6 +243,8 @@ def build_field_push_record(subject_guid, slot, icon=None, name=None,
                     else memberstatus._PRESENCE_ZONE_VIEWER)
         struct.pack_into("<H", r, 0x14, int(zone) & 0xFFFF)
         block = True
+        if character is not None:
+            r[0x12] = 1                           # playing; see below
     r[0x18] = int(hslot) & 0x3F                   # vs (slot+0x9c >> 13) & 0x3f
     r[0x19] = 1                                   # the field-list branch's gate
     r[0x1c] = int(slot) & 0xFF                    # the friend's 2:3 slot, < 0xC8
@@ -273,6 +291,17 @@ def build_field_push_record(subject_guid, slot, icon=None, name=None,
     if icon is not None:
         flags |= _PUSH_F_ICON
         chunk += struct.pack("<II", int(icon) & 0xFFFFFFFF, 0)
+    if character is not None and state is not None:
+        # The field flag 0x08 carries, sized at 0x10 without a name until
+        # LandSandBoat's xi_profile (PR #11639, `friendStatusNotice`) named it:
+        # a sqPolCharacterPrimitive, `u16 valid | u16 content class | u32 sub id
+        # | u64 user id`, with +0x12 bit 0 meaning "playing". `character` is
+        # (content code, sub id, user id) from the title (_presence_character).
+        code, sub_id, user_id = character
+        flags |= _PUSH_F_F08
+        chunk += struct.pack("<HHIQ", 1, int(code) & 0xFFFF,
+                             int(sub_id) & 0xFFFFFFFF,
+                             int(user_id) & 0xFFFFFFFFFFFFFFFF)
     if name is not None:
         flags |= _PUSH_F_NAME
         raw = name.encode("cp932", "replace") if isinstance(name, str) else name
@@ -578,6 +607,7 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None):
             # friend is, and it is what draws the Viewer/chat-room icon on the row.
             field_zone = (_presence_zone(subject_member_id, field_state)
                           if field_state is not None else None)
+            field_char = _presence_character(subject_member_id, field_zone)
             for ts in targets:
                 lines = _presence_lines(ts.nick, ts.srv, name, guid, state,
                                         slot=slot, seq=seq)
@@ -597,7 +627,8 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None):
                                 seq=next(pushspool._ROW_PUSH_SEQ))
                         lines += field_push_lines(
                             ts.nick, guid, slot, state=field_state,
-                            zone=field_zone, seq=next(pushspool._ROW_PUSH_SEQ))
+                            zone=field_zone, character=field_char,
+                            seq=next(pushspool._ROW_PUSH_SEQ))
                     except Exception as exc:
                         log("authserv", f"presence: row record failed "
                                         f"(slot {slot}, state {state}): {exc!r}")

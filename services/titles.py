@@ -326,6 +326,21 @@ class Title:
         else the digits)."""
         return None
 
+    def presence_character(self, member_id):
+        """The character this member is playing, for the friend-status record
+        their friends are sent: `(sub_id, user_id)`, the u32 and u64 of the
+        record's 0x08 field (sqPolCharacterPrimitive, whose content class is
+        this title's `content_code`). None when unknown. Asked only while the
+        member's own 4:5 zone is this title."""
+        return None
+
+    def playing_characters(self):
+        """`{member_id: key}` for every member this title knows to be playing
+        a character, `key` standing for the character. The core re-sends a
+        member's presence when their key changes. {} when the title does not
+        track it."""
+        return {}
+
     def content_schema(self):
         """(fields, record_len, phead) for this title's content profile, or
         None to use the core's table of the Viewer's own layouts
@@ -470,6 +485,28 @@ def session_quit(member_id, sid):
 
 def live_games():
     return sum(int(t.live_games() or 0) for t in _TITLES)
+
+
+def presence_character(member_id, zone):
+    """(content code, sub id, user id) of the character `member_id` plays in
+    the title whose content code is `zone`, or None."""
+    t = for_code(zone) if zone is not None else None
+    if t is None:
+        return None
+    got = t.presence_character(member_id)
+    if not got:
+        return None
+    sub_id, user_id = got
+    return int(t.content_code), int(sub_id), int(user_id)
+
+
+def playing_characters():
+    """`{(content code, member_id): key}` across every title."""
+    out = {}
+    for t in _TITLES:
+        for member_id, key in (t.playing_characters() or {}).items():
+            out[(t.content_code, int(member_id))] = key
+    return out
 
 
 def begin_shutdown():

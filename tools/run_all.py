@@ -337,6 +337,8 @@ SUITES = [
     ("admin_perms",   [sys.executable, "admin_perms_test.py"], TOOLS, {}),
     # A GM Call ticket keeps the raw 0x102 body beside the decoded fields.
     ("gmd_ticket_raw", [sys.executable, "test_gmd_ticket_raw.py"], TESTS, {}),
+    # A title's character in the friend-status record's 0x08 field.
+    ("presence_character", [sys.executable, "test_presence_character.py"], TESTS, {}),
     ("group_check",   [sys.executable, "group_check.py"],     TOOLS, {}),
     # The client's "N/M in chat" counter has two inputs served by two different
     # containers -- the 7:12 member total and the IRC roster -- so neither can
