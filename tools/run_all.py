@@ -196,6 +196,17 @@ SUITES = [
     # served to the delete path, and it deleted the friend it meant to caption.
     ("friend_rename", [sys.executable, "friend_rename_test.py"], TOOLS, {}),
     ("presence",      [sys.executable, "presence_test.py"],   TOOLS, {}),
+    ("presence_burst", [sys.executable, "presence_burst_test.py"], TOOLS, {}),
+    ("presence_grace", [sys.executable, "presence_grace_test.py"], TOOLS, {}),
+    ("presence_push_identity", [sys.executable, "presence_push_identity_test.py"],
+                      TOOLS, {}),
+    ("room_ghost_ttl", [sys.executable, "room_ghost_ttl_test.py"], TOOLS, {}),
+    ("lobby_bind",    [sys.executable, "lobby_bind_test.py"], TOOLS, {}),
+    ("pmleval",       [sys.executable, "pmleval_test.py"],    TOOLS, {}),
+    ("pmlrefs",       [sys.executable, "pmlrefs_test.py"],    TOOLS, {}),
+    # Not registered, on purpose: bridge_test needs polboards from a title
+    # repository, and info_switcher_test needs portal pages under www/ that
+    # this repository does not ship.
     # A slot is an index into the list 2:3 SERVED, and two re-derivations
     # enumerated the raw friend table instead -- so on any account holding an
     # incoming request, every row repaint and every presence push was aimed at
