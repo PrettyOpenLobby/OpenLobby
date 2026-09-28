@@ -190,6 +190,59 @@ S2_SUBJ, S2_SUBJ_LEN, S2_TEXT, S2_TEXT_LEN = 0x70, 0x40, 0xB0, 0x150
 BIT_HELD = 0x02
 
 
+#: THE RSA SESSION KEY REACHES GM CALL. When authserv sends a login the
+#: RSA-wrapped session key (POL_AUTH_RSA), polcore keeps it (0x0386a858) and
+#: cft_1217 re-keys the GM per-slot context with it right after stage 1:
+#: FUN_037ce080(ctx, cft_1165(0), 8). Under K=0 that key is zero, which is
+#: the "zero re-key" every reply here is built on. Under RSA it is not, so the
+#: client cannot read a zero-keyed 0x201 and retransmits stage 1 under the
+#: session key. authserv records each key it issues under the client address
+#: (remember_session_key); a datagram nothing opens is tried against that
+#: peer's recent keys, and the one that opens becomes the session's reply key.
+SESSION_KEYS_TTL = 12 * 3600
+SESSION_KEYS_KEEP = 8
+
+
+def _kv():
+    try:
+        from polcore import kv
+        return kv
+    except Exception:
+        return None
+
+
+def remember_session_key(peer_ip, key):
+    """authserv: record an RSA session key it just sent to `peer_ip`. Never raises."""
+    kv = _kv()
+    if kv is None or not peer_ip or not key:
+        return
+    try:
+        k = "gm:sesskeys:" + peer_ip
+        keys = [h for h in (kv.get_json(k) or []) if h != bytes(key).hex()]
+        keys = (keys + [bytes(key).hex()])[-SESSION_KEYS_KEEP:]
+        kv.set_json(k, keys, ttl=SESSION_KEYS_TTL)
+    except Exception:
+        pass
+
+
+def session_keys(peer_ip):
+    """The session keys issued to `peer_ip`, newest first. Never raises."""
+    kv = _kv()
+    if kv is None or not peer_ip:
+        return []
+    try:
+        return [bytes.fromhex(h) for h in reversed(kv.get_json("gm:sesskeys:" + peer_ip) or [])]
+    except Exception:
+        return []
+
+
+def session_key_blobs(key):
+    """The GM key blobs one session key can mean: the 8 bytes as polcore holds
+    them, then zeros (FUN_037ce080 with length 8). The byte-reversed order is
+    tried too, since the unwrap's byte order is read, not measured."""
+    return [bytes(key) + b"\0" * 8, bytes(key)[::-1] + b"\0" * 8]
+
+
 def session_guid(ses):
     """The caller's 64-bit handle id, from the 0x101 session dwords."""
     return ((ses.dwB & 0xFFFFFFFF) << 32) | (ses.dwA & 0xFFFFFFFF)
@@ -547,6 +600,25 @@ class Gmd:
                     log(f"session #{s.idx}, opened with its {name} context"
                         + (" -- RETRANSMIT, our answer was not accepted" if again else ""))
                     return s, pt, name == "GLOBAL", again
+        # A client that logged in under POL_AUTH_RSA re-keyed its per-slot
+        # context with its auth session key after stage 1 (see
+        # remember_session_key). Try that peer's recent keys; the one that
+        # opens becomes the session's reply context.
+        for key in session_keys(peer[0] if peer else None):
+            for blob in session_key_blobs(key):
+                ctx = _crypto().GmContext(blob)
+                pt = ctx.decrypt(raw)
+                if pt[:4] != b"MAG?":
+                    continue
+                s = next((x for x in ordered if x.peer and peer
+                          and x.peer[0] == peer[0]), None)
+                if s is None:
+                    s = Session(len(self.sessions), _crypto().GmContext(KEY16))
+                    self.sessions.append(s)
+                s.zctx = ctx
+                log(f"session #{s.idx}: opened with {peer[0]}'s auth SESSION "
+                    f"key (POL_AUTH_RSA); replies now use it")
+                return s, pt, False, False
         # Nothing matched. A fresh stage 1 is the only thing that legitimately
         # arrives with no session behind it, and it is always key blob one.
         pt = _crypto().GmContext(KEY16).decrypt(raw)

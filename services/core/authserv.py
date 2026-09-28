@@ -709,6 +709,13 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
                     log("authserv", f"{peer} POL_AUTH_RSA: sent an RSA-wrapped "
                                     f"session key ({n_mod.bit_length()}-bit "
                                     "client modulus)")
+                    # GM Call keys its per-slot context with this key after
+                    # stage 1, so gmd needs it too (gmd.remember_session_key).
+                    try:
+                        import gmd
+                        gmd.remember_session_key(addr[0], rsa_key)
+                    except Exception:
+                        pass
                     _trace("key line", "RSA-wrapped random key")
             except Exception as exc:
                 log("authserv", f"{peer} *** POL_AUTH_RSA: wrapping failed "
