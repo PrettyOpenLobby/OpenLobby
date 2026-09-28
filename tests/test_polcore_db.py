@@ -216,35 +216,6 @@ for tc in [("member", "login_pw_sealed"), ("member", "ext_mail"),
            ("group_member", "pending"), ("handle_content", "slot")]:
     chk("column %s.%s (from the upgrade list / rebuilds)" % tc, tc in cols, True)
 
-print("migrations: same tables and columns as the SQLite accounts.db")
-# accounts.py still builds the SQLite schema (SCHEMA + its upgrade list and
-# rebuilds). While it does, 0001 must carry every table and column it makes,
-# so a column added there without a migration here fails this line.
-import sqlite3  # noqa: E402
-import accounts  # noqa: E402
-if getattr(accounts, "SCHEMA", "").lstrip().upper().startswith("PRAGMA"):
-    tmpdb = tempfile.mkdtemp()
-    try:
-        sconn = accounts.connect(os.path.join(tmpdb, "accounts.db"))
-        lite = {}
-        for (t,) in sconn.execute("SELECT name FROM sqlite_master WHERE type = 'table'"
-                                  " AND name NOT LIKE 'sqlite_%'").fetchall():
-            lite[t] = {r[1] for r in sconn.execute("PRAGMA table_info(%s)" % t)}
-        sconn.close()
-        accounts.pool_drain()
-    finally:
-        shutil.rmtree(tmpdb, ignore_errors=True)
-    pg = {}
-    for (t, c) in cols:
-        pg.setdefault(t, set()).add(c)
-    chk("SQLite tables missing from Postgres", sorted(set(lite) - set(pg)), [])
-    chk("SQLite columns missing from Postgres",
-        sorted("%s.%s" % (t, c) for t in lite for c in lite[t] - pg.get(t, set())), [])
-    chk("Postgres columns SQLite does not have (in shared tables)",
-        sorted("%s.%s" % (t, c) for t in lite for c in pg.get(t, set()) - lite[t]), [])
-else:
-    print("  (accounts.py no longer builds a SQLite schema; comparison skipped)")
-
 print("migrations: the schema behaves like accounts.py's")
 now = "2026-09-27T00:00:00Z"
 with db.transaction() as c:

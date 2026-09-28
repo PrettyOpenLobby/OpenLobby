@@ -17,6 +17,12 @@ Docker and for CI that runs Postgres as a service container.
 
 `container()` is the generic part, used by the Valkey test as well.
 
+Suites that exercise the account code call `use_fresh_database()` once at the
+top: it creates a database, points POL_DATABASE_URL (and so polcore.db, and
+any server the suite starts as a subprocess) at it, and drops it at exit.
+tools/run_all.py starts the server once and hands every suite its URL through
+POL_TEST_DATABASE_URL, so a full run pays for one container.
+
     python tools/pgtest.py      # start one, print its URL, remove it
 """
 import atexit
@@ -113,8 +119,11 @@ def server_url():
         raise RuntimeError("no Docker daemon and POL_TEST_DATABASE_URL is unset")
     # tmpfs and fsync=off: nothing here needs to survive, and it makes the
     # CREATE DATABASE per test cheap.
+    # C collation, like the compose file's database: text sorts and lower()
+    # folds byte-wise, as SQLite did.
     _cid, port = container(
-        PG_IMAGE, 5432, env={"POSTGRES_PASSWORD": PG_PASSWORD},
+        PG_IMAGE, 5432, env={"POSTGRES_PASSWORD": PG_PASSWORD,
+                             "POSTGRES_INITDB_ARGS": "--locale=C -E UTF8"},
         args=["--tmpfs", "/var/lib/postgresql/data"],
         cmd=["-c", "fsync=off", "-c", "synchronous_commit=off",
              "-c", "full_page_writes=off"])
@@ -155,6 +164,52 @@ def database():
     finally:
         with contextlib.suppress(Exception):
             drop_database(url)
+
+
+_owned = []                    # databases use_fresh_database() made
+
+
+@atexit.register
+def _drop_owned():
+    # Close this process's pool first, or the drop waits on its connections.
+    polcore_db = sys.modules.get("polcore.db")
+    if polcore_db is not None:
+        with contextlib.suppress(Exception):
+            polcore_db.close()
+    while _owned:
+        with contextlib.suppress(Exception):
+            drop_database(_owned.pop())
+
+
+def use_fresh_database():
+    """Point this process, and every process it starts, at a new empty database.
+
+    Sets POL_DATABASE_URL (and repoints polcore.db if it is already imported),
+    and POL_LOGIN_PW_KEYFILE to a key file in a fresh temporary directory, so a
+    password sealed by one process of the suite unseals in another. Calling it
+    again moves everything to another new database: the SQLite suites made a
+    new accounts.db the same way. The databases are dropped when this process
+    exits. Returns the URL.
+
+    Without Docker or POL_TEST_DATABASE_URL this exits the suite with a
+    failure: the code under test cannot run without a database.
+    """
+    import tempfile
+    try:
+        url = create_database()
+    except Exception as exc:              # noqa: BLE001 -- say why, then fail
+        print(f"FAIL: no PostgreSQL for this suite ({exc}); start Docker or set "
+              "POL_TEST_DATABASE_URL", flush=True)
+        sys.exit(1)
+    _owned.append(url)
+    os.environ["POL_DATABASE_URL"] = url
+    if not os.environ.get("POL_LOGIN_PW_KEY"):
+        keydir = tempfile.mkdtemp(prefix="pgtest-key-")
+        os.environ["POL_LOGIN_PW_KEYFILE"] = os.path.join(keydir, "login-pw.key")
+    polcore_db = sys.modules.get("polcore.db")
+    if polcore_db is not None:
+        polcore_db.configure(None)
+    return url
 
 
 if __name__ == "__main__":
