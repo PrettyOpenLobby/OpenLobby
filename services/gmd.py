@@ -195,10 +195,10 @@ BIT_HELD = 0x02
 #: cft_1217 re-keys the GM per-slot context with it right after stage 1:
 #: FUN_037ce080(ctx, cft_1165(0), 8). Under K=0 that key is zero, which is
 #: the "zero re-key" every reply here is built on. Under RSA it is not, so the
-#: client cannot read a zero-keyed 0x201 and retransmits stage 1 under the
-#: session key. authserv records each key it issues under the client address
-#: (remember_session_key); a datagram nothing opens is tried against that
-#: peer's recent keys, and the one that opens becomes the session's reply key.
+#: client cannot read a zero-keyed 0x201; it sends back its receive buffer
+#: (our reply decrypted under its key) until we answer under the right one.
+#: authserv records each key it issues under the client address
+#: (remember_session_key) as the fast path; Gmd.find_session_key has the rest.
 SESSION_KEYS_TTL = 12 * 3600
 SESSION_KEYS_KEEP = 8
 
@@ -237,9 +237,10 @@ def session_keys(peer_ip):
 
 
 def session_key_blobs(key):
-    """The GM key blobs one session key can mean: the 8 bytes as polcore holds
-    them, then zeros (FUN_037ce080 with length 8). The byte-reversed order is
-    tried too, since the unwrap's byte order is read, not measured."""
+    """The GM key blob for one session key: the 8 bytes as authserv feeds
+    Blowfish, then zeros (FUN_037ce080 with length 8). Only the low 14 bits of
+    the first little-endian dword survive the derivation. The byte-reversed
+    order is kept as a second guess; the brute force covers both anyway."""
     return [bytes(key) + b"\0" * 8, bytes(key)[::-1] + b"\0" * 8]
 
 
@@ -604,21 +605,9 @@ class Gmd:
         # context with its auth session key after stage 1 (see
         # remember_session_key). Try that peer's recent keys; the one that
         # opens becomes the session's reply context.
-        for key in session_keys(peer[0] if peer else None):
-            for blob in session_key_blobs(key):
-                ctx = _crypto().GmContext(blob)
-                pt = ctx.decrypt(raw)
-                if pt[:4] != b"MAG?":
-                    continue
-                s = next((x for x in ordered if x.peer and peer
-                          and x.peer[0] == peer[0]), None)
-                if s is None:
-                    s = Session(len(self.sessions), _crypto().GmContext(KEY16))
-                    self.sessions.append(s)
-                s.zctx = ctx
-                log(f"session #{s.idx}: opened with {peer[0]}'s auth SESSION "
-                    f"key (POL_AUTH_RSA); replies now use it")
-                return s, pt, False, False
+        got = self.find_session_key(raw, peer, ordered)
+        if got:
+            return got
         # Nothing matched. A fresh stage 1 is the only thing that legitimately
         # arrives with no session behind it, and it is always key blob one.
         pt = _crypto().GmContext(KEY16).decrypt(raw)
@@ -647,6 +636,56 @@ class Gmd:
         self.sessions.append(s)
         log(f"NEW session #{s.idx} (a fresh 0x101 under key blob one)")
         return s, pt, False, False
+
+    def find_session_key(self, raw, peer, ordered):
+        """The reply key of a client that logged in under POL_AUTH_RSA.
+
+        After stage 1 the client decrypts everything with FUN_037ce080(ctx,
+        session key, 8), which reads only the low 14 bits of the key's first
+        little-endian dword: 16384 possible contexts. Two things identify it:
+          * a client that could not read our 0x201 sends back its receive
+            buffer, which is our reply decrypted under ITS key
+            (cft_1218_udp case -1 resends that buffer), so the right context
+            turns our last reply into exactly these bytes -- and then the
+            answer is our last request, re-answered under that key;
+          * any later message, e.g. after a gmd restart mid-call, opens as
+            MAG? under it.
+        authserv's recorded keys are tried first, then all 16384.
+        """
+        if not peer:
+            return None
+        ses = next((x for x in ordered if x.peer and x.peer[0] == peer[0]), None)
+        echo = ses and ses.last_reply and ses.last_request
+        seen, cands = set(), []
+        for key in session_keys(peer[0]):
+            for blob in session_key_blobs(key):
+                cands.append(blob[:4])
+        if ses is not None:
+            # ~0.25 s at worst, so only for an address already in a call
+            cands += [struct.pack("<I", k) for k in range(0x4000)]
+        for k4 in cands:
+            k0 = struct.unpack("<I", k4)[0] & 0x3FFF
+            if k0 in seen:
+                continue
+            seen.add(k0)
+            ctx = _crypto().GmContext(struct.pack("<I", k0) + b"\0" * 12)
+            if echo and ctx.decrypt(ses.last_reply[:8]) == raw[:8] \
+                    and ctx.decrypt(ses.last_reply[:len(raw)]) == raw:
+                ses.zctx = ctx
+                log(f"session #{ses.idx}: {peer[0]} echoed our reply back "
+                    f"decrypted under its auth SESSION key (POL_AUTH_RSA); "
+                    f"answering its last request again under that key")
+                return ses, ses.last_request, False, False
+            if ctx.decrypt(raw[:8])[:4] == b"MAG?":
+                pt = ctx.decrypt(raw)
+                if ses is None:
+                    ses = Session(len(self.sessions), _crypto().GmContext(KEY16))
+                    self.sessions.append(ses)
+                ses.zctx = ctx
+                log(f"session #{ses.idx}: opened with {peer[0]}'s auth "
+                    f"SESSION key (POL_AUTH_RSA); replies now use it")
+                return ses, pt, False, False
+        return None
 
     # ------------------------------------------------------------------ replies
     def redirect(self, ses, echoA, echoC, our_ip):
