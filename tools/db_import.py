@@ -234,34 +234,42 @@ TITLES = (
          "run --rm --no-deps --entrypoint python jan janstore.py import "
          "rank_snapshot /data/resources/jan-rank-snapshot.json",
          "the ranking's previous order"),
-        ("crystalholo_jan-board-state volume", "*_discord.json, discord_channels.json",
-         "run --rm --no-deps -v crystalholo_jan-board-state:/state:ro "
+        ("openlobby_jan-board-state volume", "*_discord.json, discord_channels.json",
+         "run --rm --no-deps -v openlobby_jan-board-state:/state:ro "
          "--entrypoint python jan janstore.py import board_state /state",
          "the web board's Discord bookkeeping; only where the board posted "
          "to Discord"),
         ("data", "resources/<member>.jan_stats.json", None,
-         "still read as a file by CrystalHoLo; stays on the volume"),
+         "each member's record: a row of the blob table, which this import "
+         "fills and CrystalHoLo reads; nothing to run"),
+    ], []),
+    ("Tetra Master", "crystalmaster", _DC, [
+        ("data", "tm-event-state.json",
+         "run --rm --no-deps --entrypoint python tmrank tmstore.py import "
+         "event_state /data/tm-event-state.json", "the tournament standings"),
+        ("data", "tm-champion.json",
+         "run --rm --no-deps --entrypoint python tmrank tmstore.py import "
+         "champion /data/tm-champion.json",
+         "the weekly champion the card shop names"),
+        ("openlobby_tm-board-state volume", "*_discord.json, discord_channels.json",
+         "run --rm --no-deps -v openlobby_tm-board-state:/state:ro "
+         "--entrypoint python tmrank tmstore.py import board_state /state",
+         "the web board's Discord bookkeeping; only where the board posted "
+         "to Discord"),
+        ("data", "resources/<member>.tm_collection.json, auction-*", None,
+         "the collections, saves, prize records and auction records: rows "
+         "of the blob table, which this import fills and CrystalMaster "
+         "reads; nothing to run"),
+        ("data", "resources/tmrank/", None,
+         "the weekly lists; this import copies each file into the blob table "
+         "as scope tmrank, and the tmrank service rebuilds them "
+         "(TM_RANK_AT=now publishes at start)"),
     ], []),
     ("Dirge of Cerberus", "crystaldirge", _DC_ENV, [
         ("logs", fn, "run --rm --entrypoint python doc docdb.py import %s /logs/%s"
          % (store, fn), None)
         for fn, store in DOC_STORES
     ], []),
-    ("Tetra Master", "crystalmaster", _DC, [
-        ("data", "resources/<member>.tm_collection.json", None,
-         "still read as a file by CrystalMaster; stays on the volume"),
-        ("data", "resources/auction-*", None,
-         "still read as files; stay on the volume"),
-        ("data", "resources/tmrank/", None,
-         "the weekly lists; this tool copies each file into the blob table "
-         "as scope tmrank, and the tmrank service rebuilds them "
-         "(TM_RANK_AT=now publishes at start)"),
-    ], [
-        "Tetra Master's collections, auctions and prizes: CrystalMaster still "
-        "reads them as files under resources/ and has no importer onto "
-        "polcore.blobs yet. This tool also copies them into the blob table by "
-        "name, and leaves the files where they are.",
-    ]),
 )
 
 
@@ -1083,8 +1091,8 @@ def render(src, results, status, merge, dry_run, logs=None):
             w("   By scope: %s" % ", ".join("%s %d" % kv for kv in
                                            sorted(res.extra["by_scope"].items())))
             if res.extra.get("other_scopes"):
-                w("   Title files copied by name (the titles still read the files,"
-                  " which stay): %s" % ", ".join(
+                w("   Title records copied by name (the titles read them from"
+                  " the blob table): %s" % ", ".join(
                       "%s %d" % kv for kv in sorted(res.extra["other_scopes"].items())))
             if res.extra.get("not_linked"):
                 w("   Stored, not linked to a member (that member no longer"
@@ -1140,8 +1148,8 @@ def render_titles(has):
     w("     members.")
     w("  2. FFXI: the bridge's two maps, before the new bridge starts for the")
     w("     first time.")
-    w("  3. Fantasy Earth, Front Mission Online and Janhourou: their files,")
-    w("     before each title starts for the first time.")
+    w("  3. Fantasy Earth, Front Mission Online, Janhourou and Tetra Master:")
+    w("     their files, before each title starts for the first time.")
     w("  4. Dirge of Cerberus: its stores, while the doc responder is stopped.")
     w("  5. Then start the stack and the titles.")
     w("")

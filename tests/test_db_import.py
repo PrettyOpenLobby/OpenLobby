@@ -557,13 +557,19 @@ ORDER = (
     " /data/resources/janevent.json",
     "$DC run --rm --no-deps --entrypoint python jan janstore.py import rank_snapshot"
     " /data/resources/jan-rank-snapshot.json",
-    "$DC run --rm --no-deps -v crystalholo_jan-board-state:/state:ro --entrypoint"
+    "$DC run --rm --no-deps -v openlobby_jan-board-state:/state:ro --entrypoint"
     " python jan janstore.py import board_state /state",
+    "$DC run --rm --no-deps --entrypoint python tmrank tmstore.py import event_state"
+    " /data/tm-event-state.json",
+    "$DC run --rm --no-deps --entrypoint python tmrank tmstore.py import champion"
+    " /data/tm-champion.json",
+    "$DC run --rm --no-deps -v openlobby_tm-board-state:/state:ro --entrypoint"
+    " python tmrank tmstore.py import board_state /state",
     "$DC run --rm --entrypoint python doc docdb.py import stats /logs/doc-stats.json",
 )
 for needle in ORDER:
     chk("printed: %s" % needle[4:70], needle in flat, True)
-chk("in the order they run: the bridge, FE, FMO, Jan, then Dirge",
+chk("in the order they run: the bridge, FE, FMO, Jan, TM, then Dirge",
     [flat.find(n) for n in ORDER] == sorted(flat.find(n) for n in ORDER)
     and flat.find(ORDER[0]) > 0, True)
 for needle in ("BEFORE the new bridge starts", "data/ffxi_idmap.json [found]",
@@ -571,9 +577,9 @@ for needle in ("BEFORE the new bridge starts", "data/ffxi_idmap.json [found]",
                "data/fmowar.json [found]", "data/fmo.db [not there]",
                "imported by the fmo service on its first start"):
     chk("printed: %s" % needle, needle in flat, True)
-chk("no importer is listed as missing any more",
-    "GAP: ffxi" in flat or "GAP: fe.db" in flat or "GAP: fmo.db" in flat
-    or "GAP: janevent" in flat, False)
+chk("no importer is listed as missing any more", "GAP:" in flat, False)
+chk("no title is said to read its records as files any more",
+    "still read as" in flat or "still read the files" in flat, False)
 chk("live files named as left behind",
     all(n in out for n in ("auth-sessions.json", "rooms-live.json",
                            "*-sessions-live.json", "push-spool.jsonl")), True)
