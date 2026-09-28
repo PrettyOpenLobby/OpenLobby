@@ -63,10 +63,30 @@
   }
   // Body text: the named entities plus the private pad/arrow glyphs.
   function decodeText(s) {
-    return decodeEntities(s).replace(/&([a-z]+\d?);/gi, (m, e) => {
+    return westernPunct(decodeEntities(s).replace(/&([a-z]+\d?);/gi, (m, e) => {
       const p = PRIVATE[e.toLowerCase()];
       return p === undefined ? m : String.fromCharCode(PUA + p);
-    });
+    }));
+  }
+
+  // Curly quotes, dashes and the ellipsis have both a full-width JIS form and
+  // a Western one (the Viewer's Latin rows, SJIS 0x85xx, spec 2.2). SE's
+  // English pages write them as entities (Developers&rsquo; Room) and the
+  // Viewer draws them narrow; its Japanese pages, written in Shift-JIS, use
+  // the full-width forms. The source encoding is gone by the time text gets
+  // here, so the neighbours decide: next to Latin text the Western form is
+  // used. INFERRED from how the pages read, not from the converter.
+  const WESTERN = 0xe100;                      // WESTERN + Latin-1 code
+  const PUNCT = { 0x2018: 0x91, 0x2019: 0x92, 0x201c: 0x93, 0x201d: 0x94,
+                  0x2013: 0x96, 0x2014: 0x97, 0x2026: 0x85 };
+  function westernPunct(s) {
+    const asciiAt = (i) => { const c = s.charCodeAt(i); return c >= 0x20 && c <= 0x7e; };
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+      const w = PUNCT[s.charCodeAt(i)];
+      out += w !== undefined && (asciiAt(i - 1) || asciiAt(i + 1)) ? String.fromCharCode(WESTERN + w) : s[i];
+    }
+    return out;
   }
 
   function parseAttrs(s) {
@@ -202,6 +222,7 @@
   // full-width form first). -1 for everything else.
   function latin(o) {
     if (o >= 0x21 && o <= 0x7e) return o;
+    if (o >= WESTERN + 0x80 && o <= WESTERN + 0xff) return o - WESTERN;
     const l = o >= 0xa0 && o <= 0xff ? o : CP1252[o];
     if (l === undefined) return -1;
     if (FONT.map && FONT.map.has(String.fromCharCode(o))) return -1;
@@ -549,6 +570,14 @@
   // ======================================================================
   // &br;  &style=N; .. &style;  &image=N;  &pre=N;  &pos=X;  &li; / &li=M;
   // &sp=N;  &a=URL; .. &a;  &size=W,H; .. &size;  &var=$x; (unresolved)
+  // A <text> body without the source formatting around it: the line break
+  // and indentation after `<text>` and before `</text>`. Spaces on the text's
+  // own line are the page's: the FFXI top menu indents its labels with four
+  // ("    Information"), and trimming them drew every label on the frame.
+  function bodyText(s) {
+    return String(s).replace(/^[ \t]*\r?\n\s*/, "").replace(/\s*\r?\n[ \t]*$/, "");
+  }
+
   function inlineItems(text, ctx, baseStyle) {
     const items = [];
     const RE = /&(br|style|image|pre|pos|var|li|sp|size|a|table)(?:=([^;]*))?;/g;
@@ -594,7 +623,10 @@
         if (arg !== undefined && ctx.inlineimgs[arg]) items.push({ t: "li", decl: ctx.inlineimgs[arg], name: arg });
         else items.push({ t: "li", mark: arg === undefined ? "・" : decodeText(arg) });
       }
-      else if (kind === "sp") items.push({ t: "sp", px: +arg || 0 });
+      // `&sp=N;` is N half-width spaces, not pixels: the FFXI tips menu pads
+      // each label so sp + 2 x (full-width chars) stays 28, and the topics
+      // ticker puts `&sp=2;` between a date and its headline.
+      else if (kind === "sp") items.push({ t: "sp", n: +arg || 0 });
       else if (kind === "a") link = arg === undefined ? null : arg;
       else if (kind === "var") {
         items.push({ t: "text", s: "(Variable error)", style, link, error: true });
@@ -714,7 +746,7 @@
     for (const it of items) {
       if (it.t !== "text") flush();
       if (it.t === "br") { if (it.style) cur = it.style; indent = 0; line.st = line.parts.length ? line.st : cur; newLine(); continue; }
-      if (it.t === "sp") { place({ t: "gap" }, it.px); continue; }
+      if (it.t === "sp") { place({ t: "gap" }, it.n * advance(0x20, 0, cur)); continue; }
       if (it.t === "pos") { if (it.x > line.w) line.w = it.x; continue; }
       if (it.t === "li") {
         if (it.decl) {
@@ -1234,12 +1266,12 @@
           if (newText !== undefined) shown = newText;
           const s2 = styleOf(ctx, style === undefined ? a.style : style);
           d.querySelectorAll(":scope > canvas.pml-text, :scope > .pml-inline-link").forEach((c) => c.remove());
-          const r2 = textCanvas(d, inlineItems(shown.trim(), ctx, s2), s2, ctx, { w, h, mode, align: a.align || "left",
+          const r2 = textCanvas(d, inlineItems(bodyText(shown), ctx, s2), s2, ctx, { w, h, mode, align: a.align || "left",
             valign: a.valign || "top", margin: margins(a.margin), wordwrap: a.wordwrap !== "0" });
           if (mode !== 3) resize(d, r2.w, r2.h);
           drawPendingImages(ctx);
         };
-        const items = inlineItems(text.trim(), ctx, st);
+        const items = inlineItems(bodyText(text), ctx, st);
         const r = textCanvas(d, items, st, ctx, { w, h, mode, align: a.align || "left",
           valign: a.valign || "top", margin: margins(a.margin), wordwrap: a.wordwrap !== "0" });
         if (mode !== 3) resize(d, r.w, r.h);
@@ -1360,7 +1392,7 @@
             const t = td.children.find((c) => c.tag === "#text");
             if (t) {
               const st = styleOf(ctx, td.attrs.style || a.style);
-              const r = textCanvas(inner, inlineItems(t.text.trim(), ctx, st), st, ctx,
+              const r = textCanvas(inner, inlineItems(bodyText(t.text), ctx, st), st, ctx,
                 { w: tw - 2 * padding, mode: 1, align: td.attrs.align || "left" });
               if (!rh) rowH = Math.max(rowH, r.natural + 2 * padding);
             }
