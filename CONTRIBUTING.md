@@ -18,6 +18,8 @@ services/
   admin.py          the local admin panel (port 8090)
   srvcore.py        logging, config, capture helpers shared by every service
   stub.py           the observation stub (dns / http / tcp modes)
+  polcore/          PostgreSQL (db.py, blobs.py) and live state (kv.py)
+  live_sessions.py  the live-session markers the deploy gate reads
 tools/              self-tests (`*_test.py`, `*_check.py`) and operator tools
 tests/              newer self-tests
 config/             server.yaml and the portal-era table
@@ -63,6 +65,16 @@ declares how many on its plugin (`Title.content_slots`), and the account code
 mints the extra ids when the title is granted and tops a member's handles up
 at login. Operator commands that only make sense for one game live in that
 game's plugin, not in `accounts.py`'s command line.
+
+### Where state lives
+
+Anything that must survive a restart goes in PostgreSQL through
+`services/polcore/db.py`: the accounts, and saves and other stored objects
+through `polcore/blobs.py`. State other containers need to see while players
+are online (sessions, presence, rooms, the push queue, live-session counts)
+goes in Valkey through `polcore/kv.py`, with an expiry. Do not add a JSON file
+on the shared volume for either. `docs/database.md` lists the keys and the
+blob scopes in use.
 
 ## Running the checks
 
