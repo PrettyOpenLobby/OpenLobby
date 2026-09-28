@@ -31,12 +31,11 @@ sys.path.insert(0, SERVICES)
 # Log to a scratch dir so we can assert on what each hop logged.
 LOG_DIR = tempfile.mkdtemp(prefix="smoke-")
 os.environ["POL_LOG_DIR"] = LOG_DIR
-# ...and give the account DB a scratch path too. The auth path provisions real
-# rows, so without this the test wrote a live database to the container path
-# `/config/accounts.db`, which on Windows resolves to the DRIVE ROOT
-# (E:\config\accounts.db). A test must not leave an account database outside its
-# own temp dir, and it certainly must not touch the real one.
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(LOG_DIR, "accounts.db")
+# ...and give the account code a throwaway database too. The auth path
+# provisions real rows, and a test must never write them anywhere but its own
+# scratch database (tools/pgtest.py), certainly not the real one.
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_SESSION_FILE"] = os.path.join(LOG_DIR, "auth-sessions.json")
 os.environ["POL_ROOMS_FILE"] = os.path.join(LOG_DIR, "rooms-live.json")
 os.environ["POL_STAMP_FILE"] = os.path.join(LOG_DIR, "auth-stamps.json")

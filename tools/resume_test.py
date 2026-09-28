@@ -42,13 +42,15 @@ OFFSET = 200
 RESUME_PORT = 52151
 
 TMP = tempfile.mkdtemp(prefix="resume-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()                   # the authserv child inherits it
 ENV = dict(os.environ)
 ENV.update({
     "POL_CONFIG":              os.path.join(ROOT, "config", "server.yaml"),
     "POL_LOG_DIR":             TMP,
     "POL_SESSION_FILE":        os.path.join(TMP, "auth-sessions.json"),
     "POL_STAMP_FILE":          os.path.join(TMP, "auth-stamps.json"),
-    "POL_ACCOUNTS_DB":         os.path.join(TMP, "accounts.db"),
     "POL_AUTH_MODE":           "welcome",
     "POL_AUTH_CLOCK":          "0",     # a redirect-shaped greeting; one fewer hop
     "POL_AUTH_PORTS":          str(CLIENT_PORT),

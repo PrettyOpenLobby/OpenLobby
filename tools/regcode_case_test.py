@@ -30,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "services"))
 
 import accounts                                            # noqa: E402
+import pgtest                                              # noqa: E402
 
 #: The code from the log above, verbatim.
 CODE = "7CJ3-HBYY-G7JG-S5V2-G8W9"
@@ -45,8 +46,7 @@ def check(name, cond, detail=""):
 
 
 def fresh():
-    tmp = tempfile.mkdtemp(prefix="regcase-")
-    db = accounts.connect(os.path.join(tmp, "accounts.db"))
+    db = accounts.connect(pgtest.use_fresh_database())
     accounts.issue_regcode(db, CODE, contents=(1, 2))
     return db
 

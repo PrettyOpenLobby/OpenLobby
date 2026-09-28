@@ -54,7 +54,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 TMP = tempfile.mkdtemp(prefix="lobby-latency-")
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_DATA_DIR"] = TMP
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 # A FIXED SESSION IV. `_lobby_iv_candidates` normally derives the candidate
 # list from live sessions; POL_LOBBY_IV pins it to one, which is what makes
 # this runnable with no login, no listener and no client. The predicate

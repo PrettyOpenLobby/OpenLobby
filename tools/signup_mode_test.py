@@ -20,7 +20,6 @@ into "whatever you type is ignored".
 """
 import os
 import re
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -29,6 +28,10 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SVC = os.path.abspath(os.path.join(HERE, "..", "services"))
+sys.path.insert(0, SVC)
+import accounts                                              # noqa: E402
+import pgtest                                                # noqa: E402
+
 bad = 0
 
 
@@ -57,11 +60,11 @@ def token_of(html):
 
 
 def serve(mode, port, db):
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", POL_ACCOUNTS_DB=db,
-               POL_LOG_DIR=os.path.dirname(db), POL_SIGNUP_MODE=mode,
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", POL_DATABASE_URL=db,
+               POL_LOG_DIR=WORK, POL_SIGNUP_MODE=mode,
                POL_SIGNUP_CONTENTS="1,2,3,4,10,11,14",
-               POL_CONFIG=os.path.join(os.path.dirname(db), "server.yaml"))
-    log = open(os.path.join(os.path.dirname(db), "ucs-%s.log" % mode), "w")
+               POL_CONFIG=os.path.join(WORK, "server.yaml"))
+    log = open(os.path.join(WORK, "ucs-%s.log" % mode), "w")
     p = subprocess.Popen(
         [sys.executable, "-u", "ucscgi.py", "--plain", "--port", str(port)],
         cwd=SVC, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -74,7 +77,7 @@ def serve(mode, port, db):
 
 WORK = tempfile.mkdtemp(prefix="pol-signup-mode-")
 print("POL_SIGNUP_MODE=permissive")
-DB1 = os.path.join(WORK, "permissive.db")
+DB1 = pgtest.use_fresh_database()
 srv = serve("permissive", 8081, DB1)
 try:
     tok = token_of(get(8081, "kinou_id=20&step=1"))
@@ -93,13 +96,13 @@ try:
     chk("password and handle reach the confirm screen", step_of(get(
         8081, "kinou_id=20&step=5&t=%s&pw1=abc12345&pw2=abc12345&handle=NoCode" % tok)), 5)
     get(8081, "kinou_id=20&step=6&t=" + tok)
-    db = sqlite3.connect(DB1)
+    db = accounts.connect()
     row = db.execute("SELECT m.id FROM member m JOIN handle h ON h.member_id = m.id"
                      " WHERE h.handle_name = 'NoCode'").fetchone()
     chk("an account really was issued without a code", bool(row), True)
     chk("...granted POL_SIGNUP_CONTENTS, not FFXI alone",
         sorted(r[0] for r in db.execute(
-            "SELECT content_code FROM content WHERE member_id = ?"
+            "SELECT content_code FROM content WHERE member_id = %s"
             " AND status = 'active'", (row[0],))) if row else None,
         [1, 2, 3, 4, 10, 11, 14])
     db.close()
@@ -108,7 +111,7 @@ finally:
     srv.wait()
 
 print("POL_SIGNUP_MODE=code (the default)")
-DB2 = os.path.join(WORK, "code.db")
+DB2 = pgtest.use_fresh_database()
 srv = serve("code", 8082, DB2)
 try:
     tok = token_of(get(8082, "kinou_id=20&step=1"))
@@ -119,9 +122,7 @@ try:
     page = get(8082, "kinou_id=20&step=4&t=" + tok)
     chk("a blank code is STILL refused",
         (step_of(page), "Please enter your registration code" in page), (3, True))
-    sys.path.insert(0, SVC)
-    import accounts                                          # noqa: E402
-    db = accounts.connect(DB2)
+    db = accounts.connect()
     accounts.issue_regcode(db, "AAAA-BBBB-CCCC-DDDD-EEEE", contents=(2, 3))
     db.close()
     chk("a real code passes step 3", step_of(get(
@@ -129,12 +130,12 @@ try:
         % tok)), 4)
     get(8082, "kinou_id=20&step=5&t=%s&pw1=abc12345&pw2=abc12345&handle=WithCode" % tok)
     get(8082, "kinou_id=20&step=6&t=" + tok)
-    db = sqlite3.connect(DB2)
+    db = accounts.connect()
     row = db.execute("SELECT m.id FROM member m JOIN handle h ON h.member_id = m.id"
                      " WHERE h.handle_name = 'WithCode'").fetchone()
     chk("the CODE decides the titles, not the permissive default",
         sorted(r[0] for r in db.execute(
-            "SELECT content_code FROM content WHERE member_id = ?"
+            "SELECT content_code FROM content WHERE member_id = %s"
             " AND status = 'active'", (row[0],))) if row else None, [2, 3])
     db.close()
 finally:

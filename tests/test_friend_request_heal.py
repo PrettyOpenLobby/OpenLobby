@@ -17,7 +17,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 tmp = tempfile.mkdtemp(prefix="reqheal-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
@@ -40,13 +42,13 @@ def chk(what, got, want):
                              "" if ok else "  (want %r)" % (want,)))
 
 
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 ids = {}
 for nm in ("Fox", "Amara", "Birdie", "Ghost"):
     accounts.register_account(db, nm, "Passw0rdTest", contents=(1,))
-    ids[nm] = int(db.execute("SELECT id FROM handle WHERE handle_name = ?",
+    ids[nm] = int(db.execute("SELECT id FROM handle WHERE handle_name = %s",
                              (nm,)).fetchone()["id"])
-CAS_MEMBER = int(db.execute("SELECT member_id FROM handle WHERE id = ?",
+CAS_MEMBER = int(db.execute("SELECT member_id FROM handle WHERE id = %s",
                             (ids["Fox"],)).fetchone()["member_id"])
 G = accounts.handle_guid
 
@@ -54,7 +56,7 @@ for asker in ("Amara", "Birdie", "Ghost"):
     chk("%s asks Fox" % asker, accounts.request_friend(db, ids[asker], "Fox"),
         "requested")
 # Ghost withdrew: their own row is gone, so Fox's invited row waits on nobody.
-db.execute("DELETE FROM friend WHERE handle_id = ?", (ids["Ghost"],))
+db.execute("DELETE FROM friend WHERE handle_id = %s", (ids["Ghost"],))
 db.commit()
 
 # Amara's client posted its request; the PS2 read it and it was retired.

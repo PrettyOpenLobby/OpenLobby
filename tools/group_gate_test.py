@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="group-gate-")
-DB = os.path.join(TMP, "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = DB
+import pgtest  # noqa: E402
+DB = pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_GROUP_CTL"] = os.path.join(TMP, "no-such.ctl")
@@ -167,11 +167,11 @@ def main():
     def invite(sender, invitee):
         as_sender(sender)
         R._mail_recipient_row = lambda db, g, h=ids[invitee][1]: db.execute(
-            "SELECT * FROM handle WHERE id = ?", (h,)).fetchone()
+            "SELECT * FROM handle WHERE id = %s", (h,)).fetchone()
         R._group_join_from_message(gid, "TEST GROUP", "invite", {"recipient_guid": 1})
         c = accounts.connect(DB)
         try:
-            return c.execute("SELECT pending FROM group_member WHERE group_id=? AND member_name=?",
+            return c.execute("SELECT pending FROM group_member WHERE group_id=%s AND member_name=%s",
                              (gid, invitee)).fetchone()
         finally:
             c.close()

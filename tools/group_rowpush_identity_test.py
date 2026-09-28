@@ -47,8 +47,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="group-rowpush-")
-DB = os.path.join(TMP, "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = DB
+import pgtest  # noqa: E402
+DB = pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_GROUP_CTL"] = os.path.join(TMP, "no-such.ctl")
@@ -118,7 +118,7 @@ for name in ("Fox", "Cyn", "Yatih"):
     hid = int(accounts.primary_handle_row(conn, mid)["id"])
     ids[name] = (mid, hid)
     if CG[name]:
-        conn.execute("UPDATE handle SET client_guid = ? WHERE id = ?",
+        conn.execute("UPDATE handle SET client_guid = %s WHERE id = %s",
                      (CG[name], hid))
 conn.commit()
 gid = accounts.add_friend(conn, ids["Fox"][1], "Example.gang",

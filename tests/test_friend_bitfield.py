@@ -18,7 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 tmp = tempfile.mkdtemp(prefix="friendbits-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
@@ -109,11 +111,11 @@ r = row()
 chk("+0x09 = +0x08 (positions)", (r[8], r[9]), (3, 3))
 
 print("profile resolver")
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 me = accounts.ensure_member(db, "BITSME")
 them = accounts.ensure_member(db, "BITSTHEM")
-my_h = db.execute("SELECT * FROM handle WHERE member_id = ?", (me["id"],)).fetchone()
-their_h = db.execute("SELECT * FROM handle WHERE member_id = ?",
+my_h = db.execute("SELECT * FROM handle WHERE member_id = %s", (me["id"],)).fetchone()
+their_h = db.execute("SELECT * FROM handle WHERE member_id = %s",
                      (them["id"],)).fetchone()
 db.close()
 R._session_member_id = lambda: int(me["id"])
@@ -139,8 +141,8 @@ chk("knob off: a plain id falls back to the viewer (unchanged)",
     profile_name(int(their_h["id"])), my_h["handle_name"])
 
 print("search-hit identity row")
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
-their_row = db.execute("SELECT * FROM handle WHERE id = ?",
+db = accounts.connect()
+their_row = db.execute("SELECT * FROM handle WHERE id = %s",
                        (int(their_h["id"]),)).fetchone()
 off_tag = R._profile_identity_record(db, their_row, tagged=True)
 os.environ["POL_FRIEND_BITFIELD"] = "1"

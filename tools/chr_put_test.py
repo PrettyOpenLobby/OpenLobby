@@ -28,7 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="chr-put-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_LOBBY_LIST_MODE"] = "1:3=chars"
@@ -49,7 +50,7 @@ def check(ok, label, detail=""):
 
 
 # --- fixture: one member, two handles, two titles on the primary ------------ #
-conn = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+conn = accounts.connect()
 accounts.create_polid(conn, "CHRPOLID", "pw-polid", area_kbn="00", login_pf="01")
 MID = accounts.add_member(conn, "CHRPOLID", "chrmember", "pw-member")
 accounts.set_handle(conn, MID, "Primary")
@@ -65,10 +66,10 @@ R._session_handle_id = lambda db=None: HID_A
 
 
 def where(code):
-    c = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    c = accounts.connect()
     try:
         rows = c.execute("SELECT handle_id, slot, content_id FROM handle_content "
-                         "WHERE content_code = ? ORDER BY slot", (code,)).fetchall()
+                         "WHERE content_code = %s ORDER BY slot", (code,)).fetchall()
         return [(int(r["handle_id"]), int(r["slot"]), r["content_id"]) for r in rows]
     finally:
         c.close()

@@ -35,7 +35,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="pfc-profile-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_RESOURCE_DIR"] = os.path.join(TMP, "resources")
@@ -75,11 +76,11 @@ def request(cid):
 
 def seed():
     """One handle with a jan Content ID, and one TM pool the client sent us."""
-    db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    db = accounts.connect()
     member = accounts.ensure_member(db, "PFCTEST")
-    handle = db.execute("SELECT * FROM handle WHERE member_id = ?",
+    handle = db.execute("SELECT * FROM handle WHERE member_id = %s",
                         (member["id"],)).fetchone()
-    db.execute("UPDATE handle SET handle_name = ? WHERE id = ?",
+    db.execute("UPDATE handle SET handle_name = %s WHERE id = %s",
                ("Cassandra", int(handle["id"])))
     accounts.link_content_to_handle(db, int(handle["id"]), 3, str(JAN_CID))
     db.commit()

@@ -11,10 +11,10 @@ format, still pending, and is why the push is disabled by default. See
 
     python tools/presence_test.py        # exit 0 on success, prints a summary
 
-Deliberately uses a throwaway on-disk DB (accounts.connect wants a path and runs
-the schema for us) pointed at by POL_ACCOUNTS_DB, because `_broadcast_presence`
-opens its own connection from that env var -- so the test exercises the real code
-path, not a hand-passed handle.
+Deliberately uses a throwaway database (tools/pgtest.py) that POL_DATABASE_URL
+points at, because `_broadcast_presence` opens its own connection through
+accounts.connect() -- so the test exercises the real code path, not a
+hand-passed handle.
 """
 import os
 import sys
@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "services"))
 
 import accounts
+import pgtest
 
 
 class FakeSession:
@@ -49,12 +50,12 @@ class FakeSession:
 def build_db():
     """Alice and Bob are mutual friends; Carol friends Alice one-way; Dave is a
     stranger. Returns (path, {name: (member_id, handle_id)})."""
-    path = os.path.join(tempfile.mkdtemp(prefix="poltest-"), "accounts.db")
+    path = pgtest.use_fresh_database()
     c = accounts.connect(path)
     ids = {}
     for name in ("Alice", "Bob", "Carol", "Dave"):
         m = accounts.ensure_member(c, name)
-        h = c.execute("SELECT id FROM handle WHERE member_id=?",
+        h = c.execute("SELECT id FROM handle WHERE member_id=%s",
                       (m["id"],)).fetchone()["id"]
         ids[name] = (int(m["id"]), int(h))
     # Alice <-> Bob mutual; Carol -> Alice one-way; Dave friendless.
@@ -70,7 +71,6 @@ def build_db():
 
 def main():
     path, ids = build_db()
-    os.environ["POL_ACCOUNTS_DB"] = path
     # Import AFTER the env is set so nothing caches the wrong DB. responders pulls
     # in the whole service, so keep the import local to the test.
     import responders as R

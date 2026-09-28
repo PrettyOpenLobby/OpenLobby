@@ -18,7 +18,9 @@ SERVICES = os.path.join(HERE, "..", "services")
 sys.path.insert(0, SERVICES)
 
 tmp = tempfile.mkdtemp(prefix="lockout-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_SESSION_FILE"] = os.path.join(tmp, "auth-sessions.json")
 os.environ["POL_DATA_DIR"] = tmp
@@ -43,7 +45,7 @@ def chk(what, got, want):
                              "" if ok else "  (want %r)" % (want,)))
 
 
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 acct = accounts.register_account(db, "Locky", "Passw0rdTest", contents=(1,))
 mid = acct["member_id"]
 nick = accounts.get_member(db, acct["polid"])["login_name"]
@@ -77,7 +79,7 @@ chk("the 6th attempt, wrong -> 0xCB", login(WRONG), CB)
 chk("...and the RIGHT password is refused too while locked", login(GOOD), CB)
 chk("a locked attempt adds no failure (still 5)",
     accounts.login_failures(db, mid, 900), 5)
-db.execute("UPDATE login_fail SET at = at - 1000 WHERE member_id = ?", (mid,))
+db.execute("UPDATE login_fail SET at = at - 1000 WHERE member_id = %s", (mid,))
 db.commit()
 chk("once the failures age out of the window -> in", login(GOOD), None)
 chk("...and the right password forgot them",
@@ -87,7 +89,7 @@ for i in range(5):
     login(WRONG)
 chk("locked again after 5", login(GOOD), CB)
 out = subprocess.run([sys.executable, os.path.join(SERVICES, "accounts.py"),
-                      os.environ["POL_ACCOUNTS_DB"], "unlock", acct["polid"]],
+                      "-", "unlock", acct["polid"]],
                      capture_output=True, text=True)
 chk("`accounts.py <db> unlock <polid>` says it cleared 5",
     "cleared 5 failed" in out.stdout, True)
@@ -118,7 +120,7 @@ os.environ["POL_LOGIN_LOCKOUT_WINDOW_S"] = "60"
 login(WRONG)
 login(WRONG)
 chk("knobs: 2 fails in 60 s lock it", login(GOOD), CB)
-db.execute("UPDATE login_fail SET at = at - 61 WHERE member_id = ?", (mid,))
+db.execute("UPDATE login_fail SET at = at - 61 WHERE member_id = %s", (mid,))
 db.commit()
 chk("...for 60 s", login(GOOD), None)
 os.environ.pop("POL_LOGIN_LOCKOUT_FAILS")

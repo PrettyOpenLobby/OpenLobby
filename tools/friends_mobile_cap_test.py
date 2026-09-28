@@ -44,8 +44,8 @@ SERVICES = os.path.join(REPO, "services")
 sys.path.insert(0, SERVICES)
 
 TMP = tempfile.mkdtemp(prefix="friends-mobile-")
-DB = os.path.join(TMP, "accounts.db")
-os.environ["POL_ACCOUNTS_DB"] = DB
+import pgtest  # noqa: E402
+DB = pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 os.environ["POL_SEARCH_CALIB"] = os.path.join(TMP, "no-such.txt")
@@ -85,7 +85,45 @@ def load_baseline():
     spec = importlib.util.spec_from_file_location("responders_baseline", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # The baseline predates PostgreSQL: its OWN queries are written with
+    # SQLite's ? placeholders. It reaches the database only through
+    # `accounts`, so it gets an `accounts` whose connections accept those, and
+    # the same database as the module under test. What it builds from the rows
+    # is untouched, which is the thing being compared.
+    mod.accounts = _QmarkAccounts()
     return mod
+
+
+class _QmarkConn:
+    """An account connection that also takes a `?`-placeholder statement."""
+
+    def __init__(self, conn):
+        self._c = conn
+
+    def execute(self, sql, params=None):
+        if params is not None and "?" in sql and "%s" not in sql:
+            sql = sql.replace("%", "%%").replace("?", "%s")
+        return self._c.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __enter__(self):
+        self._c.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._c.__exit__(*exc)
+
+
+class _QmarkAccounts:
+    """`accounts`, with connect() handing out `_QmarkConn`."""
+
+    def connect(self, path=None):
+        return _QmarkConn(accounts.connect())
+
+    def __getattr__(self, name):
+        return getattr(accounts, name)
 
 
 def request(payload=b""):
@@ -149,9 +187,9 @@ def push_checks(mid, hid, marker):
         peer = {r["peer_name"]: r for r in
                 accounts.list_friends(db, hid, status=None)}
         p3, p15 = peer["Pal03"], peer["Pal16"]
-        m15 = int(db.execute("SELECT member_id FROM handle WHERE id = ?",
+        m15 = int(db.execute("SELECT member_id FROM handle WHERE id = %s",
                              (int(p15["peer_handle"]),)).fetchone()[0])
-        m3 = int(db.execute("SELECT member_id FROM handle WHERE id = ?",
+        m3 = int(db.execute("SELECT member_id FROM handle WHERE id = %s",
                             (int(p3["peer_handle"]),)).fetchone()[0])
         s15 = R._friend_slot_raw(db, hid, int(p15["peer_handle"]))
         check(s15 == 16, "the served map does hold Pal16 at slot 16", str(s15))
@@ -226,11 +264,11 @@ def main():
     conn = accounts.connect(DB)
     me = accounts.register_account(conn, "Mobileme", "hunter2pw")
     mid = int(me["member_id"])
-    hid = int(conn.execute("SELECT id FROM handle WHERE member_id = ?",
+    hid = int(conn.execute("SELECT id FROM handle WHERE member_id = %s",
                            (mid,)).fetchone()["id"])
     for i in range(20):
         a = accounts.register_account(conn, f"Pal{i:02d}", "hunter2pw")
-        ph = conn.execute("SELECT id FROM handle WHERE member_id = ?",
+        ph = conn.execute("SELECT id FROM handle WHERE member_id = %s",
                           (a["member_id"],)).fetchone()["id"]
         # Two OUTGOING pending rows, one inside the PC's 12 and one past it,
         # so pending rows ride both halves of the list.

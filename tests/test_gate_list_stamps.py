@@ -18,7 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 tmp = tempfile.mkdtemp(prefix="gatestamps-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ.pop("POL_GATE_LIST_STAMPS", None)
 
@@ -36,7 +38,7 @@ def chk(what, got, want):
                              "" if ok else "  (want %r)" % (want,)))
 
 
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 acct = accounts.register_account(db, "Stampy", "abc12345", contents=(1,))
 mid = acct["member_id"]
 
@@ -57,8 +59,8 @@ print("fingerprints")
 f1 = accounts.friend_list_fingerprint(db, mid)
 h1 = accounts.handle_list_fingerprint(db, mid)
 chk("friend fingerprint stable", accounts.friend_list_fingerprint(db, mid), f1)
-hid = db.execute("SELECT id FROM handle WHERE member_id = ?", (mid,)).fetchone()["id"]
-db.execute("INSERT INTO friend (handle_id, peer_name, created_at) VALUES (?,?,?)",
+hid = db.execute("SELECT id FROM handle WHERE member_id = %s", (mid,)).fetchone()["id"]
+db.execute("INSERT INTO friend (handle_id, peer_name, created_at) VALUES (%s,%s,%s)",
            (hid, "Buddy", "2026-09-27T00:00:00Z"))
 db.commit()
 chk("friend fingerprint moves on a new friend",

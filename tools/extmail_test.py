@@ -27,8 +27,10 @@ import threading
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "services"))
 _TMP = tempfile.mkdtemp(prefix="extmail-")
-DB = os.path.join(_TMP, "accounts.db")
-os.environ.update(POL_ACCOUNTS_DB=DB, POL_ACCOUNTS="1",
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pgtest  # noqa: E402
+DB = pgtest.use_fresh_database()
+os.environ.update(POL_ACCOUNTS="1",
                   POL_LOG_DIR=os.path.join(_TMP, "logs"))
 for k in ("POL_EXT_MAIL_KEY", "POL_EXT_MAIL_DAILY_OUT", "POL_EXT_MAIL_DAILY_IN",
           "POL_EXT_MAIL_DOMAIN", "POL_MAIL_STRICT", "POL_MAIL_SESSION_CHECK",
@@ -119,7 +121,7 @@ def smtp(sender, rcpts, subject="hi", body="Hello there.", name="Pat Sample"):
 
 
 def enable(mid, on=True):
-    c.execute("UPDATE member SET ext_mail = ? WHERE id = ?", (1 if on else 0, mid))
+    c.execute("UPDATE member SET ext_mail = %s WHERE id = %s", (1 if on else 0, mid))
     c.commit()
 
 
@@ -170,7 +172,7 @@ check("a From header naming another address is refused at DATA (550)",
       smtp("EXTP1234@pol.com", ["friend@example.com"], name='Evil" <ceo@bank.com>')["data"], "550")
 check("...and nothing was sent", len(SENT) - n0, 0)
 crafted = b'From: "The Bank <ceo@bank.com>" <EXTP1234@pol.com>\r\nSubject: s\r\n\r\nx\r\n'
-frm = extmail.outbound_parts(crafted, c.execute("SELECT * FROM member WHERE id=?", (eo,)).fetchone())[0]
+frm = extmail.outbound_parts(crafted, c.execute("SELECT * FROM member WHERE id=%s", (eo,)).fetchone())[0]
 check("an address hidden in the display name is defused",
       frm, '"The Bank ceobank.com" <pomona@example.net>')
 

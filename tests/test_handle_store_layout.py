@@ -18,7 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 tmp = tempfile.mkdtemp(prefix="handlestore-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
@@ -71,7 +73,7 @@ chk("record 0 = store, position 0, open level 2, 'Fox'",
     [(i, m, p, lv, R._handle_store_text(nm)) for i, m, p, lv, nm in recs],
     [(0, 1, 0, 2, "Fox")])
 
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 me = accounts.ensure_member(db, "Fox")
 mid = int(me["id"])
 accounts.set_handle(db, mid, "OldOne")
@@ -81,10 +83,10 @@ R._session_member_id = lambda: mid
 
 
 def handles():
-    c = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    c = accounts.connect()
     try:
         return sorted(r["handle_name"] for r in c.execute(
-            "SELECT handle_name FROM handle WHERE member_id = ?", (mid,)))
+            "SELECT handle_name FROM handle WHERE member_id = %s", (mid,)))
     finally:
         c.close()
 
@@ -107,7 +109,7 @@ chk("record 2's name sits off the 0x10 grid, so it was missed",
 chk("the delete was not acted on", "OldOne" in after_off, True)
 
 print("knob ON")
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 accounts.delete_handle(db, mid, "quare")          # clean slate, tombstoned
 db.execute("DELETE FROM deleted_handle WHERE handle_name = 'quare'")
 db.commit()
@@ -122,7 +124,7 @@ chk("the delete is logged only without POL_HANDLE_STORE_DELETE",
 os.environ["POL_HANDLE_STORE_DELETE"] = "1"
 R._lobby_capture(PT)
 chk("POL_HANDLE_STORE_DELETE=1 deletes it", "OldOne" in handles(), False)
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 chk("and tombstones it", bool(accounts.is_handle_deleted(db, mid, "OldOne")), True)
 db.close()
 chk("a delete naming another member's handle does nothing",

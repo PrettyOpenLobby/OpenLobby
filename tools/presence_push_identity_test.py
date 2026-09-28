@@ -32,7 +32,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "services"))
 
 TMP = tempfile.mkdtemp(prefix="presence-pushid-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "accounts.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_DATA_DIR"] = TMP
 os.environ["POL_LOG_DIR"] = TMP
 
@@ -56,7 +57,7 @@ CLIENT_GUID = 0x000000860FB3E2A2       # a real-shape client_guid (LaptopTest2)
 
 def _primary_handle(db, member_id):
     return int(db.execute(
-        "SELECT id FROM handle WHERE member_id = ? "
+        "SELECT id FROM handle WHERE member_id = %s "
         "ORDER BY is_primary DESC, id ASC LIMIT 1", (int(member_id),)
     ).fetchone()["id"])
 
@@ -65,7 +66,7 @@ def seed():
     """Two handles: one that has told us its client_guid, one that has not.
     `ensure_member` already mints a primary handle, so reuse it (a PlayOnline ID
     is capitals + digits, hence the uppercase names)."""
-    db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+    db = accounts.connect()
     m1 = int(accounts.ensure_member(db, "PEERWITHCG")["id"])
     h_cg = _primary_handle(db, m1)
     accounts.learn_client_guid(db, h_cg, CLIENT_GUID)
@@ -81,7 +82,7 @@ def row_guid(db, handle_id):
     _db_friends branch verbatim so the test tracks the real serve, not a copy."""
     guid = accounts.handle_guid(int(handle_id))
     if os.environ.get("POL_FRIEND_GUID_CLIENT", "1") == "1":
-        cg = db.execute("SELECT client_guid FROM handle WHERE id = ?",
+        cg = db.execute("SELECT client_guid FROM handle WHERE id = %s",
                         (int(handle_id),)).fetchone()
         if cg and cg["client_guid"]:
             guid = int(cg["client_guid"])
@@ -89,7 +90,7 @@ def row_guid(db, handle_id):
 
 
 h_cg, h_nocg = seed()
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 
 # --------------------------------------------------------------------------- #
 print("1. flag ON (prod default): push identity == row identity, per peer")

@@ -51,7 +51,8 @@ os.makedirs(LOGS)
 os.environ["POL_WWW_DIR"] = WWW
 os.environ["POL_LOG_DIR"] = LOGS
 os.environ["POL_CONFIG"] = os.path.join(TMP, "none.yaml")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(TMP, "unused.db")
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_ACCOUNTS_ENFORCE"] = "0"
 os.environ.pop("POL_PML_FALLBACK", None)
 os.environ.pop("POL_GM_CALL", None)

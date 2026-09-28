@@ -23,7 +23,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
 
 tmp = tempfile.mkdtemp(prefix="proftrailer-")
-os.environ["POL_ACCOUNTS_DB"] = os.path.join(tmp, "accounts.db")
+sys.path.insert(0, os.path.join(HERE, "..", "tools"))
+import pgtest  # noqa: E402
+pgtest.use_fresh_database()
 os.environ["POL_STAMP_FILE"] = os.path.join(tmp, "stamps.json")
 os.environ["POL_DATA_DIR"] = tmp
 os.environ["POL_LOG_DIR"] = tmp
@@ -78,12 +80,12 @@ chk("content +0x68..+0x118 == handle +0x1A8..+0x258",
 chk("SE's trailer is 0xB0 long", len(SE_HANDLE_TAIL[8:]), 0xB0)
 
 print("fixture")
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
+db = accounts.connect()
 me = accounts.ensure_member(db, "TRAILME")
 them = accounts.ensure_member(db, "TRAILTHEM")
-my_h = db.execute("SELECT * FROM handle WHERE member_id = ?",
+my_h = db.execute("SELECT * FROM handle WHERE member_id = %s",
                   (me["id"],)).fetchone()
-their_h = db.execute("SELECT * FROM handle WHERE member_id = ?",
+their_h = db.execute("SELECT * FROM handle WHERE member_id = %s",
                      (them["id"],)).fetchone()
 accounts.set_handle_profile(db, int(their_h["id"]), {17: 4})
 for code in (3, 10):
@@ -144,8 +146,8 @@ chk("handle 0x250 status block zero", off_handle[0x250:0x258], bytes(8))
 
 print("knob ON")
 os.environ["POL_PROFILE_TRAILER"] = "1"
-db = accounts.connect(os.environ["POL_ACCOUNTS_DB"])
-their_row = db.execute("SELECT * FROM handle WHERE id = ?",
+db = accounts.connect()
+their_row = db.execute("SELECT * FROM handle WHERE id = %s",
                        (int(their_h["id"]),)).fetchone()
 idrec = R._profile_identity_record(db, their_row)
 db.close()
