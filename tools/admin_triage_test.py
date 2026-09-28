@@ -10,7 +10,8 @@ Seeds three tester issue bundles and two user reports, then checks that:
     it may not; an unknown id, a path in the id and a made-up status are
     refused;
   * user reports carry their status too, and the activity log records both
-    changes.
+    changes;
+  * issue retention (issuereport.closed_ids) reads the closed ones back.
 
 The browser side (the Open/Closed/All filters, the title picker and search,
 the detail view's buttons) is not driven here.
@@ -134,6 +135,9 @@ def main():
         chk("the activity log records both changes",
             ((OWNER, "set a report's status", 1) in acts,
              ("helper", "set a report's status", 1) in acts), (True, True))
+        import issuereport
+        chk("issue retention reads the closed ones from the database",
+            issuereport.closed_ids(), {"20260927T110000Z-PC-b2"})
         owner.call("api/triage", {"kind": "issues", "id": "20260927T110000Z-PC-b2",
                                   "status": "open"})
         got = {r["id"]: r for r in owner.call("api/issues")[1]}["20260927T110000Z-PC-b2"]
