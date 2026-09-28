@@ -51,6 +51,9 @@ services:
       POSTGRES_USER: openlobby
       POSTGRES_PASSWORD: "${POL_DB_PASSWORD:-openlobby}"
       POSTGRES_DB: openlobby
+      # Byte-wise text order and ASCII-only lower(), what the account code
+      # expects (docs/database.md). Read only when the volume is first created.
+      POSTGRES_INITDB_ARGS: "--locale=C -E UTF8"
     volumes:
       - pol-pgdata:/var/lib/postgresql/data
     healthcheck:
