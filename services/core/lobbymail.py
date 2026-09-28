@@ -30,7 +30,7 @@ def _mailbox(member=None):
     Scans every stored `O/m/` object and resolves each one's recipient from its
     own path, rather than trusting the filename -- which is also what lets the
     canonical name (`m.<token>.bin`) and the older per-member one
-    (`<member>.O_m_<token>.bin`) sit in the same directory during the changeover.
+    (`<member>.O_m_<token>.bin`) sit in the same store during the changeover.
     A message under both names is listed ONCE, under the canonical path, so the
     inbox never shows a duplicate and the row's token is the one a 3:0 will
     resolve.
@@ -40,8 +40,11 @@ def _mailbox(member=None):
     if member is None or accounts is None:
         return []
     try:
-        names = os.listdir(resourcestore.RESOURCE_DIR)
-    except OSError:
+        # the canonical names, and an older build's per-member `.O_m_` ones
+        names = (resourcestore._res_list(scope="mail", suffix=".bin")
+                 + resourcestore._res_list(prefix="O_m_", suffix=".bin"))
+    except Exception as exc:
+        log("lobby", f"  mail: cannot list the store ({exc!r})")
         return []
     try:
         db = accounts.connect()
@@ -148,14 +151,16 @@ def _friend_request_heal(member=None):
             want.append((int(r["handle_id"]), peer))
         if not want:
             return 0
-        # Every request message on disk, live or retired, by (recipient handle,
+        # Every request message stored, live or retired, by (recipient handle,
         # sender). A sender is matched by our guid or by the 15-byte name field.
         live, retired = set(), {}
         try:
-            names = os.listdir(resourcestore.RESOURCE_DIR)
-        except OSError:
-            names = []
-        for nm in names:
+            stored = resourcestore._res_list_info(scope="mail")
+        except Exception as exc:
+            log("lobby", f"  mail: request heal cannot list the store ({exc!r})")
+            stored = []
+        mtimes = {nm: at for nm, _size, at in stored}
+        for nm in mtimes:
             suffix = next((s for s in (".read", ".stale")
                            if nm.endswith(".bin" + s)), "")
             base = nm[:-len(suffix)] if suffix else nm
@@ -176,11 +181,7 @@ def _friend_request_heal(member=None):
                 if not suffix:
                     live.add(k)
                 else:
-                    try:
-                        at = os.path.getmtime(os.path.join(resourcestore.RESOURCE_DIR, nm))
-                    except OSError:
-                        at = 0
-                    retired.setdefault(k, []).append((at, nm, base))
+                    retired.setdefault(k, []).append((mtimes.get(nm) or 0, nm, base))
         now = time.time()
         for hid, peer in want:
             ks = [(hid, "id", int(peer["id"])),
@@ -194,11 +195,14 @@ def _friend_request_heal(member=None):
             if old:
                 _at, nm, base = old[-1]
                 try:
-                    os.replace(os.path.join(resourcestore.RESOURCE_DIR, nm),
-                               os.path.join(resourcestore.RESOURCE_DIR, base))
-                except OSError as exc:
+                    moved = resourcestore._res_rename(nm, base)
+                except Exception as exc:
+                    moved, why = False, repr(exc)
+                else:
+                    why = "it is no longer stored"
+                if not moved:
                     log("lobby", f"  mail: request heal -- cannot restore {nm!r} "
-                                 f"({exc})")
+                                 f"({why})")
                     continue
                 _FRIEND_HEAL_DONE[done] = now
                 healed += 1
@@ -259,8 +263,8 @@ def _mailbox_payload(n, member=None):
         # an older build, and then the store wins -- serving a length we do not
         # have is what POL-5135 is made of.
         try:
-            size = os.path.getsize(resourcestore._resource_read_file(path))
-        except OSError:
+            size = resourcestore._res_size(resourcestore._resource_read_file(path)) or 0
+        except Exception:
             size = 0
         struct.pack_into("<I", out, base + 0x04, size or meta.get("size") or 0)
         tok = path[len(lobbysearch._MAIL_PATH_PREFIX):].encode("ascii", "replace")
@@ -622,17 +626,15 @@ def _mail_legacy_names(path):
     token = path[len(lobbysearch._MAIL_PATH_PREFIX):]
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", lobbysearch._MAIL_PATH_PREFIX + token)
     try:
-        names = os.listdir(resourcestore.RESOURCE_DIR)
-    except OSError:
+        out = resourcestore._res_list(path="%s.bin" % safe)
+    except Exception:
         return []
-    tail = ".%s.bin" % safe
-    out = sorted(n for n in names if n.endswith(tail))
     # The PREVIOUS canonical name -- raw case, `@`->`-` only. It is the one the
     # case-insensitive collision above was written under, so a mailbox that
     # predates the `~` escaping is still delivered (and migrated on the way past
     # by `_resource_read_file`) rather than silently going empty.
     old = _MAIL_FILE_PREFIX + token.replace("@", "-") + ".bin"
-    if old != _mail_name(path) and old in names:
+    if old != _mail_name(path) and resourcestore._res_exists(old):
         out.append(old)
     # THE LITERAL, UN-CANONICALISED TOKEN. Anything stored before the +0x42
     # state byte was normalised out of the name (see `_mail_canon_token`) is on
@@ -641,7 +643,7 @@ def _mail_legacy_names(path):
     # it here is what makes those messages readable again instead of stranding
     # them; the read migrates the file to the canonical name on the way past.
     raw = _MAIL_FILE_PREFIX + _mail_token_escape(token) + ".bin"
-    if raw != _mail_name(path) and raw in names:
+    if raw != _mail_name(path) and resourcestore._res_exists(raw):
         out.append(raw)
     return out
 
@@ -858,7 +860,7 @@ def _mail_next_thread(recipient_guid):
     try:
         want = int(recipient_guid)
         hi = -1
-        for nm in os.listdir(resourcestore.RESOURCE_DIR):
+        for nm in resourcestore._res_list(scope="mail"):
             # Retired messages count (see above), so trim the `.read` suffix and
             # let `_mail_path_of` do the decoding -- it knows both the escaped
             # and the older raw-case name, which hand-rolling the token did not.
@@ -1110,7 +1112,7 @@ def _mail_retire(path, suffix=".read", why="the client acknowledged it (3:2)",
     `m.<token>.bin` -> `m.<token>.bin<suffix>`.
 
     `_mailbox` lists `.bin` only, so the rename is the whole mechanism -- and it
-    is one `os.replace` away from being undone. Two callers, two suffixes:
+    is one rename away from being undone. Two callers, two suffixes:
     `.read` for a 3:2 acknowledgement, `.stale` for an acceptance the reader can
     no longer act on (see `_mail_stale_acceptance`); distinct suffixes so a purge
     or an un-retire can tell WHY each message left.
@@ -1118,14 +1120,18 @@ def _mail_retire(path, suffix=".read", why="the client acknowledged it (3:2)",
     live = resourcestore._resource_read_file(path)
     meta = _mail_meta(path) or {}
     try:
-        os.replace(live, live + suffix)
-    except OSError as e:
+        moved = resourcestore._res_rename(live, live + suffix)
+    except Exception as e:
+        moved, e = False, repr(e)
+    else:
+        e = "no such message stored"
+    if not moved:
         log("lobby", f"  mail: retire of {path[:32]!r} -- nothing to retire ({e})")
         return False
     log("lobby", f"  mail: RETIRED {meta.get('subject', '?')!r} from "
                  f"{meta.get('sender', '?')!r} -- {why}, so it leaves the "
                  f"mailbox. Bytes kept as "
-                 f"{os.path.basename(live)}{suffix}; {knob}=0 disables this.")
+                 f"{live}{suffix}; {knob}=0 disables this.")
     return True
 
 

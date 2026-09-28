@@ -1,21 +1,95 @@
-"""The resource store: blobs the client fetches and writes under /data/resources."""
+"""The resource store: blobs the client fetches and writes, kept in the
+PostgreSQL `blob` table (polcore/blobs.py)."""
 import os
 import re
 import struct
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
+from polcore import blobs
 from srvcore import log
 from .deps import accounts
 from . import fetchpath, friendgroups, lobbymail, lobbyreply, lobbysearch, lobbysession, pacing, paylen, pfc
 
 
+#: Where the title plugins still keep files of their own (their records,
+#: collections and pools) until they move onto polcore.blobs. The core's own
+#: resources are no longer here.
 RESOURCE_DIR = os.environ.get("POL_RESOURCE_DIR", "/data/resources")
 
 
-def _resource_file(path, subject=0):
-    """The filesystem name a POL resource is STORED under.
+# --------------------------------------------------------------------------- #
+# the store, by NAME
+# --------------------------------------------------------------------------- #
+# Every stored resource keeps the name it had as a file under resources/:
+# `<member>.<flattened path>.bin`, `shared.<...>.bin`, `s<subject hex>.<...>.bin`,
+# `m.<token>.bin` for a message, and the `.read` / `.stale` / `.readback`
+# suffixes the mail code appends. The part before the first dot is the blob
+# row's scope (`m` is the `mail` scope) and the rest its path, so every name
+# below maps to exactly one row, and an old resources/ directory imports file
+# for row (polcore.blobs.split_name).
+def _res_key(name):
+    key = blobs.split_name(name)
+    return key if key is not None else ("", name)
 
-    The path is client-supplied, so it is flattened rather than joined -- a
-    resource called `../../etc/whatever` must not escape the directory.
+
+def _res_name(info):
+    return blobs.file_name(info.scope, info.path)
+
+
+def _res_read(name):
+    """The stored bytes under `name`, or None."""
+    return blobs.get(*_res_key(name))
+
+
+def _res_write(name, data):
+    """Store `data` under `name`, replacing it. One statement: a reader sees
+    the old object or the new one, never part of either."""
+    return blobs.put(*_res_key(name), bytes(data))
+
+
+def _res_size(name):
+    """Stored size in bytes, or None when there is nothing under `name`."""
+    st = blobs.stat(*_res_key(name))
+    return None if st is None else st.size
+
+
+def _res_mtime(name):
+    """When `name` was last written (epoch seconds), or None."""
+    st = blobs.stat(*_res_key(name))
+    return None if st is None else st.updated_at
+
+
+def _res_exists(name):
+    return blobs.stat(*_res_key(name)) is not None
+
+
+def _res_rename(old, new):
+    """Move `old` to `new`, replacing `new`; the write time is kept. False when
+    there is no `old`."""
+    return blobs.rename(*_res_key(old), *_res_key(new))
+
+
+def _res_delete(name):
+    return blobs.delete(*_res_key(name))
+
+
+def _res_list_info(scope=None, prefix=None, suffix=None, path=None):
+    """[(name, size, mtime)] for the stored resources matching every filter
+    (see polcore.blobs.listing), sorted by name."""
+    return sorted((_res_name(i), i.size, i.updated_at)
+                  for i in blobs.listing(scope=scope, prefix=prefix,
+                                         suffix=suffix, path=path))
+
+
+def _res_list(scope=None, prefix=None, suffix=None, path=None):
+    """The names of the stored resources matching every filter, sorted."""
+    return [n for n, _size, _at in _res_list_info(scope, prefix, suffix, path)]
+
+
+def _resource_file(path, subject=0):
+    """The NAME a POL resource is STORED under (see `_res_key`).
+
+    The path is client-supplied, so it is flattened rather than used as-is --
+    a resource called `../../etc/whatever` becomes one plain name.
 
     THREE SCOPES, and which one a path gets is a decision, not a default:
 
@@ -35,12 +109,12 @@ def _resource_file(path, subject=0):
     """
     name = lobbymail._mail_name(path)
     if name:
-        return os.path.join(RESOURCE_DIR, name)
+        return name
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", path)
     if subject and fetchpath._subject_keyed(path):
-        return os.path.join(RESOURCE_DIR, "s%x.%s.bin" % (subject, safe))
+        return "s%x.%s.bin" % (subject, safe)
     member = lobbysession._session_get("member_id") or "shared"
-    return os.path.join(RESOURCE_DIR, "%s.%s.bin" % (member, safe))
+    return "%s.%s.bin" % (member, safe)
 
 #: (sender handle id, recipient handle id, kind) -> when we minted it.
 #:
@@ -61,27 +135,26 @@ _MAIL_MINTED_TTL = 600
 
 
 def _resource_read_file(path, subject=0):
-    """The file a READ should serve, adopting an older name if that is where the
+    """The name a READ should serve, adopting an older name if that is where the
     content actually is.
 
     Migrating on the way past (rename, not copy) is deliberate: it happens once
-    per message, it is atomic, and it leaves one file per message afterwards --
-    so `_mailbox` cannot list the same message twice under two names.
+    per message, it is atomic, and it leaves one object per message afterwards
+    -- so `_mailbox` cannot list the same message twice under two names.
     """
     want = _resource_file(path, subject)
-    if os.path.exists(want) or not lobbymail._mail_name(path):
+    if not lobbymail._mail_name(path) or _res_exists(want):
         return want
     for name in lobbymail._mail_legacy_names(path):
-        old = os.path.join(RESOURCE_DIR, name)
         try:
-            if os.path.getsize(old) <= 0:
+            if not _res_size(name):
                 continue
-            os.replace(old, want)
-            log("lobby", f"  mail: adopted {name!r} as {os.path.basename(want)!r} "
-                         "(message filed by an older build)")
-            return want
-        except OSError as e:
-            log("lobby", f"  mail: cannot adopt {name!r} ({e})")
+            if _res_rename(name, want):
+                log("lobby", f"  mail: adopted {name!r} as {want!r} "
+                             "(message filed by an older build)")
+                return want
+        except Exception as e:
+            log("lobby", f"  mail: cannot adopt {name!r} ({e!r})")
     return want
 
 
@@ -95,8 +168,9 @@ def _resource_stored(path, subject=0):
     """True if the client has ever written this resource -- a stored blob must be
     served, never answered with "no data"."""
     try:
-        return os.path.getsize(_resource_read_file(path, subject)) > 0
-    except OSError:
+        return (_res_size(_resource_read_file(path, subject)) or 0) > 0
+    except Exception as e:
+        log("lobby", f"  resource {path!r}: cannot read the store ({e!r})")
         return False
 
 
@@ -105,8 +179,11 @@ def _resource_blob(path, n, subject=0):
     shipped template for paths that have one, else a fresh one (the measured
     header, zero-padded)."""
     try:
-        with open(_resource_read_file(path, subject), "rb") as f:
-            data = f.read()
+        data = _res_read(_resource_read_file(path, subject))
+    except Exception as e:
+        log("lobby", f"  resource {path!r}: cannot read the store ({e!r})")
+        data = None
+    if data is not None:
         # LIVE VALUES PATCHED INTO A STORED BLOB: each title's patchers (room
         # roster, lobby counts, zone host, auction counts, per-build layouts,
         # the live record overlaid on a save). Every patcher is path-gated, so
@@ -114,8 +191,6 @@ def _resource_blob(path, n, subject=0):
         # does.
         data = titles.resource_patch(path, data, subject)
         return data[:n].ljust(n, b"\x00")
-    except OSError:
-        pass
     # THE PUBLISHED RANKING TALLY OUTRANKS THE SHIPPED FIXTURE, and it is looked
     # up through the SAME function that answered `<LN>` on the other band --
     # `_rank_list_blob`. For every other path this is the title's template.
@@ -215,23 +290,21 @@ def _resource_store(path, data):
         log("lobby", f"  3:x write to {path[:48]!r} REFUSED -- a subject-keyed "
                      f"lobby list is server-authored; a client cannot store one")
         return
-    dest = _resource_read_file(path)
-    if lobbymail._mail_name(path) and os.path.exists(dest) and os.path.getsize(dest) > 0:
-        owner = lobbymail._mail_owner(path)
-        me = lobbysession._session_get("member_id")
-        if owner is not None and me is not None and int(owner) == int(me):
-            dest += ".readback"
-            log("lobby", f"  mail: member {me} is this message's RECIPIENT, not its "
-                         f"author -- {len(data)}B kept as {os.path.basename(dest)!r}, "
-                         "the stored message is untouched")
     try:
-        os.makedirs(RESOURCE_DIR, exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(data)
+        dest = _resource_read_file(path)
+        if lobbymail._mail_name(path) and (_res_size(dest) or 0) > 0:
+            owner = lobbymail._mail_owner(path)
+            me = lobbysession._session_get("member_id")
+            if owner is not None and me is not None and int(owner) == int(me):
+                dest += ".readback"
+                log("lobby", f"  mail: member {me} is this message's RECIPIENT, "
+                             f"not its author -- {len(data)}B kept as {dest!r}, "
+                             "the stored message is untouched")
+        _res_write(dest, data)
         log("lobby", f"  stored {len(data)}B for resource {path!r}")
         return True
-    except OSError as e:
-        log("lobby", f"  could NOT store resource {path!r}: {e}")
+    except Exception as e:
+        log("lobby", f"  could NOT store resource {path!r}: {e!r}")
         return False
 
 
