@@ -38,6 +38,7 @@ Stdlib only (matches the other services). Serves its single-page UI from
 import collections
 import hashlib
 import http.cookies
+import inspect
 import json
 import os
 import posixpath
@@ -407,7 +408,8 @@ class _Site:
         return self._rel(got) if got else None
 
     def expand(self, rel):
-        """(expanded text, the includes that actually resolved).
+        """(expanded text, the includes that actually resolved, where its
+        hrefs lead).
 
         The include targets come from the resolver rather than the output --
         `pmleval` inlines an include and emits no trace of it, so this is the
@@ -425,9 +427,11 @@ class _Site:
             except Exception:
                 return None
 
+        report = {}
         out = pmleval.expand(self.texts.get(rel) or "",
-                             resolve_include=resolve, base=start)
-        return out, hit
+                             resolve_include=resolve, base=start, url=rel,
+                             report=report)
+        return out, hit, report.get("links") or []
 
 
 def _ang_split(blob):
@@ -612,6 +616,108 @@ def _pml_resolve(src, base, host_dirs, tree_dirs):
             return fp
     return None
 
+
+def pml_link_target(frm, href):
+    """Where a link on a previewed page goes.
+
+    {"path": <www-relative file>} when the target is a page in the mirror,
+    {"external": url} for anything outside it, {"path": None} when nothing
+    matches. The same three src forms the renderer resolves (relative,
+    /host-absolute, file:/) plus http://<host>/... pointing at a host the
+    mirror has. A page the mirror saved from `x.pml?a=1` is stored as
+    `x.pml%3Fa%3D1`; a link to `x.pml?...` finds it when there is no plain
+    `x.pml` (the one with the same query first). Applying the link's own
+    query is the caller's job."""
+    from urllib.parse import urlsplit, unquote
+    frm = (frm or "").replace("\\", "/").lstrip("/")
+    href = (href or "").strip()
+    root = os.path.abspath(WWW_ROOT)
+    u = urlsplit(href)
+    if u.scheme in ("http", "https") and u.netloc:
+        cand = os.path.abspath(os.path.join(root, u.netloc, unquote(u.path).lstrip("/")))
+        if not (cand.startswith(root + os.sep) and os.path.isfile(cand)):
+            return {"external": href}
+        target = cand
+    else:
+        src, _, query = href.split("#", 1)[0].partition("?")
+        src = re.sub(r"^file:/+pml/", "file:/", src)     # file://pml/x == file:/x
+        host_dirs, tree_dirs, start = _pml_roots(frm)
+        target = _pml_resolve(src, start, host_dirs, tree_dirs)
+        if not target and src and "$" not in src:
+            target = _pml_resolve_encoded(src, query, start, host_dirs, tree_dirs)
+    if not target:
+        return {"path": None}
+    return {"path": os.path.relpath(target, root).replace(os.sep, "/")}
+
+
+def _pml_resolve_encoded(src, query, start, host_dirs, tree_dirs):
+    """The mirror file named `<src>%3F...` for a link to `src?query`: the one
+    whose decoded query matches, else the first such file in that folder."""
+    from urllib.parse import unquote
+    d, name = os.path.split(src)
+    if not name:
+        return None
+    rel = re.sub(r"^file:/*|^/+", "", d)
+    if src.startswith("file:"):
+        bases = list(tree_dirs)
+    elif src.startswith("/"):
+        bases = list(host_dirs)
+    else:
+        bases = [start] + list(tree_dirs) + list(host_dirs)
+    pre = (name + "%3f").lower()
+    want = unquote(query or "")
+    for base_dir in bases:
+        folder = os.path.join(base_dir, rel)
+        if not os.path.isdir(folder):
+            continue
+        hits = sorted(f for f in os.listdir(folder) if f.lower().startswith(pre))
+        if not hits:
+            continue
+        best = next((f for f in hits if unquote(f[len(pre):]) == want), hits[0])
+        # _pml_resolve applies the containment check
+        return _pml_resolve(os.path.join(folder, best), start, host_dirs, tree_dirs)
+    return None
+
+
+def pml_expand_payload(text, path, query=""):
+    """What /api/pml-expand answers for a page: the flattened PML, the
+    variables it read while undefined, the includes it could not find, and
+    `vars`, the variable table the page holds when parsing ends (system
+    variables, the URL query, every define), for the preview's runtime.
+
+    `path` is the page's www-relative file and roots include resolution;
+    `query` is the query string the page was opened with (`a=1&b=2`), which
+    the Viewer defines as `$a`, `$b` before the page runs."""
+    path = (path or "").replace("\\", "/").strip()
+    host_dirs, tree_dirs, start_dir = _pml_roots(path)
+
+    def resolve(src, base):
+        got = _pml_resolve(src, base or start_dir, host_dirs, tree_dirs)
+        if not got:
+            return None
+        try:
+            return _load_pml_text(got)[0], os.path.dirname(got)
+        except Exception:
+            return None
+
+    report = {}
+    env = {}
+    # `url`: a mirror file saved from `x.pml?a=1` is named `x.pml%3Fa%3D1`,
+    # and the Viewer sets $a before the page runs. A query the page was
+    # opened with is appended and wins over the file name's.
+    url = path + ("?" + query.lstrip("?") if query else "")
+    kw = {}
+    # An evaluator without the `env` table still expands; the runtime then
+    # starts with no page variables.
+    if "env" in inspect.signature(pmleval.expand).parameters:
+        kw["env"] = env
+    else:
+        env = None
+    out = pmleval.expand(text, resolve_include=resolve, base=start_dir,
+                         report=report, url=url, **kw)
+    return {"text": out, "missing": report.get("missing") or [],
+            "unresolved": report.get("unresolved") or [],
+            "vars": env if env is not None else {}}
 
 #: The admin panel's Kick is carried out by authsess, which holds the sockets:
 #: the request goes through the live-state store to core/authkick.py, which
@@ -3473,32 +3579,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _pml_resolve_href(self):
         """Where a link on a previewed page goes: /api/pml-resolve?from=&href=
-
-        Answers {"path": <www-relative file>} when the target is a page in the
-        mirror, or {"external": url} for anything outside it. The same three
-        src forms the renderer resolves (relative, /host-absolute, file:/) plus
-        http://<host>/... pointing at a host the mirror has."""
-        from urllib.parse import urlsplit, parse_qs, unquote
+        (see pml_link_target)."""
+        from urllib.parse import urlsplit, parse_qs
         q = parse_qs(urlsplit(self.path).query)
-        frm = (q.get("from") or [""])[0].replace("\\", "/").lstrip("/")
-        href = (q.get("href") or [""])[0].strip()
-        root = os.path.abspath(WWW_ROOT)
-        target = None
-        u = urlsplit(href)
-        if u.scheme in ("http", "https") and u.netloc:
-            cand = os.path.abspath(os.path.join(root, u.netloc, unquote(u.path).lstrip("/")))
-            if cand.startswith(root + os.sep) and os.path.isfile(cand):
-                target = cand
-            elif not target:
-                return self._send(200, {"external": href})
-        else:
-            src = href.split("?", 1)[0].split("#", 1)[0]
-            src = re.sub(r"^file:/+pml/", "file:/", src)     # file://pml/x == file:/x
-            host_dirs, tree_dirs, start = _pml_roots(frm)
-            target = _pml_resolve(src, start, host_dirs, tree_dirs)
-        if not target:
-            return self._send(200, {"path": None})
-        self._send(200, {"path": os.path.relpath(target, root).replace(os.sep, "/")})
+        frm = (q.get("from") or [""])[0]
+        href = (q.get("href") or [""])[0]
+        self._send(200, pml_link_target(frm, href))
 
     def _pml_refs(self):
         """Which files reference this one, and which it references.
@@ -3525,31 +3611,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _pml_expand(self):
         """Run a page's template layer (define/array/for/if + includes) and
-        return flattened, positioned PML the renderer can draw. `path` (the
-        loaded file's www-relative path) roots include resolution for that page.
-        """
+        return flattened, positioned PML the renderer can draw, with the
+        variables the page ends up holding (see pml_expand_payload)."""
         body = self._json_body()
-        text = body.get("text") or ""
-        path = (body.get("path") or "").replace("\\", "/").strip()
-        host_dirs, tree_dirs, start_dir = _pml_roots(path)
-
-        def resolve(src, base):
-            got = _pml_resolve(src, base or start_dir, host_dirs, tree_dirs)
-            if not got:
-                return None
-            try:
-                return _load_pml_text(got)[0], os.path.dirname(got)
-            except Exception:
-                return None
-
-        report = {}
         try:
-            out = pmleval.expand(text, resolve_include=resolve, base=start_dir,
-                                 report=report)
+            out = pml_expand_payload(body.get("text") or "", body.get("path") or "",
+                                     body.get("query") or "")
         except Exception as exc:
             return self._send(500, {"error": str(exc)})
-        self._send(200, {"text": out, "missing": report.get("missing") or [],
-                         "unresolved": report.get("unresolved") or []})
+        self._send(200, out)
 
     def _pml_load(self):
         from urllib.parse import urlsplit, parse_qs

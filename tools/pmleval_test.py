@@ -158,20 +158,28 @@ check("an unevaluated expression resolves to nothing rather than a junk path",
 
 print()
 print("attributes: SE writes bare expressions, not just &var=")
-V = {"F_PATH1": "file:/help/", "BN_X": 10, "BN_Y": 4, "BN_Ysp": 42, "i": 3}
-check("a src expression", pmleval._eval_attr("$F_PATH1+'in02.pml'", V),
+V = pmleval.make_vars({"F_PATH1": "file:/help/", "BN_X": 10, "BN_Y": 4, "BN_Ysp": 42,
+                       "i": 3})
+A = lambda tag, key, value: pmleval.eval_attr(tag, key, value, V)   # noqa: E731
+check("a src expression", A("img", "src", "$F_PATH1+'in02.pml'"),
       "file:/help/in02.pml")
 check("pos is a pair of component expressions",
-      pmleval._eval_attr("$BN_X+5,$BN_Y+($BN_Ysp*$i)", V), "15,130")
-check("integers stay integers", pmleval._eval_attr("$BN_Ysp/2,0", V), "21,0")
-check("a comma inside quotes does not split",
-      pmleval._eval_attr("$F_PATH1+'a,b.png'", V), "file:/help/a,b.png")
-check("a value with no $ is untouched", pmleval._eval_attr("#302610bb,#30261011", V),
+      A("img", "pos", "$BN_X+5,$BN_Y+($BN_Ysp*$i)"), "15,130")
+check("integers stay integers", A("img", "pos", "$BN_Ysp/2,0"), "21,0")
+check("a comma inside quotes does not split an AUTO attribute",
+      A("body", "background", "$F_PATH1+'a,b.png'"), "file:/help/a,b.png")
+# spec 5: img src is split on EVERY comma before AUTO, quotes or not
+check("but an img src splits on every comma, as the Viewer's does",
+      A("img", "src", "$F_PATH1+'a,b.png'"),
+      "file:/help/a,(Inconsistent parentheses error)")
+check("a value with no $ is untouched", A("text", "bgcolor", "#302610bb,#30261011"),
       "#302610bb,#30261011")
-check("a non-arithmetic value is left ALONE, not half-substituted",
-      pmleval._eval_attr("sd:show=1@$BN_X", V), "sd:show=1@$BN_X")
-check("an unknown variable leaves the value alone too",
-      pmleval._eval_attr("$NOPE+'x.png'", V), "$NOPE+'x.png'")
+# spec 5: href is BRACE -- only {$..} is filled in, the rest is an action string
+check("an action string is left ALONE, not half-substituted",
+      A("img", "href", "sd:show=1@$BN_X"), "sd:show=1@$BN_X")
+# spec 4: an undefined variable is "(Variable error)" in a string, not a failure
+check("an unknown variable reads as (Variable error)",
+      A("img", "src", "$NOPE+'x.png'"), "(Variable error)x.png")
 
 print()
 print("comments: SE's short form may start with a letter")
@@ -273,9 +281,15 @@ check("a page that defines its own variables reports none missing",
 # _Vars must not turn a legitimate absence into a miss: .get()/setdefault() are
 # how the evaluator probes optionals, and only a real read should be recorded.
 report = {}
-pmleval.expand('<define name="$a">&var=$never;', report=report)
-check("an unset <define> and an unknown &var= are not 'missing'",
+pmleval.expand('<define name="$a"><define name="$b" nodefvalue="1">', report=report)
+check("an unset <define> and a nodefvalue probe are not 'missing'",
       report["missing"], [])
+# spec 6: &var=$never; is AUTO-evaluated, so it IS a read: the Viewer prints
+# "(Variable error)" there
+report = {}
+got = pmleval.expand('<text>&var=$never;</text>', report=report)
+check("an unknown &var= is a real read, shown as (Variable error)",
+      (report["missing"], "(Variable error)" in got), (["never"], True))
 
 # --------------------------------------------------------------------------- #
 # SE's language, the parts the Tetra Master top page and the help manual use.
@@ -286,8 +300,14 @@ E = lambda src: pmleval.expand(src)    # noqa: E731
 # <elsif>/<else> are never closed, so they parse NESTED inside the <if>.
 got = E('<for init="$i=0" cond="$i<3" next="$i++">'
         '<if expr="$i==0">A{$i}<elsif expr="$i==1">B{$i}<else>C{$i}</if></for>')
-check("a nested if/elsif/else picks one branch per pass", got.strip(), "A0B1C2")
-check("a sibling <else> after </if> still counts",
+# spec 6: {$i} in plain text is printed literally; only &var=/&pos=/&style= fill it
+check("a nested if/elsif/else picks one branch per pass", got.strip(),
+      "A{$i}B{$i}C{$i}")
+got = E('<for init="$i=0" cond="$i<3" next="$i++">'
+        '<if expr="$i==0">A&var=$i;<elsif expr="$i==1">B&var=$i;<else>C&var=$i;</if></for>')
+check("and &var= shows which pass it was", got.strip(), "A0B1C2")
+# spec 5 (<if>): a top-level <else> after </if> is ignored, so Y always shows
+check("a top-level <else> after </if> is ignored (0: Y)",
       E('<if expr="0">X</if>\n  <else>Y</else>').strip(), "Y")
 
 check("a quoted > does not end the tag",
@@ -306,9 +326,11 @@ check("arithmetic in pos/size is evaluated with no variable in it",
 
 got = E('<array name="$c">"Title A" "B"</array><define name="$id" value="1">'
         '<text>&var=$c[0];|&var=$c[$id];|&var=$nope[3];</text>')
+# spec 5 (<array>): no comma means ONE item "Title AB"; [1] past the end is "";
+# spec 4: an unknown array is (Variable error)
 check("&var= takes an array lookup",
       got[got.index("<text"):].split(">", 1)[1].split("<")[0],
-      "Title A|B|&var=$nope[3];")
+      "Title AB||(Variable error)")
 
 got = E('<define name="$j" value="4"><img href="eval:$a[{$j}]">')
 check("{$x} is filled in", 'href="eval:$a[4]"' in got, True)
@@ -327,12 +349,19 @@ check("<hr> is self-closing",
 
 got = E('<array name="$m"><array>"Games" "x"</array><array>"Navigator" "y"</array></array>'
         '<for init="$i=0" cond="$i<2" next="$i++"><text>&var=$m[{$i}][0];</text></for>')
+# spec 5 (<array>): "Games" "x" with no comma is one item, "Gamesx"
 check("{$i} is filled in before &var= reads it (main menu labels)",
-      re.findall(r">([^<]*)</text>", got), ["Games", "Navigator"])
+      re.findall(r">([^<]*)</text>", got), ["Gamesx", "Navigatory"])
 
 got = E('<array name="$cat">"A" "B" "C" "D" "E"</array>'
         '<array name="$d">"1" "null" "d" "h" "1" "4"</array><text>&var=$cat[$d[5]];</text>')
+# spec 5 (<array>): no commas, so $cat is ["ABCDE"] and $d is ["1nulldh14"];
+# $d[5] is past the end (""), which indexes as 0
 check("an array takes a numeric string as its index (story page title)",
+      got[got.index("<text"):].split(">", 1)[1].split("<")[0], "ABCDE")
+got = E('<array name="$cat">"A","B","C","D","E"</array>'
+        '<array name="$d">"1","null","d","h","1","4"</array><text>&var=$cat[$d[5]];</text>')
+check("with commas, $d[5] is \"4\" and indexes $cat[4]",
       got[got.index("<text"):].split(">", 1)[1].split("<")[0], "E")
 
 # help/offline/login/in03.pml: a defined number compared with quoted digits.
@@ -342,6 +371,280 @@ for pages, want in (("4", "445,355"), ("10", "460,355")):
             '<sheet name="sh_wd" pos="445+15*($pgt>\'9\'),355"></sheet>')
     check(f"a defined number compares with quoted digits ({pages} pages)",
           got.split('pos="', 1)[1].split('"', 1)[0], want)
+
+# ff11/guide/tips/meps01.pml: nodefvalue="001" is a file id, not the number 1.
+got = E('<define name="$crt_url" nodefvalue="001">'
+        '<define name="$f" calc="\'src/srpm\'+$crt_url+\'.pml\'"><text>&var=$f;</text>')
+check("a zero-padded define stays an id (srpm001.pml, not srpm1.pml)",
+      got[got.index("<text"):].split(">", 1)[1].split("<")[0], "src/srpm001.pml")
+
+# The tips menu slides in at pos="$sh_bo_xc*$mn_open+$sh_bo_xo*!$mn_open,..":
+# `!` is an operand there, and Python's `not` after `*` does not parse.
+got = E('<define name="$mn_open" value="0"><define name="$xc" value="7">'
+        '<define name="$xo" value="3"><sheet pos="$xc*$mn_open+$xo*!$mn_open,5"></sheet>')
+check("unary ! works inside arithmetic",
+      got.split('pos="', 1)[1].split('"', 1)[0], "3,5")
+
+# --------------------------------------------------------------------------- #
+# The Viewer's own answers: every case in section 11 of
+# PlayOnline/docs/notes/pc-viewer/pml-engine-expressions.md, whose expected
+# values came from running the port of app.dll's evaluator.
+# --------------------------------------------------------------------------- #
+print()
+print("spec section 11: expressions")
+
+
+def spec_vars():
+    return pmleval.make_vars({
+        "mn_id": "3", "crt_url": "001", "zero": "0", "SC_ID": "1", "s": "abc",
+        "a": "01", "b": "1", "e": "", "i": "2", "x": "5",
+        "mn": [["a", "0"], ["b", "0"], ["c", "0"], ["d", "5"]], "flat": ["x", "y"]})
+
+
+EXPRS = [
+    ("$mn_id+1+$mn[$mn_id][1]", "9"),
+    ("'src/srpm'+$crt_url+'.pml'", "src/srpm001.pml"),
+    ("'ma_i/masc'+$zero+''+$SC_ID+'i.png'", "ma_i/masc01i.png"),
+    ("$zero+$SC_ID+'i.png'", "(Inconsistent parentheses error)"),
+    ("'5'+'5'", "10"),
+    ("'5'+'x'", "5x"),
+    ("'a'+1", "(Inconsistent parentheses error)"),
+    ("1+'a'", "(Inconsistent parentheses error)"),
+    ("$s+1", "1"),
+    ("$a+$b", "2"),
+    ("$a==$b", "1"),
+    ("'01'==1", "1"),
+    ("' 1'=='1'", "0"),
+    ("'10'<'9'", "0"),
+    ("'B'<'a'", "1"),
+    ("$s==0", "1"),
+    ("'abc'==0", ""),
+    ("''==0", "1"),
+    ("$undef", "(Variable error)"),
+    ("'x'+$undef", "x(Variable error)"),
+    ("$undef+1", "1"),
+    ("$undef==0", "1"),
+    ("$undef==''", "0"),
+    ("!$undef", "1"),
+    ("$mn[9][0]", "(Array error)"),
+    ("$mn[0][9]", ""),
+    ("$mn[0]", "(Array error)"),
+    ("$flat[1]", "y"),
+    ("$flat[5]", ""),
+    ("$s[0]", "(Variable error)"),
+    ("$mn['2'][0]", "c"),
+    ("$mn[1+1][0]", "c"),
+    ("7/2", "3"),
+    ("-7/2", "-3"),
+    ("-7%3", "-1"),
+    ("5/0", "0"),
+    ("5%0", "0"),
+    ("'a'*2", ""),
+    ("'a'-'b'", "(String operation error)"),
+    ("!'0'", "(Numeric value error)"),
+    ("-'5'", "(Numeric value error)"),
+    ("!0", "1"),
+    ("~0", "-1"),
+    ("1||0&&0", "0"),
+    ("0||1&&0", "0"),
+    ("1&&0||1", "1"),
+    ("2>1==1", "1"),
+    ("3&5", "1"),
+    ("3|4", "7"),
+    ("3^1", "2"),
+    ("1+2*3", "7"),
+    ("10-3-2", "5"),
+    ("-2*3", "-6"),
+    ("2*-3", ""),
+    ("12abc", "12"),
+    ("1.5+1", "1"),
+    ("0x10", "0"),
+    ("1,2", "1"),
+    ("$u ? 1 : 2", "(Variable error)"),
+    ("'it\\'s'", "it's"),
+    ("'unterminated", "unterminated"),
+    ("(1", "(Inconsistent parentheses error)"),
+    ("1+", ""),
+    ("$_PLATFORM=='WIN'", "1"),
+]
+for expr, want in EXPRS:
+    check(f"{expr}  ->  {want!r}", pmleval.eval_str(expr, spec_vars()), want)
+# the int results the table gives for the cases whose string is ""
+for expr in ("'abc'==0", "'a'*2", "2*-3"):
+    check(f"{expr} as an integer is 0", pmleval.eval_int(expr, spec_vars()), 0)
+# SE's malformed memn01.pml delay: 0 for every $i and either $mn_open
+check("(500*+200$i)*!$mn_open is 0 whatever the variables",
+      {pmleval.eval_int("(500*+200$i)*!$mn_open",
+                        pmleval.make_vars({"i": i, "mn_open": o}))
+       for i in ("0", "1", "5") for o in ("0", "1")}, {0})
+
+print()
+print("spec section 11: assignment, in order from $i=\"2\"")
+V = spec_vars()
+for expr, want in (("$i=4", "4"), ("$i+=3", "7"), ("$i-=1", "6"), ("$i++", "6"),
+                   ("++$i", "8"), ("$q+='x'", "(Variable error)x"), ("$s+=1", "1")):
+    check(f"{expr}  ->  {want}", pmleval.eval_str(expr, V), want)
+check("$i ends as 8 ($i++ left it 7, ++$i made it 8)", V.get("$i"), "8")
+
+
+def attr_of(src, name, **values):
+    """The value `name` has on the first element of `src` after expansion."""
+    got = pmleval.expand(src, sysvars=values)
+    m = re.search(r'\b%s="([^"]*)"' % name, got)
+    return m and m.group(1).replace("&quot;", '"')
+
+
+print()
+print("spec section 11: attributes")
+check("src AUTO: an expression", attr_of('<img src="$F_PATH1+\'in02.pml\'">', "src",
+                                         F_PATH1="../"), "../in02.pml")
+check("src AUTO: a literal", attr_of('<img src="in02.pml">', "src"), "in02.pml")
+check("src AUTO: {$i} is NOT filled in, the whole value evaluates",
+      attr_of('<img src="img{$i}.png">', "src", i="2"),
+      "(Inconsistent parentheses error)")
+check("href BRACE: {$x} is filled in",
+      attr_of('<img href="sd:x@{$im_bg}">', "href", im_bg="im_bg0"), "sd:x@im_bg0")
+check("href BRACE: the rest stays an action string",
+      attr_of('<img href="eval:$a[{$j}]">', "href", j="4"), "eval:$a[4]")
+check("alt AUTO: no trigger, no arithmetic", attr_of('<img alt="98+6">', "alt"), "98+6")
+check("pos PAIR", attr_of('<sheet pos="98+6,117">', "pos"), "104,117")
+check("size PAIR", attr_of('<sheet size="15*31,21">', "size"), "465,21")
+check("PAIR: an empty half is -1", attr_of('<sheet pos="$x">', "pos", x="5"), "5,-1")
+check("PAIR with variables", attr_of('<sheet pos="$x*2,$i+1">', "pos", x="5", i="2"),
+      "10,3")
+check("delay INT", attr_of('<sheet delay="900+100*$i">', "delay", i="2"), "1100")
+check("numbers vs quoted digits (4)",
+      attr_of('<sheet pos="445+15*($pgt>\'9\'),355">', "pos", pgt="4"), "445,355")
+check("numbers vs quoted digits (10)",
+      attr_of('<sheet pos="445+15*($pgt>\'9\'),355">', "pos", pgt="10"), "460,355")
+check("unary ! in a PAIR",
+      attr_of('<sheet pos="$xc*$mn_open+$xo*!$mn_open,5">', "pos",
+              xc="7", mn_open="0", xo="3"), "3,5")
+
+print()
+print("spec section 11: the template layer")
+
+
+def vars_after(src, url=None):
+    """The variable store after a page has run."""
+    seen = {}
+    real = pmleval._process
+
+    def spy(text, run, depth, base):
+        real(text, run, depth, base)
+        seen["V"] = run.V
+    pmleval._process = spy
+    try:
+        pmleval.expand(src, url=url)
+    finally:
+        pmleval._process = real
+    return seen["V"]
+
+
+check('value is literal: value="$y" stores "$y"',
+      vars_after('<define name="$x" value="$y">').get("$x"), "$y")
+check('calc is always evaluated: calc="7/2" stores "3"',
+      vars_after('<define name="$h" calc="7/2">').get("$h"), "3")
+check("a define with no value defines nothing",
+      vars_after('<define name="$x">').get("$x"), None)
+check('value="" defines ""', vars_after('<define name="$x" value="">').get("$x"), "")
+check("nodefvalue wins over value when undefined",
+      vars_after('<define name="$c" value="5" nodefvalue="9">').get("$c"), "9")
+check("nodefvalue keeps a defined value",
+      vars_after('<define name="$c" value="1"><define name="$c" value="5" nodefvalue="9">')
+      .get("$c"), "1")
+check("the URL query sets variables before the page runs",
+      vars_after('<define name="$crt_url" nodefvalue="001">',
+                 url="x/mepm010.pml?crt_url=010").get("$crt_url"), "010")
+check("so does the mirror's encoded file name",
+      vars_after('<define name="$crt_url" nodefvalue="001">',
+                 url="wh000.pol.com/pml/game/ff11/guide/tips/"
+                     "mepm010.pml%3Fcrt_url%3D010%26crt_bt%3D1").get("$crt_bt"), "1")
+check("a $_ name cannot be defined",
+      vars_after('<define name="$_X" value="1">').get("$_X"), None)
+
+
+def items(src):
+    return vars_after(src).arrays["$c"].to_list()
+
+
+check('"Title A","B" is two items', items('<array name="$c">"Title A","B"</array>'),
+      ["Title A", "B"])
+check('"Title A" "B" is ONE item', items('<array name="$c">"Title A" "B"</array>'),
+      ["Title AB"])
+check("single quotes delimit nothing", items("<array name=\"$c\">'a','b'</array>"),
+      ["", ""])
+check("a trailing comma adds an empty item",
+      items('<array name="$c">"a",\n  "b",</array>'), ["a", "b", ""])
+check("a comma inside double quotes is kept", items('<array name="$c">"x,y","z"</array>'),
+      ["x,y", "z"])
+
+
+def text_of(src, **values):
+    got = pmleval.expand(src, sysvars=values)
+    return "".join(re.findall(r"<text[^>]*>([^<]*)</text>", got))
+
+
+check("&var= lookups",
+      text_of('<array name="$c">"Title A","B"</array>'
+              '<text>&var=$c[0];|&var=$c[$id];|&var=$nope[3];</text>', id="1"),
+      "Title A|B|(Variable error)")
+check("&var=1+2; has no trigger and prints as written",
+      text_of("<text>&var=1+2;</text>"), "1+2")
+check("&var=$clst+1; is evaluated", text_of("<text>&var=$clst+1;</text>", clst="4"), "5")
+check("{$i} in plain text is literal", text_of("<text>A{$i}</text>", i="0"), "A{$i}")
+check("&calc= does not exist", text_of("<text>&calc=1+2;</text>"), "&calc=1+2;")
+
+E = lambda src, **v: pmleval.expand(src, sysvars=v).strip()   # noqa: E731
+check('<if expr="$x"> with "abc" is false (wcstol)',
+      E('<if expr="$x">Y<else>N</if>', x="abc"), "N")
+check('<if expr="$x"> with "1abc" is true', E('<if expr="$x">Y<else>N</if>', x="1abc"), "Y")
+check("$undef==0 is true", E('<if expr="$undef==0">Y</if>'), "Y")
+check("a missing expr runs the body", E("<if>Y</if>"), "Y")
+check("a top-level <else> after </if> is ignored (1: XY)",
+      E('<if expr="1">X</if><else>Y</else>'), "XY")
+check("a top-level <else> after </if> is ignored (0: Y)",
+      E('<if expr="0">X</if><else>Y</else>'), "Y")
+report = {}
+got = pmleval.expand('<if expr="0"><img src="$undef"></if>', report=report)
+check("a false branch evaluates nothing", (got, report["missing"]), ("", []))
+check("<for> with cond", text_of('<for init="$i=0" cond="$i<3" next="$i++">'
+                                 '<text>&var=$i;</text></for>'), "012")
+check("<for> without cond runs once", text_of('<for init="$i=0" next="$i++">'
+                                              '<text>&var=$i;</text></for>'), "0")
+check("<for> stops after 1 + 1024 passes",
+      pmleval.expand('<for init="$i=0" cond="1" next="$i++">x</for>').count("x"), 1025)
+check("<while> does nothing", E('<while expr="1">W</while>'), "W")
+
+print()
+print("env: the page's final variable table, for the browser-side runtime")
+env = {}
+pmleval.expand('<define name="$crt_url" nodefvalue="001"><define name="$n" calc="2*3">'
+               '<array name="$m"><array>"a","0"</array><array>"b","5"</array></array>'
+               '<array name="$flat">"x","y"</array>'
+               '<for init="$i=0" cond="$i<3" next="$i++"></for>',
+               url="x/mepm010.pml%3Fcrt_url%3D010%26crt_bt%3D1", env=env)
+check("query variables, defines and loop counters are strings",
+      [env.get(k) for k in ("$crt_url", "$crt_bt", "$n", "$i")], ["010", "1", "6", "3"])
+check("arrays are nested lists of strings",
+      (env.get("$m"), env.get("$flat")), ([["a", "0"], ["b", "5"]], ["x", "y"]))
+check("system variables are there, the recomputed ones too",
+      (env.get("$_LANG"), env.get("$_PLATFORM"), len(env.get("$_DAT") or "")),
+      ("en", "WIN", 2))
+check("every value is a string or a list",
+      all(isinstance(v, (str, list)) for v in env.values()), True)
+check("a page that never defined $x has no $x", "$x" in env, False)
+
+print()
+print("system variables (spec section 7)")
+SV = pmleval.make_vars()
+check("$_LANG is en, $_VERSION the build date, $_SHORTCUT_ID 0",
+      (SV.get("$_LANG"), SV.get("$_VERSION"), SV.get("$_SHORTCUT_ID")),
+      ("en", "20060221", "0"))
+check("$_MON and $_DAT are zero-padded",
+      [len(SV.get(n)) for n in ("$_MON", "$_DAT")], [2, 2])
+check("'x'+$_MON keeps the padding",
+      pmleval.eval_str("'x'+$_MON", SV), "x" + SV.get("$_MON"))
 
 print()
 print("pmleval_test: OK" if ok else "pmleval_test: FAILED")
