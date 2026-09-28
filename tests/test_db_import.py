@@ -622,6 +622,7 @@ ORDER = (
     " /data/fe_mail.db",
     "$DC run --rm --no-deps --entrypoint python feworld fedb.py import world /data",
     "$DC run --rm --no-deps --entrypoint python fmo fmodb.py import fmo_db /data/fmo.db",
+    "$DC run --rm --no-deps --entrypoint python fmo fmodb.py import war /data/fmowar.json",
     "$DC run --rm --no-deps --entrypoint python jan janstore.py import event"
     " /data/resources/janevent.json",
     "$DC run --rm --no-deps --entrypoint python jan janstore.py import rank_snapshot"
@@ -634,7 +635,8 @@ ORDER = (
     " /data/tm-champion.json",
     "$DC run --rm --no-deps -v openlobby_tm-board-state:/state:ro --entrypoint"
     " python tmrank tmstore.py import board_state /state",
-    "$DC run --rm --entrypoint python doc docdb.py import stats /logs/doc-stats.json",
+    "$DC run --rm --no-deps --entrypoint python doc docdb.py import stats"
+    " /logs/doc-stats.json",
 )
 for needle in ORDER:
     chk("printed: %s" % needle[4:70], needle in flat, True)
