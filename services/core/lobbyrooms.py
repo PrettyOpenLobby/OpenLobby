@@ -5,6 +5,7 @@ import struct
 import time
 import threading
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
+from polcore import kv
 from srvcore import log
 from . import handlelists, lobbymail, lobbysearch, lobbysession, roomregistry
 
@@ -191,7 +192,7 @@ def _parse_room_topic(topic):
 #: and the only symptom would be a room that quietly never lists.
 #:
 #: So it rides the SESSION, which already exists to hand state between exactly
-#: these two processes (`_SESSION_FILE`, merged rather than overwritten) and which
+#: these two processes (`_SESSION_KEY`, merged rather than overwritten) and which
 #: both bands of one launch agree on. `_BROWSE_ZONE` stays as a same-process
 #: fallback for the tests and for a single-container deployment.
 _BROWSE_ZONE = {}
@@ -320,15 +321,25 @@ def _register_created_room(chan, topic, sess):
 #: registration itself was working the whole time; `authserv.log` said
 #: `LISTED as 'HI' in zone 1100` while `lobby.log` served six rooms.
 #:
-#: Only the process that MUTATES the registry writes this file (`_ROOMS_OWNER`,
-#: set by `RoomRegistry._publish`). A reader can therefore never overwrite it with
-#: its own empty view -- which is precisely how `_SESSION_FILE` got broken once
-#: before, and it cost a POL-0010.
-_ROOMS_FILE = os.environ.get(
-    "POL_ROOMS_FILE", os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
-                                   "rooms-live.json"))
+#: Only the process that MUTATES the registry publishes this (`_ROOMS_OWNER`,
+#: set by `RoomRegistry._publish`). A reader can therefore never overwrite it
+#: with its own empty view -- which is precisely how the old shared session file
+#: got broken once before, and it cost a POL-0010.
+#:
+#: It lives in the live-state store as one JSON document, `rooms:live`, and
+#: expires POL_ROOM_RESTORE_WINDOW (default 6 h) after the last publish -- the
+#: same window `_restore_rooms_once` accepts, so a snapshot too old to restore
+#: is simply gone.
+_ROOMS_KEY = "rooms:live"
 _ROOMS_OWNER = [False]
-_ROOMS_CACHE = {"mtime": -1.0, "data": {}}
+_ROOMS_CACHE = {"raw": None, "data": {}}
+
+
+def _room_restore_window():
+    try:
+        return float(os.environ.get("POL_ROOM_RESTORE_WINDOW", "21600"))
+    except ValueError:
+        return 21600.0
 
 
 def _rooms_local_state():
@@ -418,44 +429,41 @@ def _room_roster(chan):
 
 
 def _publish_rooms():
-    """Write the registry's state where the other container can read it."""
+    """Publish the registry's state where the other container can read it."""
     state = _rooms_local_state()
     # A ROOM ARRIVAL IS A ROSTER EVENT. Done here rather than on the JOIN path
     # because this is the ONE function every registry mutation goes through, and
     # a delta stream that misses a join is worse than no delta stream at all.
     titles.rooms_changed(state)
-    os.makedirs(os.path.dirname(_ROOMS_FILE), exist_ok=True)
-    tmp = _ROOMS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-    os.replace(tmp, _ROOMS_FILE)              # atomic
-    _ROOMS_CACHE["mtime"] = -1.0              # our own next read re-stats
+    kv.set(_ROOMS_KEY, json.dumps(state), ttl=max(1.0, _room_restore_window()))
 
 
 def _live_rooms():
     """Room state from wherever it is actually known.
 
     The owning process answers from memory -- it IS the truth, and an empty
-    registry there means empty, not stale. Everyone else reads the file, re-read
-    only when its mtime moves.
+    registry there means empty, not stale. Everyone else reads the published
+    snapshot, parsed again only when it has changed.
     """
     if _ROOMS_OWNER[0]:
         state = _rooms_local_state()
         state.pop("__reg__", None)            # bookkeeping, not a room
         return state
     try:
-        mtime = os.stat(_ROOMS_FILE).st_mtime
-    except OSError:
+        raw = kv.get(_ROOMS_KEY)
+    except Exception as exc:
+        log("lobby", f"room state: cannot read ({exc!r})")
+        return _ROOMS_CACHE["data"]           # the last good view stands
+    if raw is None:
         return {}
-    if mtime != _ROOMS_CACHE["mtime"]:
+    if raw != _ROOMS_CACHE["raw"]:
         try:
-            with open(_ROOMS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-            data.pop("__reg__", None)         # bookkeeping, not a room
-            _ROOMS_CACHE["data"] = data
-            _ROOMS_CACHE["mtime"] = mtime
-        except (OSError, ValueError):
-            return _ROOMS_CACHE["data"]       # torn write: last good view stands
+            data = json.loads(raw) or {}
+        except ValueError:
+            return _ROOMS_CACHE["data"]
+        data.pop("__reg__", None)             # bookkeeping, not a room
+        _ROOMS_CACHE["data"] = data
+        _ROOMS_CACHE["raw"] = raw
     return _ROOMS_CACHE["data"]
 
 
@@ -474,9 +482,10 @@ def _restore_rooms_once():
     the members as GHOSTS that re-attach on their next touch or expire
     (POL_ROOM_GHOST_TTL, default 900 s).
 
-    Only a RECENT file restores (POL_ROOM_RESTORE_WINDOW, default 6 h): rooms
-    die with their last occupant, so resurrecting last week's registry would
-    fill the browser with rooms nobody is in.
+    Only a RECENT snapshot restores (POL_ROOM_RESTORE_WINDOW, default 6 h):
+    rooms die with their last occupant, so resurrecting last week's registry
+    would fill the browser with rooms nobody is in. The snapshot expires from
+    the store after that window, so an older one is simply not there.
     """
     if _ROOMS_RESTORED[0]:
         return
@@ -485,21 +494,18 @@ def _restore_rooms_once():
             return
         _ROOMS_RESTORED[0] = True
         try:
-            st = os.stat(_ROOMS_FILE)
-            window = float(os.environ.get("POL_ROOM_RESTORE_WINDOW", "21600"))
-            if time.time() - st.st_mtime > window:
-                log("authserv", f"room restore: {_ROOMS_FILE} is "
-                                f"{time.time() - st.st_mtime:.0f}s old "
-                                f"(> {window:.0f}); starting empty")
+            raw = kv.get(_ROOMS_KEY)
+            if raw is None:
+                log("authserv", "room restore: no room state younger than "
+                                f"{_room_restore_window():.0f}s; starting empty")
                 return
-            with open(_ROOMS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-        except (OSError, ValueError):
-            return                            # no file / torn: a fresh start
+            data = json.loads(raw) or {}
+        except Exception:
+            return                            # no store / junk: a fresh start
         reg = data.get("__reg__") or {}
         ttl = float(os.environ.get("POL_ROOM_GHOST_TTL", "900"))
         n = roomregistry.ROOMS.restore_state(reg, ttl) if reg else 0
-        # the room BROWSER registrations ride the same file: without these a
+        # the room BROWSER registrations ride the same snapshot: without these a
         # restored room has modes and ghosts but no listing, which reads as
         # "the room vanished" in the browser even though its door still works
         restored_rows = 0
@@ -522,12 +528,12 @@ def _restore_rooms_once():
                             f"{ttl:.0f}s")
             # WARNING: AND REPUBLISH, OR EVERY COUNT KEEPS SHOWING THE OLD WORLD.
             # `_publish_rooms` runs on registry MUTATIONS, and a restart is not
-            # one -- so `rooms-live.json` kept the last snapshot the PREVIOUS
+            # one -- so the published rooms kept the last snapshot the PREVIOUS
             # process wrote, live member rows and all, until somebody happened to
             # join something. Reported 2026-08-20T19:56: the zone screen said
             # "1 player in Mermaid's Dreamworld" with nobody online, and the file
-            # backing it was stamped 19:50:50 -- three minutes before the restart
-            # that was serving it.
+            # backing it then was stamped 19:50:50 -- three minutes before the
+            # restart that was serving it.
             #
             # The restored state is the honest one: ghosts carry `member_id 0`
             # and `snapshot()` counts LIVE SESSIONS, so a room nobody has
