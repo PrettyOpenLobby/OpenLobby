@@ -1,11 +1,11 @@
 """Portal eras: which client build gets which pages; shim logs."""
-import json
 import os
 import re
 import time
+import clientbuilds
 from srvcore import LOG_DIR, log
 from .deps import yaml
-from . import pacing, portalauth
+from . import portalauth
 
 
 
@@ -239,12 +239,8 @@ def _client_era(peer_ip, ua=None, viewer_version=None):
         era, why = _era_for_release(eras, builds, allowed, viewer_version)
         if era:
             return era, why
-    try:
-        with open(pacing.CLIENT_BUILDS_PATH, encoding="utf-8") as f:
-            state = json.load(f)
-    except (OSError, ValueError):
-        state = {}
-    for key, rec in sorted((state.get(peer_ip) or {}).items()):
+    state_here = clientbuilds.for_address(peer_ip)
+    for key, rec in sorted(state_here.items()):
         # Product 1000 is the Viewer itself; a title's build says nothing about
         # which portal UI the shell renders.
         service, _, product = key.partition("/")
@@ -274,7 +270,6 @@ def _client_era(peer_ip, ua=None, viewer_version=None):
     # (the Xbox trees), one whose ADDRESS reported builds that belong to a
     # different platform (the shared-bridge case above), and one whose claim was
     # not a build id at all.
-    state_here = state.get(peer_ip) or {}
     reported = [k for k in state_here if k.endswith("/1000")]
     mine = [k for k in reported if not allowed or k.partition("/")[0] in allowed]
     junk = [k for k in mine

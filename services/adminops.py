@@ -8,8 +8,8 @@
   * Code expiry: the same thread deletes unused registration codes whose
     expiry has passed. Redemption lives in accounts.py and is not touched --
     changing it would make prod restart login and authsess.
-  * Status for the Overview: live session counts from the marker files the
-    game services write (live_sessions.py), TCP reachability of the services,
+  * Status for the Overview: live session counts from the markers the game
+    services publish (live_sessions.py), TCP reachability of the services,
     the last backup (deploy/pol-backup writes data/backup-status.json) and
     free disk.
 
@@ -27,19 +27,21 @@ import urllib.error
 import urllib.request
 
 import adminusers
+import live_sessions
 import webpush
 
 TICKET_RE = re.compile(r"gm-\d{8}T\d{6}-\d+\.json")
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-#: Marker files written every ~10 s by services that hold live sessions:
-#: (file, label, what the count is).
+#: Live-session markers published every ~10 s by services that hold live
+#: sessions (live_sessions.py, `live:<service>` in the live-state store):
+#: (service, label, what the count is).
 LIVE_MARKERS = (
-    ("tm-matches-live.json", "Tetra Master", "matches"),
-    ("authsess-jan-sessions-live.json", "Janhourou", "sessions"),
-    ("fmo-sessions-live.json", "Front Mission Online", "sessions"),
-    ("felobby-sessions-live.json", "Fantasy Earth (lobby)", "sessions"),
-    ("feworld-sessions-live.json", "Fantasy Earth (world)", "sessions"),
+    ("tm", "Tetra Master", "matches"),
+    ("authsess-jan", "Janhourou", "sessions"),
+    ("fmo", "Front Mission Online", "sessions"),
+    ("felobby", "Fantasy Earth (lobby)", "sessions"),
+    ("feworld", "Fantasy Earth (world)", "sessions"),
 )
 LIVE_FRESH = 60.0
 #: How often expired codes are swept (seconds). Tests shorten it.
@@ -65,14 +67,11 @@ def clean(text, limit=200):
 # --------------------------------------------------------------------------- #
 # status probes
 # --------------------------------------------------------------------------- #
-def live_counts(data_dir):
+def live_counts():
     now, out = time.time(), []
-    for fname, label, unit in LIVE_MARKERS:
-        path = os.path.join(data_dir, fname)
-        try:
-            with open(path, encoding="utf-8") as f:
-                d = json.load(f)
-        except (OSError, ValueError):
+    for service, label, unit in LIVE_MARKERS:
+        d = live_sessions.read_marker(service)
+        if d is None:
             continue                          # service not deployed here
         age = now - float(d.get("stamp") or 0)
         fresh = 0 <= age < LIVE_FRESH

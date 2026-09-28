@@ -35,6 +35,10 @@ Usage:
 """
 import argparse, json, os, socket, struct, hashlib, threading, sys, re, time
 try:
+    import clientbuilds                 # the portal's view of each client's build
+except ImportError:                     # standalone use outside services/
+    clientbuilds = None
+try:
     from srvcore import advertise_for   # per-client download host (LAN vs tailnet)
 except ImportError:                     # standalone use outside services/
     def advertise_for(default, peer_ip=None, dialed_ip=None):
@@ -389,28 +393,13 @@ class Server:
         so this check is the only place the server learns whether it is talking
         to a 2004 Viewer or a 2011 one. The portal needs that to pick the right
         page set (see config/portal-eras.yaml), and the two run in different
-        containers, so hand it over through the shared logs volume.
+        containers, so hand it over through the live-state store
+        (clientbuilds.py).
 
         Best-effort by design: a failure here must never cost a patch reply.
         """
-        path = os.environ.get("POLP_BUILDS_FILE", "/logs/client-builds.json")
-        try:
-            try:
-                with open(path, encoding="utf-8") as f:
-                    state = json.load(f)
-            except (OSError, ValueError):
-                state = {}
-            entry = state.setdefault(addr[0], {})
-            entry[f"{region}/{prod}"] = {
-                "version": ver.decode("latin-1"),
-                "seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=1, sort_keys=True)
-            os.replace(tmp, path)
-        except OSError:
-            pass
+        if clientbuilds is not None:
+            clientbuilds.record(addr[0], region, prod, ver)
 
     def answer_current(self, region, prod, ver, addr, dlhost=None):
         """Tell a client it is already up to date, with no bundle behind it.
