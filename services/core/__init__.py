@@ -21,6 +21,7 @@
     ircband.py             The auth band's IRC verbs (JOIN, PART, NOTICE, PRIVMSG, ...) and the XXL gate.
     authserv.py            The auth node responder: line I/O, account resolution, the login exchange.
     authresume.py          The session channel loop and re-attaching a session after an authserv restart.
+    authkick.py            Administrator kick: the admin panel's request to disconnect a PlayOnline ID's live channels.
     framing.py             Lobby band framing: headers, frame boundaries, reading one frame.
     lobbysession.py        Per-connection lobby session state, its on-disk mirror, and the session record.
     paylen.py              Lobby reply lengths per opcode and the constant-length fetch path tables.
@@ -79,6 +80,7 @@ MODULES = (
     "ircband",
     "authserv",
     "authresume",
+    "authkick",
     "framing",
     "lobbysession",
     "paylen",

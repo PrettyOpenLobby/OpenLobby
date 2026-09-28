@@ -83,6 +83,13 @@ class PresenceRegistry:
         with self._lock:
             return list(self._by_member.get(int(member_id), []))
 
+    def sessions_for_polid(self, polid):
+        """Snapshot live channels belonging to a PlayOnline ID."""
+        with self._lock:
+            return [sess for sessions in self._by_member.values() for sess in sessions
+                    if sess.member is not None and sess.member["polid"] == polid
+                    and sess.alive]
+
     def is_online(self, member_id):
         with self._lock:
             return bool(self._by_member.get(int(member_id)))
@@ -116,22 +123,32 @@ def _member_channel_alive(member_id):
         return False
 
 
-def _logout_wipe(member_id, login_name, peer, sid, why=""):
+def _logout_wipe(member_id, login_name, peer, sid, why="", kick_tokens=None):
     """The logout bookkeeping, in one place: stamp the logout, drop the session
     rows (presence = the session table), push offline at the watchers, clear
     the 4:5 status latch, and mark the Viewer closed. Runs immediately when
     POL_PRESENCE_LOGOUT_GRACE=0, or from the grace timer when the member
     really stayed gone. Opens its own DB handle -- the caller's connection is
-    long closed by the time a timer fires."""
+    long closed by the time a timer fires. Kick cleanup deletes only the
+    captured session tokens and keeps presence if a new login has opened."""
     try:
         gone = 0
+        still_online = False
         if accounts is not None:
             db = accounts.connect()
             try:
-                accounts.record_logout(db, int(member_id))
-                gone = accounts.close_sessions(db, int(member_id))
+                if kick_tokens is None:
+                    accounts.record_logout(db, int(member_id))
+                    gone = accounts.close_sessions(db, int(member_id))
+                else:
+                    gone, still_online = accounts.close_kicked_sessions(
+                        db, int(member_id), kick_tokens)
             finally:
                 db.close()
+        if kick_tokens is not None and still_online:
+            log("accounts", f"{peer} kick closed {gone} old session(s) for "
+                            f"{login_name}; newer login remains online")
+            return
         log("accounts", f"{peer} logout stamped for {login_name} "
                         f"({gone} session(s) closed){why}")
         pushrecord._broadcast_presence(int(member_id), "offline")

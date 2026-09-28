@@ -54,13 +54,19 @@ TOKEN_ALPHABET = "N43OVHBJ1Y2C0WSXED5QFILRZMUTAPGK"
 # payment method will expire at the end of the month...". Codes below 0xDD raise
 # no dialog at all (sub_049f919f: `cmp al,0xdd / jb`), and 0 still satisfies the
 # ERROR handler's store condition (`al == 0 || al >= 0xdc`, sub_037d5820), so 0
-# is both silent and accepted. Set POL_ACCT_STATUS=0xfa to get the old behaviour
-# back, or to any code in 0xDD..0xFC to raise that dialog deliberately.
+# is both silent and accepted. POL_ACCT_STATUS=0xfa remains a server-wide test
+# override for the lobby redirect token; per-account notices come from
+# accounts.claim_login_information and are one-time by default.
 _ACCT_STATUS = int(os.environ.get("POL_ACCT_STATUS", "0"), 0) & 0xFF
 #: [4:8] "client IP" -- the captured address with [6] replaced by the status code.
 #: The name is historical; it is not a constant in SE's protocol.
 _CONST_48 = bytes.fromhex("6c37") + bytes([_ACCT_STATUS]) + bytes.fromhex("b1")
 _CONST_END = bytes.fromhex("010100")      # [22] = [23] = 1 (Crystal: same), [24] 0
+
+
+def client_ip_field(status=0):
+    """[4:8] with `status` at [6]: the login-result code the client stores."""
+    return _CONST_48[:2] + bytes([status & 0xFF]) + _CONST_48[3:]
 
 
 def token_encode(raw):
@@ -80,7 +86,7 @@ def _next_nonce():
     return struct.pack(">I", _nonce_counter[0])
 
 
-def build_redirect_token(node_ip, node_port):
+def build_redirect_token(node_ip, node_port, status=0):
     """Mint a base-32 redirect record pointing the client at node_ip:node_port.
 
     The nonce field [0:4] is the SEED of the first-hop (state-5) session key:
@@ -90,7 +96,7 @@ def build_redirect_token(node_ip, node_port):
     """
     raw = bytearray(25)
     raw[0:4] = b"\x00\x00\x00\x00"          # nonce=0 -> first-hop K=0
-    raw[4:8] = _CONST_48                    # "client IP" + status [6]; see above
+    raw[4:8] = client_ip_field(status)      # "client IP" + status [6]; see above
     raw[8:12] = socket.inet_aton(node_ip)
     raw[12:14] = struct.pack(">H", node_port)
     # [14:20] zero, [20:22] = client port in SE's (left zero), [22:25] see above
@@ -98,7 +104,7 @@ def build_redirect_token(node_ip, node_port):
     return token_encode(bytes(raw)) + "NNNN"   # 4-sym trailing checksum: unenforced
 
 
-def build_session_token(stamp):
+def build_session_token(stamp, status=0):
     """The FINAL hop's 300 token: a SESSION token, not a redirect.
 
     Same 25-byte base-32 record, but the address at [8:12] is ZERO and [0:4]
@@ -129,7 +135,7 @@ def build_session_token(stamp):
     """
     raw = bytearray(25)
     struct.pack_into(">I", raw, 0, stamp & 0xFFFFFFFF)   # server clock + key seed
-    raw[4:8] = _CONST_48
+    raw[4:8] = client_ip_field(status)
     # [8:12] MUST stay zero -- a non-zero address makes this a redirect.
     raw[22:25] = _CONST_END
     return token_encode(bytes(raw)) + "NNNN"

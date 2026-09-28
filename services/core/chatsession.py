@@ -41,6 +41,9 @@ class ChatSession:
         self.member = member
         self._lock = threading.Lock()
         self.alive = True
+        #: An administrator kicked this channel (authkick): the kick request,
+        #: not the channel's own close, does the logout bookkeeping.
+        self.admin_kicked = False
         #: Which launch and which client build this channel is (set by the
         #: auth hop), and whether a newer login KILLED it. See
         #: `_kill_duplicate_logins`: a killed channel's close is not a logout.

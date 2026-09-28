@@ -6,7 +6,7 @@ import titles                   # the title-plugin seam (services/titles.py)  # 
 from srvcore import log
 import sessioncrypt
 from .deps import accounts, gmchat
-from . import authnode, authserv, chatsession, friendroster, gamenotice, ircband, lobbysearch, lobbysession, pacing, presence, roomregistry
+from . import authkick, authnode, authserv, chatsession, friendroster, gamenotice, ircband, lobbysearch, lobbysession, pacing, presence, roomregistry
 
 
 
@@ -258,8 +258,13 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                 if lobbysession._session_sid():
                     lobbysession._session_put(lobbysession._session_sid())
                 continue
+            except OSError as exc:
+                close_why = ('administrator kicked account' if chat_sess.admin_kicked
+                             else f'socket read failed: {exc}')
+                break
             if not c:
-                close_why = 'THE CLIENT hung up (clean EOF)'
+                close_why = ('administrator kicked account' if chat_sess.admin_kicked
+                             else 'THE CLIENT hung up (clean EOF)')
                 break
             extra += c
             if not interact:
@@ -488,7 +493,6 @@ def handle_authresume(conn, addr, srv_name):
         if member is not None and want is not None and int(member["id"]) != int(want):
             return _resume_fail(conn, peer, "member-mismatch")
         lobbysession.session_bind(sid)
-        conn.sendall(b"RESUME OK\r\n")
         ping_every = int(os.environ.get("POL_AUTH_PING", "60"))
         prefix = ":" + srv
         chat_sess = chatsession.ChatSession(nick, srv, addr[0], conn, P, S, iv,
@@ -503,19 +507,30 @@ def handle_authresume(conn, addr, srv_name):
         # and re-joining rooms on the client's behalf would invent traffic it
         # never asked for. Presence is different: the account still reads online
         # (the session row was never closed), so the registry has to agree.
+        # The registration happens before RESUME OK, under the same lock a kick
+        # takes, so a kick that retired this launch meanwhile refuses the resume.
         if member is not None:
-            presence.PRESENCE.register(int(member["id"]), chat_sess)
+            if not authkick._register_account_channel(member["id"], chat_sess,
+                                                      resume=True):
+                return _resume_fail(conn, peer, "closed")
+        else:
+            lobbysession._session_put(sid, channel_open=True, viewer_open=True,
+                                      peer_ip=addr[0])
+        conn.sendall(b"RESUME OK\r\n")
+        if member is not None:
             # A resumed session lost polcore's recognition table with the old
             # process, so re-load the roster here too (gated POL_FRIEND_LOAD).
             friendroster._send_friend_roster(chat_sess, int(member["id"]))
-        lobbysession._session_put(sid, channel_open=True, viewer_open=True,
-                     peer_ip=addr[0])
         conn.settimeout(ping_every)
         extra = _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix,
                                    P, S, iv, True, ping_every)
+        chat_sess.alive = False
         if extra:
             log("authserv", f"{peer} resumed client sent {len(extra)}B total")
-        if member is not None and chat_sess.killed_dup:
+        if member is not None and chat_sess.admin_kicked:
+            # The kick request owns cleanup after it closes the socket.
+            pass
+        elif member is not None and chat_sess.killed_dup:
             log("accounts", f"{peer} resumed channel for "
                             f"{member['login_name']} was killed by a newer "
                             "login -- not a logout, no offline notification")
@@ -534,7 +549,7 @@ def handle_authresume(conn, addr, srv_name):
     except Exception as e:
         log("authserv", f"{peer} resume error: {e!r}")
     finally:
-        if sid is not None:
+        if sid is not None and not (chat_sess is not None and chat_sess.admin_kicked):
             for field in ("viewer_open", "channel_open"):
                 try:
                     lobbysession._session_put(sid, **{field: False})

@@ -9,7 +9,8 @@ from srvcore import _LOGIN_TRACE, _trace, _trace_begin, _trace_done, _trace_dump
 from authtoken import _STAMPS, _STAMPS_LOCK, _stamps_refresh, build_redirect_token, build_session_token, remember_stamp, session_token_key
 import sessioncrypt
 from .deps import accounts, contentlist
-from . import contentprofiles, authcap, authnode, authresume, chatsession, friendroster, ircband, lobbybind, lobbysession, logingate, presence, pushrecord, redirect, roomregistry
+from authtoken import _ACCT_STATUS
+from . import contentprofiles, authcap, authkick, authnode, authresume, chatsession, friendroster, ircband, lobbybind, lobbysession, logingate, presence, pushrecord, redirect, roomregistry
 
 
 # POL's Blowfish lives in sessioncrypt.py (bf_setkey / ofb_apply / recover_iv).
@@ -229,9 +230,12 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
     POL_LOGIN_DIGEST_ENFORCE=all refuses on unproven builds too, =off never
     refuses (log only).
 
-    Returns (conn, member_row, reject) -- `reject` is None when nothing was
-    refused, else the SE status byte to send back (REJECT_UNKNOWN_ID /
-    REJECT_BAD_PASSWORD). The caller owns closing conn.
+    Returns (conn, member_row, reject, session_token) -- `reject` is None when
+    nothing was refused, else the SE status byte to send back (REJECT_UNKNOWN_ID /
+    REJECT_BAD_PASSWORD, or the account's own refusal code,
+    accounts.login_reject_code). `session_token` is the session row this login
+    opened; the caller hands it to authkick._register_account_channel or
+    authkick._finish_pending_session. The caller owns closing conn.
 
     THE THIRD VALUE IS NOT COSMETIC. `member is None` on its own does not mean
     "refused": it is also what a stateless run returns (no account DB, or
@@ -241,11 +245,14 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
     password (see the caller).
     """
     if accounts is None or os.environ.get("POL_ACCOUNTS", "1") != "1":
-        return None, None, None
+        return None, None, None, None
     if isinstance(nick, (bytes, bytearray)):
         nick = nick.decode("ascii", "replace")
     enforce = os.environ.get("POL_ACCOUNTS_ENFORCE", "0") == "1"
     enforce_pw = enforce or os.environ.get("POL_ACCOUNTS_ENFORCE_PW", "0") == "1"
+    tok = None
+    db = None
+    member = None
     try:
         db = accounts.connect()
         accounts.purge_sessions(db)
@@ -258,20 +265,17 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                                 "(POL_ACCOUNTS_ENFORCE=1)")
                 _warn_stranded_registration(db, nick, peer_ip)
                 db.close()
-                return None, None, logingate.REJECT_UNKNOWN_ID
+                return None, None, logingate.REJECT_UNKNOWN_ID, None
             member = accounts.ensure_member(db, nick)
             log("accounts", f"{peer_ip} auto-provisioned {nick!r} "
                             f"(member id={member['id']}, polid={member['polid']})")
             _warn_stranded_registration(db, nick, peer_ip)
-        if member["status"] != "active":
+        reject_code = accounts.login_reject_code(db, member)
+        if reject_code:
             log("accounts", f"{peer_ip} REJECT {nick!r}: member status="
-                            f"{member['status']}")
+                            f"{member['status']}, reject code={reject_code:#04x}")
             db.close()
-            # No capture of SE refusing a SUSPENDED account, so this reuses the
-            # unknown-ID byte rather than inventing one. Same effect for the
-            # player -- this ID cannot log in -- and it is honest about what we
-            # actually observed.
-            return None, None, logingate.REJECT_UNKNOWN_ID
+            return None, None, reject_code, None
         # LOCKED OUT? After POL_LOGIN_LOCKOUT_FAILS (5) passwords the NICK digest
         # REFUSED within POL_LOGIN_LOCKOUT_WINDOW_S (900 s), every login of this
         # member is refused with SE's 0xCB -- the right password too, which is
@@ -294,7 +298,7 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                                 f"({int(left)}s left; `accounts.py unlock "
                                 f"{member['polid']}` clears it)")
                 db.close()
-                return None, None, logingate.REJECT_LOCKED
+                return None, None, logingate.REJECT_LOCKED, None
         # THE PASSWORD CHECK: the NICK digest against the sealed password copy.
         pw_proven = False
         if digest and os.environ.get("POL_LOGIN_DIGEST", "1") == "1":
@@ -349,7 +353,7 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                         log("accounts", f"{peer_ip} could not count the failed "
                                         f"login ({exc!r})")
                 db.close()
-                return None, None, logingate.REJECT_BAD_PASSWORD
+                return None, None, logingate.REJECT_BAD_PASSWORD, None
             else:
                 log("accounts", f"{peer_ip} WARN {nick!r}: NICK digest did not "
                                 f"match over {len(salts)} salt(s) and client "
@@ -414,7 +418,7 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                         + ". Run `accounts.py arm` to arm it for a while. "
                         "POL_TOKEN_ARM=0 disables this.")
                     db.close()
-                    return None, None, logingate.REJECT_BAD_PASSWORD
+                    return None, None, logingate.REJECT_BAD_PASSWORD, None
                 if scoped:
                     accounts.set_client_token(db, member["id"], client_sig, cred)
                     known = accounts.list_client_tokens(db, member["id"])
@@ -443,17 +447,19 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                                 + ")")
                 if enforce_pw:
                     db.close()
-                    return None, None, logingate.REJECT_BAD_PASSWORD
+                    return None, None, logingate.REJECT_BAD_PASSWORD, None
             elif scoped:
                 accounts.touch_client_token(db, member["id"], client_sig)
         elif enforce_pw:
             log("accounts", f"{peer_ip} REJECT {nick!r}: no credential presented "
                             "(POL_ACCOUNTS_ENFORCE_PW=1)")
             db.close()
-            return None, None, logingate.REJECT_BAD_PASSWORD
-        tok = accounts.open_session(db, member["id"], nick=nick,
-                                    peer_ip=peer_ip, iv=iv,
-                                    lobby_port=lobby_port)
+            return None, None, logingate.REJECT_BAD_PASSWORD, None
+        with authkick._SESSION_OPEN_LOCK:
+            tok = accounts.open_session(db, member["id"], nick=nick,
+                                        peer_ip=peer_ip, iv=iv,
+                                        lobby_port=lobby_port)
+            authkick._PENDING_SESSION_TOKENS[tok] = lobbysession._session_sid()
         try:
             prev, out = accounts.record_login(db, member["id"])
             log("accounts", f"{peer_ip} login clock: previous login={prev}, "
@@ -475,21 +481,33 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
         log("accounts", f"{peer_ip} login {nick!r} polid={member['polid']} "
                         f"contents={accounts.content_ids(db, member['id'])} "
                         f"session={tok[:8]}...")
-        return db, member, None
-    except Exception as exc:                      # never let the DB break login
-        # LOUD. "Continuing stateless" is the right call -- a login that half
-        # works beats one that does not happen -- but it is not a minor event:
-        # the client gets a session with no account behind it, so no games menu,
-        # no handle, and a lobby with nothing to serve. It read like an ordinary
-        # line in the log while a PS2 login was visibly broken on 2026-08-13.
-        log("accounts", f"{peer_ip} *** ACCOUNT LOOKUP FAILED ({exc!r}) -- this "
+        return db, member, None, tok
+    except Exception as exc:
+        if tok is not None:
+            authkick._finish_pending_session(tok, member, peer_ip)
+            if db is not None:
+                try:
+                    db.execute("DELETE FROM session WHERE token = %s", (tok,))
+                    db.commit()
+                except Exception:
+                    pass
+        if db is not None:
+            db.close()
+        # A fault here is ours, not the player's, so by default the login goes
+        # on without an account (no games menu, no handle) rather than being
+        # refused. The client gets a session with nothing behind it and looks
+        # broken, so the log line is loud. POL_ACCOUNTS_DB_FAIL=refuse answers
+        # "server busy" instead, which also stops a banned account slipping in
+        # during an outage.
+        if os.environ.get("POL_ACCOUNTS_DB_FAIL", "stateless") == "refuse":
+            log("accounts", f"{peer_ip} *** ACCOUNT LOOKUP FAILED ({exc!r}); "
+                            "refusing the login as server busy "
+                            "(POL_ACCOUNTS_DB_FAIL=refuse) ***")
+            return None, None, logingate.REJECT_BUSY, None
+        log("accounts", f"{peer_ip} *** ACCOUNT LOOKUP FAILED ({exc!r}); this "
                         f"login continues WITHOUT AN ACCOUNT: no games menu, no "
-                        f"handle, nothing for the lobby to serve. The client "
-                        f"will look broken. ***")
-        # reject=None deliberately: a DB fault is OURS, not the player's, and the
-        # comment above is the whole argument -- a half-working login beats a
-        # refusal. Do not "helpfully" refuse here.
-        return None, None, None
+                        f"handle, nothing for the lobby to serve ***")
+        return None, None, None, None
 
 
 def _front_preamble_addr(conn, addr):
@@ -596,6 +614,9 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
     _trace_begin(peer, port)
     accept = os.environ.get("POL_AUTH_ACCEPT", "1") == "1"
     acct_db, member = None, None
+    session_token = None
+    info_code = 0
+    info_claim = None
     chat_sess = None            # set on the welcome hop; dropped in `finally`
     viewer_marked = False       # did this hop mark the session signed-in?
     channel_marked = False      # ...and resumable? (see channel_open below)
@@ -978,7 +999,7 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # Resolve the NICK to an account. Permissive unless POL_ACCOUNTS_ENFORCE=1;
         # a rejection here means "no such account" OR a wrong password, and we now
         # SAY SO on the wire instead of hanging up (see the reject block below).
-        acct_db, member, reject = resolve_account(
+        acct_db, member, reject, session_token = resolve_account(
             nick, addr[0], iv, cred=cred, client_sig=client_sig,
             digest=nick_fields[1].strip() if len(nick_fields) > 2 else None,
             salts=login_digest_salts(addr[0], sent_greetings))
@@ -1093,7 +1114,17 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             else:
                 lobby_ip = authcap._self_ip()
                 lobby_port = int(os.environ.get("POL_LOBBY_PORT", "51220"))
-            lobby_token = build_redirect_token(lobby_ip, lobby_port)
+            if acct_db is not None and member is not None:
+                try:
+                    info_code, info_claim = accounts.claim_login_information(
+                        acct_db, member["polid"])
+                except Exception as exc:
+                    log("accounts", f"{peer} login information unavailable "
+                                    f"({exc!r}); continuing without a notice")
+            # This post-NICK 300 is the account-specific successful-login
+            # carrier. Earlier greetings must stay silent: no account is known.
+            lobby_token = build_redirect_token(
+                lobby_ip, lobby_port, status=info_code or _ACCT_STATUS)
             # The gate record carries the unread-mail count the badge shows at
             # boot (byte +0x11), so serve this member's real mailbox depth. Best
             # effort: a mail-DB hiccup must never cost anyone their login, so any
@@ -1184,6 +1215,15 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # FUN_037d5e80 rejects it after decrypt (return before the numeric handler) --
         # which is why 422 never registered and the record never reached the gate.
         chat_sess.send_raw(chat_sess.encode(lines))
+        if info_claim is not None and acct_db is not None and member is not None:
+            claim = info_claim
+            info_claim = None  # sendall completed; do not requeue a sent notice
+            try:
+                accounts.complete_login_information(
+                    acct_db, member["polid"], info_code, claim)
+            except Exception as exc:
+                log("accounts", f"{peer} could not finish delivered notice "
+                                f"{info_code:#04x} ({exc!r})")
         _trace("welcome sent", f"mode={mode}, {len(lines)} line(s)")
         # POL_LOGIN_TRACE=all turns this into the deliberate whole-login capture;
         # on the default (`fail`) it writes nothing and costs a dict lookup.
@@ -1260,7 +1300,8 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             resume_fp = hashlib.sha1(nick_enc).hexdigest()
             lobbysession._session_put(lobbysession._session_sid(), resume_fp=resume_fp,
                          nick=nick, srv=prefix[1:], key=sess_key,
-                         hop_port=port, channel_open=True)
+                         hop_port=port, channel_open=True,
+                         peer_ip=addr[0])
             channel_marked = True
         # PRESENCE. Only the welcome hop is a real session channel (redirect hops
         # close at once), so only it is a login worth announcing. Register this
@@ -1275,7 +1316,7 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             # _kill_duplicate_logins for why that is not as simple here.
             if os.environ.get("POL_AUTH_KILL_DUP", "0") == "1":
                 presence._kill_duplicate_logins(int(member["id"]), chat_sess, peer)
-            presence.PRESENCE.register(int(member["id"]), chat_sess)
+            authkick._register_account_channel(member["id"], chat_sess, session_token)
             # No name passed on purpose -- _broadcast_presence resolves the
             # HANDLE name. Passing `nick` here is what leaked URZ82TPPK.
             pushrecord._broadcast_presence(int(member["id"]), "online")
@@ -1285,10 +1326,14 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             friendroster._send_friend_roster(chat_sess, int(member["id"]))
         extra = authresume._auth_channel_loop(conn, peer, addr, chat_sess, nick,
                                    prefix, P, S, iv, keepalive, ping_every)
+        chat_sess.alive = False
         if extra:
             log("authserv", f"{peer} client replied {len(extra)}B total\n"
                             + hexdump(extra))
-        if keepalive and member is not None and chat_sess.killed_dup:
+        if keepalive and member is not None and chat_sess.admin_kicked:
+            # The kick request owns cleanup after it closes the socket.
+            pass
+        elif keepalive and member is not None and chat_sess.killed_dup:
             # REPLACED, NOT LOGGED OUT. A newer login of this member killed
             # this channel (POL_AUTH_KILL_DUP); the member is still online on
             # the new one, so no offline push and no session wipe.
@@ -1318,6 +1363,15 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
     except Exception as e:
         log("authserv", f"{peer} hop {port} error: {e}")
     finally:
+        if session_token is not None:
+            authkick._finish_pending_session(session_token, member, peer)
+        if info_claim is not None and acct_db is not None and member is not None:
+            try:
+                accounts.restore_login_information(
+                    acct_db, member["polid"], info_code, info_claim)
+            except Exception as exc:
+                log("accounts", f"{peer} could not requeue unsent notice "
+                                f"{info_code:#04x} ({exc!r})")
         # *** A LOGIN THAT HANGS PRODUCES NO OUTCOME, AND THAT WAS THE HOLE. ***
         # Every dump above fires at a RESULT -- welcome, reject, no-key. A login
         # that simply stops (the client gives up and the socket dies) reaches

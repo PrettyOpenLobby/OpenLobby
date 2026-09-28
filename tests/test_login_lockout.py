@@ -56,9 +56,11 @@ CA, CB = responders.REJECT_BAD_PASSWORD, responders.REJECT_LOCKED
 
 
 def login(digest, sig=PC, cred="tokenAAAAAA"):
-    conn, member, reject = responders.resolve_account(
+    conn, member, reject, token = responders.resolve_account(
         nick, "203.0.113.9", b"\0" * 8, cred=cred, client_sig=sig,
         digest=digest, salts=salts)
+    if token is not None:
+        responders._finish_pending_session(token, member)
     if conn is not None:
         conn.close()
     return reject

@@ -40,7 +40,7 @@
     .panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted);
       text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
     label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
-    input[type=text], textarea, select { background: var(--panel2); color: var(--text);
+    input[type=text], input[type=datetime-local], textarea, select { background: var(--panel2); color: var(--text);
       border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
       font: inherit; width: 100%; }
     textarea { font: 12.5px/1.5 'Consolas', monospace; resize: vertical; }
@@ -69,6 +69,15 @@
     .pill { font-size: 11px; padding: 2px 9px; border-radius: 20px; }
     .pill.open { background: rgba(87,211,140,.15); color: var(--good); }
     .pill.used { background: rgba(255,122,122,.15); color: var(--bad); }
+    .state-choices { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+    .state-choices button.selected { border-color: var(--accent); color: var(--accent); }
+    .state-choices button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--accent); }
+    .account-state { display: flex; align-items: center; gap: 7px; margin: 3px 0;
+      white-space: nowrap; }
+    .account-state .kind { color: var(--muted); min-width: 48px; font-size: 11px; }
+    .account-state .pill { max-width: 165px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; }
+    .account-state button.ghost { padding: 3px 7px; font-size: 11px; }
     .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel2);
       border: 1px solid var(--line); border-left: 3px solid var(--good);
       padding: 12px 16px; border-radius: 8px; opacity: 0; transform: translateY(8px);
@@ -784,7 +793,7 @@
           <button class="ghost sm" id="accCsv">Export CSV</button>
         </div>
         <div class="tablewrap"><table class="cards"><thead><tr><th>PlayOnline ID</th><th>Handle</th><th>Content</th>
-          <th>Playable</th><th>Clients</th><th>Created</th><th></th></tr></thead>
+          <th>Playable</th><th>Clients</th><th>Login status</th><th>Created</th><th></th></tr></thead>
           <tbody id="accountsBody"></tbody></table></div>
       </div>
       <div class="grid2" id="acctForms" data-owner>
@@ -1300,6 +1309,64 @@
       <div class="foot">
         <button class="ghost" id="delCancel">Cancel</button>
         <button class="danger solid" id="delGo" disabled>Delete account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Account-wide refusal, sent as ERROR before the login completes. -->
+  <div class="modal" id="stateModal">
+    <div class="card">
+      <h3>Login refusal for <code class="mono" id="statePolid"></code></h3>
+      <p>A nonzero code blocks the next login for every member under this PlayOnline ID.</p>
+      <label>Common refusals</label>
+      <div class="state-choices" id="stateChoices">
+        <button class="ghost" type="button" data-code="0">Allow login</button>
+        <button class="ghost" type="button" data-code="237">Suspend · 0xED</button>
+        <button class="ghost" type="button" data-code="231">Ban · 0xE7</button>
+      </div>
+      <label for="stateCode">Other refusal codes</label>
+      <select id="stateCode"></select>
+      <p class="hint" id="stateMeaning" style="margin-top:10px"></p>
+      <label for="stateDuration">Duration</label>
+      <select id="stateDuration">
+        <option value="none">Until cleared manually</option>
+        <option value="1h">1 hour</option>
+        <option value="1d">1 day</option>
+        <option value="7d">7 days</option>
+        <option value="30d">30 days</option>
+        <option value="custom">Choose expiration</option>
+      </select>
+      <div id="stateUntilWrap" style="display:none">
+        <label for="stateUntil">Expires at (your local time)</label>
+        <input type="datetime-local" id="stateUntil">
+      </div>
+      <p class="hint" id="stateDurationHint"></p>
+      <div class="foot">
+        <button class="ghost" id="stateCancel">Cancel</button>
+        <button class="act" id="stateGo">Save refusal</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Information code in the successful 300 token. This does not block login. -->
+  <div class="modal" id="infoModal">
+    <div class="card">
+      <h3>Login notice for <code class="mono" id="infoPolid"></code></h3>
+      <p>This code rides in the successful login token. It does not block login.</p>
+      <label for="infoCode">Client message</label>
+      <select id="infoCode"></select>
+      <p class="hint" id="infoMeaning" style="margin-top:10px"></p>
+      <div class="row">
+        <div><label for="infoRepeat">Delivery</label>
+          <select id="infoRepeat">
+            <option value="once">Once</option>
+            <option value="always">Every login</option>
+          </select></div>
+      </div>
+      <p class="hint">Once clears the client message to No Code after delivery.</p>
+      <div class="foot">
+        <button class="ghost" id="infoCancel">Cancel</button>
+        <button class="act" id="infoGo">Save notice</button>
       </div>
     </div>
   </div>

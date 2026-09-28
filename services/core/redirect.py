@@ -4,7 +4,7 @@ import socket
 import struct
 import time
 from srvcore import log
-from authtoken import _CONST_48, _CONST_END, _STAMPS, _STAMPS_LOCK, _stamps_refresh, session_token_key, token_encode
+from authtoken import _CONST_48, _CONST_END, client_ip_field, _STAMPS, _STAMPS_LOCK, _stamps_refresh, session_token_key, token_encode
 import sessioncrypt
 from .deps import accounts
 from . import lobbysession
@@ -159,7 +159,7 @@ def pol_error_token(node_ip, node_port):
     """
     raw = bytearray(25)
     raw[0:4] = b"\x00\x00\x00\x00"
-    raw[4:8] = _CONST_48
+    raw[4:8] = client_ip_field(0)       # a redirect is never an account notice
     raw[8:12] = socket.inet_aton(node_ip)
     raw[12:14] = struct.pack(">H", node_port)
     raw[22:25] = _CONST_END

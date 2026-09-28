@@ -323,6 +323,14 @@ SUITES = [
     ("friend_bitfield", [sys.executable, "test_friend_bitfield.py"], TESTS, {}),
     ("friend_request_heal", [sys.executable, "test_friend_request_heal.py"], TESTS, {}),
     ("profile_trailer", [sys.executable, "test_profile_trailer.py"], TESTS, {}),
+    # Per-account refusals and notices leave the PS2 layout choice and the
+    # old refusal for an inactive member as they were.
+    ("notice_keeps_layouts", [sys.executable, "test_notice_keeps_layouts.py"], TESTS, {}),
+    # The patch service with no archives, a partial one, and an empty re-login.
+    ("polserver2_startup", [sys.executable, "test_polserver2_startup.py"], TESTS, {}),
+    # Refusal codes, login notices, the admin panel's controls and Kick.
+    ("account_state", [sys.executable, "account_state_test.py"], TOOLS, {}),
+    ("kick_cleanup",  [sys.executable, "kick_cleanup_test.py"], TOOLS, {}),
     ("group_check",   [sys.executable, "group_check.py"],     TOOLS, {}),
     # The client's "N/M in chat" counter has two inputs served by two different
     # containers -- the 7:12 member total and the IRC roster -- so neither can
