@@ -335,6 +335,14 @@ got = E('<array name="$cat">"A" "B" "C" "D" "E"</array>'
 check("an array takes a numeric string as its index (story page title)",
       got[got.index("<text"):].split(">", 1)[1].split("<")[0], "E")
 
+# help/offline/login/in03.pml: a defined number compared with quoted digits.
+# Python refused int > str and the pos stayed raw (dotted outline in the preview).
+for pages, want in (("4", "445,355"), ("10", "460,355")):
+    got = E(f'<define name="$pgt" value="{pages}">'
+            '<sheet name="sh_wd" pos="445+15*($pgt>\'9\'),355"></sheet>')
+    check(f"a defined number compares with quoted digits ({pages} pages)",
+          got.split('pos="', 1)[1].split('"', 1)[0], want)
+
 print()
 print("pmleval_test: OK" if ok else "pmleval_test: FAILED")
 shutil.rmtree(WWW, ignore_errors=True)

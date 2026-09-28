@@ -2103,7 +2103,7 @@ async function loadRefs(path) {
     d.appendChild(l);
     const add = (from, to) => rows.slice(from, to).forEach((r) => {
       const a = document.createElement("a");
-      a.textContent = TITLES[r.path] || r.path.replace(/^_(lang|eras)\/[^/]+\//, "…/");
+      a.textContent = TITLES[r.path] || LABELS[r.path] || r.path.replace(/^_(lang|eras)\/[^/]+\//, "…/");
       a.title = r.path;
       a.onclick = () => openPmlFile(r.path, { push: true });
       d.appendChild(a);
@@ -2125,9 +2125,12 @@ async function loadRefs(path) {
 }
 
 // ---- the page browser ----
+// Grouped by folder unless a search is typed: 4,000-odd files read as one
+// list otherwise. Pinned and recent pages and SE's section top pages sit
+// above the folders.
 let ALLFILES = [];
 let PML_LIST_READY = Promise.resolve();
-let SHAPES = {}, PARTS = {}, TITLES = {};
+let SHAPES = {}, PARTS = {}, TITLES = {}, LABELS = {};
 const GAME_BY_SEG = {
   ff11: "FFXI", ffxi: "FFXI", tetra: "Tetra Master", fmo: "Front Mission Online",
   fe: "Fantasy Earth", fantasyearth: "Fantasy Earth", dc: "Dirge of Cerberus",
@@ -2136,18 +2139,32 @@ const GAME_BY_SEG = {
 };
 const LOCALE_RE = /^(en-US|en-GB|ja-JP|fr-FR|de-DE|ja|fr|de)$/i;
 const SHAPE_WORD = { page: "page", layout: "piece", content: "text", data: "data" };
+// SE names a section's first page index.pml or <xx>pm01.pml (tupm01, gdpm01).
+const SECTION_TOP_RE = /^(index|[a-z]{2,4}pm0*1)\.pml$/i;
+const MAIN_HOST = "wh000.pol.com";
 
 function classify(path) {
-  const segs = path.split("/");
-  let game = null, locale = null;
+  let segs = path.split("/");
+  let game = null, locale = null, variant = "";
   for (const s of segs) {
     const g = GAME_BY_SEG[s.toLowerCase()];
     if (g && !game) game = g;
     if (!locale && LOCALE_RE.test(s)) locale = s;
   }
-  const host = segs[0] === "_lang" || segs[0] === "_eras" ? segs[2] : segs[0];
-  return { path, host, game, locale, shape: SHAPES[path] || "", title: TITLES[path] || "",
-           name: segs[segs.length - 1] };
+  // _lang/<locale>/<host>/... and _eras/<era>/<host>/... are copies of a
+  // host path; they file under that path with the copy named on the row.
+  if (segs[0] === "_lang" || segs[0] === "_eras") {
+    variant = segs[0] === "_eras" ? segs[1] + " era" : segs[1];
+    segs = segs.slice(2);
+  }
+  const host = segs[0];
+  const name = segs[segs.length - 1];
+  const dirs = segs.slice(host === MAIN_HOST ? 1 : 0, -1);   // other hosts keep their name as the first folder
+  const shape = SHAPES[path] || "";
+  return { path, host, game, locale, shape, variant, dirs, name,
+           title: TITLES[path] || "", label: TITLES[path] || LABELS[path] || "",
+           top: shape === "page" && !!TITLES[path] && SECTION_TOP_RE.test(name)
+             && !path.startsWith("_eras/") };
 }
 
 function fillFacet(sel, values, label) {
@@ -2164,7 +2181,9 @@ async function loadPmlFileList() {
     SHAPES = j.shapes || {};
     PARTS = j.parts || {};
     TITLES = j.titles || {};
+    LABELS = j.labels || {};
     ALLFILES = j.files.map(classify);
+    FILE_BY_PATH = new Map(ALLFILES.map((f) => [f.path, f]));
     const hosts = new Map(), games = new Map(), locales = new Map();
     const bump = (m, k) => { if (k) m.set(k, (m.get(k) || 0) + 1); };
     ALLFILES.forEach((f) => { bump(hosts, f.host); bump(games, f.game); bump(locales, f.locale); });
@@ -2178,31 +2197,181 @@ async function loadPmlFileList() {
 const kindMatches = (kind, shape) => !kind || (kind === "draws" ? shape !== "data" : shape === kind);
 const visibleUnderFilter = (path) => kindMatches($("#fKind").value, SHAPES[path] || "");
 let FILE_ROWS = [];
+let FILE_BY_PATH = new Map();
+
+// Pinned and recently opened pages, per browser.
+const listPref = (k, d) => { try { const v = JSON.parse(store.get(k, JSON.stringify(d || []))); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
+let PV_PINS = listPref("pvPins");
+let PV_RECENT = listPref("pvRecent");
+function notePmlRecent(path) {
+  PV_RECENT = [path, ...PV_RECENT.filter((p) => p !== path)].slice(0, 10);
+  store.set("pvRecent", JSON.stringify(PV_RECENT));
+}
+function paintPinButton() {
+  const b = $("#pvPin");
+  const on = !!ACTIVE_FILE && PV_PINS.includes(ACTIVE_FILE);
+  b.disabled = !ACTIVE_FILE;
+  b.classList.toggle("on", on);
+  b.textContent = on ? "★ Pinned" : "☆ Pin";
+  b.title = on ? "Remove this page from Pinned" : "Keep this page at the top of the list";
+}
+$("#pvPin").onclick = () => {
+  if (!ACTIVE_FILE) return;
+  PV_PINS = PV_PINS.includes(ACTIVE_FILE) ? PV_PINS.filter((p) => p !== ACTIVE_FILE) : [...PV_PINS, ACTIVE_FILE];
+  store.set("pvPins", JSON.stringify(PV_PINS));
+  paintPinButton();
+  renderFileList();
+};
+
+// Open folders and sections. Folders start closed; sections start open except
+// the long list of section top pages, which would push the folders away.
+const PV_OPEN = new Set(listPref("pvOpen"));
+const PV_SHUT = new Set(listPref("pvShut", ["#tops"]));
+const isOpen = (key) => key.startsWith("#") ? !PV_SHUT.has(key) : PV_OPEN.has(key);
+function toggleOpen(key) {
+  const set = key.startsWith("#") ? PV_SHUT : PV_OPEN;
+  set.has(key) ? set.delete(key) : set.add(key);
+  store.set("pvOpen", JSON.stringify([...PV_OPEN].slice(-300)));
+  store.set("pvShut", JSON.stringify([...PV_SHUT]));
+  renderFileList();
+}
+
+const byLabel = (a, b) => (a.label || "~" + a.name).localeCompare(b.label || "~" + b.name) || a.path.localeCompare(b.path);
+
+function fileRow(f, depth, full) {
+  const kind = f.shape && f.shape !== "page" ? `<span class="k">${SHAPE_WORD[f.shape] || f.shape}</span>` : "";
+  const variant = f.variant ? `<span class="v">${esc(f.variant)}</span>` : "";
+  // In the tree the folder already says where it is; an unnamed file shows
+  // its filename once.
+  const sub = full ? f.path : f.label ? f.name : "";
+  return `<div class="pv-item${f.path === ACTIVE_FILE ? " active" : ""}" data-p="${esc(f.path)}"` +
+    (depth ? ` style="padding-left:${12 + depth * 14}px"` : "") + ">" +
+    `<div class="t${f.title ? "" : " fb"}"${f.title ? "" : ' title="No title in the file; this is its first line of text"'}>` +
+    `${esc(f.label || f.name)}${kind}${variant}</div>` +
+    (sub ? `<div class="p" title="${esc(f.path)}">${esc(sub)}</div>` : "") + "</div>";
+}
+
+function dirRow(key, name, label, count, depth, section) {
+  return `<div class="pv-dir${section ? " sec" : ""}" data-d="${esc(key)}" style="padding-left:${10 + depth * 14}px">` +
+    `<span class="tw">${isOpen(key) ? "▾" : "▸"}</span>` +
+    (label ? `<span class="fl">${esc(label)}</span>` : "") +
+    (name ? `<span class="nm" title="${esc(name)}">${esc(name)}</span>` : "") +
+    `<span class="n">${count.toLocaleString()}</span></div>`;
+}
+
+// Folders from the filtered rows. A folder that holds no files and one
+// subfolder merges into it, so pml/game/ff11 is one row, not three.
+function buildTree(rows) {
+  const mk = (name, key) => ({ name, key, kids: new Map(), files: [], count: 0 });
+  const root = mk("", "");
+  for (const f of rows) {
+    let n = root;
+    n.count++;
+    for (const s of f.dirs) {
+      if (!n.kids.has(s)) n.kids.set(s, mk(s, n.key + "/" + s));
+      n = n.kids.get(s);
+      n.count++;
+    }
+    n.files.push(f);
+  }
+  const squash = (n) => {
+    for (const [k, c] of n.kids) {
+      let m = c;
+      while (!m.files.length && m.kids.size === 1) {
+        const only = m.kids.values().next().value;
+        m = { ...only, name: m.name + "/" + only.name };
+      }
+      n.kids.set(k, m);
+      squash(m);
+    }
+  };
+  squash(root);
+  return root;
+}
+
+// A folder's name in words: its section top page's title, or the title
+// prefix most of its pages share ("FFXI: Tutorial" -> "FFXI").
+function folderLabel(n) {
+  const top = n.files.find((f) => f.top) || n.files.find((f) => f.title && SECTION_TOP_RE.test(f.name));
+  if (top) return top.title;
+  const pre = new Map();
+  n.files.forEach((f) => {
+    const m = f.title.match(/^(.{2,40}?)\s*[:：]/);
+    if (m) pre.set(m[1], (pre.get(m[1]) || 0) + 1);
+  });
+  const best = [...pre.entries()].sort((a, b) => b[1] - a[1])[0];
+  return best && best[1] >= 2 && best[1] * 2 >= n.files.length ? best[0] : "";
+}
+
+function renderTree(n, depth, out) {
+  const kids = [...n.kids.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // Sibling folders often share one section title (help/chat, help/mail ...
+  // are all "Quick Manuals Top"); a name that does not tell them apart is
+  // left off.
+  const labels = kids.map(folderLabel);
+  const seen = new Map();
+  labels.forEach((l) => l && seen.set(l, (seen.get(l) || 0) + 1));
+  for (const [i, k] of kids.entries()) {
+    const label = seen.get(labels[i]) > 1 ? "" : labels[i];
+    out.push(dirRow(k.key, k.name, label, k.count, depth));
+    if (isOpen(k.key)) renderTree(k, depth + 1, out);
+  }
+  n.files.slice().sort(byLabel).forEach((f) => out.push(fileRow(f, depth, false)));
+}
+
+function renderSection(key, label, rows, out) {
+  if (!rows.length) return;
+  out.push(dirRow(key, "", label, rows.length, 0, true));
+  if (isOpen(key)) rows.forEach((f) => out.push(fileRow(f, 1, true)));
+}
 
 function renderFileList() {
   const host = $("#fHost").value, game = $("#fGame").value, locale = $("#fLocale").value,
     q = $("#fSearch").value.toLowerCase().trim(), sort = $("#fSort").value, kind = $("#fKind").value;
   document.querySelectorAll("#fKindSeg button").forEach((b) => b.classList.toggle("on", b.dataset.f === kind));
-  FILE_ROWS = ALLFILES.filter((f) =>
-    (!host || f.host === host) && (!game || f.game === game) &&
-    (!locale || f.locale === locale) && kindMatches(kind, f.shape) &&
-    (!q || f.path.toLowerCase().includes(q) || f.title.toLowerCase().includes(q)));
-  FILE_ROWS.sort((a, b) => sort === "title"
-    ? (a.title || "~" + a.name).localeCompare(b.title || "~" + b.name) || a.path.localeCompare(b.path)
-    : a.path.localeCompare(b.path));
+  const passes = (f) => (!host || f.host === host) && (!game || f.game === game) &&
+    (!locale || f.locale === locale) && kindMatches(kind, f.shape);
+  FILE_ROWS = ALLFILES.filter((f) => passes(f) &&
+    (!q || f.path.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
   $("#pmlCount").textContent = `(${FILE_ROWS.length.toLocaleString()} of ${ALLFILES.length.toLocaleString()})`;
   const list = $("#fileList");
+  if (!FILE_ROWS.length) { list.innerHTML = `<div class="pv-more">No files match.</div>`; return; }
+
+  if (sort === "folders" && !q) {
+    const out = [];
+    const known = (paths) => paths.map((p) => FILE_BY_PATH.get(p)).filter(Boolean);
+    renderSection("#pinned", "Pinned", known(PV_PINS), out);
+    renderSection("#recent", "Recent", known(PV_RECENT).filter((f) => !PV_PINS.includes(f.path)).slice(0, 6), out);
+    renderSection("#tops", "Section top pages", FILE_ROWS.filter((f) => f.top).sort(byLabel), out);
+    out.push(`<div class="pv-dir sec plain">All files by folder<span class="n">${FILE_ROWS.length.toLocaleString()}</span></div>`);
+    renderTree(buildTree(FILE_ROWS), 0, out);
+    list.innerHTML = out.join("");
+    return;
+  }
+
+  FILE_ROWS.sort(sort === "path" ? (a, b) => a.path.localeCompare(b.path) : byLabel);
   const CAP = 400;
-  list.innerHTML = FILE_ROWS.slice(0, CAP).map((f, i) =>
-    `<div class="pv-item${f.path === ACTIVE_FILE ? " active" : ""}" data-i="${i}">` +
-    `<div class="t">${esc(f.title || f.name)}${f.shape && f.shape !== "page" ? `<span class="k">${SHAPE_WORD[f.shape] || f.shape}</span>` : ""}</div>` +
-    `<div class="p" title="${esc(f.path)}">${esc(f.path)}</div></div>`).join("")
-    + (FILE_ROWS.length > CAP ? `<div class="pv-more">${(FILE_ROWS.length - CAP).toLocaleString()} more. Search or filter to narrow.</div>` : "")
-    || `<div class="pv-more">No files match.</div>`;
+  list.innerHTML = FILE_ROWS.slice(0, CAP).map((f) => fileRow(f, 0, true)).join("")
+    + (FILE_ROWS.length > CAP ? `<div class="pv-more">${(FILE_ROWS.length - CAP).toLocaleString()} more. Search or filter to narrow.</div>` : "");
 }
+
+// Open every folder above a file, so opening it from a link or the history
+// shows it in place.
+function revealInTree(path) {
+  const f = FILE_BY_PATH.get(path);
+  if (!f) return;
+  let key = "";
+  for (const s of f.dirs) {
+    key += "/" + s;
+    PV_OPEN.add(key);
+  }
+}
+
 $("#fileList").onclick = (e) => {
+  const d = e.target.closest(".pv-dir[data-d]");
+  if (d) { toggleOpen(d.dataset.d); return; }
   const it = e.target.closest(".pv-item");
-  if (it) openPmlFile(FILE_ROWS[+it.dataset.i].path, { push: true });
+  if (it) openPmlFile(it.dataset.p, { push: true });
 };
 $("#fKindSeg").onclick = (e) => {
   const b = e.target.closest("button[data-f]");
@@ -2210,6 +2379,8 @@ $("#fKindSeg").onclick = (e) => {
   $("#fKind").value = b.dataset.f;
   renderFileList();
 };
+$("#fSort").value = store.get("pvSort", "folders");
+$("#fSort").addEventListener("change", () => store.set("pvSort", $("#fSort").value));
 ["fHost", "fGame", "fLocale", "fSort"].forEach((id) => $("#" + id).addEventListener("change", renderFileList));
 let searchTimer;
 $("#fSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderFileList, 120); });
@@ -2228,6 +2399,9 @@ async function openPmlFile(path, opts) {
     $("#pmlKind").textContent = kind.replace("plaintext/", "").replace("pmlus-cipher/", "encrypted, ");
     ACTIVE_FILE = path;
     REVEAL = null;
+    notePmlRecent(path);
+    revealInTree(path);
+    paintPinButton();
     $("#pvPath").textContent = path;
     writeHash("pml", path);
     if (Object.keys(SHAPES).length && !visibleUnderFilter(path)) $("#fKind").value = "";
@@ -2275,6 +2449,7 @@ $("#loadBtn").onclick = async () => {
     $("#pml").value = txt;
     updateGutter();
     ACTIVE_FILE = null;
+    paintPinButton();
     $("#pvPath").textContent = `registration wizard, step ${step}`;
     $("#stageRefs").innerHTML = "";
     renderFileList();
@@ -2285,6 +2460,7 @@ $("#loadBtn").onclick = async () => {
 
 if (store.get("pvSource", "0") === "1") showSource(true);
 updateNavButtons();
+paintPinButton();
 
 // ---- news ----
 // The announcements store, edited here, published as every file the Viewer

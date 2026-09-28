@@ -304,6 +304,50 @@ def _pml_title(text):
     return t[:90] if t and "$" not in t else None
 
 
+_LABEL_BLOCK_RE = re.compile(r"<(array|define|style|script|data|if|for)\b[^>]*>.*?</\1\s*>",
+                             re.S | re.I)
+_LABEL_TAG_RE = re.compile(r"<(?:\"[^\"]*\"|'[^']*'|[^'\">])*>")
+_LABEL_MARK_RE = re.compile(r"&[a-z]+=[^;]*;|&[a-z]+;|&#x?[0-9a-f]+;", re.I)
+_LABEL_QUOTED_RE = re.compile(r"\"([^\"\n]{4,300})\"")
+#: Commands and leftovers of markup; control characters mean a binary .pcb.
+_LABEL_CMD_RE = re.compile(r"\b(?:sd|null|eval|file|https?):|[<>=\x00-\x08\x0e-\x1f\x7f-\x9f]",
+                           re.I)
+
+
+def _label_prose(s, weight):
+    """`s` tidied if it reads like a line of text, else None. `weight` is the
+    shortest it may be, a non-ASCII character counting as two."""
+    s = re.sub(r"\^\d\d", "", _LABEL_MARK_RE.sub(" ", s))     # ^03 is a colour code
+    s = " ".join(s.split()).strip(" -=*・:：,")
+    letters = len(re.findall(r"[^\W\d_]", s))
+    if (letters < 3 or letters < len(re.findall(r"\d", s)) or "$" in s or "{" in s
+            or "�" in s or "/" in s.split(" ")[0][1:] or _LABEL_CMD_RE.search(s)
+            or len(s) + sum(ord(c) > 127 for c in s) < weight):
+        return None
+    return s[:70]
+
+
+def _pml_label(text, shape=None):
+    """A stand-in name for a file with no <title>, for the file browser: the
+    first line of text a reader would see, or else the first quoted string
+    that reads like prose. Topic headlines, FAQ questions and announcement
+    bodies live in <array> and <record> strings."""
+    if not text:
+        return None
+    text = pmleval._strip_comments(text)
+    if shape != "data":
+        body = _LABEL_TAG_RE.sub("\n", _LABEL_BLOCK_RE.sub(" ", text))
+        for line in body.splitlines():
+            if (got := _label_prose(line, 5)):
+                return got
+    # Tags out first: attribute values ("Cache-Control", a font name) are
+    # quoted too.
+    for m in _LABEL_QUOTED_RE.finditer(_LABEL_TAG_RE.sub(" ", text)):
+        if (got := _label_prose(m.group(1), 12)):
+            return got
+    return None
+
+
 def _pml_scan(root):
     files, shapes, texts = [], {}, {}
     for dirpath, _dirs, names in os.walk(root):
@@ -324,7 +368,10 @@ def _pml_scan(root):
     # build it separately would double the only expensive part of the scan.
     graph = pmlrefs.build(_Site(root, texts), files)
     titles = {rel: t for rel in files if (t := _pml_title(texts.get(rel)))}
+    labels = {rel: t for rel in files
+              if rel not in titles and (t := _pml_label(texts.get(rel), shapes[rel]))}
     _PML_CACHE["titles"] = titles
+    _PML_CACHE["labels"] = labels
     return files, shapes, graph
 
 
@@ -3204,9 +3251,10 @@ class Handler(BaseHTTPRequestHandler):
         parts = {k: v for k, v in (graph.parts if graph else {}).items() if v}
         with _PML_LOCK:
             titles = dict(_PML_CACHE.get("titles") or {})
+            labels = dict(_PML_CACHE.get("labels") or {})
         self._send(200, {"root": "www", "count": len(files), "files": files,
                          "shapes": shapes, "shape_help": PML_SHAPES,
-                         "parts": parts, "titles": titles})
+                         "parts": parts, "titles": titles, "labels": labels})
 
     def _pml_resolve_href(self):
         """Where a link on a previewed page goes: /api/pml-resolve?from=&href=
