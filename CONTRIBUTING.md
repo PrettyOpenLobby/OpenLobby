@@ -86,12 +86,12 @@ repository has its own range:
 
 ```
 OpenLobby       0001-0999
-CrystalRing     1001-1999   fe_* tables
-CrystalFront    2001-2999   fmo_*
-CrystalMaster   3001-3999   tm_*
-CrystalHoLo     4001-4999   jan_*
-CrystalDirge    5001-5999   doc_*
-CrystalBridge   6001-6999   ffxi_*
+HippaulRing     1001-1999   fe_* tables
+HippaulFront    2001-2999   fmo_*
+HippaulMaster   3001-3999   tm_*
+HippaulHoLo     4001-4999   jan_*
+HippaulDirge    5001-5999   doc_*
+HippaulBridge   6001-6999   ffxi_*
 ```
 
 A title that moves one of its files into PostgreSQL ships an importer for
