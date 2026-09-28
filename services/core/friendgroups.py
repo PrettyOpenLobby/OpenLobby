@@ -4,7 +4,7 @@ import re
 import struct
 from srvcore import log
 from .deps import accounts
-from . import friendlist, friendput, handlelists, lobbymail, lobbyrefuse, lobbysession, pushchannel, pushspool, resourcestore
+from . import fetchpath, friendlist, friendput, handlelists, lobbymail, lobbyrefuse, lobbysession, pushchannel, pushspool, resourcestore
 
 
 
@@ -1371,6 +1371,80 @@ def _group_invite_refusal(path, data, req_pt):
             db.close()
     except Exception as exc:
         log("lobby", f"  group invite check skipped ({exc!r}); filed as before")
+        return False
+
+
+#: The message TYPE of a message sent TO a group (record +0x3E bits 7..11).
+_GROUP_MSG_TYPE_TO_GROUP = 0x11
+
+
+def _group_message_fanout(path, data, req_pt):
+    """Deliver a message sent TO A GROUP to each of its members. True = handled
+    (the caller must not also store it under the original path).
+
+    Project Crystal Server reads a type-0x11 message's write request as naming
+    the GROUP in the target field (payload +0x08, which we call the fetch
+    subject) and writes one copy into each member's mailbox. Ours stored it once
+    under a header addressed to nobody, so no member ever received it.
+
+    The target is client-asserted, so the sender must be an accepted member (or
+    the owner) of that group; otherwise, or when the group has nobody else in
+    it, the write is refused with 0xFF, which is what Project Crystal Server
+    answers for a group with no members. POL_GROUP_MESSAGES=0 stores it the old
+    way.
+    """
+    if os.environ.get("POL_GROUP_MESSAGES", "1") != "1" or accounts is None:
+        return False
+    meta = lobbymail._mail_meta(path)
+    if not meta or lobbymail._mail_kind_type(meta.get("kind")) != \
+            _GROUP_MSG_TYPE_TO_GROUP:
+        return False
+    gid = fetchpath._fetch_subject(req_pt)
+    try:
+        db = accounts.connect()
+        try:
+            grp = db.execute("SELECT handle_id, peer_name FROM friend "
+                             "WHERE id = %s AND kind = %s",
+                             (int(gid), accounts.KIND_GROUP)).fetchone()
+            me_mid = lobbysession._session_member_id()
+            mine = {int(r["id"]) for r in db.execute(
+                "SELECT id FROM handle WHERE member_id = %s", (int(me_mid or 0),))}
+            if grp is None or not me_mid or accounts.group_class_of(
+                    db, int(gid), member_id=me_mid) is None:
+                lobbyrefuse._lobby_refuse(
+                    lobbyrefuse.LOBBY_ERR_GENERIC,
+                    f"group message to group {gid}: no such group, or member "
+                    f"{me_mid} is not in it; not delivered", req_pt)
+                return True
+            handles = {int(grp["handle_id"])}
+            for r in db.execute("SELECT member_handle FROM group_member WHERE "
+                                "group_id = %s AND pending = 0", (int(gid),)):
+                if r["member_handle"]:
+                    handles.add(int(r["member_handle"]))
+            handles -= mine
+            if not handles:
+                lobbyrefuse._lobby_refuse(
+                    lobbyrefuse.LOBBY_ERR_GENERIC,
+                    f"group message to {grp['peer_name']!r} (id {gid}): nobody "
+                    f"else is in the group", req_pt)
+                return True
+            delivered = []
+            for hid in sorted(handles):
+                row = db.execute("SELECT * FROM handle WHERE id = %s",
+                                 (hid,)).fetchone()
+                copy = lobbymail._mail_readdress(db, path, row)
+                if copy is None:
+                    continue
+                resourcestore._resource_store(copy, data)
+                lobbymail._mail_announce(copy)
+                delivered.append(row["handle_name"])
+            log("lobby", f"  group message to {grp['peer_name']!r} (id {gid}): "
+                         f"delivered to {delivered}")
+            return True
+        finally:
+            db.close()
+    except Exception as exc:
+        log("lobby", f"  group message fan-out failed ({exc!r}); stored as sent")
         return False
 
 

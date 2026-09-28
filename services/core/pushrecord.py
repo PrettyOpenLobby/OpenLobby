@@ -514,8 +514,14 @@ def _push_identity_guid(db, subject_handle):
     return guid
 
 
-def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None):
+def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None,
+                        only_handle=None):
     """Push `subject`'s presence change to every online friend that watches them.
+
+    `only_handle` limits it to the watchers of ONE of the subject's handles:
+    a handle switch is a logout on the old handle and a login on the new one
+    as far as their friends and groups are concerned, since both lists are
+    keyed by handle (see `pushspool._push_deliver_handleswitch`).
 
     Three modes via `POL_PRESENCE_PUSH`:
       unset/"0"  fully off -- no DB work, no log, nothing. The default.
@@ -548,6 +554,16 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None):
         except Exception as exc:
             log("authserv", f"presence: watcher lookup failed ({exc!r})")
             return 0
+        if only_handle is not None:
+            watchers = [w for w in watchers if int(w[2]) == int(only_handle)]
+            if not subject_name:
+                try:
+                    row = db.execute("SELECT handle_name FROM handle WHERE id = %s",
+                                     (int(only_handle),)).fetchone()
+                    if row:
+                        subject_name = row["handle_name"]
+                except Exception:
+                    pass
         # THE NAME A WATCHER SEES IS THE HANDLE NAME, and nothing else. The two
         # call sites used to supply whatever they had in scope -- the login hop
         # passed the IRC NICK and the logout path passed `login_name` -- so a
@@ -641,6 +657,50 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None):
                                     + "; ".join(repr(l) for l in lines))
                 elif ts.send(lines):
                     sent += 1
+        # GROUP MEMBERS WHO ARE NOT FRIENDS. The loop above reaches only friend
+        # watchers (with a group record for each group they share), so a group
+        # member without a friend row never saw the subject come or go. They get
+        # the group-scoped record alone -- the first of SE's pair, the one that
+        # names the group. Its +0x1C is the WATCHER's handle slot, as Project
+        # Crystal Server fills it for a group status notice; every account here
+        # has its handle at slot 0. POL_PRESENCE_GROUPS=0 turns this off.
+        g_state = _presence_field_state(state)
+        if g_state is not None and \
+                os.environ.get("POL_PRESENCE_GROUPS", "1") == "1":
+            g_zone = _presence_zone(subject_member_id, g_state)
+            g_sent = []
+            for gid, subject_handle, watcher_member, _watcher_handle in \
+                    pushspool._group_only_watchers(
+                        db, subject_member_id,
+                        exclude_members={w for w, _h, _s in watchers}):
+                if only_handle is not None and \
+                        int(subject_handle) != int(only_handle):
+                    continue
+                targets = presence.PRESENCE.sessions_for(watcher_member)
+                if not targets:
+                    continue
+                guid = _push_identity_guid(db, subject_handle)
+                for ts in targets:
+                    try:
+                        lines = field_push_lines(
+                            ts.nick, guid, 0, state=g_state, zone=g_zone,
+                            group=gid, seq=next(pushspool._ROW_PUSH_SEQ))
+                    except Exception as exc:
+                        log("authserv", f"presence: group record failed "
+                                        f"(group {gid}, state {state}): {exc!r}")
+                        continue
+                    if dry:
+                        log("authserv", f"presence[dry]: would tell group member "
+                                        f"{ts.nick!r} that "
+                                        f"{subject_name or subject_member_id} is "
+                                        f"{state} (group {gid})")
+                    elif ts.send(lines):
+                        sent += 1
+                        g_sent.append(gid)
+            if g_sent:
+                log("authserv", f"presence: {subject_name or subject_member_id} -> "
+                                f"{state}, told {len(g_sent)} group-only member "
+                                f"session(s) [groups {sorted(set(g_sent))}]")
         if dry and online_watchers:
             log("authserv", f"presence[dry]: {subject_name or subject_member_id} -> "
                             f"{state}, {online_watchers} online watcher(s) (nothing sent)")

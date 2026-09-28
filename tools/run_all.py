@@ -298,6 +298,9 @@ SUITES = [
     # What the lobby refuses (7:1, 7:2, 7:3, invites) and who hears about
     # a disband, a removal or a decline.
     ("group_refusal", [sys.executable, "group_refusal_test.py"], TOOLS, {}),
+    # Who receives a group message, a 3:4 multi-target send and a group
+    # member's presence, and what a handle switch tells them.
+    ("social_delivery", [sys.executable, "social_delivery_test.py"], TOOLS, {}),
     # The 2:3 list serves every friend up to 0x40 rows (12 was a read chunk).
     ("friends_mobile", [sys.executable, "friends_mobile_cap_test.py"], TOOLS, {}),
     ("contentauth",   [sys.executable, "contentauth.py"], SERVICES, {}),

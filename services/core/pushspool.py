@@ -207,6 +207,8 @@ def _push_deliver(rec, db=None):
         return _push_deliver_gmode(rec)         # channel MODE, no DB
     if rec.get("kind") == "mail":
         return _push_deliver_mail(rec, db)      # carries its own record
+    if rec.get("kind") == "handleswitch":
+        return _push_deliver_handleswitch(rec)  # two presence broadcasts
     missing = [k for k in ("kind", "handle", "event") if k not in rec]
     if missing:
         log("authserv", f"push: ignoring malformed record, no {'/'.join(missing)}"
@@ -229,6 +231,29 @@ def _push_deliver(rec, db=None):
                 db.close()
             except Exception:
                 pass
+
+
+def _push_deliver_handleswitch(rec):
+    """A member switched handles mid-session. Runs in authserv.
+
+    Friends and group members follow a HANDLE, not the account, so to them a
+    switch is the old handle logging out and the new one logging in. Project
+    Crystal Server sends exactly that pair; before 2026-09-28 the old handle's
+    watchers kept seeing it online and the new handle's never saw it arrive.
+    """
+    try:
+        member = int(rec.get("member", 0))
+        old, new = int(rec.get("old", 0)), int(rec.get("new", 0))
+    except (TypeError, ValueError):
+        log("authserv", f"push[handleswitch]: malformed record {rec!r}")
+        return 0
+    if not member or not old or not new or old == new:
+        return 0
+    n = pushrecord._broadcast_presence(member, "offline", only_handle=old)
+    n += pushrecord._broadcast_presence(member, "online", only_handle=new)
+    log("authserv", f"push[handleswitch]: member {member} handle {old} -> {new}, "
+                    f"{n} watcher session(s) told")
+    return n
 
 
 def _push_deliver_gmode(rec):
@@ -415,6 +440,55 @@ def _shared_groups(db, watcher_handle, subject_handle):
     except Exception as exc:
         log("authserv", f"presence: shared-group lookup failed ({exc!r})")
         return []
+
+
+def _group_only_watchers(db, subject_member_id, exclude_members=()):
+    """`[(group_id, subject_handle, watcher_member, watcher_handle)]` for every
+    accepted member of every group the subject is in, other than the subject
+    and anyone in `exclude_members` (the friend watchers, who already get the
+    group record alongside their friend-list one).
+
+    A group member who is not also a friend used to hear nothing about the
+    subject logging in, going away or logging out. Project Crystal Server tells
+    every online member of each of the subject's groups. Pending invitees are
+    not members yet and are left out. Returns [] on any failure.
+    """
+    out = []
+    try:
+        mine = [int(r["id"]) for r in db.execute(
+            "SELECT id FROM handle WHERE member_id = %s", (int(subject_member_id),))]
+        if not mine:
+            return []
+        marks = ",".join(["%s"] * len(mine))
+        groups = {}                     # gid -> the subject's handle in it
+        for r in db.execute(
+                f"SELECT id, handle_id FROM friend WHERE kind = %s"
+                f" AND handle_id IN ({marks})", (accounts.KIND_GROUP, *mine)):
+            groups.setdefault(int(r["id"]), int(r["handle_id"]))
+        for r in db.execute(
+                f"SELECT group_id, member_handle FROM group_member WHERE pending = 0"
+                f" AND member_handle IN ({marks})", tuple(mine)):
+            groups.setdefault(int(r["group_id"]), int(r["member_handle"]))
+        skip = {int(subject_member_id)} | {int(m) for m in exclude_members}
+        for gid, subject_handle in sorted(groups.items()):
+            seen = set()
+            rows = list(db.execute(
+                "SELECT m.member_handle AS hid, h.member_id AS mid FROM group_member m"
+                " JOIN handle h ON h.id = m.member_handle"
+                " WHERE m.group_id = %s AND m.pending = 0", (gid,)))
+            rows += list(db.execute(
+                "SELECT f.handle_id AS hid, h.member_id AS mid FROM friend f"
+                " JOIN handle h ON h.id = f.handle_id WHERE f.id = %s", (gid,)))
+            for r in rows:
+                mid = int(r["mid"])
+                if mid in skip or mid in seen:
+                    continue
+                seen.add(mid)
+                out.append((gid, subject_handle, mid, int(r["hid"])))
+    except Exception as exc:
+        log("authserv", f"presence: group-member lookup failed ({exc!r})")
+        return []
+    return out
 
 
 def _watcher_row_slot(db, watcher_member, subject_guid):

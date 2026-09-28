@@ -435,6 +435,27 @@ def _mail_address_as(db, handle_row):
         accounts.handle_guid(int(handle_row["id"]))
 
 
+def _mail_readdress(db, path, handle_row):
+    """The same `O/m/` message, addressed to `handle_row`. None if the path is
+    not a message record.
+
+    One message can have many readers -- a group message, a multi-target send
+    (3:4) -- but a stored message has exactly one: its path IS its header, and
+    +0x08 names the reader. So each reader gets its own copy with only that
+    field changed, addressed by the id they know themselves by
+    (`_mail_address_as`), the same choice `_mail_normalise` makes.
+    """
+    prefix = lobbysearch._MAIL_PATH_PREFIX
+    if not path or not path.startswith(prefix) or handle_row is None:
+        return None
+    rec = bytearray(_b64decode(path[len(prefix):]))
+    if len(rec) < 0x48:
+        return None
+    to = _mail_address_as(db, handle_row)
+    struct.pack_into("<Q", rec, 0x08, int(to) ^ pushchannel._PUSH_GUID_MASK)
+    return prefix + logingate._b64encode(bytes(rec))
+
+
 def _mail_stale_acceptance(db, member, meta):
     """True when a `Friend registration accepted` can only misfire if served.
 
