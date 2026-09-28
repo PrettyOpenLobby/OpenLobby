@@ -1119,13 +1119,12 @@ function triPaint(pfx, kind, r, after) {
 // right with the chat under it. What is and is not proven, so nothing here
 // over-claims:
 //
-//   * the DUTY switch is fully measured -- Join is flag 0x40, Start is 0x20,
-//     the queue is 0x801 body +0x02, all confirmed against a live client -- so
-//     what it sets is what a caller's GM Call screen shows on its next poll;
-//   * a reply RENDERS only when it goes out under the player's OWN nick
-//     ("self"): the client draws a T line only for a speaker in its member
-//     table, and no inbound record can add the GM to it. So replies default to self + a "GM: " prefix, and
-//     the old nick/raw probes live under Diagnostics;
+//   * Start (flag 0x20) is PER CALLER: gmd offers it only to a caller whose
+//     ticket was KNOCKED here (gmd.KNOCK_ONLY). The duty switch is presence
+//     for the team; it no longer decides what callers see;
+//   * replies go out under the GM's own nick; authserv answers the client's
+//     roster request with the GM's `HA...:G` record so it is drawn as the GM.
+//     The nick/raw probes live under Diagnostics;
 //   * each request has its OWN room (gmd names it #gmcallNNN from the request
 //     number and records it in the ticket), so selecting a request switches the
 //     chat to that room. Requests filed before that change were all put in the
@@ -1200,7 +1199,7 @@ function gmRenderDuty(d) {
   const sv = d.serving || {};
   const polled = sv.at ? ` · a caller last checked in ${gmAgo(sv.at)}` : "";
   $("#gmStateSub").textContent =
-    `Callers see ${gmFlagsSay(d.flags)} · ${d.waiting} on a GM Call now${polled}`;
+    `Players get Start when you knock their request · ${d.waiting} on a GM Call now${polled}`;
   const btn = $("#gmDutyBtn");
   btn.textContent = on ? "Go off duty" : "Go on duty";
   btn.className = on ? "ghost" : "act";
@@ -1329,17 +1328,15 @@ function gmRenderChatState(d) {
     text = "Waiting for the player to join"; cls = "warn";
   } else if (lastIn && Date.now() / 1000 - lastIn < 600) {
     text = `Player active, last heard ${gmAgo(lastIn)}`; cls = "good";
-  } else if (!(d.flags & 0x40)) {
-    text = "Go on duty to let callers join"; cls = "warn";
   } else {
     text = "Nobody in the room right now";
   }
   el.textContent = text;
   el.className = "gm-chat-state " + cls;
-  $("#gmComposeHint").textContent = !(d.flags & 0x40)
-    ? "Go on duty to let callers join the chat."
-    : `Sent to ${GM_ROOM || "the room"}. Shown to the player as ` +
-      `"<name> > ${$("#gmPrefix").value}your text".`;
+  const as = $("#gmNick").value.trim() || "GM";
+  $("#gmComposeHint").textContent =
+    `Sent to ${GM_ROOM || "the room"} as ${as}. Knock the request first so ` +
+    `the player can start the chat.`;
 }
 
 const gmPost = (body) => ({
@@ -1385,7 +1382,7 @@ async function gmSay(body) {
   if (!GM_ROOM) { toast("No chat room is available. Check that the GM service is running.", true); return false; }
   try {
     await api("/api/gm-say", gmPost({ ...body, room: GM_ROOM,
-      nick: $("#gmNick").value.trim() || "self" }));
+      nick: $("#gmNick").value.trim() }));
     GM_LOG_SIG = "";
     loadGmDesk();
     return true;
@@ -1408,6 +1405,7 @@ $("#gmSay").onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#gmSend").click(); }
 };
 $("#gmPrefix").oninput = () => { if (GM_DESK) gmRenderChatState(GM_DESK); };
+$("#gmNick").oninput = () => { if (GM_DESK) gmRenderChatState(GM_DESK); };
 $("#gmSendEvent").onclick = () => {
   const ev = $("#gmEvent").value;
   if (!ev) return toast("Pick an event", true);
@@ -1500,7 +1498,8 @@ document.querySelectorAll(".gm-filter button").forEach((b) => {
 
 function gmRenderTicket() {
   const r = GM_CALLS.find((x) => x.id === GM_SEL);
-  const sig = r ? [r.id, r.status, r.connected, gmAgo(gmIso(r.received_at))].join(",") : "";
+  const sig = r ? [r.id, r.status, r.connected, gmAgo(gmIso(r.received_at)),
+                   r.knocked_at ? gmAgo(r.knocked_at) : ""].join(",") : "";
   if (sig === GM_TICKET_SIG) return;
   GM_TICKET_SIG = sig;
   $("#gmEmpty").hidden = !!r;
@@ -1510,7 +1509,8 @@ function gmRenderTicket() {
   $("#gmTSubj").textContent = gmClean(r.subject) || "(no subject)";
   $("#gmTChips").innerHTML =
     (r.connected ? `<span class="gm-st live">On a GM Call now</span>` : "") +
-    `<span class="gm-st ${esc(r.status)}">${esc(r.status)}</span>`;
+    `<span class="gm-st ${esc(r.status)}">${esc(r.status)}</span>` +
+    (r.knocked_at ? `<span class="gm-st live">Knocked ${esc(gmAgo(r.knocked_at))}</span>` : "");
   const t = gmIso(r.received_at);
   const meta = [
     r.content_label || (r.content_id != null ? `content ${r.content_id}` : ""),
@@ -1528,16 +1528,35 @@ function gmRenderTicket() {
   $("#gmTBody").textContent = gmClean(r.body).trim() || "(no message text)";
   const btn = (st, label, cls) =>
     `<button class="${cls}" data-st="${st}">${label}</button>`;
-  $("#gmTActions").innerHTML =
-    r.status === "open" ? btn("answered", "Mark answered", "ghost") + btn("closed", "Close", "ghost")
+  // The knock is how the player learns GM chat is ready: their GM Call screen
+  // says so and offers Start on their next check-in.
+  const knock = r.status === "closed" ? ""
+    : r.knocked_at ? `<button class="ghost" data-knock="0">Withdraw knock</button>`
+    : `<button class="act" data-knock="1" title="Tell the player GM chat is ready">Knock</button>`;
+  $("#gmTActions").innerHTML = knock +
+    (r.status === "open" ? btn("answered", "Mark answered", "ghost") + btn("closed", "Close", "ghost")
     : r.status === "answered" ? btn("closed", "Close", "ghost") + btn("open", "Reopen", "ghost")
-    : btn("open", "Reopen", "ghost");
+    : btn("open", "Reopen", "ghost"));
 }
 
 $("#gmTActions").onclick = (e) => {
+  const k = e.target.closest("button[data-knock]");
+  if (k && GM_SEL) return gmKnock(GM_SEL, k.dataset.knock === "1");
   const b = e.target.closest("button[data-st]");
   if (b && GM_SEL) gmSetStatus(GM_SEL, b.dataset.st);
 };
+
+async function gmKnock(id, on) {
+  try {
+    const out = await api("/api/gm-ticket", gmPost({ id, knock: on }));
+    const r = GM_CALLS.find((x) => x.id === id);
+    if (r) r.knocked_at = out.knocked_at || null;
+    GM_TICKET_SIG = "";
+    gmRenderTicket();
+    toast(on ? "Knocked: the player's GM Call screen will say GM chat is ready"
+             : "Knock withdrawn");
+  } catch (e) { toast(e.message, true); }
+}
 
 async function gmSetStatus(id, status, quiet) {
   try {
