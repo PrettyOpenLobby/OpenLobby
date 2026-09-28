@@ -32,9 +32,10 @@ SCOPE. Only the zones in POL_CONTENT_AUTH_ZONES (default "4" = FMO) get a
 random value. Any other title keeps the exact bytes it has always had, because
 it is not known whether the other titles derive a key from these 16 bytes.
 
-The file crosses containers (the lobby writes, the title's container reads the
-shared /data), so it is one writer, an atomic replace, and an mtime-cached
-read.
+The values cross containers (the lobby writes, the title's container reads),
+through the live-state store (polcore.kv): one JSON list under
+`contentauth:rows`, newest first, expiring TTL after the last value minted.
+One writer, the lobby.
 """
 
 import json
@@ -42,9 +43,10 @@ import os
 import threading
 import time
 
-FILE = os.environ.get(
-    "POL_CONTENT_AUTH_FILE",
-    os.path.join(os.environ.get("POL_DATA_DIR", "/data"), "content-auth.json"))
+from polcore import kv
+
+#: The live-state key the minted values are kept under.
+KEY = "contentauth:rows"
 
 #: Content ids (the 4:5 zone) that receive a minted value. Empty = feature off.
 ZONES = frozenset(int(z) for z in
@@ -55,7 +57,7 @@ ZONES = frozenset(int(z) for z in
 #: polcore reuses the value on every relaunch inside it.
 TTL = int(os.environ.get("POL_CONTENT_AUTH_TTL", str(24 * 3600)))
 
-#: Hard cap on rows kept, newest first, so a busy night cannot grow the file
+#: Hard cap on rows kept, newest first, so a busy night cannot grow the list
 #: (and the trial list) without bound.
 MAX_ROWS = int(os.environ.get("POL_CONTENT_AUTH_MAX", "256"))
 
@@ -70,10 +72,10 @@ LEN = 16
 #: POL_CONTENT_AUTH_MEMBERS, when set, overrides the file.
 ENABLE_FILE = os.environ.get(
     "POL_CONTENT_AUTH_ENABLE_FILE",
-    os.path.join(os.path.dirname(FILE) or ".", "content-auth-members.txt"))
+    os.path.join(os.environ.get("POL_DATA_DIR", "/data"),
+                 "content-auth-members.txt"))
 
 _LOCK = threading.Lock()
-_CACHE = {"mtime": -1.0, "rows": []}
 _ENABLE_CACHE = {"mtime": None, "spec": ""}
 
 
@@ -109,18 +111,10 @@ def enabled_for(member_id):
 
 def _load():
     try:
-        mtime = os.stat(FILE).st_mtime
-    except OSError:
+        rows = json.loads(kv.get(KEY) or "[]")
+    except (ValueError, TypeError):
         return []
-    if mtime != _CACHE["mtime"]:
-        try:
-            with open(FILE, "r", encoding="utf-8") as f:
-                rows = json.load(f) or []
-            _CACHE["rows"] = rows if isinstance(rows, list) else []
-            _CACHE["mtime"] = mtime
-        except (OSError, ValueError):
-            return _CACHE["rows"]              # torn write: last good view stands
-    return _CACHE["rows"]
+    return rows if isinstance(rows, list) else []
 
 
 def mint():
@@ -145,12 +139,7 @@ def publish(member_id, peer_ip, zone, value, now=None):
                 if now - float(r.get("at") or 0) < TTL and r.get("v") != row["v"]]
         rows.insert(0, row)
         del rows[MAX_ROWS:]
-        os.makedirs(os.path.dirname(FILE) or ".", exist_ok=True)
-        tmp = FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rows, f)
-        os.replace(tmp, FILE)                  # atomic
-        _CACHE["mtime"] = -1.0                 # our own next read re-stats
+        kv.set(KEY, json.dumps(rows), ttl=TTL)
     return True
 
 
@@ -177,14 +166,11 @@ def candidates(peer_ip=None, zone=None, now=None):
 
 
 def selftest():
-    """Round-trip through a temp file, with twins that must FAIL."""
+    """Round-trip through an in-memory store, with twins that must FAIL."""
     import tempfile
-    global FILE
     ok = True
-    saved = FILE
+    kv.reset(kv.MemoryKV(prefix="selftest:"))
     with tempfile.TemporaryDirectory() as d:
-        FILE = os.path.join(d, "ca.json")
-        _CACHE.update(mtime=-1.0, rows=[])
         t0 = 1_000_000.0
         a, b, old = mint(), mint(), mint()
         publish(3, "1.2.3.4", 4, a, now=t0)
@@ -233,8 +219,7 @@ def selftest():
         if saved_env is not None:
             os.environ["POL_CONTENT_AUTH_MEMBERS"] = saved_env
         _ENABLE_CACHE.update(mtime=None, spec="")
-    FILE = saved
-    _CACHE.update(mtime=-1.0, rows=[])
+    kv.reset()
     return ok
 
 

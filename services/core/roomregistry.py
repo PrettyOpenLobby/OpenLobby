@@ -332,7 +332,7 @@ class RoomRegistry:
             # WARNING: A RECONNECT IS THE SAME PERSON, NOT A SECOND ONE. The test
             # below is object identity, so a client that drops and rejoins under
             # the SAME NICK used to be appended beside its own stale session.
-            # Measured 2026-08-20 after a restart cycle: `rooms-live.json` held
+            # Measured 2026-08-20 after a restart cycle: the published rooms held
             # `UA4XX8PKP` twice, `members: 3` for two people, and Tetra Master's
             # member pane drew "LaptopTest2" twice. The ghost path already gets
             # this right (`g.pop(sess.nick)` above) -- it only covers sessions
