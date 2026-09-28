@@ -20,6 +20,44 @@ def _mail_paylen(count):
     return lobbyreply.MAIL_COUNT_BLOCK + count * lobbyreply.MAIL_RECORD + 4
 
 
+def _mailbox_matcher(db, member):
+    """A function `recipient_guid -> True / False / None` answering "is this
+    message addressed to `member`?" without a query per message.
+
+    It reproduces `_mail_recipient_row` exactly: a guid in OUR shape names the
+    handle with that id if it exists (whoever owns it), and only a guid that
+    names no existing handle falls through to the client-guid lookup. One read
+    of the handle table serves the whole listing, where the old loop ran one or
+    two queries for EVERY stored message on the server, on every 3:3.
+    None means "ask the database": a client guid claimed by more than one
+    account, where the single-row lookup's answer is not ours to predict.
+    """
+    ids, owner_of = set(), {}
+    by_client = {}
+    for r in db.execute("SELECT id, member_id, client_guid FROM handle").fetchall():
+        hid, mid = int(r["id"]), int(r["member_id"] or 0)
+        ids.add(hid)
+        owner_of[hid] = mid
+        c = int(r["client_guid"] or 0) & 0xFFFFFFFFFFFFFFFF
+        if c:
+            by_client.setdefault(c, set()).add(mid)
+    member = int(member)
+
+    def match(guid):
+        g = int(guid) & accounts.HANDLE_GUID_MASK
+        if g and (g & ~0xFFFFFFFF) == accounts.HANDLE_GUID_BASE:
+            hid = g & 0xFFFFFFFF
+            if hid in ids:
+                return owner_of[hid] == member
+        owners = by_client.get(int(guid) & 0xFFFFFFFFFFFFFFFF) if guid else None
+        if not owners:
+            return False
+        if len(owners) > 1:
+            return None
+        return member in owners
+    return match
+
+
 def _mailbox(member=None):
     """[(when, path, meta)] of the messages addressed TO `member`, newest first.
 
@@ -52,6 +90,13 @@ def _mailbox(member=None):
         return []
     out, seen = [], set()
     try:
+        match = None
+        if os.environ.get("POL_MAILBOX_MATCH", "1") == "1":
+            try:
+                match = _mailbox_matcher(db, member)
+            except Exception as exc:
+                log("lobby", f"  mail: address matcher unavailable ({exc!r}); "
+                             "resolving per message")
         for name in sorted(names):
             path = _mail_path_of(name)
             if path is None:
@@ -66,8 +111,11 @@ def _mailbox(member=None):
             meta = _mail_meta(path)
             if not meta:
                 continue
-            row = _mail_recipient_row(db, meta["recipient_guid"])
-            if row is None or int(row["member_id"]) != int(member):
+            hit = match(meta["recipient_guid"]) if match is not None else None
+            if hit is None:
+                row = _mail_recipient_row(db, meta["recipient_guid"])
+                hit = row is not None and int(row["member_id"]) == int(member)
+            if not hit:
                 continue
             seen.add(key)
             # A dead acceptance is retired HERE, at listing time, whatever
