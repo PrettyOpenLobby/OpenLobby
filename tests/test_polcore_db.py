@@ -204,7 +204,7 @@ want = {"polid", "member", "handle", "login_alias", "deleted_handle", "content",
         "handle_profile", "profile", "regcode", "mail", "admin_cred",
         "login_token_client", "ext_mail_log", "login_digest_client", "login_fail",
         "list_stamp", "handle_content_trimmed", "content_character", "blob",
-        "schema_migrations"}
+        "web_login", "schema_migrations"}
 chk("every table exists", sorted(want - tables), [])
 
 cols = {(r["table_name"], r["column_name"]) for r in db.query(
@@ -251,10 +251,28 @@ db.execute("INSERT INTO mail (box, member_id, uidl, raw, received_at)"
 chk("mail.raw is bytes", db.query_one("SELECT raw FROM mail")["raw"], b"\x00raw\xff")
 db.upsert("blob", {"scope": str(mid), "path": "save.bin", "member_id": mid,
                    "data": b"\x01\x02"}, key=("scope", "path"))
+db.execute("INSERT INTO web_login (username, member_id, created_at)"
+           " VALUES ('Tester.Web', %s, %s)", (mid, now))
+try:
+    with db.transaction() as c:
+        db.execute("INSERT INTO polid (polid, pw_hash, pw_salt, created_at,"
+                   " updated_at) VALUES ('WXYZ2345', 'h', 's', %s, %s)", (now, now),
+                   conn=c)
+        mid2 = db.query_one(
+            "INSERT INTO member (polid, member_no, login_name, pw_hash, pw_salt,"
+            " created_at) VALUES ('WXYZ2345', 1, 'LOGIN2', 'h', 's', %s)"
+            " RETURNING id", (now,), conn=c)["id"]
+        db.execute("INSERT INTO web_login (username, member_id, created_at)"
+                   " VALUES ('tester.WEB', %s, %s)", (mid2, now), conn=c)
+    dup = "accepted"
+except psycopg.errors.UniqueViolation:
+    dup = "refused"
+chk("a website username taken in another case", dup, "refused")
 db.execute("DELETE FROM polid WHERE polid = 'ABCD2345'")
-chk("deleting the POL ID cascades to member, handle, links, mail, blobs",
+chk("deleting the POL ID cascades to member, handle, links, mail, blobs, web_login",
     [db.query_one("SELECT count(*) AS n FROM %s" % t)["n"]
-     for t in ("member", "handle", "handle_content", "mail", "blob")], [0] * 5)
+     for t in ("member", "handle", "handle_content", "mail", "blob", "web_login")],
+    [0] * 6)
 done(cm)
 
 # --------------------------------------------------------------------------- #
