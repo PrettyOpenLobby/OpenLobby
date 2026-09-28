@@ -142,6 +142,10 @@ SUITES = [
     # client-build records other containers read from Valkey.
     ("polcore_blobs", [sys.executable, "test_polcore_blobs.py"], TESTS, {}),
     ("live_markers",  [sys.executable, "test_live_markers.py"], TESTS, {}),
+    # The importer that moves an old /data tree (the SQLite files and
+    # resources/) into PostgreSQL, run against a fixture the pre-PostgreSQL
+    # account code writes itself (taken from git).
+    ("db_import",     [sys.executable, "test_db_import.py"], TESTS, {}),
     # THE CONTENT ID MINT (2026-08-23). Registered beside `accounts` because it
     # pins that file's `allocate_content_id` from the outside, and because the
     # thing it guards is invisible from inside our own server: nothing we run
