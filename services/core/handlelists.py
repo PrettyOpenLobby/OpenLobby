@@ -772,7 +772,8 @@ def _list_payload(op1, op2, n, req_pt=None):
             # 0x37e86c0 -- see _group_record. It is not 0:9's, despite the shared
             # size, and the name is UTF-16LE at +0x08.
             out[base:base + rec] = friendgroups._group_record(
-                rec, i, friends[i][1], guid=friends[i][0])
+                rec, i, friends[i][1], guid=friends[i][0],
+                settings=friendgroups._my_group_settings(friends[i][0]))
             if i == count - 1 and os.environ.get("POL_GROUP_MEMBERS", "1") == "1":
                 # After the LAST header, append every group's members in group
                 # order and record each group's count in the count block. Both

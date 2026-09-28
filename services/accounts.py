@@ -3581,6 +3581,37 @@ GROUP_CLASS_MIN = 2
 GROUP_CLASS_MAX = 5
 
 
+def set_group_settings(conn, gid, member_name, comment=None, status=None,
+                       handle_pos=None):
+    """Store what a member says about themself in group `gid` (lobby 7:11).
+    Returns True when their member row exists and was updated.
+
+    Only a member row can hold settings: an owner of a group made before
+    membership rows existed has none, and nothing is invented for them.
+    """
+    cur = conn.execute(
+        "UPDATE group_member SET my_comment = %s, my_status = %s,"
+        " my_handle_pos = %s WHERE group_id = %s AND member_name = %s",
+        (comment, None if status is None else int(status),
+         None if handle_pos is None else int(handle_pos),
+         int(gid), member_name))
+    conn.commit()
+    return bool(cur.rowcount)
+
+
+def group_settings(conn, gid, member_name):
+    """`{comment, status, handle_pos}` a member stored for group `gid`, each
+    None when never sent; None when they have no member row."""
+    row = conn.execute(
+        "SELECT my_comment, my_status, my_handle_pos FROM group_member"
+        " WHERE group_id = %s AND member_name = %s",
+        (int(gid), member_name)).fetchone()
+    if row is None:
+        return None
+    return {"comment": row["my_comment"], "status": row["my_status"],
+            "handle_pos": row["my_handle_pos"]}
+
+
 def count_handle_groups(conn, handle_id, include_pending=True):
     """How many groups `handle_id` holds: owned, joined, and (by default) the
     ones it has been invited to and not yet answered.

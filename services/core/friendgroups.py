@@ -578,7 +578,26 @@ _HANDLE_GUID_BITS = (1 << 44) - 1
 _PROFILE_FICON = 19
 
 
-def _group_record(rec, slot, name, guid=0, code=b""):
+def _my_group_settings(gid):
+    """This session's own 7:11 settings for group `gid`, or None. Never raises:
+    it runs inside the 7:12 reply, which must not be lost to a busy database."""
+    if accounts is None or os.environ.get("POL_GROUP_SETTINGS", "1") != "1":
+        return None
+    try:
+        me = lobbysession._session_handle_name()
+        if not me:
+            return None
+        db = accounts.connect()
+        try:
+            return accounts.group_settings(db, int(gid), me)
+        finally:
+            db.close()
+    except Exception as exc:
+        log("lobby", f"  7:12 group {gid}: own settings unavailable ({exc!r})")
+        return None
+
+
+def _group_record(rec, slot, name, guid=0, code=b"", settings=None):
     """One 07:12 (`KGetGroupList`) group header record, 136 bytes.
 
     LAYOUT READ OFF THE CLIENT (2026-08-12), not guessed. The record installer is
@@ -637,6 +656,19 @@ def _group_record(rec, slot, name, guid=0, code=b""):
     out[0x6E] = _group_cfg_int("f6e", 0) & 0xFF
     out[0x6F] = _group_cfg_int("f6f", 0) & 0xFF
     out[0x85] = _group_cfg_int("f85", 0) & 0xFF
+    # WHAT THIS MEMBER SENT WITH 7:11 COMES BACK HERE. Project Crystal Server
+    # reads +0x08 as the requester's comment for the group and +0x6E/+0x6F as
+    # their handle slot and status in it, the same offsets the 7:11 request
+    # carries. A member who never sent one keeps exactly the bytes above;
+    # `settings` is `accounts.group_settings(...)` or None.
+    if settings:
+        if settings.get("comment"):
+            wide_c = str(settings["comment"]).encode("utf-16-le", "replace")[:100]
+            out[0x08:0x08 + 100] = wide_c.ljust(100, b"\x00")
+        if settings.get("handle_pos") is not None:
+            out[0x6E] = int(settings["handle_pos"]) & 0xFF
+        if settings.get("status") is not None:
+            out[0x6F] = int(settings["status"]) & 0xFF
     # +0x70 IS THE ROW LABEL, and it is NOT the same string as the name.
     # MEASURED 2026-08-13, both ends:
     #   polcore 0x37e8757  copies 0x14 bytes from record+0x70 to group obj +0x10
@@ -820,20 +852,26 @@ _GROUP_STATUS_GID_OFF = 0x00
 _GROUP_STATUS_FLAG_OFF = 0x6F
 
 
+_GROUP_STATUS_COMMENT_OFF = 0x08       # 0x64 bytes of UTF-16LE
+_GROUP_STATUS_COMMENT_LEN = 0x64
+_GROUP_STATUS_HPOS_OFF = 0x6E
+
+
 def _group_my_status(pt):
-    """Read a 07:0B. Returns b"" -- the reply is header-only.
+    """Apply a 07:0B. Returns b"" -- the reply is header-only.
 
-    WARNING: **THIS RECORDS NOTHING YET, ON PURPOSE.** What the client means by the flag
-    is one sample deep, there is no column to put it in, and the half that would
-    matter -- what the server sends the OTHER members when it changes -- has
-    never been observed: SE answers 7:0B with an empty payload and the capture
-    shows no follow-up on either band that can be tied to it.
+    THE LAYOUT IS PROJECT CRYSTAL SERVER'S (GroupChangeSettingsRequest), and it
+    agrees with our one live sample: the u64 group id, the member's comment for
+    this group as UTF-16LE at +0x08, the handle slot they appear under at
+    +0x6E and their status in the group at +0x6F. SE's sample had only +0x6F
+    set, i.e. an empty comment. The 7:12 group record carries the same three
+    at the same offsets, so what is stored here is served back to this member
+    in their next group list (see `_group_record`).
 
-    So this parses and LOGS, which is the step that is actually missing. Every
-    theory about the group sidebar (who is present, the member count) currently
-    rests on one request nobody has watched arrive. A live log line saying which
-    group, which flag, and how often it repeats is what turns that into evidence
-    -- and it costs nothing, because the reply was already header-only.
+    Stored per member row (`accounts.set_group_settings`). What the OTHER members
+    are sent when the status changes is not implemented: that needs the group
+    presence push to honour a per-group status, which it does not yet.
+    POL_GROUP_SETTINGS=0 only logs, as before.
     """
     if pt is None:
         return b""
@@ -843,14 +881,28 @@ def _group_my_status(pt):
         return b""
     gid = struct.unpack_from("<Q", body, _GROUP_STATUS_GID_OFF)[0]
     flag = body[_GROUP_STATUS_FLAG_OFF]
-    # Name every other non-zero byte too: with one captured sample the layout is
-    # a sketch, and a second shape shows up here rather than in a re-decode.
-    extra = [f"+{i:#04x}={body[i]:#04x}" for i in range(len(body) - 4)
-             if body[i] and not (i < 8 or i == _GROUP_STATUS_FLAG_OFF)]
+    hpos = body[_GROUP_STATUS_HPOS_OFF]
+    raw = body[_GROUP_STATUS_COMMENT_OFF:
+               _GROUP_STATUS_COMMENT_OFF + _GROUP_STATUS_COMMENT_LEN]
+    comment = raw.decode("utf-16-le", "replace").split("\x00")[0]
+    stored = "parsed only (POL_GROUP_SETTINGS=0)"
+    if accounts is not None and os.environ.get("POL_GROUP_SETTINGS", "1") == "1":
+        try:
+            db = accounts.connect()
+            try:
+                me = lobbysession._session_handle_name()
+                ok = bool(me) and accounts.set_group_settings(
+                    db, int(gid), me, comment=comment, status=flag,
+                    handle_pos=hpos)
+                stored = (f"stored for {me!r}" if ok else
+                          f"NOT stored: {me!r} has no member row in group {gid}")
+            finally:
+                db.close()
+        except Exception as exc:
+            stored = f"NOT stored ({exc!r})"
     log("lobby", f"  group 7:11 KChgMyGrpStatus: group {gid} "
-                 f"(#XXL{int(gid):016X}) flag={flag}"
-                 + (f"  OTHER NON-ZERO BYTES: {' '.join(extra)}" if extra else "")
-                 + " -- parsed only, nothing stored (see _group_my_status)")
+                 f"(#XXL{int(gid):016X}) status={flag} handle_pos={hpos} "
+                 f"comment={comment!r} -- {stored}")
     return b""
 
 
