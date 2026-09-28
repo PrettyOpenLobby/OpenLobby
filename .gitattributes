@@ -3,3 +3,5 @@
 *.bin binary
 portal/patches/*.diff -text
 portal/authored/** -text
+*.sh text eol=lf
+Dockerfile* text eol=lf
