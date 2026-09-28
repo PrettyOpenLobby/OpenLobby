@@ -10,8 +10,9 @@ numbers, so slot i agrees between a PC and a phone for i < 12.
 
 Pinned here, against a member with 20 friends (2 of them pending):
   * no marker  -> 12 rows, and the WHOLE reply payload is byte-identical to
-                  what origin/main's responders.py builds for the same DB (the
-                  old module is loaded from `git show origin/main:...`, or from
+                  what the last single-file responders.py (commit 7a1a57a,
+                  before the split into services/core/) builds for the same
+                  DB (loaded from `git show 7a1a57a:...`, or from
                   $POL_BASELINE_RESPONDERS if set);
   * marker     -> 20 rows, count block 20, length 8 + 20*168, rows 0..11
                   byte-identical to the no-marker rows, slot map covers 0..19;
@@ -21,7 +22,7 @@ Pinned here, against a member with 20 friends (2 of them pending):
   * NO PUSH FOR A SLOT >= 12, ever: a PC Viewer on the same member files a
     pushed row at table + slot*0xB0 in a 12-row table. A marked 2:3 queues
     exactly the PC's row spool + presence burst (slots 0..11, identical to
-    origin/main's); `_friend_slot`, `_watcher_row_slot`, `push_friend_icons`,
+    the baseline's); `_friend_slot`, `_watcher_row_slot`, `push_friend_icons`,
     `push_presence_burst`, `field_push_lines`, both deliverers and
     `_broadcast_presence` (login/logout/status) all refuse slot 12+ and still
     serve slot 3.
@@ -65,6 +66,12 @@ import responders as R                                             # noqa: E402
 FAILS = []
 REC = 0xA8
 
+# The last commit where services/responders.py was the whole lobby in one
+# file. After it, responders.py is a facade over services/core/ and cannot be
+# loaded on its own. The PC reply must still be byte-identical to what this
+# build served, which the mobile list already shipped in.
+BASELINE_COMMIT = "7a1a57a"
+
 
 def check(ok, label, detail=""):
     print(f"  [{'PASS' if ok else 'FAIL'}] {label}"
@@ -77,7 +84,8 @@ def load_baseline():
     path = os.environ.get("POL_BASELINE_RESPONDERS")
     if not path:
         src = subprocess.run(
-            ["git", "-C", REPO, "show", "origin/main:services/responders.py"],
+            ["git", "-C", REPO, "show",
+             BASELINE_COMMIT + ":services/responders.py"],
             capture_output=True, check=True).stdout
         path = os.path.join(TMP, "responders_baseline.py")
         with open(path, "wb") as f:
@@ -305,13 +313,13 @@ def main():
           and [r[0] for r in q_pc["rows"]] == list(range(12))
           and [r[0] for r in q_pc["presencerows"]] == list(range(12)),
           "PC 2:3 queues row spool + presence burst for slots 0..11, "
-          "IDENTICAL to origin/main", slots_of(q_pc))
+          "IDENTICAL to the baseline", slots_of(q_pc))
     c_pc, r_pc = rows(p_pc)
     check(c_pc == 12 and len(r_pc) == 12, "12 rows", f"count={c_pc}")
     check(n_pc == 8 + 12 * REC, "declared length 8 + 12*168", str(n_pc))
-    check(n_pc == n_old, "length identical to origin/main", f"{n_pc} vs {n_old}")
+    check(n_pc == n_old, "length identical to the baseline", f"{n_pc} vs {n_old}")
     check(p_pc == p_old and len(p_pc) == n_pc,
-          "payload BYTE-IDENTICAL to origin/main's",
+          "payload BYTE-IDENTICAL to the baseline's",
           f"{len(p_pc)}B vs {len(p_old)}B")
     check(sorted((R._friend_slots_map(hid) or {})) == list(range(12)),
           "slot map = 0..11")
