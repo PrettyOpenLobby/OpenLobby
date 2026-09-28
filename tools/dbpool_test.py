@@ -121,7 +121,14 @@ def main():
     lost = accounts.connect()
     lost.execute("INSERT INTO pooltest (v) VALUES (99)")
     del lost
-    after = pdb.get_pool().get_stats().get("pool_available", 0)
+    # The pool files a returned connection on its own schedule; give it a
+    # moment rather than reading a snapshot taken mid-return.
+    deadline = time.monotonic() + 5
+    while True:
+        after = pdb.get_pool().get_stats().get("pool_available", 0)
+        if after >= before or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
     conn = accounts.connect()
     n = conn.execute("SELECT count(*) FROM pooltest WHERE v = 99").fetchone()[0]
     conn.close()
