@@ -10,7 +10,9 @@ and discordlink.py, taken from git (OLD_COMMIT, the commit before the move),
 and run from a temporary directory. On top of that go the rows SQLite let
 through and PostgreSQL will not (children of missing parents), the two backup
 tables the old rebuilds kept, an unknown table, a value its column cannot
-hold, resources/ files and live files that are left behind.
+hold, the website sign-in service's web_login table (created as that service
+creates it, with a row whose member is gone), resources/ files (with the
+operators' backup copies beside them) and live files that are left behind.
 
 It is imported into a throwaway database (tools/pgtest.py) and checked: row
 counts, ids and sequences, the group member order, the orphans in the report,
@@ -324,6 +326,11 @@ RES = {
     "%d.tm_collection.json.bak-before-houseprize-backpay-20260926" % m1:
         (b'{"cards": []}', 1_700_001_000),
     "%d.jan_stats.json.bak" % m3: (b'{"games": 2}', 1_700_001_100),
+    "%d.tm_collection.json.pre-lastplayed" % m1: (b'{"cards": [1]}', 1_700_001_110),
+    "auction-1.bids.bin.stale-settled-20260820": (b"old bids", 1_700_001_120),
+    "%d.U_g_TM0DataFile.bin.orig" % m1: (b"an original", 1_700_001_130),
+    # a save whose path begins with one of those words is still a save
+    "%d.bakery.bin" % m1: (b"bread", 1_700_001_140),
     # Janhourou's own import reads these two (janstore.py import event|rank_snapshot)
     "janevent.json": (b'{"id": 7}', 1_700_001_200),
     "jan-rank-snapshot.json": (b'{"0": [3]}', 1_700_001_300),
@@ -336,8 +343,9 @@ for name, (data, mtime) in RES.items():
 # Tetra Master's weekly lists: a directory of their own, imported as scope
 # tmrank; a directory inside it, and any other directory, are not resources
 TMRANK = {"r1.bin": b"rank", "week-2026-39.json": b'{"top": [3, 5]}'}
-with open(os.path.join(SRC, "resources", "tmrank", "r1.bin.bak"), "wb") as fh:
-    fh.write(b"old rank")
+for backup in ("r1.bin.bak", "r1.bin.stale-20260901"):
+    with open(os.path.join(SRC, "resources", "tmrank", backup), "wb") as fh:
+        fh.write(b"old rank")
 for name, data in TMRANK.items():
     with open(os.path.join(SRC, "resources", "tmrank", name), "wb") as fh:
         fh.write(data)
@@ -544,19 +552,29 @@ conn.close()
 
 print("resources: blobs, readable through the resource store")
 rs = next(s for s in res["sources"] if s["name"] == "resources")
-chk("blob rows", db.query_one("SELECT count(*) AS n FROM blob")["n"], 10)
+chk("blob rows", db.query_one("SELECT count(*) AS n FROM blob")["n"], 11)
 left = sorted(x[0] for x in rs["left_out"])
+BACKUPS = ["tmrank/r1.bin.bak", "tmrank/r1.bin.stale-20260901",
+           "%d.tm_collection.json.bak-before-houseprize-backpay-20260926" % m1,
+           "%d.jan_stats.json.bak" % m3,
+           "%d.tm_collection.json.pre-lastplayed" % m1,
+           "auction-1.bids.bin.stale-settled-20260820",
+           "%d.U_g_TM0DataFile.bin.orig" % m1]
 chk("left as files", left, sorted([
-    "README", "content-profiles.json", "other/", "tmrank/old/", "tmrank/r1.bin.bak",
-    "%d.tm_collection.json.bak-before-houseprize-backpay-20260926" % m1,
-    "%d.jan_stats.json.bak" % m3, "janevent.json", "jan-rank-snapshot.json"]))
+    "README", "content-profiles.json", "other/", "tmrank/old/",
+    "janevent.json", "jan-rank-snapshot.json"] + BACKUPS))
 why = {x[0]: x[2] for x in rs["left_out"]}
-chk("a backup copy is named as one", why.get("%d.jan_stats.json.bak" % m3),
-    "a backup copy (.bak), not a record")
+chk("each backup copy (.bak, .pre-, .stale-, .orig) is named as one",
+    {n: why.get(n) for n in BACKUPS},
+    {n: "a backup copy (.bak, .pre-, .stale-, .orig), not a record" for n in BACKUPS})
+chk("a save whose path begins with 'bak' is a save", db.query_one(
+    "SELECT data FROM blob WHERE scope = %s AND path = 'bakery.bin'", (str(m1),)),
+    {"data": b"bread"})
 chk("the Jan files point at the Jan import", why.get("janevent.json"),
     "the title's own import reads it (crystalholo: janstore.py import event)")
 chk("no blob row for a backup or a Jan file", db.query_one(
-    "SELECT count(*) AS n FROM blob WHERE path LIKE '%%.bak%%' OR scope IN"
+    "SELECT count(*) AS n FROM blob WHERE path LIKE '%%.bak%%' OR path LIKE"
+    " '%%.pre-%%' OR path LIKE '%%.stale-%%' OR path LIKE '%%.orig%%' OR scope IN"
     " ('janevent', 'jan-rank-snapshot')")["n"], 0)
 for name, data in sorted(TMRANK.items()):
     row = db.query_one("SELECT data, member_id, extract(epoch FROM updated_at) AS t"
@@ -580,6 +598,17 @@ chk("a deleted member's save is kept, not linked",
 chk("and reported", rs["extra"]["not_linked"], ["%d.U_g_x.bin" % m4])
 chk("title files reported by scope", rs["extra"]["other_scopes"],
     {"auction-pending-%d" % m1: 1, "tmrank": 2})
+
+print("the backup rule")
+import db_import  # noqa: E402
+for name, want in (("1.tm_collection.json.pre-lastplayed", True),
+                   ("auction-1.bids.bin.stale-settled-20260820", True),
+                   ("1.jan_stats.json.bak", True), ("1.x.bin.bak-note", True),
+                   ("1.x.bin.orig", True), ("README.bak", True),
+                   ("1.bakery.bin", False), ("1.original.bin", False),
+                   ("1.pre-season.json", False), ("auction-1.bids.bin", False),
+                   ("s1f.b_g_PTL.bin", False)):
+    chk("_is_backup(%r)" % name, db_import._is_backup(name), want)
 
 print("title follow-ups")
 flat = " ".join(out.split())

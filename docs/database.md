@@ -334,7 +334,7 @@ What it reads and where each part goes:
 | `resources/<name>` (each top-level file) | a `blob` row: `blobs.split_name(name)` gives scope and path, the bytes are the file, `updated_at` is its mtime |
 | `resources/tmrank/<f>` (Tetra Master's weekly lists) | a `blob` row in scope `tmrank`, path `<f>`, the same way |
 | `resources/content-profiles.json` | stays a file for now (core/pfc.py) |
-| `resources/*.bak`, `resources/*.bak-*` | not imported; an operator's backup copy is not a record |
+| backup copies in `resources/` and `resources/tmrank/` | not imported; an operator's backup copy is not a record (the rule follows the table) |
 | `resources/janevent.json`, `resources/jan-rank-snapshot.json` | not imported here; Janhourou's own import reads them (step 6) |
 | `auth-sessions.json` | not imported; `authsess:s:<sid>` is refilled at the next login |
 | `auth-stamps.json` | not imported; `authstamp:ip:<address>` (a client running across the move logs in again) |
@@ -344,6 +344,16 @@ What it reads and where each part goes:
 | `/logs/push-spool.jsonl` and its `.offset` | not imported; `push:queue` (drain the old spool first by letting `authsess` run) |
 | `<service>-sessions-live.json`, `tm-matches-live.json` | not imported; `live:<service>` (`live:tm` for Tetra Master) |
 | `/logs/client-builds.json` | not imported; `clientbuild:<address>`, refilled at each client's next launch |
+
+A backup copy is a file whose name goes on past its real extension with a
+suffix that starts with `.bak`, `.pre-`, `.stale-` or `.orig`:
+`<member>.jan_stats.json.bak`,
+`<member>.tm_collection.json.bak-before-houseprize-backpay-20260926`,
+`<member>.tm_collection.json.pre-lastplayed`,
+`auction-1.bids.bin.stale-settled-20260820`. A name that ends in `.bak`
+counts whatever comes before it. The suffix has to follow a name with a dot
+in it, so a save whose path only begins with one of these words
+(`<member>.bakery.bin`) is imported. The report lists every copy it left.
 
 `web_login` belongs to the website sign-in service, which creates and reads
 it and deletes a member's row itself when it deletes the account. The
