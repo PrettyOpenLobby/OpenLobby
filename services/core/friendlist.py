@@ -380,15 +380,17 @@ def _friend_list_record(rec_size, guid, name, kind=0x0800, hid=0, status=0,
             # in slot 0 and each overwrites the last -- exactly "only the final
             # friend renders". The slot lives at +0x08, NOT byte 0 (SLOTPROBE=1) and
             # NOT the guid's slot bits (SLOTPROBE=2); both earlier probes missed
-            # because they never touched +0x08. The record index (0..count-1, and
-            # the list is capped at 12) gives each friend a distinct slot.
+            # because they never touched +0x08. The record index (0..count-1)
+            # gives each friend a distinct slot. The byte is a FULL byte: the
+            # table holds 200 rows and polcore reads the reply in 12-record
+            # chunks, so nothing here is bounded by 12 (see `_LOBBY_LIST`).
             #     037e39ca  mov al, byte ptr [ebp + 8]   ; ebp = record base
             #     037e39cf  lea edi,[eax+eax*4] .. shl edi,4   ; slot * 0xB0
             #     037e39d8  add edi, 0x38740d8                 ; table base
             #     037e3a2f  add ebp, 0xa8                      ; next record (+168)
             # (bit 4 of record[+0x00] picks the alternate table 0x386fc18 -- an
             # online/offline grouping, not the collapse. Left at 0 for now.)
-            r[0x08] = int(index) & 0x3F
+            r[0x08] = int(index) & 0xFF
             # PRESENCE, SOLVED 2026-08-13. Byte +0x09 is the online/offline enum.
             # polcore's record-copy reads it directly --
             #     037def0c  mov al, byte ptr [edi + 9]   ; edi = record base

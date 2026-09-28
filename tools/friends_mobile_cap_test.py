@@ -1,41 +1,36 @@
 #!/usr/bin/env python3
-"""2:3 KGetFriendList: the mobile marker lifts the 12-row cap; the PC is untouched.
+"""2:3 KGetFriendList: every client gets the whole list, up to the 0x40 row cap.
 
-The PC Viewer sends 2:3 with an EMPTY payload and can only hold 12 rows per
-read, so the reply is capped at 12. The mobile Tetra Master app marks its
-request with the 4 ASCII bytes `MOB1` at payload +0 (decrypted message offset
-0x28, right after the 40-byte request header) and gets up to
-POL_FRIENDS_MOBILE_CAP (default 64) rows, in the same order with the same slot
-numbers, so slot i agrees between a PC and a phone for i < 12.
+Until 2026-09-28 the PC reply was capped at 12 rows and only a mobile-marked
+request (the Tetra Master app, MOB1 at payload +0) got more. The 12 came from
+polcore's 2:3 reader: `min(remaining*168, 0x7e0)` bytes per socket read, which
+is a 12-record READ CHUNK -- the reader files each chunk at slot byte +0x08 and
+re-enters the read until the U32 count is spent. Read as a list cap, it dropped
+every friend past the 12th for any account holding more (a member with 19
+friends never received 7 of them). The cap is now `_LOBBY_LIST[(2,3)][2]` = 0x40 for everyone, the
+ceiling the push records' slot byte (+0x1c) and the slot maps allow.
 
-Pinned here, against a member with 20 friends (2 of them pending):
-  * no marker  -> 12 rows, and the WHOLE reply payload is byte-identical to
-                  what the last single-file responders.py (commit 7a1a57a,
-                  before the split into services/core/) builds for the same
-                  DB (loaded from `git show 7a1a57a:...`, or from
-                  $POL_BASELINE_RESPONDERS if set);
-  * marker     -> 20 rows, count block 20, length 8 + 20*168, rows 0..11
-                  byte-identical to the no-marker rows, slot map covers 0..19;
-  * POL_FRIENDS_MOBILE=0 -> a marked request is served 12 rows, byte-identical
-                  to the unmarked reply;
-  * POL_FRIENDS_MOBILE_CAP=16 -> 16 rows;
-  * NO PUSH FOR A SLOT >= 12, ever: a PC Viewer on the same member files a
-    pushed row at table + slot*0xB0 in a 12-row table. A marked 2:3 queues
-    exactly the PC's row spool + presence burst (slots 0..11, identical to
-    the baseline's); `_friend_slot`, `_watcher_row_slot`, `push_friend_icons`,
-    `push_presence_burst`, `field_push_lines`, both deliverers and
-    `_broadcast_presence` (login/logout/status) all refuse slot 12+ and still
-    serve slot 3.
+Asserts, on an account with 20 friends (two of them outgoing-pending):
+
+  * no marker  -> 20 rows, slot i at +0x08 of row i, slot map 0..19, and the
+    row spool + presence burst queued for ALL 20 slots;
+  * MOB1 (bare, or with its cksum32 trailer) -> byte-identical to the PC reply
+    and the same pushes: the marker changes nothing any more, and still parses;
+  * POL_FRIENDS_MOBILE=0 / POL_FRIENDS_MOBILE_CAP=16 -> the list cap wins
+    (never below it), so still 20 rows;
+  * pushes: every friend push path (`push_friend_icons`, `push_presence_burst`,
+    `field_push_lines`, the row/presence deliverers, `_broadcast_presence`)
+    addresses slots below 0x40 and refuses 0x40+, both at enqueue and delivery.
 
 Drives the real path: `_lobby_paylen` (the declared length) then
 `_lobby_payload` with the decrypted request message, exactly as
 `_build_lobby_reply_pt` does.
+
+Run:  python tools/friends_mobile_cap_test.py
 """
-import importlib.util
 import json
 import os
 import struct
-import subprocess
 import sys
 import tempfile
 
@@ -65,12 +60,7 @@ import responders as R                                             # noqa: E402
 
 FAILS = []
 REC = 0xA8
-
-# The last commit where services/responders.py was the whole lobby in one
-# file. After it, responders.py is a facade over services/core/ and cannot be
-# loaded on its own. The PC reply must still be byte-identical to what this
-# build served, which the mobile list already shipped in.
-BASELINE_COMMIT = "7a1a57a"
+CAP = R._LOBBY_LIST[(0x02, 0x03)][2]
 
 
 def check(ok, label, detail=""):
@@ -78,60 +68,6 @@ def check(ok, label, detail=""):
           + (f"  --  {detail}" if detail else ""))
     if not ok:
         FAILS.append(label)
-
-
-def load_baseline():
-    path = os.environ.get("POL_BASELINE_RESPONDERS")
-    if not path:
-        src = subprocess.run(
-            ["git", "-C", REPO, "show",
-             BASELINE_COMMIT + ":services/responders.py"],
-            capture_output=True, check=True).stdout
-        path = os.path.join(TMP, "responders_baseline.py")
-        with open(path, "wb") as f:
-            f.write(src)
-    spec = importlib.util.spec_from_file_location("responders_baseline", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    # The baseline predates PostgreSQL: its OWN queries are written with
-    # SQLite's ? placeholders. It reaches the database only through
-    # `accounts`, so it gets an `accounts` whose connections accept those, and
-    # the same database as the module under test. What it builds from the rows
-    # is untouched, which is the thing being compared.
-    mod.accounts = _QmarkAccounts()
-    return mod
-
-
-class _QmarkConn:
-    """An account connection that also takes a `?`-placeholder statement."""
-
-    def __init__(self, conn):
-        self._c = conn
-
-    def execute(self, sql, params=None):
-        if params is not None and "?" in sql and "%s" not in sql:
-            sql = sql.replace("%", "%%").replace("?", "%s")
-        return self._c.execute(sql, params)
-
-    def __getattr__(self, name):
-        return getattr(self._c, name)
-
-    def __enter__(self):
-        self._c.__enter__()
-        return self
-
-    def __exit__(self, *exc):
-        return self._c.__exit__(*exc)
-
-
-class _QmarkAccounts:
-    """`accounts`, with connect() handing out `_QmarkConn`."""
-
-    def connect(self, path=None):
-        return _QmarkConn(accounts.connect())
-
-    def __getattr__(self, name):
-        return getattr(accounts, name)
 
 
 def request(payload=b""):
@@ -183,10 +119,10 @@ class FakeSession:
         return True
 
 
-def push_checks(mid, hid, marker):
-    """Every other push path, after a MARKED 2:3 published slots 0..19."""
-    print("pushes after a marked 2:3 (slot map 0..19) ->")
-    serve(R, request(marker))
+def push_checks(mid, hid):
+    """Every other push path, after a 2:3 published slots 0..19."""
+    print("pushes after a 2:3 (slot map 0..19) ->")
+    serve(R, request())
     queued(R)
     check(sorted(R._friend_slots_map(hid) or {}) == list(range(20)),
           "slot map is 0..19")
@@ -200,13 +136,13 @@ def push_checks(mid, hid, marker):
         m3 = int(db.execute("SELECT member_id FROM handle WHERE id = %s",
                             (int(p3["peer_handle"]),)).fetchone()[0])
         s15 = R._friend_slot_raw(db, hid, int(p15["peer_handle"]))
-        check(s15 == 16, "the served map does hold Pal16 at slot 16", str(s15))
-        check(R._friend_slot(db, hid, int(p15["peer_handle"])) is None,
-              "_friend_slot: slot 16 -> None (no push may address it)")
+        check(s15 == 16, "the served map holds Pal16 at slot 16", str(s15))
+        check(R._friend_slot(db, hid, int(p15["peer_handle"])) == 16,
+              "_friend_slot: slot 16 -> 16 (a push may address it now)")
         check(R._friend_slot(db, hid, int(p3["peer_handle"])) == 3,
-              "_friend_slot: slot 3 -> 3, as before")
-        check(R._watcher_row_slot(db, mid, int(p15["peer_guid"])) is None,
-              "_watcher_row_slot (profile repaint): slot 16 -> None")
+              "_friend_slot: slot 3 -> 3")
+        check(R._watcher_row_slot(db, mid, int(p15["peer_guid"])) == 16,
+              "_watcher_row_slot (profile repaint): slot 16 -> 16")
         check(R._watcher_row_slot(db, mid, int(p3["peer_guid"])) == 3,
               "_watcher_row_slot: slot 3 -> 3")
         g3, g15 = int(p3["peer_guid"]), int(p15["peer_guid"])
@@ -214,54 +150,61 @@ def push_checks(mid, hid, marker):
         db.close()
 
     # Enqueue side (the accept pushes call these two as well).
-    R.push_friend_icons(None, mid, [(15, g15, 7, None), (19, g15, 7, "x")])
-    R.push_presence_burst(None, mid, [(12, g15, 1), (63, g15, 1)])
+    R.push_friend_icons(None, mid, [(CAP, g15, 7, None), (200, g15, 7, "x")])
+    R.push_presence_burst(None, mid, [(CAP, g15, 1), (255, g15, 1)])
     check(queued(R) == {}, "push_friend_icons / push_presence_burst: slots "
-                           "12+ queue NOTHING")
-    R.push_friend_icons(None, mid, [(3, g3, 7, None), (15, g15, 7, None)])
-    R.push_presence_burst(None, mid, [(3, g3, 1), (15, g15, 1)])
+                           f"{CAP:#x}+ queue NOTHING")
+    R.push_friend_icons(None, mid, [(3, g3, 7, None), (15, g15, 7, None),
+                                    (CAP, g15, 7, None)])
+    R.push_presence_burst(None, mid, [(3, g3, 1), (15, g15, 1), (CAP, g15, 1)])
     q = queued(R)
-    check([r[0] for r in q.get("rows", [])] == [3]
-          and [r[0] for r in q.get("presencerows", [])] == [3],
-          "mixed rows: only slot 3 is queued", slots_of(q))
+    check([r[0] for r in q.get("rows", [])] == [3, 15]
+          and [r[0] for r in q.get("presencerows", [])] == [3, 15],
+          f"mixed rows: slots 3 and 15 queued, {CAP:#x} dropped", slots_of(q))
 
     # The chokepoint every friend push record is built through.
     try:
-        R.field_push_lines(b"N", g15, 12, state=1)
-        check(False, "field_push_lines refuses slot 12")
+        R.field_push_lines(b"N", g15, CAP, state=1)
+        check(False, f"field_push_lines refuses slot {CAP:#x}")
     except ValueError:
-        check(True, "field_push_lines refuses slot 12")
-    check(len(R.field_push_lines(b"N", g3, 11, state=1)) == 1,
-          "field_push_lines still builds slot 11")
+        check(True, f"field_push_lines refuses slot {CAP:#x}")
+    check(len(R.field_push_lines(b"N", g15, CAP - 1, state=1)) == 1,
+          f"field_push_lines builds slot {CAP - 1:#x}")
+    check(len(R.field_push_lines(b"N", g15, 15, state=1)) == 1,
+          "field_push_lines builds slot 15")
 
     # Delivery side, for spool lines written by anything.
     ts = FakeSession()
     R.PRESENCE.sessions_for = lambda m: [ts] if int(m) == mid else []
     R._push_deliver_rows({"kind": "rows", "member": mid, "after": 0,
-                          "rows": [[15, g15, 7, None], [40, g15, 7, None]]})
+                          "rows": [[CAP, g15, 7, None], [200, g15, 7, None]]})
     R._push_deliver_presencerows({"kind": "presencerows", "member": mid,
-                                  "after": 0, "rows": [[15, g15, m15]]})
-    check(ts.lines == [], "deliverers send NOTHING for a spooled slot 12+",
+                                  "after": 0, "rows": [[CAP, g15, m15]]})
+    check(ts.lines == [],
+          f"deliverers send NOTHING for a spooled slot {CAP:#x}+",
           f"{len(ts.lines)} line(s)")
     R._push_deliver_rows({"kind": "rows", "member": mid, "after": 0,
-                          "rows": [[3, g3, 7, None], [15, g15, 7, None]]})
-    check(len(ts.lines) == 1, "_push_deliver_rows: slot 3 delivered, 15 not",
-          f"{len(ts.lines)} line(s)")
+                          "rows": [[3, g3, 7, None], [15, g15, 7, None],
+                                   [CAP, g15, 7, None]]})
+    check(len(ts.lines) == 2, "_push_deliver_rows: slots 3 and 15 delivered, "
+                              f"{CAP:#x} not", f"{len(ts.lines)} line(s)")
     ts.lines.clear()
     R._push_deliver_presencerows({"kind": "presencerows", "member": mid,
                                   "after": 0,
-                                  "rows": [[3, g3, m3], [15, g15, m15]]})
-    check(len(ts.lines) == 1,
-          "_push_deliver_presencerows: slot 3 delivered, 15 not",
+                                  "rows": [[3, g3, m3], [15, g15, m15],
+                                           [CAP, g15, m15]]})
+    check(len(ts.lines) == 2,
+          f"_push_deliver_presencerows: slots 3 and 15 delivered, {CAP:#x} not",
           f"{len(ts.lines)} line(s)")
     ts.lines.clear()
 
     # Login / logout / status (4:5 watcher) all go through _broadcast_presence.
     for state in ("online", "offline", "away", "back"):
         R._broadcast_presence(m15, state)
-    check(ts.lines == [], "_broadcast_presence for the slot-16 friend "
-                          "(online/offline/away/back) sends NOTHING",
+    check(len(ts.lines) >= 4, "_broadcast_presence for the slot-16 friend "
+                              "(online/offline/away/back) pushes every time",
           f"{len(ts.lines)} line(s)")
+    ts.lines.clear()
     R._broadcast_presence(m3, "online")
     check(len(ts.lines) >= 1, "_broadcast_presence for the slot-3 friend "
                               "still pushes", f"{len(ts.lines)} line(s)")
@@ -278,7 +221,7 @@ def main():
         a = accounts.register_account(conn, f"Pal{i:02d}", "hunter2pw")
         ph = conn.execute("SELECT id FROM handle WHERE member_id = %s",
                           (a["member_id"],)).fetchone()["id"]
-        # Two OUTGOING pending rows, one inside the PC's 12 and one past it,
+        # Two OUTGOING pending rows, one inside the old PC 12 and one past it,
         # so pending rows ride both halves of the list.
         st = accounts.STATUS_PENDING if i in (5, 15) else accounts.STATUS_ACTIVE
         accounts.add_friend(conn, hid, f"Pal{i:02d}", peer_handle=int(ph),
@@ -288,90 +231,74 @@ def main():
     conn.commit()
     conn.close()
 
-    base = load_baseline()
-    for mod in (R, base):
-        mod._session_member_id = lambda: mid
-        mod._session_handle_id = lambda db=None: hid
-        mod._session_get = (lambda k, _o=mod._session_get:
-                            mid if k == "member_id" else _o(k))
-    for mod in (R, base):
-        EMITTED[mod] = []
-        mod._push_emit = (lambda rec, db=None, _l=EMITTED[mod]:
-                          _l.append(json.loads(json.dumps(rec))) or 0)
+    R._session_member_id = lambda: mid
+    R._session_handle_id = lambda db=None: hid
+    R._session_get = (lambda k, _o=R._session_get:
+                      mid if k == "member_id" else _o(k))
+    EMITTED[R] = []
+    R._push_emit = (lambda rec, db=None, _l=EMITTED[R]:
+                    _l.append(json.loads(json.dumps(rec))) or 0)
 
     marker = b"MOB1"
     signed_marker = bytearray(8)                  # MOB1 + cksum32 trailer
     signed_marker[0:4] = marker
     struct.pack_into("<I", signed_marker, 4, R._lobby_cksum(bytes(marker)))
 
+    check(CAP == 0x40,
+          "the 2:3 record cap is 0x40 (not the 12-record read chunk)",
+          f"cap={CAP}")
+
     print("PC (no marker) ->")
-    n_old, p_old = serve(base, request())
-    q_old = queued(base)
     n_pc, p_pc = serve(R, request())
     q_pc = queued(R)
-    check(q_pc == q_old and set(q_pc) == {"rows", "presencerows"}
-          and [r[0] for r in q_pc["rows"]] == list(range(12))
-          and [r[0] for r in q_pc["presencerows"]] == list(range(12)),
-          "PC 2:3 queues row spool + presence burst for slots 0..11, "
-          "IDENTICAL to the baseline", slots_of(q_pc))
+    check(set(q_pc) == {"rows", "presencerows"}
+          and [r[0] for r in q_pc["rows"]] == list(range(20))
+          and [r[0] for r in q_pc["presencerows"]] == list(range(20)),
+          "PC 2:3 queues row spool + presence burst for ALL slots 0..19",
+          slots_of(q_pc))
     c_pc, r_pc = rows(p_pc)
-    check(c_pc == 12 and len(r_pc) == 12, "12 rows", f"count={c_pc}")
-    check(n_pc == 8 + 12 * REC, "declared length 8 + 12*168", str(n_pc))
-    check(n_pc == n_old, "length identical to the baseline", f"{n_pc} vs {n_old}")
-    check(p_pc == p_old and len(p_pc) == n_pc,
-          "payload BYTE-IDENTICAL to the baseline's",
-          f"{len(p_pc)}B vs {len(p_old)}B")
-    check(sorted((R._friend_slots_map(hid) or {})) == list(range(12)),
-          "slot map = 0..11")
+    check(c_pc == 20 and len(r_pc) == 20, "20 rows", f"count={c_pc}")
+    check(n_pc == 8 + 20 * REC and len(p_pc) == n_pc,
+          "declared length 8 + 20*168 = payload length", f"n={n_pc}")
+    check([r[8] for r in r_pc] == list(range(20)),
+          "row i carries slot i at +0x08", str([r[8] for r in r_pc]))
+    check(all(r_pc[i] != r_pc[j] for i in range(20) for j in range(i)),
+          "20 distinct rows")
+    check(sorted((R._friend_slots_map(hid) or {})) == list(range(20)),
+          "slot map = 0..19")
     # A payload that is not the marker is the PC path too.
     n_x, p_x = serve(R, request(b"MOB2"))
     check(queued(R) == q_pc, "...and queues exactly the PC's pushes")
     check((n_x, p_x) == (n_pc, p_pc), "a non-marker payload is served as the PC")
 
     print("mobile (MOB1 at payload +0) ->")
-    for label, pl in (("bare MOB1", marker), ("MOB1 + cksum", bytes(signed_marker))):
+    for label, pl in (("bare MOB1", marker),
+                      ("MOB1 + cksum", bytes(signed_marker))):
         n_m, p_m = serve(R, request(pl))
-        c_m, r_m = rows(p_m)
-        check(c_m == 20 and len(r_m) == 20, f"[{label}] 20 rows", f"count={c_m}")
-        check(n_m == 8 + 20 * REC and len(p_m) == n_m,
-              f"[{label}] declared length 8 + 20*168 = payload length",
-              f"n={n_m} len={len(p_m)}")
-        check(r_m[:12] == r_pc, f"[{label}] rows 0..11 byte-identical to the PC's")
-        check(p_m[4:8] == p_pc[4:8], f"[{label}] count block pad identical")
-        # Each row names its own slot at +0x08 (the numbering 2:6 indexes).
-        check([r[8] for r in r_m] == list(range(20)),
-              f"[{label}] row i carries slot i",
-              str([r[8] for r in r_m]))
-        check(len(r_m) == 20
-              and all(r_m[i] != r_m[j] for i in range(20) for j in range(i)),
-              f"[{label}] 20 distinct rows")
-        smap = R._friend_slots_map(hid) or {}
-        check(sorted(smap) == list(range(20)), f"[{label}] slot map = 0..19",
-              str(sorted(smap)))
-        q_m = queued(R)
-        check(q_m == q_pc,
-              f"[{label}] pushes queued = the PC's exactly (slots 0..11); "
-              "NOTHING for slots 12..19", slots_of(q_m))
+        check((n_m, p_m) == (n_pc, p_pc),
+              f"[{label}] byte-identical to the PC reply "
+              "(the marker changes nothing)")
+        check(queued(R) == q_pc, f"[{label}] pushes queued = the PC's exactly")
 
-    print("POL_FRIENDS_MOBILE=0 ->")
+    print("POL_FRIENDS_MOBILE=0 / POL_FRIENDS_MOBILE_CAP=16 ->")
     os.environ["POL_FRIENDS_MOBILE"] = "0"
     try:
         n_off, p_off = serve(R, request(marker))
     finally:
         os.environ.pop("POL_FRIENDS_MOBILE", None)
-    check(rows(p_off)[0] == 12 and (n_off, p_off) == (n_pc, p_pc),
-          "marker ignored: 12 rows, identical to the PC reply")
-
-    print("POL_FRIENDS_MOBILE_CAP=16 ->")
+    check((n_off, p_off) == (n_pc, p_pc),
+          "marker off: identical to the PC reply")
     os.environ["POL_FRIENDS_MOBILE_CAP"] = "16"
     try:
         n_16, p_16 = serve(R, request(marker))
     finally:
         os.environ.pop("POL_FRIENDS_MOBILE_CAP", None)
-    check(rows(p_16)[0] == 16 and n_16 == 8 + 16 * REC,
-          "16 rows, length 8 + 16*168", f"n={n_16}")
+    check(rows(p_16)[0] == 20 and (n_16, p_16) == (n_pc, p_pc),
+          "a mobile cap below the list cap never lowers it: still 20 rows",
+          f"n={n_16}")
+    queued(R)
 
-    push_checks(mid, hid, marker)
+    push_checks(mid, hid)
 
     print()
     if FAILS:
