@@ -559,6 +559,20 @@
       text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
     .pv-item .k { font-size: 10.5px; color: var(--muted); margin-left: 6px; }
     .pv-more { padding: 10px 12px; color: var(--muted); font-size: 12px; }
+    .pv-item .t.fb { font-style: italic; color: #c3c9d6; }
+    .pv-item .v { font-size: 10.5px; color: var(--accent); margin-left: 6px; }
+    .pv-dir { display: flex; align-items: baseline; gap: 6px; padding: 6px 10px; cursor: pointer;
+      font-size: 12.5px; border-bottom: 1px solid rgba(51,57,73,.5); min-width: 0; }
+    .pv-dir:hover { background: var(--panel2); }
+    .pv-dir .tw { flex: none; width: 10px; color: var(--muted); font-size: 10px; }
+    .pv-dir .fl { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pv-dir .nm { flex: 1 1 0; min-width: 0; font: 11px 'Consolas', monospace; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pv-dir .fl + .nm { flex: 0 10 auto; }
+    .pv-dir .n { margin-left: auto; flex: none; font-size: 11px; color: var(--muted); }
+    .pv-dir.sec { font-weight: 600; background: rgba(255,255,255,.025); }
+    .pv-dir.plain { cursor: default; color: var(--muted); font-weight: 500; }
+    #pvPin.on { background: rgba(255,207,107,.16); border-color: var(--warn); }
     .pv-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; flex-wrap: wrap; }
     .pv-title { flex: 1 1 200px; min-width: 0; }
     .pv-title > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1162,7 +1176,7 @@
             <label>Game</label><select id="fGame"></select>
             <label>Language</label><select id="fLocale"></select>
             <label>Sort</label>
-            <select id="fSort"><option value="title">Title</option><option value="path">Path</option></select>
+            <select id="fSort"><option value="folders">Folders</option><option value="title">Title</option><option value="path">Path</option></select>
             <select id="fKind" hidden>
               <option value="page">page</option><option value="draws">draws</option>
               <option value="layout">layout</option><option value="content">content</option>
@@ -1201,6 +1215,7 @@
               <button data-z="1">1x</button>
               <button data-z="2">2x</button>
             </div>
+            <button class="ghost sm" id="pvPin">☆ Pin</button>
             <button class="ghost sm" id="pvMissingBtn" title="Highlight images the mirror does not have">Missing art</button>
             <button class="ghost sm" id="pvInspect" title="Click an element to see its settings and source line">Inspect</button>
             <button class="ghost sm" id="pvSourceBtn">Source</button>

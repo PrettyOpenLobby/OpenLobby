@@ -201,6 +201,25 @@ check("an unresolvable include still makes the page constructed",
 check("even though it is built from nothing we can find",
       built_from.get(f"{HOST}/pml/broken/index.pml"), None)
 
+# The file browser names a file with no <title> by its first line of text.
+# Cases from the mirror: a topics table, an announcement, a manual piece, and
+# the attribute values and commands that must never become a name.
+L = admin._pml_label
+check("a topics table is named by its first headline",
+      L('<array name="$TopicsList"><array>"4","01/29/2010","News Flash",'
+        '"Moggy New Year Bonanza Winning Numbers Announced","5208"</array></array>',
+        "data"), "Moggy New Year Bonanza Winning Numbers Announced")
+check("an announcement skips its date line",
+      L('<META http-equiv="Cache-Control" content="no-cache">\n<ARRAY NAME="$D">'
+        '"1","Aug. 12, 2026 18:00 [UTC]","Welcome to this PlayOnline server"</ARRAY>',
+        "data"), "Welcome to this PlayOnline server")
+check("a layout piece is named by its visible text",
+      L('<sheet name="a"><text style="t">^03Card Growth and Exchange</text></sheet>',
+        "layout"), "Card Growth and Exchange")
+check("attribute values and sd: commands are not names",
+      L('<style name="x" font="proportional"><img href="sd:enable=1@shBTNxt,'
+        'sd:alt=Go to the next page.@imBTNxt">', "layout"), None)
+
 print()
 print("pmlrefs_test: OK" if ok else "pmlrefs_test: FAILED")
 shutil.rmtree(WWW, ignore_errors=True)

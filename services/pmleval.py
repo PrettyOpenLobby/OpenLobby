@@ -166,6 +166,33 @@ class _N(int):
     def __neg__(self):
         return _N(-int(self))
 
+    # `<define value="4">` stores a number, and SE compares it against quoted
+    # digits: in03.pml places its glossary sheet at pos="445+15*($pgt>'9'),355".
+    # Python refused int > str, so the whole pos stayed unevaluated.
+    def _cmp_key(self, o):
+        if isinstance(o, str):
+            try:
+                return int(self), int(o.strip())
+            except ValueError:
+                return str(int(self)), o
+        return int(self), o
+
+    def __lt__(self, o):
+        a, b = self._cmp_key(o)
+        return a < b
+
+    def __le__(self, o):
+        a, b = self._cmp_key(o)
+        return a <= b
+
+    def __gt__(self, o):
+        a, b = self._cmp_key(o)
+        return a > b
+
+    def __ge__(self, o):
+        a, b = self._cmp_key(o)
+        return a >= b
+
 
 def _num(v):
     """Wrap plain ints (not bools) as PML numbers; leave everything else."""
