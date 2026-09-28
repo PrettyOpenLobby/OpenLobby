@@ -4,6 +4,7 @@ import json
 import os
 import time
 import threading
+from polcore import kv
 from srvcore import log
 from .deps import accounts
 from . import framing, friendgroups, friendroster, handlelists, memberstatus, presence, profilerecord, pushchannel, pushrecord, roomregistry, titlezone
@@ -23,85 +24,82 @@ from . import framing, friendgroups, friendroster, handlelists, memberstatus, pr
 # return value of 0. This spool is the hop between them: the lobby APPENDS the
 # intent, authserv DRAINS it and does the fan-out where the sockets are.
 #
-# /logs, not /data -- both containers mount ./logs read-write, and `login` does
-# not mount ./data at all. Same directory the presence control files already use.
-_PUSH_SPOOL = os.environ.get(
-    "POL_PUSH_SPOOL", os.path.join(os.environ.get("POL_LOG_DIR", "/logs"),
-                                   "push-spool.jsonl"))
+# The hop is a queue in the live-state store (polcore.kv): the lobby pushes each
+# record, JSON, onto `push:queue`; authserv moves it onto `push:work`, delivers
+# it, and only then removes it from there. A record is therefore never lost to
+# an authserv that dies mid-delivery -- the next one finds it on `push:work` and
+# delivers it again -- and never replayed once it has been delivered, which is
+# what the persisted drain offset of the old spool file was for.
+_PUSH_QUEUE = "push:queue"
+_PUSH_WORK = "push:work"
 #: True only in the process that runs `authserv` -- i.e. the one holding the
-#: sockets. Set in main(). Everywhere else, pushes go to the spool.
+#: sockets. Set in main(). Everywhere else, pushes go to the queue.
 _PUSH_LOCAL = [False]
-_PUSH_SPOOL_LOCK = threading.Lock()
-
-#: WARNING: THE DRAIN OFFSET IS PERSISTED, AND IT DID NOT USED TO BE.
-#:
-#: `_push_spool_watcher` kept `off` in a local, so it started every process at
-#: byte 0 and re-delivered the WHOLE spool on every restart. Found 2026-08-17 by
-#: restarting authsess and watching 315 records replay out of a 353-record file
-#: that nothing had ever trimmed.
-#:
-#: It looked harmless -- all 315 were dropped, because no session had registered
-#: yet -- and that is exactly the trap. It inverts the point of `authrelay`,
-#: which exists so a client KEEPS its socket across an authsess restart. In the
-#: case the relay is built for, re-registration races the drain, and a client
-#: that wins that race is handed the entire accumulated push history at once:
-#: stale friend rows, stale events, all replayed as if they had just happened.
-#: Dropping them was luck, not design.
-_PUSH_SPOOL_OFFSET = _PUSH_SPOOL + ".offset"
-
-#: Rotate the spool once it is fully consumed and past this, so it cannot grow
-#: forever (it is append-only and nothing ever trimmed it). One generation is
-#: kept, because a spool is the only record of what was pushed and when.
-_PUSH_SPOOL_MAX = int(float(os.environ.get("POL_PUSH_SPOOL_MAX_MB", "4"))
-                      * 1024 * 1024)
-#: ...and only after it has been QUIET this long. The writer is the other
-#: container and appends with a plain O_APPEND open, so a rename could in
-#: principle land between its open and its write. Requiring the file to be both
-#: fully drained AND idle makes that window one nobody will hit; without the
-#: idle test it is merely small.
-_PUSH_SPOOL_IDLE = 30.0
+#: How long one blocking wait for a record lasts, and so the tick of the
+#: deferred-row retry that shares the watcher thread.
+_PUSH_TICK = 0.5
 
 
-def _push_offset_load():
-    """The byte offset this process should resume draining from."""
+def _push_spool_pending():
+    """The records waiting for authserv, oldest first (tests, operators)."""
+    out = []
+    for raw in kv.lrange(_PUSH_QUEUE):
+        try:
+            out.append(json.loads(raw))
+        except ValueError:
+            continue
+    return out
+
+
+def _push_spool_clear():
+    """Drop everything queued or in flight. Returns how many records went."""
+    n = kv.llen(_PUSH_QUEUE) + kv.llen(_PUSH_WORK)
+    kv.delete(_PUSH_QUEUE, _PUSH_WORK)
+    return n
+
+
+def _push_spool_deliver(raw):
+    """Deliver one queued record (text). A record that is not JSON is logged
+    and dropped; it can never become deliverable."""
     try:
-        with open(_PUSH_SPOOL_OFFSET, "r", encoding="utf-8") as f:
-            return max(0, int(f.read().strip() or 0))
-    except (OSError, ValueError):
-        return 0
-
-
-def _push_offset_save(off):
+        rec = json.loads(raw)
+    except ValueError as exc:
+        log("authserv", f"push[spool] bad record ({exc!r})")
+        return
     try:
-        tmp = _PUSH_SPOOL_OFFSET + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(str(int(off)))
-        os.replace(tmp, _PUSH_SPOOL_OFFSET)   # atomic
-    except OSError as exc:
-        log("authserv", f"push[spool] cannot persist offset ({exc})")
+        _push_deliver(rec)
+    except Exception as exc:
+        log("authserv", f"push[spool] bad record ({exc!r})")
 
 
-def _push_spool_rotate(off):
-    """Retire a fully-drained spool. Returns the new offset (0 if rotated)."""
-    if _PUSH_SPOOL_MAX <= 0:
-        return off
-    try:
-        st = os.stat(_PUSH_SPOOL)
-    except OSError:
-        return off
-    if st.st_size < _PUSH_SPOOL_MAX or off < st.st_size:
-        return off                            # too small, or not caught up
-    if time.time() - st.st_mtime < _PUSH_SPOOL_IDLE:
-        return off                            # still being written to
-    try:
-        os.replace(_PUSH_SPOOL, _PUSH_SPOOL + ".1")
-        _push_offset_save(0)
-        log("authserv", f"push[spool] rotated at {st.st_size} bytes, fully "
-                        f"drained and idle {_PUSH_SPOOL_IDLE:.0f}s")
-        return 0
-    except OSError as exc:
-        log("authserv", f"push[spool] cannot rotate ({exc})")
-        return off
+def _push_spool_recover():
+    """Deliver whatever a previous authserv took off the queue and did not
+    finish. Returns how many records that was.
+
+    AFTER delivering, the record leaves `push:work`, never before: a crash
+    mid-delivery then replays that record, which is the right way round. These
+    are idempotent row/event pushes, so re-delivering one beats losing it.
+    """
+    n = 0
+    for raw in kv.lrange(_PUSH_WORK):
+        _push_spool_deliver(raw)
+        kv.lrem(_PUSH_WORK, raw)
+        n += 1
+    if n:
+        log("authserv", f"push[spool] re-delivered {n} record(s) a previous run "
+                        f"took but did not finish")
+    return n
+
+
+def _push_spool_drain_one(timeout=None):
+    """Take the oldest queued record, deliver it, acknowledge it. Returns the
+    record's text, or None when the queue stayed empty for `timeout`."""
+    raw = kv.move(_PUSH_QUEUE, _PUSH_WORK, timeout=timeout)
+    if raw is None:
+        return None
+    _push_spool_deliver(raw)
+    kv.lrem(_PUSH_WORK, raw)
+    return raw
 
 
 def _row_push_enabled():
@@ -179,9 +177,7 @@ def _push_emit(rec, db=None):
     if _PUSH_LOCAL[0]:
         return _push_deliver(rec, db)
     try:
-        with _PUSH_SPOOL_LOCK:
-            with open(_PUSH_SPOOL, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec) + "\n")
+        kv.push(_PUSH_QUEUE, json.dumps(rec))
         log("lobby", f"  push spooled: {rec.get('kind')} "
                      + (f"{rec.get('subject')!r} from {rec.get('sender')!r}"
                         if rec.get("kind") == "mail" else
@@ -194,8 +190,8 @@ def _push_emit(rec, db=None):
 def _push_deliver(rec, db=None):
     """Do the fan-out for one spooled record. Runs in authserv only.
 
-    Validates rather than trusting: the spool is a FILE, so a truncated write, a
-    half-flushed line or an older build's record shape can all turn up here, and
+    Validates rather than trusting: the queue is shared with other processes, so
+    an older build's record shape can turn up here, and
     a KeyError deep in the fan-out would be caught by the drain loop but only
     after this record was silently lost. Bad records are named in the log.
     """
@@ -338,82 +334,31 @@ def _push_deliver_mail(rec, db=None):
 
 
 def _push_spool_watcher():
-    """Daemon: drain the spool as the lobby writes to it.
+    """Daemon: deliver the lobby's queued pushes as they arrive.
 
-    Tracks a byte offset rather than deleting, so a half-written line is simply
-    not read until its newline lands. A file that SHRANK was rotated or cleared
-    under us, so the offset resets rather than seeking past the end.
-
-    THE OFFSET IS PERSISTED, and it must be: keeping it in a local made every
-    restart replay the whole spool. See `_PUSH_SPOOL_OFFSET` for what that costs
-    in the case `authrelay` is built for.
+    Blocks on the queue for up to `_PUSH_TICK` at a time. The deferred-row retry
+    shares this thread and runs at least once per tick, whether or not a record
+    arrived: it is the retry clock, 0.5 s, so a session that registers just
+    after its push was issued still gets its icons promptly.
     """
-    off = _push_offset_load()
     try:
-        # A persisted offset past the end means the spool was replaced while we
-        # were down. Start over rather than seeking past EOF and going deaf.
-        if off > os.path.getsize(_PUSH_SPOOL):
-            log("authserv", f"push[spool] stored offset {off} is past the end -- "
-                            f"the spool was replaced; restarting from 0")
-            off = 0
-    except OSError:
-        off = 0
-    if off:
-        log("authserv", f"push[spool] resuming at byte {off} "
-                        f"(not replaying what a previous run already delivered)")
+        _push_spool_recover()
+    except Exception as exc:
+        log("authserv", f"push[spool] recovery error: {exc!r}")
+    last_retry = 0.0
     while True:
         try:
-            size = os.path.getsize(_PUSH_SPOOL)
-            if size < off:
-                off = 0                       # rotated or truncated
-                _push_offset_save(off)
-            if size > off:
-                # BINARY, and that is not a detail. This tracks a BYTE offset,
-                # and a text-mode read translates newlines -- so on any platform
-                # where the spool has CRLF, `len(line.encode())` undercounts by
-                # one byte per line and the next seek lands mid-record. The
-                # container writes LF and never noticed; the offset only became
-                # durable (and the drift cumulative) when it started being
-                # persisted, and the first test written against it hit exactly
-                # this on Windows. Bytes in, decode per line, no translation.
-                with open(_PUSH_SPOOL, "rb") as f:
-                    f.seek(off)
-                    chunk = f.read()
-                # A trailing fragment with no newline is still being written:
-                # leave it, and its bytes, for the next pass. cut == 0 means the
-                # whole chunk is that fragment, so there is nothing to do yet.
-                cut = chunk.rfind(b"\n") + 1
-                if cut:
-                    off += cut
-                    for raw in chunk[:cut].split(b"\n"):
-                        line = raw.strip()
-                        if not line:
-                            continue
-                        try:
-                            _push_deliver(json.loads(line.decode("utf-8")))
-                        except Exception as exc:
-                            log("authserv", f"push[spool] bad record ({exc!r})")
-                    # AFTER delivering, never before: a crash mid-batch then
-                    # replays that batch, which is the right way round. These are
-                    # idempotent row/event pushes, so re-delivering a few beats
-                    # losing them.
-                    _push_offset_save(off)
-            off = _push_spool_rotate(off)
-        except OSError:
-            off = 0                           # no file yet -- inert
+            _push_spool_drain_one(timeout=_PUSH_TICK)
         except Exception as exc:
             log("authserv", f"push[spool] error: {exc!r}")
-        # OUTSIDE the try, deliberately. The deferred queue has nothing to do
-        # with the spool file, and the spool is legitimately ABSENT for a while
-        # after a rotation -- inside, `getsize` would raise, jump to the handler,
-        # and skip the retry for exactly as long as that lasted. This tick is the
-        # retry clock: 0.5s, so a session that registers just after its push was
-        # issued still gets its icons promptly.
-        try:
-            _push_defer_retry()
-        except Exception as exc:
-            log("authserv", f"push[rows] defer sweep error: {exc!r}")
-        time.sleep(0.5)
+            time.sleep(_PUSH_TICK)            # the store is down: do not spin
+        now = time.monotonic()
+        if now - last_retry >= _PUSH_TICK:
+            last_retry = now
+            try:
+                _push_defer_retry()
+            except Exception as exc:
+                log("authserv", f"push[rows] defer sweep error: {exc!r}")
 
 
 def broadcast_event(db, subject_handle_id, event, text, subject_name=None):
@@ -1197,15 +1142,41 @@ def _presence_fire_watcher():
         time.sleep(1.0)
 
 
+#: Events the presence watchers wait on between ticks, set whenever a title
+#: zone or a 4:5 status is published on the `presence` channel (titlezone,
+#: memberstatus), so a change is pushed at once rather than on the next tick.
+_PRESENCE_WAKE = []
+_PRESENCE_SUB = []
+_PRESENCE_WAKE_LOCK = threading.Lock()
+
+
+def _presence_wake_event():
+    """A new event set on every `presence` announcement. The subscription is
+    made once per process; if the store refuses it, the watchers simply poll."""
+    ev = threading.Event()
+    with _PRESENCE_WAKE_LOCK:
+        _PRESENCE_WAKE.append(ev)
+        if not _PRESENCE_SUB:
+            def wake(_channel, _message):
+                for e in list(_PRESENCE_WAKE):
+                    e.set()
+            try:
+                _PRESENCE_SUB.append(kv.subscribe(titlezone.PRESENCE_CHANNEL, wake))
+            except Exception as exc:
+                log("authserv", f"presence: no change notifications ({exc!r}); "
+                                "polling every second")
+    return ev
+
+
 def _title_zone_watcher():
     """Daemon: entering or leaving a TITLE is a presence change too.
 
     `_broadcast_presence` fires only on login / logout / away-back, so the zone
     the client reports on 4:5 -- written by the LOBBY container, a different
-    process, see `_publish_title_zone` -- would just sit in the file until some
-    unrelated event happened to push. Measured 2026-08-16: the zone reached the
-    file 9 s AFTER the last push, so a watcher's friend list never saw it.
-    Watching the file is what makes "X is in Tetra Master" arrive when it
+    process, see `_publish_title_zone` -- would just sit in the store until some
+    unrelated event happened to push. Measured 2026-08-16: the zone was
+    published 9 s AFTER the last push, so a watcher's friend list never saw it.
+    Watching the entries is what makes "X is in Tetra Master" arrive when it
     becomes true rather than at their next login.
 
     Offline members are skipped: the logout push already said zone 0, and
@@ -1213,6 +1184,7 @@ def _title_zone_watcher():
     attached.
     """
     seen = {}
+    wake = _presence_wake_event()
     while True:
         try:
             # WARNING: THE mtime GATE IS GONE, DELIBERATELY. It used to skip this whole
@@ -1220,9 +1192,9 @@ def _title_zone_watcher():
             # entry (it only ever changes by being written) and WRONG for a
             # lease: a lease lapses because the clock moved, not because anyone
             # touched the file, so under the old gate an expiring lease would
-            # never have produced a "left the title" push at all. The read
-            # underneath is still mtime-cached, so a tick that finds nothing new
-            # costs one stat() and a dict comprehension.
+            # never have produced a "left the title" push at all. So every tick
+            # reads the current entries, and a published change wakes the tick
+            # early.
             now = {k: int(v["zone"])
                    for k, v in (titlezone._live_title_zones() or {}).items()
                    if not titlezone._title_zone_expired(v)}
@@ -1241,7 +1213,8 @@ def _title_zone_watcher():
             seen = now
         except Exception as exc:
             log("authserv", f"presence[title] error: {exc!r}")
-        time.sleep(1.0)
+        wake.wait(1.0)
+        wake.clear()
 
 
 def _member_status_watcher():
@@ -1249,7 +1222,7 @@ def _member_status_watcher():
 
     The exact shape of `_title_zone_watcher` beside it, and for the same reason:
     the 4:5 request lands on the LOBBY container and the push has to leave from
-    `authsess`, so the lobby writes a file (`_publish_member_status`) and this
+    `authsess`, so the lobby publishes it (`_publish_member_status`) and this
     side watches it. Without a watcher the new status would sit there until some
     unrelated event happened to push -- which for a user who just set themselves
     Away means their friends learn about it at their next login.
@@ -1277,6 +1250,7 @@ def _member_status_watcher():
         log("authserv", "presence[status]: watcher disabled (POL_STATUS_PUSH=0)")
         return
     seen = {}
+    wake = _presence_wake_event()
     while True:
         try:
             now = {k: int(v.get("code") or 0)
@@ -1298,7 +1272,8 @@ def _member_status_watcher():
             seen = now
         except Exception as exc:
             log("authserv", f"presence[status] error: {exc!r}")
-        time.sleep(1.0)
+        wake.wait(1.0)
+        wake.clear()
 
 
 #: ON-DEMAND ROW PUSH, for bringing the face icon up without costing a login.
