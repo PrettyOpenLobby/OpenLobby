@@ -405,8 +405,50 @@ def _b64encode(data):
     return "".join(out)
 
 
-def build_gate_record(lobby_ip, lobby_port, pad_to=192, unread=0):
+def gate_list_stamps(db, member):
+    """{0x14: mail, 0x24: friends, 0x28: handles} "last changed" times for the
+    login record, or None when POL_GATE_LIST_STAMPS is off or anything fails.
+
+    WHY (2026-09-27, player report): read messages and accepted friend
+    requests came back as NEW after every relog, while the server's mailbox for
+    that member was EMPTY (3:3 answered 0/0 at 16:45:50) -- so the client was
+    re-flagging its OWN cached copies. We wrote `now` into 0x14/0x24 and
+    `now - 200 days` into 0x28 on every login. Project Crystal Server names
+    these fields LastEmailUpdate / LastFriendListUpdate / LastHandleListUpdate
+    (then fills all of them with `now` too), and SE's one captured login fits
+    the names (0x28 = 2019, the account's creation). If they are cache stamps,
+    a fresh value every login tells the client every list changed.
+
+    With the knob: each is the last time that list really changed for this
+    member (accounts.list_stamp), so an unchanged list serves the same value
+    login after login. Mail grows only when a NEWER message arrives. 0x2C stays
+    `now` -- it is what the client shows as the login date. Not yet checked
+    against a client: A/B = read a message, accept a friend request, relog, and see whether they
+    stay read; then have someone send a message and check it still shows up.
+    """
+    if os.environ.get("POL_GATE_LIST_STAMPS", "0") != "1" or member is None:
+        return None
+    try:
+        mid = int(member["id"])
+        newest = max((when for when, _p, _m in _mailbox(mid)), default=0)
+        return {
+            0x14: accounts.list_stamp(db, mid, "mail", newest, grow=True),
+            0x24: accounts.list_stamp(db, mid, "friends",
+                                      accounts.friend_list_fingerprint(db, mid)),
+            0x28: accounts.list_stamp(db, mid, "handles",
+                                      accounts.handle_list_fingerprint(db, mid)),
+        }
+    except Exception as exc:
+        log("authserv", f"gate list stamps unavailable ({exc!r}); serving the "
+                        "old per-login values")
+        return None
+
+
+def build_gate_record(lobby_ip, lobby_port, pad_to=192, unread=0, stamps=None):
     """72-byte gate/redirect record -> base64 (>=96 chars) for the 001 payload.
+
+    `stamps` ({offset: unix time}, from gate_list_stamps) replaces the per-login
+    values at 0x14/0x24/0x28 when given.
 
     `unread` is byte +0x11: the UNREAD-MAIL COUNT the client shows on its badge
     before the mail app exists. See the note at the write below -- this used to
@@ -453,6 +495,8 @@ def build_gate_record(lobby_ip, lobby_port, pad_to=192, unread=0):
         struct.pack_into("<I", r, 0x14, now)              # this login
         struct.pack_into("<I", r, 0x24, now - 86400)      # an earlier login
         struct.pack_into("<I", r, 0x28, now - 200 * 86400)  # account creation
+        for off, val in (stamps or {}).items():
+            struct.pack_into("<I", r, off, int(val) & 0xFFFFFFFF)
     else:
         struct.pack_into("<I", r, 0x14, ipn)          # -> DAT_0386a978
         struct.pack_into("<I", r, 0x24, ipn)          # -> DAT_03bc3040
@@ -7343,6 +7387,13 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # The LOBBY uses this same K=0 keystream (proven: this IV decrypts pp000
         # message headers to clean structure), so hand it to the lobby handler.
         _session_put(_session_sid(), iv=iv)
+        # ...and WHICH BUILD it is, for the lobby's send pacing: the NICK's
+        # client signature is the one real build tell we have (PS2 `TTTTT7I...`,
+        # PC `TTTTTAI...`), and the lobby band cannot see it -- see
+        # _lobby_pace_ps2. Recorded even for a login that is refused below;
+        # pacing is payload-neutral, so a stale value costs nothing.
+        if client_sig:
+            _session_put(_session_sid(), client_sig=client_sig)
         # Resolve the NICK to an account. Permissive unless POL_ACCOUNTS_ENFORCE=1;
         # a rejection here means "no such account" OR a wrong password, and we now
         # SAY SO on the wire instead of hanging up (see the reject block below).
@@ -7477,8 +7528,14 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             except Exception as exc:
                 log("authserv", f"{peer} unread-mail count unavailable ({exc!r}); "
                                 f"badge will read 0")
+            stamps = (gate_list_stamps(acct_db, member)
+                      if acct_db is not None else None)
+            if stamps:
+                log("authserv", f"{peer} gate list stamps (POL_GATE_LIST_STAMPS): "
+                                + ", ".join(f"0x{o:02X}={v}" for o, v in
+                                            sorted(stamps.items())))
             gate_rec = build_gate_record(lobby_ip, lobby_port, pad_to=0,
-                                         unread=unread)
+                                         unread=unread, stamps=stamps)
             p = prefix[1:]
             # The gate/redirect record rides in a NOTICE payload (command NOTICE ->
             # FUN_037d7f90 -> FUN_037d7ef0 -> FUN_037db6f0). FUN_037d7ef0 tokenises the
@@ -8403,6 +8460,11 @@ def handle_authresume(conn, addr, srv_name):
 # REAL probe with 81 00 (18 of 18) and only ever sent 81 e8 to our own zero-token
 # hello -- i.e. the reject was SE refusing a session it never issued, NOT a normal
 # step the client shrugs off. Emitting a reject ourselves is what produces POL-0512.
+#
+# (2026-09-27) "6c37fab1" is an IPv4 address (the client's own address in the
+# SE capture these bytes were copied from), and the hello carries it because our auth
+# record's [4:8] "client IP" field does (authtoken._CONST_48). Byte +0x09 is
+# that record's [6], which we overwrite with the account-status code.
 _SESSION_CONST_LE = bytes.fromhex("b1fa376c")     # 6c37fab1 little-endian
 _LOBBY_HDR_LEN = 0x18                             # s2c body starts here
 
@@ -8558,7 +8620,44 @@ def _lobby_until(peer_ip=None, http=False):
         if http and _http_request_complete(buf):
             return True
         return _lobby_frame_complete(buf, peer_ip)
+    done.pending = lambda buf: _lobby_frame_pending(buf, peer_ip)
     return done
+
+
+#: The largest request payload a split frame may declare and still be waited
+#: for. Requests are small (the biggest measured is the 0:8 handle store at
+#: 0x648); the cap keeps a random decrypt from holding a read open.
+_LOBBY_PARTIAL_MAX = 0x20000
+
+
+def _lobby_frame_pending(buf, peer_ip=None):
+    """True when `buf` is the FRONT of one lobby request whose tail has not
+    arrived yet -- a header that decrypts under a known session and declares
+    more payload than we hold.
+
+    WHY (2026-09-27, POL-5204 creating a handle): the 0:8 handle store is 1648
+    bytes, and twice the Viewer's first 40 arrived alone, more than `idle` (1 s)
+    before the rest. `_read_frame` returned the bare header, `_lobby_bind`'s
+    exact-length check then matched NO session ("no session claims this
+    frame"), the lobby answered blind, and the client showed POL-5204. The
+    header had decrypted cleanly under the member's own IV: type 02, opcode
+    00,08, payload 0x648. With this, the reader keeps waiting (up to its
+    maxwait) for such a frame instead of giving up at the idle mark.
+    POL_LOBBY_WAIT_PARTIAL=0 restores the old read.
+    """
+    if os.environ.get("POL_LOBBY_WAIT_PARTIAL", "1") == "0" or len(buf) < 40:
+        return False
+    try:
+        for _sid, iv in _lobby_iv_candidates(peer_ip):
+            pt = _lobby_crypt(buf[:8], iv)
+            if len(pt) < 8 or pt[0] != 0x02:
+                continue
+            plen = struct.unpack_from("<I", pt, 4)[0]
+            if 0 < plen <= _LOBBY_PARTIAL_MAX and 40 + plen > len(buf):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _read_frame(conn, idle=1.0, maxwait=8.0, minlen=1, until=None):
@@ -8574,11 +8673,17 @@ def _read_frame(conn, idle=1.0, maxwait=8.0, minlen=1, until=None):
     conn.settimeout(idle)
     buf = b""
     waited = 0.0
+    pending = getattr(until, "pending", None)
     while waited < maxwait:
         try:
             chunk = conn.recv(4096)
         except socket.timeout:
             if buf and len(buf) >= minlen:
+                # A frame that PROVES more is coming (see _lobby_frame_pending)
+                # is not finished by an idle gap -- keep reading to maxwait.
+                if pending is not None and pending(buf):
+                    waited += idle
+                    continue
                 break
             waited += idle
             continue
@@ -9946,6 +10051,13 @@ def _friend_put_reply(n, req_pt=None):
                                         ).digest()[:3], "little") or 1)
                     out[base + 0x01:base + 0x04] = struct.pack("<I", rid)[:3]
                     out[base + 0x04] = 0x04
+                    if peer_hid and _friend_bitfield_mode():
+                        # POL_FRIEND_BITFIELD: the plain handle id in bits 13-50
+                        # (no 04 above it), matching what 2:3 then serves.
+                        word = struct.unpack_from("<Q", out, base)[0]
+                        word = (word & ~(_FRIEND_HID_BITS << 13)) \
+                            | ((peer_hid & _FRIEND_HID_BITS) << 13)
+                        struct.pack_into("<Q", out, base, word)
                     log("lobby", f"  2:6 reply: assigned row id {rid:#08x} to "
                                  f"record {_i} ("
                                  + (f"handle {peer_hid} << 5, so profile/delete "
@@ -12738,6 +12850,103 @@ def _friend_handle_slots():
 _FRIEND_HID_TAG = 0x200000
 
 
+#: 🔬 **POL_FRIEND_BITFIELD -- THE FRIEND ROW'S FIRST 8 BYTES ARE ONE u64.
+#: DEFAULT OFF, NOT YET CHECKED AGAINST A CLIENT.**
+#:
+#: Project Crystal Server reads the 168-byte friend row (FriendData) as
+#:
+#:     bit 0      valid (clear = a delete, in a 2:6)
+#:     bit 4      ignore list
+#:     bits 5-6   level (disclosure scope)
+#:     bits 7-12  handle slot                    (what we already write there)
+#:     bits 13-50 HANDLE ID, 38 bits
+#:     bits 57-60 group
+#:     bit 62     temporary (a pending request)
+#:     +0x08 creation position, +0x09 custom position
+#:
+#: and SE's bytes agree without exception. What this file has called the
+#: "state byte" at +0x04 is bits 32-39, i.e. handle-id bits 19-26: SE's ids are
+#: 23-bit numbers, and the "0x200000 tag" is just their high bits.
+#:   * Fox's profile row head 0x238EA040 with +0x04 = 0x0A gives
+#:     (0x0A << 19) | (0x238EA040 >> 13) = 0x511C75 = the SAME record's z_hid
+#:     (prof-ffxi-retail-20260823.log), and 0x511C75 is also Fox's group-member
+#:     word in SE's 7:12.
+#:   * Cyn 0x27509D = (4 << 19) | 0x7509D, Wiccaan 0x20F64B: +0x04 low byte 04.
+#:   * JackAlexender's pending word 0x5A000009: byte 7 = 0x5A = bit 62 set
+#:     (temporary) + group 0xD. The settled 0x06000004 is group 3, bit 62 clear.
+#:   * SE's 2:6 frames (tools/friend_rename_test.py) have the header Crystal
+#:     describes -- u16 count at frame 0x154 (1, and 2 in the two-record write) --
+#:     and each row starting at 0x158: our "state dword in front of the grid" is
+#:     the row's bitfield. The ignore-scope bytes 21/31/51 are valid+level 1,
+#:     valid+ignore+level 1, valid+ignore+level 2; SE's deletes carry 0xE2 =
+#:     bit 0 clear. Our own clients agree: all 78 logged 2:6 records in
+#:     logs/lobby.log* (dev, 08-15..08-25) have bit 0 set on the 24 with a
+#:     name and clear on the 54 with heap in the name field.
+#:
+#: With the knob: the served head is the full u64 -- the real handle id in bits
+#: 13-50 (for our ids that zeroes the old "state byte"), level and ignore from
+#: the bytes the client last wrote for the row (`friend.ignore_low`), group and
+#: the pending bit kept from the SE words we replay today. So the client's
+#: profile subject becomes the plain handle id, which `_profile_record` accepts
+#: under the same knob; the 2:6 reply's fresh-row id and the search-hit id row
+#: follow. `POL_FRIEND_BITFIELD=1` also serves +0x09 = +0x08 (SE's rows always
+#: carry equal bytes there); `=head` changes only the u64. WARNING: Mirroring +0x09
+#: cost a login once (POL-0008, 2026-08-16, cause never separated -- see
+#: POL_FRIEND_ROWSLOT9), so A/B `head` first. Incoming 2:6: a row with bit 0
+#: clear is ALSO taken as a delete, and every record where that and the
+#: name-field heuristic disagree is logged.
+#: A/B: relog with it on, open a friend's profile and a pending row's profile,
+#: add, rename, ignore and delete a friend; compare the lobby log's resolver
+#: and `2:6 bitfield` lines with the knob off.
+_FRIEND_HID_BITS = (1 << 38) - 1
+
+
+def _friend_bitfield_mode():
+    """None (off), "full" (u64 + positions) or "head" (u64 only)."""
+    v = os.environ.get("POL_FRIEND_BITFIELD", "0").strip().lower()
+    if v in ("1", "full"):
+        return "full"
+    if v == "head":
+        return "head"
+    return None
+
+
+def _friend_row_bitfield(hid, handle_slot, state_word, flags_low=None):
+    """The u64 at friend row +0x00 -- see `_friend_bitfield_mode`.
+
+    `state_word` is the +0x04 dword we would have replayed; its group bits and
+    pending bit are kept, its low byte (old "state") is replaced by the real
+    handle-id bits. `flags_low` is the row's stored low byte from the client's
+    own 2:6, if any, for the ignore and level bits.
+    """
+    level = 1                                   # SE's settled rows: 0x21
+    ignore = 0
+    if flags_low is not None:
+        level = (int(flags_low) >> 5) & 3
+        ignore = (int(flags_low) >> 4) & 1
+    word = 1 | (ignore << 4) | (level << 5)
+    if handle_slot is not None:
+        word |= (int(handle_slot) & 0x3F) << 7
+    word |= (int(hid or 0) & _FRIEND_HID_BITS) << 13
+    word |= (int(state_word) & 0xFE000000) << 32          # group, bit 62, bit 63
+    return word & 0xFFFFFFFFFFFFFFFF
+
+
+def _friend_flags_low_by_row():
+    """`{friend row id: stored ignore_low}` for rows that have one."""
+    if accounts is None:
+        return {}
+    try:
+        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        try:
+            return {int(r["id"]): int(r["ignore_low"]) for r in db.execute(
+                "SELECT id, ignore_low FROM friend WHERE ignore_low IS NOT NULL")}
+        finally:
+            db.close()
+    except Exception:
+        return {}
+
+
 def _friend_row_handles(blob):
     """Every handle id a 02:06 frame echoes back in a friend-row head word.
 
@@ -12853,7 +13062,7 @@ def _friend_guid_probe(name, guid):
 
 def _friend_list_record(rec_size, guid, name, kind=0x0800, hid=0, status=0,
                         online=False, index=0, handle_slot=None, face_icon=0,
-                        row_id=0):
+                        row_id=0, flags_low=None):
     """One record for the 1:3 / 2:3 friend-list family.
 
     Layout read straight off a real SE capture (2026-08-11), 2:3 record:
@@ -13084,6 +13293,16 @@ def _friend_list_record(rec_size, guid, name, kind=0x0800, hid=0, status=0,
             else:
                 state = 0x06000004                            # observed OFFLINE
             struct.pack_into("<I", r, 0x04, state)
+            bf = _friend_bitfield_mode()
+            if bf:
+                # POL_FRIEND_BITFIELD -- the whole u64, see the note there.
+                hs = handle_slot if os.environ.get(
+                    "POL_FRIEND_HSLOT", "1") == "1" else None
+                struct.pack_into("<Q", r, 0x00, _friend_row_bitfield(
+                    hid if os.environ.get("POL_FRIEND_ROW_TAG", "1") == "1"
+                    else 0, hs, state, flags_low))
+                if bf == "full":
+                    r[0x09] = r[0x08]            # custom position = creation
         # WHERE IS THE COMMENT? The 2:3 record is 168 bytes and this builder
         # fills only +0x00 (flags), +0x10 (guid) and +0x18 (name). WARNING: Since
         # 2026-09-02 the 2:3 SERVE PATH overlays the 8x16 per-content block at
@@ -13802,6 +14021,44 @@ def _friend_put_deletes(pt):
     return [rec for rec in raw if not _friend_put_name(rec)]
 
 
+def _friend_put_bitfield_deletes(pt, start, raw_recs, deletes, renamed=()):
+    """POL_FRIEND_BITFIELD: add rows whose bit 0 (valid) is clear to `deletes`.
+
+    Each row's bitfield starts 4 bytes before our grid record (the "state
+    dword", `_friend_put_state_low`); the u16 row count sits 4 bytes before
+    that. Both readings are LOGGED wherever they disagree -- the name-field
+    heuristic has held since 2026-08-16 and this does not replace it.
+    Returns (deletes, set of raw records added by the bit alone).
+    """
+    at = start - 8
+    if 0 <= at and at + 2 <= len(pt):
+        count = struct.unpack_from("<H", pt, at)[0]
+        if count != len(raw_recs):
+            log("lobby", f"  2:6 bitfield: header count {count} but the frame "
+                         f"length gives {len(raw_recs)} record(s)")
+    heur = {bytes(r) for r in deletes}
+    out, extra = list(deletes), set()
+    for i, rec in enumerate(raw_recs):
+        low = _friend_put_state_low(pt, i, start)
+        if low is None:
+            continue
+        bit_del = not (low & 1)
+        h_del = bytes(rec) in heur
+        if bit_del == h_del:
+            continue
+        log("lobby", f"  2:6 bitfield: record {i} valid bit says "
+                     f"{'DELETE' if bit_del else 'keep'} (low {low:#04x}), the "
+                     f"name heuristic says {'DELETE' if h_del else 'keep'} "
+                     f"(text {_friend_put_text(rec)!r}, slot "
+                     f"{_friend_put_slot(rec)})"
+                     + (" -- deleting (POL_FRIEND_BITFIELD)" if bit_del and
+                        bytes(rec) not in renamed else ""))
+        if bit_del and bytes(rec) not in renamed:
+            out.append(rec)
+            extra.add(bytes(rec))
+    return out, extra
+
+
 #: WHICH FRIEND A DELETE NAMES -- the record's +0x04 byte, the friend's slot in
 #: the 2:3 list WE served. Measured 2026-08-16 against SE's own capture
 #: (`pol-shim/build-se/polshim-se.429364.log`, decoded with `tools/lobbydec.py`)
@@ -14275,6 +14532,12 @@ def _capture_friend_put(pt):
                                  "read-it-as-a-delete behaviour)")
             # A record we just took as a rename is not a delete and not an add.
             deletes = [r for r in deletes if bytes(r) not in renamed]
+            if fits and _friend_bitfield_mode():
+                deletes, extra = _friend_put_bitfield_deletes(
+                    pt, start, raw_recs, deletes, renamed)
+                if extra:
+                    # Deleted, so it must not also be read as an add below.
+                    recs = [r for r in recs if bytes(r["raw"]) not in extra]
             for rec in deletes:
                 # THE SLOT, and on a live record ONLY the slot. It is the one
                 # identifier here that WE minted, so it resolves a row the client
@@ -15315,6 +15578,10 @@ def _list_payload(op1, op2, n, req_pt=None):
     # Same rule, same reason -- and only for `friends`, since the row spool is the
     # only consumer and groups have no comment.
     rcomments = _comments_by_handle() if mode == "friends" else {}
+    # POL_FRIEND_BITFIELD only: each row's stored low byte (ignore + level bits,
+    # from the client's own last 2:6), one query for the whole list.
+    flows = _friend_flags_low_by_row() \
+        if mode in ("friends", "groups") and _friend_bitfield_mode() else {}
     #: (slot, guid, icon) per friend that HAS a picture -- filled by the record
     #: loop, pushed once the reply is built. See push_friend_icons.
     icon_rows = []
@@ -15612,7 +15879,7 @@ def _list_payload(op1, op2, n, req_pt=None):
                 status=1 if st in accounts.STATUS_UNSETTLED else 0,
                 online=onl, index=i,
                 handle_slot=fslots.get(int(g)),
-                face_icon=icon, row_id=rid)
+                face_icon=icon, row_id=rid, flags_low=flows.get(int(rid)))
             # The content block -- see the banner where `cblocks` is built. The
             # 128 bytes end exactly at the record's 0xA8, so the size check is
             # an identity today and a guard if the record ever shrinks.
@@ -16037,6 +16304,8 @@ _CONTENT_PHEAD = 104
 #: on the 424-byte handle record (`verify_profile.py` pins it). So a measured
 #: value wins where we have one, and the formula is the fallback. Do not
 #: "correct" FFXI's 104 to 101: 104 is what renders live.
+#: (2026-09-27: 104 is 101 rounded up to 8, the offset of a 0xB0 trailer -- see
+#: `_PROFILE_NOTIFY_AT`; POL_PROFILE_TRAILER=1 applies that to every title.)
 #:
 #: code -> (schema, record length, measured z_phead or None to compute)
 _CONTENT_SCHEMAS = {
@@ -16472,6 +16741,11 @@ def _content_schema_for(code):
         # by verify_profile.py). FFXI's content record is the one place it does
         # not hold, and there the MEASURED value is stored instead.
         phead = 1 + sum(ln + 1 for _i, _n, ln, _t in schema)
+        if _profile_trailer_on():
+            # ALIGNED TO 8 under POL_PROFILE_TRAILER -- see `_profile_trailer_on`.
+            # That is what FFXI's measured 104 is (101 rounded up), and it is
+            # the offset the 0xB0 trailer sits at in SE's FFXI record.
+            phead = (phead + 7) & ~7
     return schema, rec_len, phead, True
 
 
@@ -16646,6 +16920,35 @@ def _content_profile_record(size, req_pt=None):
             except Exception:
                 pass
         off += step
+    # THE 0xB0 TRAILER AT z_phead -- POL_PROFILE_TRAILER=1 only, see
+    # `_PROFILE_NOTIFY_AT`. SE's FFXI record carries the OWNING HANDLE's friend
+    # row there (the same bytes as that handle's own profile record at 0x1A8),
+    # then the status block. A Content ID with no owning handle stays zero,
+    # which is what Crystal sends for a missing header too.
+    if _profile_trailer_on() and cid and accounts is not None \
+            and 0 < int(phead) and int(phead) + _PROFILE_TRAILER_LEN <= size:
+        try:
+            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
+                                                 accounts.DEFAULT_DB))
+            try:
+                owner = accounts.handle_by_content_id(db, cid)
+                if owner is not None:
+                    owner = db.execute("SELECT * FROM handle WHERE id = ?",
+                                       (int(owner["id"]),)).fetchone()
+                if owner is not None:
+                    purp = (accounts.get_handle_profile(db, int(owner["id"]))
+                            or {}).get(17)
+                    trailer = (_profile_identity_record(db, owner)
+                               + _profile_notify_status(db, owner, purp))
+                    at = int(phead)
+                    out[at:at + _PROFILE_TRAILER_LEN] = trailer
+                    log("lobby", f"content profile: trailer at {at:#x} = handle "
+                                 f"{owner['id']}'s friend row + status "
+                                 f"{trailer[-8:].hex()} (POL_PROFILE_TRAILER)")
+            finally:
+                db.close()
+        except Exception as exc:
+            log("lobby", f"content profile: trailer failed ({exc!r}); left zero")
     log("lobby", f"content profile: z_ctid={cid if cid is None else hex(int(cid))} "
                  f"code={code} schema={'measured' if measured else 'FFXI (assumed)'}"
                  f" name={name!r}, {len(served)} field(s) set ({', '.join(served)})")
@@ -16890,6 +17193,93 @@ def _identity_content_entries(db, hid):
                      "(no content section will be offered)")
     return bytes(out)
 
+
+#: 🔬 **POL_PROFILE_TRAILER=1 -- EVERY PROFILE RECORD ENDS IN A 0xB0 TRAILER.
+#: DEFAULT OFF, NOT YET CHECKED AGAINST A CLIENT.**
+#:
+#: The trailer is the subject's 168-byte friend row (FriendData) followed by an
+#: 8-byte status block (NotifyStatusData), and it sits at z_phead, which is
+#: 1 + sum(len + 1) ROUNDED UP TO 8. Project Crystal Server's profile table
+#: writer (PolDbTable / ProfileHeader) builds records that way. It matches every
+#: record length the Viewer's own `prof_<NNN>.pib` files declare:
+#:
+#:     FFXI  101 -> 104 + 176 = 280     TM / jan  251 -> 256 + 176 = 432
+#:     DoC    61 ->  64 + 176 = 240     FE        285 -> 288 + 176 = 464
+#:     FMO   102 -> 104 + 176 = 280     handle    424       + 176 = 600
+#:
+#: That also accounts for the "3-byte discrepancy" on FFXI's z_phead (104, not
+#: 101) noted at `_CONTENT_SCHEMAS`: the 104 is the aligned value.
+#:
+#: CHECKED AGAINST SE'S OWN BYTES (work/pc/prof-ffxi-retail-20260823.log):
+#:   * the 280-byte FFXI content record (line 10525) has, at +0x68, the same
+#:     168-byte row the handle record carries at 0x1A8 (head 0x238EA040, guid,
+#:     "Fox", the content block) and then `01 01 00 00 00 00 00 00` at +0x110;
+#:   * the handle records carry 8 bytes at 0x250: `01 01 00 00 00000000` on the
+#:     account's OWN profile, `00 01 00 04 ...` and `00 01 00 05 ...` on two
+#:     offline members (line 11843/11950), and polshim-se.429364's select1 for
+#:     an online friend has `01 03 00 00 e8 03 00 00`.
+#:
+#: The status block, read with Crystal's field names and checked on those four:
+#:     +0 login flag     1 online (or self), 0 offline
+#:     +1 status         the presence push's +0x11 value: 3 online, 2 away,
+#:                       1 offline -- and 1 on the account's own record
+#:     +2 active character bits (0 in every sample; left 0)
+#:     +3 purpose        the subject's z_purp. The two offline members carry
+#:                       purpose 4 and 5 in their field 17 and 04/05 here; Crystal
+#:                       always writes 0, SE does not.
+#:     +4 u32 zone       the presence zone (1000 = the Viewer), 0 offline / self
+#:
+#: The SELF case is copied from the one sample there is (own profile, logged in,
+#: yet status 1 / zone 0); the others follow the presence push we already
+#: serve, so a friend's record and their push agree.
+#:
+#: What changes with the knob ON: content records use the aligned z_phead
+#: (DoC/TM/jan/FMO/FE -- FFXI's measured 104 is unchanged) and carry the owner
+#: handle's friend row + status block there instead of zeros; the handle record
+#: gains the status block at 0x250. With it OFF the bytes are what they were.
+#: A/B: open a TM/FE/DoC/FMO content profile and a friend's handle profile with
+#: it on and off; watch for the section rendering and for any refusal.
+_PROFILE_NOTIFY_AT = _PROFILE_IDREC_AT + _PROFILE_IDREC_LEN     # 0x250
+_PROFILE_NOTIFY_LEN = 8
+_PROFILE_TRAILER_LEN = _PROFILE_IDREC_LEN + _PROFILE_NOTIFY_LEN  # 0xB0
+
+
+def _profile_trailer_on():
+    """Is POL_PROFILE_TRAILER on? Read per call so a test can flip it."""
+    return os.environ.get("POL_PROFILE_TRAILER", "0") == "1"
+
+
+def _profile_notify_status(db, h, purpose=None):
+    """The 8-byte status block of a profile trailer for handle row `h`.
+
+    See `_PROFILE_NOTIFY_AT` for the layout and the four SE samples it is
+    checked against. Best effort: any failure gives the offline shape.
+    """
+    purp = 0
+    try:
+        purp = int(purpose or 0) & 0xFF
+    except (TypeError, ValueError):
+        purp = 0
+    offline = _PRESENCE_FIELD_STATE["offline"]
+    try:
+        member = int(h["member_id"])
+        if _session_member_id() == member:
+            # The account's own record: SE sent status 1, zone 0 while online.
+            return bytes([1, offline, 0, purp]) + bytes(4)
+        if not accounts.handle_online(db, int(h["id"])):
+            return bytes([0, offline, 0, purp]) + bytes(4)
+        away = _status_is_away(_member_status(member))
+        state = _presence_field_state("away" if away else "online")
+        if state is None:
+            state = _PRESENCE_FIELD_STATE["away" if away else "online"]
+        zone = _presence_zone(member, state)
+        return bytes([1, int(state) & 0xFF, 0, purp]) + struct.pack(
+            "<I", int(zone or 0) & 0xFFFFFFFF)
+    except Exception as exc:
+        log("lobby", f"profile trailer: status block failed ({exc!r}); offline")
+        return bytes([0, offline, 0, purp]) + bytes(4)
+
+
 #: The parser consumes ONE leading byte (stored at dest+4) and then, per field,
 #: a PRESENCE byte followed by `length` value bytes -- the walk step is
 #: `edi += length + 1`. So the used span is 1 + sum(length + 1) = 424 bytes of
@@ -17009,7 +17399,15 @@ def _profile_identity_record(db, h, tagged=False):
             _PROFILE_IDREC_LEN, accounts.handle_guid(hid), h["handle_name"],
             kind=accounts.KIND_FRIEND, hid=hid,
             online=bool(accounts.handle_online(db, hid)), index=0)
-        if tagged:
+        if tagged and _friend_bitfield_mode():
+            # POL_FRIEND_BITFIELD: SE's search-hit head is the same u64 with the
+            # low 13 bits replaced by 0x40 (no valid bit, level 2) -- Cyn's
+            # 0xEA13A040 -- so the handle id stays where the row put it.
+            rec = bytearray(rec)
+            word = struct.unpack_from("<Q", rec, 0x00)[0]
+            struct.pack_into("<Q", rec, 0x00, (word & ~0x1FFF) | 0x40)
+            rec = bytes(rec)
+        elif tagged:
             rec = bytearray(rec)
             struct.pack_into("<I", rec, 0x00,
                              (((hid & 0x7FFFF) << 5) << 8) | 0x40)
@@ -17107,6 +17505,7 @@ def _profile_record(size, req_pt=None, force_hid=None):
     out = bytearray(size)
     fields = {}
     idrec = None                       # the trailing 2:3 row, see _PROFILE_IDREC_AT
+    notify = None                      # the status block, see _PROFILE_NOTIFY_AT
     if accounts is not None:
         try:
             db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
@@ -17164,6 +17563,18 @@ def _profile_record(size, req_pt=None, force_hid=None):
                     log("lobby", f"profile record: z_hid {int(subject_hid):#x} is a "
                                  f"friend-row subject (state "
                                  f"{int(subject_hid) >> 19:#04x}) -> handle {fid}"
+                                 + (f" ({h['handle_name']!r})" if h else
+                                    " -- WHICH WE DO NOT HAVE"))
+                if h is None and subject_hid and _friend_bitfield_mode() \
+                        and 0 < int(subject_hid) < 0x80000:
+                    # POL_FRIEND_BITFIELD: the friend row carries the plain
+                    # handle id in bits 13-50, so the client's subject is that id
+                    # with no "state" bits above it (see `_friend_bitfield_mode`).
+                    fid = int(subject_hid)
+                    h = db.execute("SELECT * FROM handle WHERE id = ?",
+                                   (fid,)).fetchone()
+                    log("lobby", f"profile record: z_hid {fid:#x} is a plain "
+                                 f"handle id (POL_FRIEND_BITFIELD) -> handle {fid}"
                                  + (f" ({h['handle_name']!r})" if h else
                                     " -- WHICH WE DO NOT HAVE"))
                 if h is None and subject_hid and \
@@ -17242,7 +17653,14 @@ def _profile_record(size, req_pt=None, force_hid=None):
                     # POL_SEARCH_ZHID_TAGGED=0 reverts.
                     tagged = bool(force_hid) and os.environ.get(
                         "POL_SEARCH_ZHID_TAGGED", "1") == "1"
-                    if tagged:
+                    if tagged and _friend_bitfield_mode():
+                        # POL_FRIEND_BITFIELD: the id row carries the plain
+                        # handle id in bits 13-50, so z_hid is that id.
+                        fields[2] = int(h["id"]) & _FRIEND_HID_BITS
+                        log("lobby", f"profile record: search hit z_hid "
+                                     f"{int(fields[2]):#x} (handle {h['id']}, "
+                                     f"POL_FRIEND_BITFIELD)")
+                    elif tagged:
                         fields[2] = _FRIEND_HID_TAG | (int(h["id"]) & 0x7FFFF)
                         log("lobby", f"profile record: search hit z_hid "
                                      f"TAGGED {int(fields[2]):#x} "
@@ -17251,6 +17669,8 @@ def _profile_record(size, req_pt=None, force_hid=None):
                     # see `_PROFILE_IDREC_AT`. Built here because this is where
                     # the subject handle is resolved and the database is open.
                     idrec = _profile_identity_record(db, h, tagged=tagged)
+                    if _profile_trailer_on():
+                        notify = _profile_notify_status(db, h, fields.get(17))
                     log("lobby", f"profile record: serving handle {h['id']} "
                                  f"({h['handle_name']!r}), "
                                  f"{len(fields)} field(s)")
@@ -17440,6 +17860,12 @@ def _profile_record(size, req_pt=None, force_hid=None):
                      f"({_PROFILE_IDREC_LEN}B) -- guid at "
                      f"{_PROFILE_IDREC_AT + 0x10:#x}, name at "
                      f"{_PROFILE_IDREC_AT + 0x18:#x}")
+    if notify is not None \
+            and size >= _PROFILE_NOTIFY_AT + _PROFILE_NOTIFY_LEN:
+        # POL_PROFILE_TRAILER=1 only -- see `_PROFILE_NOTIFY_AT`.
+        out[_PROFILE_NOTIFY_AT:_PROFILE_NOTIFY_AT + _PROFILE_NOTIFY_LEN] = notify
+        log("lobby", f"profile tail: status block at {_PROFILE_NOTIFY_AT:#x} = "
+                     f"{notify.hex()} (POL_PROFILE_TRAILER)")
 
     log("lobby", "profile record head:\n" + hexdump(bytes(out[:96])))
     log("lobby", f"profile record: {len(served)}/{len(_PROFILE_SCHEMA)} fields set "
@@ -21320,6 +21746,11 @@ def _lobby_capture(pt):
                              "scavenged phantom, not a handle a user chose")
                 continue
             names.append((off, txt))
+    if _handle_store_layout() == "crystal":
+        # POL_HANDLE_STORE_LAYOUT=crystal -- read the 64 records instead of
+        # scavenging; the scavenger's names above are only logged beside them.
+        _handle_store_capture(pt, names)
+        return
     if not names:
         log("lobby", "0:8 carried no handle-shaped names; nothing captured")
         return
@@ -21332,6 +21763,128 @@ def _lobby_capture(pt):
     for _off, _name in names:
         _capture_one_handle(_name.encode("ascii"))
     return
+
+
+#: 🔬 **POL_HANDLE_STORE_LAYOUT=crystal -- 0:8 IS 64 FIXED RECORDS, NOT A TABLE
+#: TO SCAVENGE. DEFAULT OFF, NOT YET CHECKED AGAINST A CLIENT.**
+#:
+#: Project Crystal Server reads the 0x648-byte KPutHandleList object as 0x40
+#: order bytes, then 64 records of 0x18:
+#:
+#:     +0x00 mode    0 = unchanged (skip), 1 = store, 2 = delete
+#:     +0x01 creation position     +0x02 open level     +0x08 name, 16 bytes
+#:
+#: With our 0x28-byte frame header that is order at 0x28..0x67 and record i at
+#: 0x68 + i*0x18, name at 0x70 + i*0x18. Our own logged 0:8s fit it:
+#:   * the order bytes are the 0x00..0x3F ramp at 0x28 (the printable run
+#:     " !\"#...?" at 0x48 in every dump), reordered `01 00 02 ..` after a
+#:     handle swap (lobby.log.2, 2026-08-16);
+#:   * Fox's registration: 0x68 = `01 00 02 00` = mode 1, position 0, open
+#:     level 2, "Fox" at 0x70 -- the "disc=01000100" registration flavour is
+#:     record 0's mode/position/level, and the "00 00 03 00" mail flavour is a
+#:     SKIPPED record 0;
+#:   * every phantom the scavenger ever minted sits in a record's name field
+#:     (TUTTTTTT at 0x88 = record 1, DeckTest at 0x88 = record 1, CasGoons and
+#:     HIJKLMNO at record 7/8 name +8), i.e. stale buffer in records we cannot
+#:     show were mode 1 -- only the first 0x80 bytes of a 0:8 were ever
+#:     dumped, so records 1..63's mode bytes are UNSEEN. The 0x10 stride from
+#:     0x78 lands on every other record's name and on the middle of the rest.
+#:
+#: With the knob: mode-1 records are captured (same validation and tombstones
+#: as before), mode-2 records are logged with the handle they name and deleted
+#: only if POL_HANDLE_STORE_DELETE=1 as well, and the scavenger's result is
+#: logged beside the parse for every 0:8. The reply is unchanged (Crystal
+#: answers 64 u64 of 0x100000000000 | handle id; ours is left alone).
+#: A/B: create, reorder and delete a handle with the knob on; the log's
+#: `0:8 records` line should name exactly the handle touched, with the
+#: scavenger's `would have taken` list for comparison.
+_HANDLE_STORE_REC_AT = 0x68
+_HANDLE_STORE_REC = 0x18
+_HANDLE_STORE_N = 64
+_HANDLE_STORE_NAME = 0x08
+
+
+def _handle_store_layout():
+    """"crystal" when POL_HANDLE_STORE_LAYOUT asks for it, else None."""
+    v = os.environ.get("POL_HANDLE_STORE_LAYOUT", "").strip().lower()
+    return "crystal" if v == "crystal" else None
+
+
+def _handle_store_records(pt):
+    """[(index, mode, position, open level, 16-byte name field)] with mode != 0."""
+    out = []
+    for i in range(_HANDLE_STORE_N):
+        at = _HANDLE_STORE_REC_AT + i * _HANDLE_STORE_REC
+        if at + _HANDLE_STORE_REC > len(pt):
+            break
+        mode = pt[at]
+        if mode == 0:
+            continue
+        name = bytes(pt[at + _HANDLE_STORE_NAME:at + _HANDLE_STORE_NAME + 0x10])
+        out.append((i, mode, pt[at + 1], pt[at + 2], name))
+    return out
+
+
+def _handle_store_text(field):
+    """The name in a record's field, for logs and delete lookups ('' if none)."""
+    raw = field.split(b"\x00", 1)[0]
+    try:
+        txt = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+    return txt if txt.isprintable() else ""
+
+
+def _handle_store_capture(pt, scavenged):
+    """Act on the 0:8 per record -- see `_HANDLE_STORE_REC_AT`."""
+    recs = _handle_store_records(pt)
+    log("lobby", "0:8 records (crystal layout): " + (", ".join(
+        f"#{i} mode={mode} pos={pos} open={lvl} name="
+        f"{_handle_store_text(nm)!r}" for i, mode, pos, lvl, nm in recs)
+        or "none changed"))
+    stored = sorted(_handle_store_text(nm) for _i, mode, _p, _l, nm in recs
+                    if mode == 1)
+    scav = sorted(n for _o, n in scavenged)
+    log("lobby", f"0:8 scavenger would have taken {scav}; the records store "
+                 f"{stored}" + ("" if scav == stored else " -- THEY DISAGREE"))
+    for i, mode, pos, _lvl, nm in recs:
+        if mode == 1:
+            _capture_one_handle(nm)
+        elif mode == 2:
+            _handle_store_delete(i, pos, nm)
+        else:
+            log("lobby", f"0:8 record #{i}: unknown mode {mode}; ignored")
+
+
+def _handle_store_delete(index, pos, field):
+    """A mode-2 record. Logged; acted on only with POL_HANDLE_STORE_DELETE=1."""
+    name = _handle_store_text(field)
+    act = os.environ.get("POL_HANDLE_STORE_DELETE", "0") == "1"
+    try:
+        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
+                                             accounts.DEFAULT_DB))
+        try:
+            mid = _session_member_id()
+            row = db.execute("SELECT id FROM handle WHERE member_id = ? AND"
+                             " handle_name = ?", (mid, name)).fetchone() \
+                if mid and name else None
+            if row is None:
+                log("lobby", f"0:8 record #{index}: DELETE position {pos} "
+                             f"name {name!r} -- names no handle of member {mid}; "
+                             "nothing done")
+            elif not act:
+                log("lobby", f"0:8 record #{index}: DELETE {name!r} (handle "
+                             f"{row['id']}, position {pos}) -- logged only, "
+                             "POL_HANDLE_STORE_DELETE=1 acts on it")
+            else:
+                gone = accounts.delete_handle(db, mid, name)
+                log("lobby", f"0:8 record #{index}: DELETE {name!r} (handle "
+                             f"{row['id']}, position {pos}) -> "
+                             f"{'deleted + tombstoned' if gone else 'not found'}")
+        finally:
+            db.close()
+    except Exception as exc:
+        log("lobby", f"0:8 record #{index}: delete failed ({exc!r})")
 
 
 def _capture_one_handle(raw):
@@ -21661,6 +22214,12 @@ def _parse_lobby_hello(buf):
     # anything (see the note above _SESSION_CONST_LE -- the only occurrences in
     # the image are the client's own outgoing template), so treating it as a
     # four-byte constant was our invention, not the protocol's.
+    #
+    # And the "PS2 sends 00 where the PC sends fa" reading is not a build
+    # difference either (2026-09-27): these four bytes echo the [4:8] "client
+    # IP" field of the auth record WE sent, and +0x09 is its byte [6], our
+    # account-status code -- 0xfa back when we shipped 0xfa, 0x00 since. It
+    # tells you which server version greeted the client, not which client.
     d["magic_ok"] = (buf[8:9] == _SESSION_CONST_LE[0:1]
                      and buf[10:12] == _SESSION_CONST_LE[2:4])
     d["magic_variant"] = buf[9] if len(buf) > 9 else None
@@ -22647,8 +23206,59 @@ _peer_build = threading.local()
 
 
 def _peer_is_ps2():
-    """True when the connection being answered on THIS thread is a PS2 Viewer."""
+    """True when the lobby hello's magic[+0x09] was 0x00 -- NOT a build test.
+
+    WARNING: That byte is OURS. The hello's [8:12] echoes the [4:8] of the record our
+    auth hop sent (the "client IP" field, see authtoken._CONST_48), and [+0x09]
+    is its byte [6] -- the account-status code we write, 0 by default. So this
+    reads back our own POL_ACCT_STATUS and says PS2 for every client, which is
+    exactly what was measured on a live server.
+
+    Its three callers all choose a RECORD LAYOUT (TM0RkData length and body,
+    the ZL/RL name transforms), and a layout switch must not change on a signal
+    that has never been validated for it, in either direction -- so they are
+    deliberately LEFT on this. Send pacing, the one payload-neutral use, moved
+    to `_lobby_pace_ps2`, which reads the real build from the login NICK.
+    """
     return getattr(_peer_build, "ps2", False)
+
+
+def _lobby_pace_ps2(variant, peer=""):
+    """Pace this lobby connection's replies as a PS2 console? (send cadence ONLY)
+
+    The basis is the client signature from the login NICK (`nick_client_sig`,
+    PS2 `TTTTT7I...`, PC `TTTTTAI...`), which the auth hop records in the
+    session this lobby connection has bound to. The old basis, magic[+0x09]
+    (`variant`), is our own status byte echoed back -- 0x00 for everyone -- so
+    every PC Viewer was being paced like a console.
+
+    Never removes pacing from a real PS2: when no signature is known for the
+    session (unbound connection, a login from before this shipped, an unfamiliar
+    prefix) it returns the old answer, which in practice is True.
+    POL_PS2_DETECT=magic restores the old basis outright.
+
+    Payload-neutral by construction -- the caller sends identical bytes either
+    way -- so this must NOT be reused to choose a record layout. See
+    `_peer_is_ps2`.
+    """
+    old = variant == 0x00
+    if os.environ.get("POL_PS2_DETECT", "sig") == "magic":
+        return old
+    sig = _session_get("client_sig")
+    if isinstance(sig, str) and sig.startswith("TTTTT7I"):
+        verdict, why = True, "PS2 client signature"
+    elif isinstance(sig, str) and sig.startswith("TTTTTAI"):
+        verdict, why = False, "PC client signature"
+    else:
+        verdict, why = old, ("no client signature for this session"
+                             if not sig else "unfamiliar client signature")
+    note = (verdict, sig)
+    if getattr(_peer_build, "pace_note", None) != note:
+        _peer_build.pace_note = note
+        log("lobby", f"{peer} send pacing: {'PS2' if verdict else 'PC'} "
+                     f"({why} {sig!r}; magic[+0x09] said "
+                     f"{'PS2' if old else 'PC'})")
+    return verdict
 
 
 def _lobby_ps2_send(conn, out, is_ps2, peer=""):
@@ -22663,9 +23273,10 @@ def _lobby_ps2_send(conn, out, is_ps2, peer=""):
     clean room/table list and hangs on "getting the room list details". This is
     the SAME failure class as POL-0006 on the portal band, which `_band_send`
     already paces -- this is that fix for the lobby band. Two differences from the
-    portal path: the lobby band has no User-Agent header, so the PS2 is identified
-    by its hello `magic[+0x09] == 0x00` (the `variant` the handler already parses);
-    and it needs TCP_NODELAY, or Nagle recoalesces the metered chunks into the very
+    portal path: the lobby band has no User-Agent header, so the PS2 was identified
+    by its hello `magic[+0x09] == 0x00` -- which turned out to be our own status
+    byte echoed back, PS2 for everyone; callers now pass `_lobby_pace_ps2()`,
+    which reads the login NICK's client signature instead; and it needs TCP_NODELAY, or Nagle recoalesces the metered chunks into the very
     burst DEV9 chokes on. Payload-neutral -- identical bytes, only the send cadence
     changes -- so it cannot affect the content the client parses (Tetra Master
     included, though a PC TM never pace here).
@@ -23149,6 +23760,7 @@ def handle_lobby(conn, addr, port, stub_ip):
         # send cadence -- a title's ranking header is 24 bytes here and 28 on the PC.
         _peer_build.ps2 = (variant == 0x00)
         _peer_build.ip = addr[0]
+        _peer_build.pace_note = None          # _lobby_pace_ps2 logs once per hello
         # +0x09 identifies the CLIENT: 0xfa = PC Viewer, 0x00 = PS2 Viewer.
         # Worth surfacing -- it is the only field seen so far that tells the two
         # apart on this channel, and the two do not speak it identically.
@@ -23373,12 +23985,13 @@ def handle_lobby(conn, addr, port, stub_ip):
                         log("lobby", f"{peer}   SPLIT (POL_LOBBY_SPLIT): 24B header, "
                                      f"{split_ms}ms pause, then {len(out) - 24}B")
                         time.sleep(split_ms / 1000.0)
-                        _lobby_ps2_send(conn, out[24:], variant == 0x00, peer)
+                        _lobby_ps2_send(conn, out[24:], _lobby_pace_ps2(variant, peer),
+                                        peer)
                     else:
                         # PS2 consoles get the reply metered so PCSX2's DEV9 TCP
                         # emulation does not choke on a 51 KB room list and reset
                         # (see _lobby_ps2_send). PC clients take the single sendall.
-                        _lobby_ps2_send(conn, out, variant == 0x00, peer)
+                        _lobby_ps2_send(conn, out, _lobby_pace_ps2(variant, peer), peer)
 
         # Phase 2/3 (legacy `full`): read one request, then reply.
         req = _read_frame(conn, idle=1.0, maxwait=follow, minlen=1,
