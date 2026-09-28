@@ -41,7 +41,6 @@ RELEASE_DEFAULTS = {
     "POL_LOBBY_LIST_MODE": "0:7=handles,0:9=handles,1:3=chars,2:3=friends,7:12=groups",
     "POL_LOBBY_CONTENT_IDS": "1,2,4,11,14",
     "POL_ACCOUNTS_ENFORCE": "1",      # unknown NICKs are refused; accounts come from sign-up or the admin panel
-    "POL_ACCOUNTS_DB": "/data/accounts.db",
     "POL_AUTH_FRONT_PREAMBLE": "1",  # authrelay announces the real client address; consume it
     "POL_PRESENCE_PUSH": "1",
     "POL_FRIEND_ROW_PUSH": "1",

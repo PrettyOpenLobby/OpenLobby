@@ -87,8 +87,8 @@ def _now():
 def count_today(db, member_id, direction):
     since = (_now() - datetime.timedelta(days=1)).isoformat()
     return db.execute(
-        "SELECT COUNT(*) FROM ext_mail_log WHERE member_id = ? AND direction = ? "
-        "AND ok = 1 AND at >= ?", (member_id, direction, since)).fetchone()[0]
+        "SELECT COUNT(*) FROM ext_mail_log WHERE member_id = %s AND direction = %s "
+        "AND ok = 1 AND at >= %s", (member_id, direction, since)).fetchone()[0]
 
 
 def room_today(db, member_id, direction):
@@ -99,7 +99,7 @@ def room_today(db, member_id, direction):
 
 def note(db, member_id, direction, peer_addr, ok, detail=""):
     db.execute("INSERT INTO ext_mail_log (member_id, direction, peer_addr, at, ok, "
-               "detail) VALUES (?,?,?,?,?,?)",
+               "detail) VALUES (%s,%s,%s,%s,%s,%s)",
                (member_id, direction, str(peer_addr)[:320], _now().isoformat(),
                 1 if ok else 0, str(detail)[:500]))
     db.commit()

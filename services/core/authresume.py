@@ -480,8 +480,7 @@ def handle_authresume(conn, addr, srv_name):
         # the last thing to do.
         nick_s = nick.decode("ascii", "replace")
         if accounts is not None and os.environ.get("POL_ACCOUNTS", "1") == "1":
-            acct_db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                      accounts.DEFAULT_DB))
+            acct_db = accounts.connect()
             member = (accounts.member_by_handle(acct_db, nick_s) or
                       accounts.get_member(acct_db, nick_s) or
                       accounts.member_by_alias(acct_db, nick_s))

@@ -152,7 +152,7 @@ def _warn_stranded_registration(db, nick, peer_ip):
     try:
         rows = db.execute(
             "SELECT login_name, polid FROM member WHERE login_token IS NULL"
-            " AND login_name != ? ORDER BY id DESC LIMIT 5", (nick,)).fetchall()
+            " AND login_name != %s ORDER BY id DESC LIMIT 5", (nick,)).fetchall()
     except Exception:
         return                                  # a diagnostic is never fatal
     if not rows:
@@ -247,8 +247,7 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
     enforce = os.environ.get("POL_ACCOUNTS_ENFORCE", "0") == "1"
     enforce_pw = enforce or os.environ.get("POL_ACCOUNTS_ENFORCE_PW", "0") == "1"
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         accounts.purge_sessions(db)
         member = (accounts.member_by_handle(db, nick) or
                   accounts.get_member(db, nick) or
@@ -277,7 +276,7 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
         # REFUSED within POL_LOGIN_LOCKOUT_WINDOW_S (900 s), every login of this
         # member is refused with SE's 0xCB -- the right password too, which is
         # the point of a lockout -- until enough of those failures age out of
-        # the window. Counted in accounts.db (login_fail), so authsess and the
+        # the window. Counted in the database (login_fail), so authsess and the
         # login container agree. `accounts.py <db> unlock <polid|login>` ends
         # it early; POL_LOGIN_LOCKOUT_FAILS=0 turns it off.
         lock_fails, lock_window = _lockout_policy()

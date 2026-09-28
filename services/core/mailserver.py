@@ -51,7 +51,7 @@ _MAIL_MAX_BYTES = int(os.environ.get("POL_MAIL_MAX_KB", "4096")) * 1024
 def _mail_db():
     """The account DB, or None when accounts are unavailable/disabled.
 
-    Mail storage rides the SAME sqlite file as everything else rather than a
+    Mail storage rides the SAME database as everything else rather than a
     maildir of its own: an address belongs to a member, and putting it anywhere
     else means a second thing to back up and a second thing that can disagree
     about who owns `lex@pol.com`.
@@ -59,8 +59,7 @@ def _mail_db():
     if accounts is None or os.environ.get("POL_ACCOUNTS", "1") != "1":
         return None
     try:
-        return accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                               accounts.DEFAULT_DB))
+        return accounts.connect()
     except Exception as exc:                       # pragma: no cover - defensive
         log("mail", f"account DB unavailable ({exc!r}); mailbox is read-only stub")
         return None

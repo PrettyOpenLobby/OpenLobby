@@ -4,10 +4,10 @@
 Runs beside the server (localhost only; it can mint codes and accounts, so it is
 NOT for player exposure). Three jobs today:
 
-  1. Codes & accounts over the SAME accounts.db the login/ucs services use
-     (`accounts.issue_regcode`, `grant_content`, `delete_polid`, listing) -- so an
-     operator can create registration codes, grant content and delete an account
-     without a sqlite shell.
+  1. Codes & accounts over the SAME account database the login/ucs services
+     use (`accounts.issue_regcode`, `grant_content`, `delete_polid`, listing) --
+     so an operator can create registration codes, grant content and delete an
+     account without a database shell.
 
   2. Authoring server NEWS -- the login-screen ticker, SE's real Information
      section, and a detail page per story. The panel edits the announcement
@@ -28,7 +28,7 @@ Stdlib only (matches the other services). Serves its single-page UI from
 `services/admin_web/`, art from `/www`, and a small JSON API under `/api/`.
 
     POL_ADMIN_PORT        default 8090
-    POL_ACCOUNTS_DB       default /data/accounts.db
+    POL_DATABASE_URL      the PostgreSQL the accounts live in (docs/database.md)
     POL_ADMIN_ART_ROOT    default /www/ucs.pol.com        (serves /art/*)
     POL_ADMIN_CGI         default http://ucs-plain:8080   (live-page proxy)
     POL_ADMIN_USER        default admin       } break-glass override only; the
@@ -71,9 +71,11 @@ import gmchat  # noqa: E402  -- the GM chat record language and its spool
 #: that here is how the panel ends up telling an operator something the caller
 #: was never told. Importing it binds no socket -- `serve()` does that.
 import gmd  # noqa: E402
-import sqlite3  # noqa: E402
-#: Moderator logins, the audit log and code origins. Its own data/admin.db,
-#: so nothing here makes prod restart login/authsess (see its docstring).
+#: The database layer's error types (the connections come from accounts and
+#: adminusers). Named so, because `db` is every connection's name below.
+from polcore import db as polcore_db  # noqa: E402
+#: Moderator logins, the audit log and code origins: the admin_* tables, which
+#: only this panel reads (see its docstring).
 import adminusers  # noqa: E402
 #: GM-call alerts, code expiry, and the Overview's status probes.
 import adminops  # noqa: E402
@@ -106,7 +108,6 @@ except ImportError:                            # pragma: no cover
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, "admin_web")
-DB = os.environ.get("POL_ACCOUNTS_DB", "/data/accounts.db")
 #: Where responders.py files parsed abuse reports. Same default as its own
 #: POL_REPORT_DIR, so the two agree without either importing the other.
 REPORT_DIR = os.environ.get(
@@ -123,7 +124,7 @@ GM_CALL_DIR = os.environ.get(
 ART_ROOT = os.environ.get("POL_ADMIN_ART_ROOT", "/www/ucs.pol.com")
 CGI = os.environ.get("POL_ADMIN_CGI", "http://ucs-plain:8080")
 
-# Operator auth. The credential lives in accounts.db (see accounts.admin_cred)
+# Operator auth. The credential lives in the database (accounts.admin_cred)
 # so the Security tab can change it at run time; the environment pair below is
 # now the BREAK-GLASS override, kept valid alongside the stored one so a
 # forgotten password cannot lock the operator out of their own panel.
@@ -566,7 +567,7 @@ def _pml_resolve(src, base, host_dirs, tree_dirs):
 
 
 def _db():
-    return accounts.connect(DB)
+    return accounts.connect()
 
 
 # --------------------------------------------------------------------------- #
@@ -658,7 +659,7 @@ def _mod_row(uid, force=False):
             row = adminusers.get_mod(db, uid)
         finally:
             db.close()
-    except sqlite3.Error:
+    except polcore_db.Error:
         return hit[1] if hit else None        # a locked DB is not a revocation
     _MOD_CACHE[uid] = (now, row)
     return row
@@ -1230,7 +1231,7 @@ class Handler(BaseHTTPRequestHandler):
                     row = adminusers.check_login(db, user, pw)
                 finally:
                     db.close()
-            except sqlite3.Error:
+            except polcore_db.Error:
                 row = None
             if row is not None:
                 who, fp, role, uid = (row["username"], adminusers.fingerprint(row),
@@ -1285,7 +1286,7 @@ class Handler(BaseHTTPRequestHandler):
                 clash = adminusers.find_mod(mdb, username)
             finally:
                 mdb.close()
-        except sqlite3.Error:
+        except polcore_db.Error:
             clash = None
         if clash is not None:
             return self._send(400, {"error": "A moderator already uses that "
@@ -1495,8 +1496,8 @@ class Handler(BaseHTTPRequestHandler):
                     " (SELECT handle_name FROM handle h WHERE h.member_id = m.id"
                     "  ORDER BY h.is_primary DESC, h.id LIMIT 1) AS handle"
                     " FROM session s JOIN member m ON m.id = s.member_id"
-                    " WHERE s.expires_at > ? ORDER BY s.created_at DESC", (now,)).fetchall()
-            except sqlite3.Error:
+                    " WHERE s.expires_at > %s ORDER BY s.created_at DESC", (now,)).fetchall()
+            except polcore_db.Error:
                 rows = []
             finally:
                 db.close()
@@ -1543,17 +1544,17 @@ class Handler(BaseHTTPRequestHandler):
             if mem is None:
                 return self._send(404, {"error": "No such account."})
             pol = mem["polid"]
-            prow = db.execute("SELECT * FROM polid WHERE polid=?", (pol,)).fetchone()
+            prow = db.execute("SELECT * FROM polid WHERE polid=%s", (pol,)).fetchone()
             fp = accounts.account_footprint(db, pol) or {}
-            members = db.execute("SELECT * FROM member WHERE polid=? ORDER BY id",
+            members = db.execute("SELECT * FROM member WHERE polid=%s ORDER BY id",
                                  (pol,)).fetchall()
             handles, titles, devices = [], [], []
             for m in members:
-                for h in db.execute("SELECT id, handle_name FROM handle WHERE member_id=?"
+                for h in db.execute("SELECT id, handle_name FROM handle WHERE member_id=%s"
                                     " ORDER BY id", (m["id"],)):
                     handles.append(h["handle_name"])
                     linked = {r[0] for r in db.execute(
-                        "SELECT content_code FROM handle_content WHERE handle_id=?"
+                        "SELECT content_code FROM handle_content WHERE handle_id=%s"
                         " AND status='active'", (h["id"],))}
                     for c in sorted(linked):
                         titles.append({"handle": h["handle_name"], "content": c,
@@ -1571,10 +1572,10 @@ class Handler(BaseHTTPRequestHandler):
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             sess = db.execute(
                 "SELECT s.created_at, s.expires_at, s.peer_ip FROM session s"
-                " JOIN member m ON m.id=s.member_id WHERE m.polid=? AND s.expires_at > ?"
+                " JOIN member m ON m.id=s.member_id WHERE m.polid=%s AND s.expires_at > %s"
                 " ORDER BY s.created_at DESC", (pol, now)).fetchall()
             codes = [dict(r) for r in db.execute(
-                "SELECT code, contents, redeemed_at FROM regcode WHERE redeemed_by=?"
+                "SELECT code, contents, redeemed_at FROM regcode WHERE redeemed_by=%s"
                 " ORDER BY redeemed_at", (pol,))]
         finally:
             db.close()
@@ -1638,8 +1639,9 @@ class Handler(BaseHTTPRequestHandler):
             mdb = adminusers.connect()
             try:
                 out["activity"] = [dict(r) for r in mdb.execute(
-                    "SELECT at, actor, role, action, ok FROM audit WHERE target=?"
-                    " COLLATE NOCASE ORDER BY at DESC LIMIT 30", (pol,))]
+                    "SELECT at, actor, role, action, ok FROM admin_audit"
+                    " WHERE lower(target) = lower(%s)"
+                    " ORDER BY at DESC LIMIT 30", (pol,))]
             finally:
                 mdb.close()
         self._send(200, out)
@@ -1736,7 +1738,8 @@ class Handler(BaseHTTPRequestHandler):
         mdb = adminusers.connect()
         try:
             ep = str(body.get("endpoint") or "")
-            row = mdb.execute("SELECT username, role FROM push_sub WHERE endpoint=?",
+            row = mdb.execute("SELECT username, role FROM admin_push_sub"
+                              " WHERE endpoint=%s",
                               (ep,)).fetchone()
             if row and (role == "owner" or (row["username"], row["role"]) == (user, role)):
                 adminusers.push_remove(mdb, ep)
@@ -2011,7 +2014,7 @@ class Handler(BaseHTTPRequestHandler):
                 origin = adminusers.code_origins(mdb)
             finally:
                 mdb.close()
-        except sqlite3.Error:
+        except polcore_db.Error:
             origin = {}
         user, role, _p = self._caller()
         out = [{"code": r["code"], "contents": r["contents"],
@@ -2063,7 +2066,7 @@ class Handler(BaseHTTPRequestHandler):
         db = _db()
         try:
             existing = db.execute("SELECT 1 FROM regcode"
-                                  " WHERE code=? COLLATE NOCASE",
+                                  " WHERE lower(code) = lower(%s)",
                                   (accounts.normalise_regcode(code),)).fetchone()
             if existing:
                 return self._send(409, {"error": "that code already exists"})
@@ -2078,7 +2081,7 @@ class Handler(BaseHTTPRequestHandler):
                                            user, role, expires_at)
             finally:
                 mdb.close()
-        except sqlite3.Error as exc:
+        except polcore_db.Error as exc:
             print(f"[admin] could not record who made {code!r}: {exc}", flush=True)
         self._send(200, {"code": accounts.normalise_regcode(code),
                          "contents": contents, "note": note})
@@ -2092,7 +2095,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "code required"})
         db = _db()
         try:
-            n = db.execute("DELETE FROM regcode WHERE code=? COLLATE NOCASE "
+            n = db.execute("DELETE FROM regcode WHERE lower(code) = lower(%s) "
                            "AND redeemed_at IS NULL AND redeemed_by IS NULL",
                            (code,)).rowcount
             db.commit()
@@ -2536,18 +2539,18 @@ class Handler(BaseHTTPRequestHandler):
             out = []
             for r in rows:
                 pol = r["polid"]
-                mem = db.execute("SELECT * FROM member WHERE polid=? "
+                mem = db.execute("SELECT * FROM member WHERE polid=%s "
                                  "ORDER BY member_no LIMIT 1", (pol,)).fetchone()
                 contents = []
                 linked = []
                 handle = None
                 if mem:
                     cs = db.execute("SELECT content_code FROM content WHERE "
-                                    "member_id=? AND status='active'",
+                                    "member_id=%s AND status='active'",
                                     (mem["id"],)).fetchall()
                     contents = [c["content_code"] for c in cs]
                     h = db.execute("SELECT id, handle_name FROM handle WHERE "
-                                   "member_id=? ORDER BY id LIMIT 1",
+                                   "member_id=%s ORDER BY id LIMIT 1",
                                    (mem["id"],)).fetchone()
                     handle = h["handle_name"] if h else None
                     # A GRANT IS NOT A LICENCE UNTIL IT IS LINKED TO A HANDLE.
@@ -2559,7 +2562,7 @@ class Handler(BaseHTTPRequestHandler):
                     if h:
                         linked = [c["content_code"] for c in db.execute(
                             "SELECT content_code FROM handle_content WHERE "
-                            "handle_id=? AND status='active'", (h["id"],))]
+                            "handle_id=%s AND status='active'", (h["id"],))]
                 # WHICH CLIENTS this account has actually logged in from.
                 # The NICK token is per (account x client build), so an account
                 # used from the PC and the PS2 legitimately has two. Shown here
@@ -2732,7 +2735,7 @@ class Handler(BaseHTTPRequestHandler):
             row = _member_row(db, who)
             if row is None:
                 return self._send(404, {"error": "no such account"})
-            db.execute("UPDATE member SET ext_mail = ? WHERE id = ?", (on, row["id"]))
+            db.execute("UPDATE member SET ext_mail = %s WHERE id = %s", (on, row["id"]))
             db.commit()
             mail = row["mail_address"]
         finally:
@@ -2904,7 +2907,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "polid and at least one content required"})
         db = _db()
         try:
-            mem = db.execute("SELECT id FROM member WHERE polid=?", (pol,)).fetchone()
+            mem = db.execute("SELECT id FROM member WHERE polid=%s", (pol,)).fetchone()
             if not mem:
                 return self._send(404, {"error": "no such account"})
             for code in codes:
@@ -2949,7 +2952,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "polid and at least one content required"})
         db = _db()
         try:
-            mem = db.execute("SELECT id FROM member WHERE polid=?", (pol,)).fetchone()
+            mem = db.execute("SELECT id FROM member WHERE polid=%s", (pol,)).fetchone()
             if not mem:
                 return self._send(404, {"error": "no such account"})
             for code in codes:
@@ -3428,7 +3431,7 @@ def _start_worker():
     def expire_code(code):
         db = _db()
         try:
-            n = db.execute("DELETE FROM regcode WHERE code=? COLLATE NOCASE"
+            n = db.execute("DELETE FROM regcode WHERE lower(code) = lower(%s)"
                            " AND redeemed_at IS NULL AND redeemed_by IS NULL",
                            (code,)).rowcount
             db.commit()
@@ -3451,7 +3454,8 @@ def main():
         return
     port = int(os.environ.get("POL_ADMIN_PORT", "8090"))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"[admin] listening on {port}; db={DB} art={ART_ROOT} cgi={CGI}",
+    print(f"[admin] listening on {port}; db="
+          f"{polcore_db.database_url().rsplit('@', 1)[-1]} art={ART_ROOT} cgi={CGI}",
           flush=True)
     # Say plainly whether anything is guarding a panel that mints accounts --
     # "open" is a legitimate loopback-only setting, not a state to discover by

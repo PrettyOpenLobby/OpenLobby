@@ -14,7 +14,7 @@ def _peer_online(peer_handle):
     if accounts is None or not peer_handle:
         return False
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return accounts.handle_online(db, int(peer_handle))
         finally:
@@ -134,7 +134,7 @@ def _friend_flags_low_by_row():
     if accounts is None:
         return {}
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return {int(r["id"]): int(r["ignore_low"]) for r in db.execute(
                 "SELECT id, ignore_low FROM friend WHERE ignore_low IS NOT NULL")}
@@ -599,10 +599,10 @@ def _db_friends(kinds=None):
     if accounts is None:
         return []
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             mid = lobbysession._session_member_id()
-            h = db.execute("SELECT id FROM handle WHERE member_id = ?"
+            h = db.execute("SELECT id FROM handle WHERE member_id = %s"
                            " ORDER BY is_primary DESC, id ASC LIMIT 1",
                            (mid,)).fetchone() if mid else None
             if h is None:
@@ -693,7 +693,7 @@ def _db_friends(kinds=None):
                     # a clean-order live test (fresh login, no cached list).
                     if os.environ.get("POL_FRIEND_GUID_CLIENT", "1") == "1":
                         cg = db.execute(
-                            "SELECT client_guid FROM handle WHERE id = ?",
+                            "SELECT client_guid FROM handle WHERE id = %s",
                             (int(r["peer_handle"]),)).fetchone()
                         if cg and cg["client_guid"]:
                             guid = int(cg["client_guid"])
@@ -760,12 +760,12 @@ def _friend_list_handle_id():
     if accounts is None:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             mid = lobbysession._session_member_id()
             if not mid:
                 return None
-            h = db.execute("SELECT id FROM handle WHERE member_id = ?"
+            h = db.execute("SELECT id FROM handle WHERE member_id = %s"
                            " ORDER BY is_primary DESC, id ASC LIMIT 1",
                            (mid,)).fetchone()
             return int(h["id"]) if h else None
@@ -911,12 +911,11 @@ def _friend_payload(n):
     entries, self_name = [], None
     if accounts is not None:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 mid = lobbysession._session_member_id()
                 h = db.execute(
-                    "SELECT id, handle_name FROM handle WHERE member_id = ?"
+                    "SELECT id, handle_name FROM handle WHERE member_id = %s"
                     " ORDER BY is_primary DESC, id ASC LIMIT 1",
                     (mid,)).fetchone() if mid else None
                 if h is not None:

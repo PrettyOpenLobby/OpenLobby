@@ -152,7 +152,7 @@ def _sess_member_id(sess):
 
     `ChatSession.member` is the **`member` ROW**, not an id -- every other caller
     goes through `int(member["id"])`. Taking `int(sess.member)` raises
-    `TypeError: int() argument must be ... not 'sqlite3.Row'`, which is exactly
+    `TypeError: int() argument must be ... not 'Row'`, which is exactly
     what `_group_op_nicks` did on every single call (seen in authserv.log against
     every JOIN and WHO on a group channel). It was caught and logged, so the only
     symptom was the operator flag silently falling back to join order -- the

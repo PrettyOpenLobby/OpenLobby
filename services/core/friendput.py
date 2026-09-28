@@ -123,8 +123,7 @@ def _friend_put_reply(n, req_pt=None):
                     peer_hid = 0
                     if named and accounts is not None:
                         try:
-                            _db = accounts.connect(os.environ.get(
-                                "POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+                            _db = accounts.connect()
                             try:
                                 _hrow = accounts.handle_by_name(
                                     _db, named.decode("cp932", "replace"))
@@ -208,8 +207,7 @@ def _friend_put_reply(n, req_pt=None):
                     guid = friendlist._FRIEND_PUT_GUIDS.get(nm)
                     if not guid and accounts is not None:
                         try:
-                            db = accounts.connect(os.environ.get(
-                                "POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+                            db = accounts.connect()
                             try:
                                 hrow = accounts.handle_by_name(db, nm)
                                 if hrow is not None:
@@ -753,8 +751,8 @@ def _friend_put_row_for(db, handle_id, rec, slot_map=None):
     if not text:
         return None                              # heap (a delete), or empty
     if _friend_put_name(rec) is not None:
-        return db.execute("SELECT * FROM friend WHERE handle_id = ?"
-                          " AND peer_name = ?",
+        return db.execute("SELECT * FROM friend WHERE handle_id = %s"
+                          " AND peer_name = %s",
                           (int(handle_id), text)).fetchone()
     if slot_map is None:
         return None
@@ -762,7 +760,7 @@ def _friend_put_row_for(db, handle_id, rec, slot_map=None):
     hit = _friend_slot_row(slot_map, slot) if slot is not None else None
     if hit is None:
         return None
-    return db.execute("SELECT * FROM friend WHERE id = ? AND handle_id = ?",
+    return db.execute("SELECT * FROM friend WHERE id = %s AND handle_id = %s",
                       (int(hit[1]), int(handle_id))).fetchone()
 
 
@@ -889,8 +887,8 @@ def _friend_addrow_push(db, mid, h, recs, before):
                          icon, cmt))
         # THE OTHER DIRECTION, only on the accept transition: their row for us
         # already exists (their add created it) and just went active with ours.
-        row = db.execute("SELECT status FROM friend WHERE handle_id = ?"
-                         " AND peer_name = ?", (hid, nm)).fetchone()
+        row = db.execute("SELECT status FROM friend WHERE handle_id = %s"
+                         " AND peer_name = %s", (hid, nm)).fetchone()
         if row is None or row["status"] != accounts.STATUS_ACTIVE \
                 or before.get(nm) == accounts.STATUS_ACTIVE:
             continue
@@ -979,8 +977,8 @@ def _friend_addrow_presence(db, mid, h, recs, before):
         phid = int(prow["id"])
         if phid == hid:
             continue                # the self-add guard's leftovers
-        row = db.execute("SELECT status FROM friend WHERE handle_id = ?"
-                         " AND peer_name = ?", (hid, nm)).fetchone()
+        row = db.execute("SELECT status FROM friend WHERE handle_id = %s"
+                         " AND peer_name = %s", (hid, nm)).fetchone()
         # ONLY THE TRANSITION. A write that merely re-names an existing friend
         # (a rename and a delete are both 2:6s naming the whole list) has
         # already had its presence asserted by the burst; re-asserting on every
@@ -1042,10 +1040,10 @@ def _capture_friend_put(pt):
                      "-- NOT touching the stored list")
         return
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             mid = lobbysession._session_member_id()
-            h = db.execute("SELECT id, handle_name FROM handle WHERE member_id = ?"
+            h = db.execute("SELECT id, handle_name FROM handle WHERE member_id = %s"
                            " ORDER BY is_primary DESC, id ASC LIMIT 1",
                            (mid,)).fetchone() if mid else None
             if h is None:
@@ -1182,7 +1180,7 @@ def _capture_friend_put(pt):
             # in the log and the guard's effect is measured, not inferred.
             own_handle_names = {
                 r["handle_name"] for r in db.execute(
-                    "SELECT handle_name FROM handle WHERE member_id = ?", (mid,))
+                    "SELECT handle_name FROM handle WHERE member_id = %s", (mid,))
             } if mid else set()
             self_named = [r["name"] for r in recs
                           if r.get("name") in own_handle_names]
@@ -1207,8 +1205,8 @@ def _capture_friend_put(pt):
             if os.environ.get("POL_FRIEND_RENAME", "1") == "1":
                 for r in recs:
                     row = db.execute(
-                        "SELECT id, label FROM friend WHERE handle_id = ?"
-                        " AND peer_name = ?",
+                        "SELECT id, label FROM friend WHERE handle_id = %s"
+                        " AND peer_name = %s",
                         (int(h["id"]), r["name"])).fetchone()
                     if row is not None and row["label"]:
                         accounts.set_friend_label(db, int(h["id"]),
@@ -1235,7 +1233,7 @@ def _capture_friend_put(pt):
                 if rslot is None:
                     continue
                 row = db.execute("SELECT id, peer_handle, peer_guid FROM friend"
-                                 " WHERE handle_id = ? AND peer_name = ?",
+                                 " WHERE handle_id = %s AND peer_name = %s",
                                  (int(h["id"]), r["name"])).fetchone()
                 if row is None:
                     continue
@@ -1260,8 +1258,8 @@ def _capture_friend_put(pt):
                         g = accounts.handle_guid(int(hrow["id"]))
                     else:
                         frow = db.execute(
-                            "SELECT peer_guid FROM friend WHERE handle_id = ?"
-                            " AND peer_name = ?",
+                            "SELECT peer_guid FROM friend WHERE handle_id = %s"
+                            " AND peer_name = %s",
                             (int(h["id"]), r["name"])).fetchone()
                         g = int(frow["peer_guid"] or 0) if frow else 0
                     if g:
@@ -1472,8 +1470,8 @@ def _capture_friend_put(pt):
                         if now.get(rec["name"]) != "pending":
                             continue
                         peer = db.execute(
-                            "SELECT peer_handle FROM friend WHERE handle_id = ? "
-                            "AND peer_name = ?",
+                            "SELECT peer_handle FROM friend WHERE handle_id = %s "
+                            "AND peer_name = %s",
                             (int(h["id"]), rec["name"])).fetchone()
                         if peer and peer["peer_handle"]:
                             greeting = lobbymail._friend_request_greeting(

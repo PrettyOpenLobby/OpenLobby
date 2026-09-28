@@ -40,7 +40,6 @@ import urllib.request
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import sqlite3
 
 import discordlink
 import polboards
@@ -261,8 +260,7 @@ def scan_once(now=None, min_age=None):
                     discordlink.mark_notified(ldb, name, now)   # a system notice
                     continue
                 if adb is None:
-                    adb = rs.accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                             rs.accounts.DEFAULT_DB))
+                    adb = rs.accounts.connect()
                 row = rs._mail_recipient_row(adb, meta["recipient_guid"])
                 link = discordlink.link_by_member(ldb, row["member_id"]) if row else None
                 if link is None or not link["notify"]:
@@ -339,9 +337,9 @@ def _member_label(member_id):
     """'Lex (POL ID 87-...)' for a status line -- best effort."""
     rs = R()
     try:
-        adb = rs.accounts.connect(os.environ.get("POL_ACCOUNTS_DB", rs.accounts.DEFAULT_DB))
+        adb = rs.accounts.connect()
         try:
-            m = adb.execute("SELECT polid FROM member WHERE id = ?", (int(member_id),)).fetchone()
+            m = adb.execute("SELECT polid FROM member WHERE id = %s", (int(member_id),)).fetchone()
             h = rs.accounts.primary_handle_row(adb, int(member_id))
         finally:
             adb.close()
@@ -446,9 +444,9 @@ def on_reply_submit(data, rid, now=None):
             return _say("This message can no longer be answered from here.")
         if discordlink.sent_since(ldb, ctx["member_id"], 3600, now) >= REPLY_PER_HOUR:
             return _say("That is a lot of replies in an hour -- try again a little later.")
-        adb = rs.accounts.connect(os.environ.get("POL_ACCOUNTS_DB", rs.accounts.DEFAULT_DB))
+        adb = rs.accounts.connect()
         try:
-            me = adb.execute("SELECT * FROM handle WHERE id = ?",
+            me = adb.execute("SELECT * FROM handle WHERE id = %s",
                              (int(ctx["handle_id"]),)).fetchone()
             peer = rs._mail_recipient_row(adb, int(ctx["peer_guid"]))
         finally:
@@ -572,16 +570,17 @@ def pol_online():
     population -- the Viewer and the portal -- not any one title's, which is
     exactly what the bridge is about.
 
-    Its own read-only connection rather than responders.accounts: this runs
-    every few seconds for a status line and must never take the write lock the
-    rest of the server needs.
+    It runs every few seconds for a status line. Under SQLite it had its own
+    read-only connection so it could never take the write lock the rest of the
+    server needed; a PostgreSQL read takes no such lock, so it uses the
+    ordinary account connection.
     """
-    path = os.environ.get("POL_ACCOUNTS_DB", "/data/accounts.db")
     try:
-        conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2.0)
+        import accounts
+        conn = accounts.connect()
         try:
             row = conn.execute(
-                "SELECT COUNT(DISTINCT member_id) FROM session WHERE expires_at > ?",
+                "SELECT COUNT(DISTINCT member_id) FROM session WHERE expires_at > %s",
                 (datetime.datetime.now(datetime.timezone.utc)
                  .strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()
             return int(row[0]) if row else 0

@@ -44,7 +44,7 @@ def _mailbox(member=None):
     except OSError:
         return []
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
     except Exception:
         return []
     out, seen = [], set()
@@ -120,7 +120,7 @@ def _friend_request_heal(member=None):
         ttl = 21600.0
     healed = 0
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
     except Exception:
         return 0
     try:
@@ -128,19 +128,19 @@ def _friend_request_heal(member=None):
         for r in db.execute(
                 "SELECT f.handle_id, f.peer_handle, f.peer_name, h.handle_name"
                 " FROM friend f JOIN handle h ON h.id = f.handle_id"
-                " WHERE h.member_id = ? AND f.status = ? AND f.kind = ?",
+                " WHERE h.member_id = %s AND f.status = %s AND f.kind = %s",
                 (int(member), accounts.STATUS_INVITED,
                  accounts.KIND_FRIEND)).fetchall():
             peer = None
             if r["peer_handle"]:
-                peer = db.execute("SELECT * FROM handle WHERE id = ?",
+                peer = db.execute("SELECT * FROM handle WHERE id = %s",
                                   (int(r["peer_handle"]),)).fetchone()
             if peer is None:
                 peer = accounts.handle_by_name(db, r["peer_name"])
             if peer is None:
                 continue                # not one of ours: nobody to send it
             asks = db.execute(
-                "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
+                "SELECT status FROM friend WHERE handle_id = %s AND peer_name = %s",
                 (int(peer["id"]), accounts.friend_row_name(
                     db, int(peer["id"]), r["handle_name"]))).fetchone()
             if asks is None or asks["status"] != accounts.STATUS_PENDING:
@@ -404,15 +404,15 @@ def _mail_recipient_raw_note(db, to):
     hits = []
     if raw and raw <= 0xFFFFFFFF:
         try:
-            if db.execute("SELECT 1 FROM handle WHERE id = ?", (raw,)).fetchone():
+            if db.execute("SELECT 1 FROM handle WHERE id = %s", (raw,)).fetchone():
                 hits.append(f"handle.id {raw}")
-            if db.execute("SELECT 1 FROM member WHERE id = ?", (raw,)).fetchone():
+            if db.execute("SELECT 1 FROM member WHERE id = %s", (raw,)).fetchone():
                 hits.append(f"member.id {raw}")
             if accounts is not None and db.execute(
-                    "SELECT 1 FROM friend WHERE id = ? AND kind = ?",
+                    "SELECT 1 FROM friend WHERE id = %s AND kind = %s",
                     (raw, accounts.KIND_GROUP)).fetchone():
                 hits.append(f"group (friend.id) {raw}")
-            if db.execute("SELECT 1 FROM handle WHERE id = ?",
+            if db.execute("SELECT 1 FROM handle WHERE id = %s",
                           (raw & 0x7FFFF,)).fetchone() and raw & ~0x7FFFF:
                 hits.append(f"tagged z_hid of handle {raw & 0x7FFFF}")
         except Exception:
@@ -466,14 +466,14 @@ def _mail_stale_acceptance(db, member, meta):
             # `_mail_mint` applies, so an exact hit is trustworthy and a miss on
             # a 15-byte value may just be the cut -- resolve, never infer.
             srow = db.execute(
-                "SELECT id, handle_name FROM handle WHERE handle_name = ?",
+                "SELECT id, handle_name FROM handle WHERE handle_name = %s",
                 (meta["sender"],)).fetchone()
         if srow is None:
             return False
         held = db.execute(
             "SELECT 1 FROM friend f JOIN handle h ON f.handle_id = h.id"
-            " WHERE h.member_id = ? AND f.kind = ?"
-            " AND (f.peer_handle = ? OR f.peer_name = ?)",
+            " WHERE h.member_id = %s AND f.kind = %s"
+            " AND (f.peer_handle = %s OR f.peer_name = %s)",
             (int(member), accounts.KIND_FRIEND, int(srow["id"]),
              srow["handle_name"])).fetchone()
         return held is None
@@ -494,7 +494,7 @@ def _mail_owner(path):
     if not meta or accounts is None:
         return None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             row = _mail_recipient_row(db, meta["recipient_guid"])
             return int(row["member_id"]) if row else None
@@ -728,7 +728,7 @@ def _mail_drop_redundant_request(db, path):
     if sender_hid is None or recip is None:
         return False
     row = db.execute(
-        "SELECT status FROM friend WHERE handle_id = ? AND peer_name = ?",
+        "SELECT status FROM friend WHERE handle_id = %s AND peer_name = %s",
         (int(sender_hid), recip["handle_name"])).fetchone()
     if row is not None and row["status"] == accounts.STATUS_ACTIVE:
         log("lobby", f"  3:1 write: DROPPED a redundant friend REQUEST to "
@@ -790,7 +790,7 @@ def _friend_request_greeting(db, peer_handle_id, sender_name, window=600):
     forwarded with a new request.
     """
     try:
-        row = db.execute("SELECT member_id FROM handle WHERE id = ?",
+        row = db.execute("SELECT member_id FROM handle WHERE id = %s",
                          (int(peer_handle_id),)).fetchone()
         if row is None:
             return ""
@@ -913,8 +913,7 @@ def _mail_mint(sender_name, sender_guid, recipient_guid, subject, body,
     # User". Falls back to our guid for an account we have never seen write.
     if accounts is not None:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 row = _mail_recipient_row(db, recipient_guid)
                 recipient_guid = _mail_address_as(db, row) or recipient_guid
@@ -1012,8 +1011,7 @@ def _mail_normalise(path, sender_handle_id):
     if len(rec) < 0x48:
         return path
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
     except Exception as exc:
         log("lobby", f"  mail: cannot open the account DB to normalise ({exc})")
         return path
@@ -1092,7 +1090,7 @@ def _mail_announce(path):
     if not meta or not token or accounts is None:
         return 0
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             row = _mail_recipient_row(db, meta["recipient_guid"])
         finally:

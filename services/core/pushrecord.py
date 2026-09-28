@@ -476,7 +476,7 @@ def _push_identity_guid(db, subject_handle):
     guid = accounts.handle_guid(int(subject_handle))
     if os.environ.get("POL_FRIEND_GUID_CLIENT", "1") == "1":
         try:
-            cg = db.execute("SELECT client_guid FROM handle WHERE id = ?",
+            cg = db.execute("SELECT client_guid FROM handle WHERE id = %s",
                             (int(subject_handle),)).fetchone()
             if cg and cg["client_guid"]:
                 guid = int(cg["client_guid"])
@@ -509,7 +509,7 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None):
     dry = mode == "log"
     sent = 0
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
     except Exception as exc:
         log("authserv", f"presence: db open failed ({exc!r})")
         return 0
@@ -528,7 +528,7 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None):
         if not subject_name:
             try:
                 row = db.execute(
-                    "SELECT handle_name FROM handle WHERE member_id = ? "
+                    "SELECT handle_name FROM handle WHERE member_id = %s "
                     "ORDER BY is_primary DESC, id ASC LIMIT 1",
                     (int(subject_member_id),)).fetchone()
                 if row:

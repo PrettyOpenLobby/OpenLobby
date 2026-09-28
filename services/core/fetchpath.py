@@ -123,7 +123,7 @@ def _capture_self_guid(pt):
     if not value:
         return                       # the client does not know yet; nothing to learn
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             # A guid of ours means the client is echoing something we served,
             # which teaches us nothing about what it calls itself.

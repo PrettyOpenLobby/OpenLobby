@@ -388,22 +388,22 @@ def _search_rows(preds):
         # answer -- "Test" does not find "Tester". POL_SEARCH_LIKE=1 relaxes it to
         # a prefix match, which is friendlier but is our invention, not SE's.
         if os.environ.get("POL_SEARCH_LIKE", "0") == "1":
-            where.append(f"{col} LIKE {'UPPER(?)' if upper else '?'}")
+            # ILIKE: SQLite's LIKE ignored ASCII case, and this kept that.
+            where.append(f"{col} ILIKE {'UPPER(%s)' if upper else '%s'}")
             args.append(value + "%")
         else:
-            where.append(f"{col} = {'UPPER(?)' if upper else '?'}")
+            where.append(f"{col} = {'UPPER(%s)' if upper else '%s'}")
             args.append(value)
     if not where:
         return []
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return [dict(r) for r in db.execute(
                 "SELECT h.id, h.handle_name, h.member_id, m.polid, m.mail_address"
                 " FROM handle h JOIN member m ON m.id = h.member_id"
                 " WHERE " + " AND ".join(where) +
-                " ORDER BY h.id DESC LIMIT ?", args + [_search_cap()])]
+                " ORDER BY h.id DESC LIMIT %s", args + [_search_cap()])]
         finally:
             db.close()
     except Exception as exc:

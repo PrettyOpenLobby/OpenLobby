@@ -116,7 +116,7 @@ def _pfc_profile_subject(cid):
     if name:
         return name, info, member_id
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             row = accounts.handle_by_content_id(db, cid)
             if row is not None:

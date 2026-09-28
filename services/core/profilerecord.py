@@ -462,8 +462,7 @@ def _profile_record(size, req_pt=None, force_hid=None):
     notify = None                      # the status block, see _PROFILE_NOTIFY_AT
     if accounts is not None:
         try:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 # z_hid is a WIRE GUID, not our row id -- `accounts.handle_guid`
                 # mints it and the client only ever repeats back what we put in
@@ -476,7 +475,7 @@ def _profile_record(size, req_pt=None, force_hid=None):
                 # z_hid to resolve -- the subject comes from the search, not from
                 # the client. See the `profile` mode in _search_result_payload.
                 if force_hid:
-                    h = db.execute("SELECT * FROM handle WHERE id = ?",
+                    h = db.execute("SELECT * FROM handle WHERE id = %s",
                                    (int(force_hid),)).fetchone()
                     if h is None:
                         log("lobby", f"profile record: forced handle "
@@ -512,7 +511,7 @@ def _profile_record(size, req_pt=None, force_hid=None):
                     # a wider mask would swallow subjects of classes we have
                     # never observed.
                     fid = int(subject_hid) & 0x7FFFF
-                    h = db.execute("SELECT * FROM handle WHERE id = ?",
+                    h = db.execute("SELECT * FROM handle WHERE id = %s",
                                    (fid,)).fetchone()
                     log("lobby", f"profile record: z_hid {int(subject_hid):#x} is a "
                                  f"friend-row subject (state "
@@ -525,7 +524,7 @@ def _profile_record(size, req_pt=None, force_hid=None):
                     # handle id in bits 13-50, so the client's subject is that id
                     # with no "state" bits above it (see `_friend_bitfield_mode`).
                     fid = int(subject_hid)
-                    h = db.execute("SELECT * FROM handle WHERE id = ?",
+                    h = db.execute("SELECT * FROM handle WHERE id = %s",
                                    (fid,)).fetchone()
                     log("lobby", f"profile record: z_hid {fid:#x} is a plain "
                                  f"handle id (POL_FRIEND_BITFIELD) -> handle {fid}"
@@ -579,7 +578,7 @@ def _profile_record(size, req_pt=None, force_hid=None):
                     # handle the client logged in as -- 4:7 told us.
                     hid = lobbysession._session_handle_id(db)
                     if hid:
-                        h = db.execute("SELECT * FROM handle WHERE id = ?",
+                        h = db.execute("SELECT * FROM handle WHERE id = %s",
                                        (hid,)).fetchone()
                 if h is not None:
                     fields = accounts.get_handle_profile(db, int(h["id"]))
@@ -997,7 +996,7 @@ def _capture_comment(pt):
         log("lobby", "  4:3 comment: not decodable as UTF-16LE; not stored")
         return
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             hid = lobbysession._session_handle_id(db)
             if not hid:
@@ -1117,8 +1116,7 @@ def _capture_profile_write(pt):
         _store_content_profile_write(fields, pt)
         return
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                             accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             # THE ACTIVE HANDLE, not "the first member". A 05:01 names no handle
             # -- SE scopes it to whoever you are logged in as -- so this used to
@@ -1131,7 +1129,7 @@ def _capture_profile_write(pt):
             if len(pt) > 0x2A and pt[0x2A]:
                 fields[_PROFILE_VIS_KEY] = int(pt[0x2A])
             accounts.set_handle_profile(db, hid, fields)
-            row = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+            row = db.execute("SELECT handle_name FROM handle WHERE id = %s",
                              (hid,)).fetchone()
             named = ", ".join(
                 f"{accounts.HANDLE_PROFILE_FIELDS.get(k, hex(k))}={v!r}"

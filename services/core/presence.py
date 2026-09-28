@@ -126,8 +126,7 @@ def _logout_wipe(member_id, login_name, peer, sid, why=""):
     try:
         gone = 0
         if accounts is not None:
-            db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB",
-                                                 accounts.DEFAULT_DB))
+            db = accounts.connect()
             try:
                 accounts.record_logout(db, int(member_id))
                 gone = accounts.close_sessions(db, int(member_id))

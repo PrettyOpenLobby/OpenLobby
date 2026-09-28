@@ -102,12 +102,12 @@ def _group_members(groups):
     if accounts is None or not groups:
         return [[] for _ in groups]
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             hid = lobbysession._session_handle_id(db)
             if not hid:
                 return [[] for _ in groups]
-            row = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+            row = db.execute("SELECT handle_name FROM handle WHERE id = %s",
                              (hid,)).fetchone()
             # THE OWNER IS THE MASTER, and that is what unlocks invite. SE serves
             # class 5 for the creator of every one of their groups; we served the
@@ -142,7 +142,7 @@ def _group_members(groups):
                 owner_hid = int(g[2]) if len(g) > 2 else int(hid)
                 if owner_hid != hid:
                     orow = db.execute(
-                        "SELECT handle_name FROM handle WHERE id = ?",
+                        "SELECT handle_name FROM handle WHERE id = %s",
                         (owner_hid,)).fetchone()
                     owner = (accounts.handle_guid(owner_hid),
                              orow["handle_name"] if orow else "",
@@ -278,7 +278,7 @@ def _client_guid_map():
     if accounts is None:
         return {}
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             return {r["handle_name"]: int(r["client_guid"]) for r in db.execute(
                 "SELECT handle_name, client_guid FROM handle"
@@ -533,7 +533,7 @@ def _groups_for_list(count):
         return []
     out, seen = [], set()
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             hid = lobbysession._session_handle_id(db)
             if not hid:
@@ -541,8 +541,8 @@ def _groups_for_list(count):
             # Owned first, in the order the friend list already serves them, so
             # an owner's list does not reshuffle now that members are included.
             for r in db.execute(
-                    "SELECT id, peer_name FROM friend WHERE handle_id = ? "
-                    "AND kind = ? ORDER BY id", (int(hid), accounts.KIND_GROUP)):
+                    "SELECT id, peer_name FROM friend WHERE handle_id = %s "
+                    "AND kind = %s ORDER BY id", (int(hid), accounts.KIND_GROUP)):
                 if int(r["id"]) not in seen:
                     seen.add(int(r["id"]))
                     out.append((int(r["id"]), r["peer_name"], int(hid)))
@@ -557,8 +557,8 @@ def _groups_for_list(count):
                     # a list entry, and acceptance flows back on the mail path
                     # (_group_join_from_message), so hiding the group here does
                     # not break their ability to accept it.
-                    "WHERE m.member_handle = ? AND m.pending = 0 "
-                    "AND f.kind = ? ORDER BY f.id",
+                    "WHERE m.member_handle = %s AND m.pending = 0 "
+                    "AND f.kind = %s ORDER BY f.id",
                     (int(hid), accounts.KIND_GROUP)):
                 if int(r["id"]) not in seen:
                     seen.add(int(r["id"]))
@@ -699,10 +699,10 @@ def _group_create(pt):
         return b""
     made = None
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             mid = lobbysession._session_member_id()
-            h = db.execute("SELECT id, handle_name FROM handle WHERE member_id = ?"
+            h = db.execute("SELECT id, handle_name FROM handle WHERE member_id = %s"
                            " ORDER BY is_primary DESC, id ASC LIMIT 1",
                            (mid,)).fetchone() if mid else None
             if h is None:
@@ -836,7 +836,7 @@ def _group_mode_push(db, gid, member_name, op):
     authserv can see it.
     """
     try:
-        row = db.execute("SELECT member_id FROM handle WHERE handle_name = ?",
+        row = db.execute("SELECT member_id FROM handle WHERE handle_name = %s",
                          (member_name,)).fetchone()
         if row is None or not row["member_id"]:
             log("lobby", f"  group 7:3: {member_name!r} has no member id; "
@@ -877,10 +877,10 @@ def _group_delete(pt):
         return b""
     gid = struct.unpack_from("<Q", body, 0)[0]
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             owner = db.execute("SELECT handle_id, peer_name FROM friend "
-                               "WHERE id = ? AND kind = ?",
+                               "WHERE id = %s AND kind = %s",
                                (int(gid), accounts.KIND_GROUP)).fetchone()
             if owner is None:
                 log("lobby", f"  group 7:2: no group row {gid} -- either the "
@@ -949,7 +949,7 @@ def _group_class_change(pt):
         log("lobby", f"  group 7:3: request declares {want} entries but the "
                      f"{len(body)}B body holds {room}; applying {count}")
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             # include_pending: 7:3 is driven from the OWNER's screen, whose
             # roster is the only one that lists pending invitees -- a target
@@ -976,7 +976,7 @@ def _group_class_change(pt):
                     by_guid[int(cg)] = nm
                     by_guid[int(cg) ^ pushchannel._PUSH_GUID_MASK] = nm
             owner = db.execute("SELECT handle_id, peer_name FROM friend "
-                               "WHERE id = ? AND kind = ?",
+                               "WHERE id = %s AND kind = %s",
                                (int(gid), accounts.KIND_GROUP)).fetchone()
             if owner is None:
                 log("lobby", f"  group 7:3: no group row {gid}; nothing changed")
@@ -990,9 +990,9 @@ def _group_class_change(pt):
             me_mid = lobbysession._session_member_id()
             my_cls = accounts.group_class_of(db, gid, member_id=me_mid) if me_mid else None
             my_names = {r["handle_name"] for r in db.execute(
-                "SELECT handle_name FROM handle WHERE member_id = ?",
+                "SELECT handle_name FROM handle WHERE member_id = %s",
                 (int(me_mid or 0),))}
-            owner_name = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+            owner_name = db.execute("SELECT handle_name FROM handle WHERE id = %s",
                                     (int(owner["handle_id"] or 0),)).fetchone()
             owner_name = owner_name["handle_name"] if owner_name else None
             cls_of = {nm: int(c) for _g, nm, c in roster}
@@ -1140,7 +1140,7 @@ def _group_join_from_message(gid, gname, kind, meta):
                       os.environ.get("POL_GROUP_ACCEPT_ROWPUSH", "1")) == "1":
             try:
                 mems = list(accounts.list_group_members(db, int(gid)))
-                orow = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+                orow = db.execute("SELECT handle_name FROM handle WHERE id = %s",
                                   (int(owner_hid),)).fetchone()
                 if orow and not any(nm == orow["handle_name"]
                                     for _g, nm, _c in mems):
@@ -1166,7 +1166,7 @@ def _group_join_from_message(gid, gname, kind, meta):
                 queued, unresolved = 0, []
                 for _g, nm, _c in mems:
                     hrow = db.execute(
-                        "SELECT member_id FROM handle WHERE handle_name = ?",
+                        "SELECT member_id FROM handle WHERE handle_name = %s",
                         (nm,)).fetchone()
                     if hrow:
                         pushspool.push_group_rosters(None, int(hrow["member_id"]), entries)
@@ -1181,10 +1181,10 @@ def _group_join_from_message(gid, gname, kind, meta):
                 log("lobby", f"  group accept: roster push skipped ({exc!r})")
 
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             row = db.execute("SELECT id, peer_name, handle_id FROM friend "
-                             "WHERE id = ? AND kind = ?",
+                             "WHERE id = %s AND kind = %s",
                              (int(gid), accounts.KIND_GROUP)).fetchone()
             if row is None:
                 # A group on another server, or one we have lost. The message is
@@ -1224,7 +1224,7 @@ def _group_join_from_message(gid, gname, kind, meta):
                                      f"master or sub-master; message delivered, "
                                      f"nobody invited")
                         return
-            h = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+            h = db.execute("SELECT handle_name FROM handle WHERE id = %s",
                            (int(member_id),)).fetchone()
             if h is None:
                 log("lobby", f"  group {kind}: handle {member_id} is gone; "
@@ -1238,8 +1238,8 @@ def _group_join_from_message(gid, gname, kind, meta):
             # their own group would come back as a class-2 member of it. Joining
             # is "be in this group", never "be this rank".
             already = db.execute(
-                "SELECT class, pending FROM group_member WHERE group_id = ? "
-                "AND member_name = ?", (int(gid), h["handle_name"])).fetchone()
+                "SELECT class, pending FROM group_member WHERE group_id = %s "
+                "AND member_name = %s", (int(gid), h["handle_name"])).fetchone()
             if already is not None:
                 # An ACCEPTANCE for a pending row is the whole point of the
                 # flow -- clear the flag rather than "leaving as is" (which is
@@ -1365,7 +1365,7 @@ def _capture_group_invite(path, data):
                      f"-- nothing stored ({body[:60]!r})")
         return
     try:
-        db = accounts.connect(os.environ.get("POL_ACCOUNTS_DB", accounts.DEFAULT_DB))
+        db = accounts.connect()
         try:
             # The OWNER of the group is whoever is logged in when the invite goes
             # out; for a registration reply it is the other way round, so resolve
@@ -1382,7 +1382,7 @@ def _capture_group_invite(path, data):
                 log("lobby", f"  group invite: no group named {gname!r} on either "
                              f"side -- nothing stored")
                 return
-            row = db.execute("SELECT handle_name FROM handle WHERE id = ?",
+            row = db.execute("SELECT handle_name FROM handle WHERE id = %s",
                              (int(member_id),)).fetchone()
             if row is None:
                 return
