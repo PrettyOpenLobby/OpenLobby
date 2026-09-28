@@ -41,6 +41,23 @@ PG_PASSWORD = "pgtest"
 _started = []                  # container ids to remove at exit
 _pg_url = None
 
+#: Seconds to wait for the test server to answer. libpq's own default is to
+#: wait for ever, which turned an unreachable POL_TEST_DATABASE_URL into a
+#: suite that hung instead of one that failed.
+CONNECT_TIMEOUT = int(os.environ.get("POL_TEST_CONNECT_TIMEOUT", "5") or 5)
+
+
+def _connect(url):
+    """An autocommit connection to the test server, or a RuntimeError that
+    names the server and the reason."""
+    import psycopg
+    try:
+        return psycopg.connect(url, autocommit=True, connect_timeout=CONNECT_TIMEOUT)
+    except psycopg.OperationalError as exc:
+        where = url.rsplit("@", 1)[-1]
+        raise RuntimeError(f"cannot reach the test PostgreSQL at {where} within "
+                           f"{CONNECT_TIMEOUT}s ({str(exc).strip()})") from None
+
 
 def docker_available():
     """True when a Docker daemon answers."""
@@ -113,6 +130,7 @@ def server_url():
         return _pg_url
     given = os.environ.get("POL_TEST_DATABASE_URL", "").strip()
     if given:
+        _connect(given).close()           # fail fast and say why, not hang
         _pg_url = given
         return _pg_url
     if not docker_available():
@@ -140,18 +158,16 @@ def _with_dbname(url, name):
 
 def create_database():
     """A new empty database on the test server; returns its URL."""
-    import psycopg
     base = server_url()
     name = "test_" + secrets.token_hex(6)
-    with psycopg.connect(base, autocommit=True) as c:
+    with _connect(base) as c:
         c.execute(f'CREATE DATABASE "{name}"')
     return _with_dbname(base, name)
 
 
 def drop_database(url):
-    import psycopg
     name = urllib.parse.urlsplit(url).path.lstrip("/")
-    with psycopg.connect(server_url(), autocommit=True) as c:
+    with _connect(server_url()) as c:
         c.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
