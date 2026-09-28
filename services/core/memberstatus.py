@@ -63,6 +63,23 @@ _PRESENCE_ZONE_VIEWER = 1000
 #: So the zone is what is load-bearing and byte 19 is not: a named title latches,
 #: and only the Viewer's own zone 1000 clears it (plus logout and the 12 h TTL,
 #: which are unchanged). POL_STATUS_ZONE_LATCH=0 restores the old reading.
+#:
+#: WARNING: BYTE 19 IS NOT "IN A TITLE", AND THE "HAND-OFF" ABOVE WAS A GUESS.
+#: LandSandBoat's xi_profile names this body `ChangeMyStatus`: +0x10 handle,
+#: +0x11 bCharacterFound, +0x12 ActiveCharacterSlot, +0x13
+#: bReceiveOnlineMessage, +0x14 content, +0x16 OpenStat. Checked against every
+#: 4:5 in a month of lobby logs (about 780 bodies):
+#:   * +0x11 goes 0 -> 1 when a CHARACTER becomes active: for FFXI two seconds
+#:     after the world server selected the character and six before the
+#:     zone-in; Fantasy Earth and Tetra Master flip it about 10 s after launch
+#:     every time.
+#:   * +0x12 is that character's index in the 1:3 table we served: FFXI 0,
+#:     TM 1, FMO 3 (190 of 193). FANTASY EARTH ALWAYS SAYS 0 although its
+#:     record is idx5, so the slot is per title; do not trust it for FE.
+#:   * +0x13 is 0 in the Viewer and 1 at every title launch, but TM clears it
+#:     in the very frame that sets found=1 while still in TM, so it is not "in
+#:     a title". LSB's "receive online messages" fits; not proven.
+#: So TM's second frame is "character active, slot 1", not a hand-off.
 _STATUS_ZONE_LATCH = os.environ.get("POL_STATUS_ZONE_LATCH", "1") == "1"
 
 
@@ -300,7 +317,8 @@ def payload_change_status(n, req_pt):
         zone, in_title = _status_frame_zone(echo)
         titlezone._publish_title_zone(lobbysession._session_get("member_id"), zone, in_title)
         log("lobby", f"  4:5 zone={zone} in_title={in_title} "
-                     f"(flag={echo[19]})")
+                     f"(found={echo[0x11]} slot={echo[0x12]} "
+                     f"b13={echo[0x13]}; see _STATUS_ZONE_LATCH)")
     # AND THE PRESENCE STATUS, which is the OTHER field in this body and had
     # never been read (2026-08-19, `pol-presence-status-protocol`). One byte
     # at +0x16: 01 Online, 02 Away, 05 Invisible. It is what SE reflects as
