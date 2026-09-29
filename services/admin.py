@@ -876,12 +876,20 @@ def _request_knock(ticket, action=0, wait=_KICK_WAIT):
     or a close (2). Returns its answer; raises TimeoutError, withdrawing the
     request, when no authsess answered within `wait` seconds."""
     from polcore import kv
+    # THE KEY MUST NOT BE EMPTY. app.dll's knock handler (0x4ab2656) drops a
+    # knock whose room or key is empty, silently: the player sees the message
+    # prompt and nothing else. The admin container never had POL_GMD_CHAT_KEY,
+    # so every knock and invitation went out keyless until 2026-09-29. GM rooms
+    # carry no +k, so gmd's own key is all it has to be.
+    key = os.environ.get("POL_GMD_CHAT_KEY") or "gmkey"
+    if action == 0 and not ticket.get("room"):
+        raise ValueError("this request has no chat room to knock for")
     reply = _KNOCK_REPLY + secrets.token_hex(8)
     raw = json.dumps({"reply": reply, "expires": time.time() + wait,
                       "handle": ticket.get("handle") or "",
                       "guid": ticket.get("guid") or 0,
                       "room": ticket.get("room") or "",
-                      "key": os.environ.get("POL_GMD_CHAT_KEY", ""),
+                      "key": key,
                       "request_no": ticket.get("request_no") or 0,
                       "action": action})
     kv.push(_KNOCK_QUEUE, raw)
@@ -1279,6 +1287,7 @@ def _content_label(codes_csv):
 _GET_PERMS = {
     "/": "any", "/api/content-names": "any", "/api/sessions": "any",
     "/api/gm-calls": "gm", "/api/gm-desk": "gm", "/api/gm-notices": "gm",
+    "/api/gm-players": "gm", "/api/face-sheet": "gm",
     "/api/codes": "codes",
     "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
     "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
@@ -2201,6 +2210,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._gm_desk()
         if path == "/api/gm-notices":
             return self._send(200, gmnotices.load())
+        if path == "/api/gm-players":
+            return self._gm_players()
+        if path == "/api/face-sheet":
+            return self._face_sheet()
         if path == "/api/pml-list":
             return self._pml_list()
         if path == "/api/pml-load":
@@ -2944,39 +2957,66 @@ class Handler(BaseHTTPRequestHandler):
         knock = body.get("knock")
         invite = (body.get("invite") or "").strip()
         uninvite = (body.get("uninvite") or "").strip()
+        # The desk's picker names the player by HANDLE ID: two handles can
+        # differ only in case, and a name lookup ignores case.
+        try:
+            invite_id = int(body.get("invite_handle_id") or 0)
+            uninvite_guid = int(body.get("uninvite_guid") or 0)
+        except (TypeError, ValueError):
+            return self._send(400, {"error": "handle ids are numbers"})
         if not self._TICKET_NAME.fullmatch(tid + ".json"):
             return self._send(400, {"error": "no such ticket"})
         if status is not None and status not in self.GM_TICKET_STATUSES:
             return self._send(400, {"error": "status must be open, answered "
                                              "or closed"})
-        if status is None and knock is None and not invite and not uninvite:
+        if (status is None and knock is None and not invite and not uninvite
+                and not invite_id and not uninvite_guid):
             return self._send(400, {"error": "nothing to change"})
         # AN INVITATION names a player by handle; gmd recognises a caller by the
         # id their client calls itself (handle.client_guid), so that is what is
         # stored. A handle that has never logged in has none yet.
         invitee = None
-        if invite:
+        if invite or invite_id:
             try:
                 db = _db()
                 try:
-                    h = accounts.handle_by_name(db, invite)
+                    h = (db.execute("SELECT * FROM handle WHERE id = %s", (invite_id,)).fetchone()
+                         if invite_id else accounts.handle_by_name(db, invite))
+                    pol = (db.execute("SELECT polid FROM member WHERE id = %s",
+                                      (h["member_id"],)).fetchone() if h else None)
                 finally:
                     db.close()
             except Exception as exc:
                 return self._send(500, {"error": f"could not look the player up: {exc}"})
             if h is None:
-                return self._send(404, {"error": f"no player named {invite!r}"})
+                return self._send(404, {"error": f"no player named {invite!r}" if invite
+                                        else "no such handle"})
             if not h["client_guid"]:
                 return self._send(400, {"error": f"{h['handle_name']} has not logged "
                                                  "in yet, so their Viewer cannot be "
                                                  "recognised"})
-            invitee = {"handle": h["handle_name"], "guid": int(h["client_guid"])}
+            invitee = {"handle": h["handle_name"], "guid": int(h["client_guid"]),
+                       "handle_id": int(h["id"]), "polid": pol["polid"] if pol else ""}
         if not os.path.exists(os.path.join(GM_CALL_DIR, tid + ".json")):
             return self._send(404, {"error": "no such ticket"})
+        # A REQUEST THE PLAYER CANCELLED has no chat any more: gmd will not
+        # offer Join for it and authsess refuses its room (473), so a knock or
+        # an invitation into it would only look sent.
+        if knock or invitee:
+            try:
+                with open(os.path.join(GM_CALL_DIR, tid + ".json"), encoding="utf-8",
+                          errors="replace") as f:
+                    cancelled = (json.load(f) or {}).get("cancelled_at")
+            except (OSError, ValueError):
+                cancelled = None
+            if cancelled:
+                return self._send(409, {"error": "the player cancelled this request, "
+                                                 "so it has no chat to knock or invite into"})
         who = (self._session() or {}).get("user") or "operator"
         with self._GM_TICKET_LOCK:
             st = self._gm_ticket_state()
             cur = dict(st.get(tid) or {})
+            was_closed = cur.get("status") == "closed"
             if status is not None:
                 cur.update(status=status, by=who, at=time.time())
             cur.setdefault("status", "open")
@@ -2985,10 +3025,12 @@ class Handler(BaseHTTPRequestHandler):
             if knock is False or cur["status"] == "closed":
                 cur.pop("knocked_at", None)
                 cur.pop("knocked_by", None)
+            drop_guids = {g for g in (uninvite_guid, invitee and invitee["guid"]) if g}
             invited = [i for i in cur.get("invited") or []
-                       if isinstance(i, dict) and (
-                           (i.get("handle") or "").lower() not in
-                           {invite.lower(), uninvite.lower()} - {""})]
+                       if isinstance(i, dict)
+                       and int(i.get("guid") or 0) not in drop_guids
+                       and (i.get("handle") or "").lower() not in
+                       {invite.lower(), uninvite.lower()} - {""}]
             if invitee:
                 invited.append(dict(invitee, at=time.time(), by=who))
             if cur["status"] == "closed":
@@ -3044,10 +3086,158 @@ class Handler(BaseHTTPRequestHandler):
                 message = f"not sent ({exc})"
             print(f"[admin] {who} invited {invitee['handle']} into {tid}: "
                   f"message {message}", flush=True)
+        # CLOSING MAILS THE TRANSCRIPT to the player who filed the request, to
+        # their PlayOnline Mail inbox, each time it is closed (a reopened
+        # request may have gone on). Invited players do not get it: the
+        # conversation is the requester's. No chat, no mail.
+        transcript = None
+        if status == "closed" and not was_closed:
+            transcript = self._gm_mail_transcript(tid)
+            print(f"[admin] transcript of {tid}: {transcript}", flush=True)
         self._send(200, {"ok": True, "id": tid, "status": status,
                          "knocked_at": cur.get("knocked_at"),
                          "invited": cur.get("invited") or [],
-                         "knock_message": message})
+                         "knock_message": message, "transcript": transcript})
+
+    def _gm_mail_transcript(self, tid):
+        """Mail the chat of request `tid` to the requester. Returns what
+        happened, for the desk."""
+        try:
+            with open(os.path.join(GM_CALL_DIR, tid + ".json"),
+                      encoding="utf-8", errors="replace") as f:
+                ticket = json.load(f)
+        except (OSError, ValueError):
+            return "not mailed: the ticket could not be read"
+        room = str(ticket.get("room") or "")
+        lines = []
+        db = _db()
+        try:
+            h = (accounts.handle_by_name(db, ticket.get("handle"))
+                 if ticket.get("handle") else None)
+            if h is None and ticket.get("guid"):
+                h = accounts.handle_by_client_guid(db, ticket["guid"])
+            if h is None:
+                return "not mailed: the caller is not a known player"
+            row = db.execute("SELECT mail_address FROM member WHERE id = %s",
+                             (h["member_id"],)).fetchone()
+            to = (row["mail_address"] if row else "") or ""
+            if "@" not in to:
+                return "not mailed: the caller has no PlayOnline Mail address"
+            names = {}
+            for rec in gmchat.transcript(room.encode(), 2000) if room else []:
+                raw = bytes.fromhex(rec.get("raw") or "")
+                if raw[:1] != b"T" or gmchat.SEP not in raw:
+                    continue          # presence and roster records, not speech
+                text = raw.split(gmchat.SEP, 1)[1].decode("cp932", "replace").strip()
+                if not text:
+                    continue
+                if rec.get("dir") == "out":
+                    who = "GM"
+                else:
+                    nick = rec.get("nick") or ""
+                    if nick not in names:
+                        names[nick] = self._handle_for_nick(db, nick) or "Player"
+                    who = names[nick]
+                when = time.strftime("%H:%M", time.gmtime(rec.get("at") or 0))
+                lines.append(f"[{when}] {who}: {text}")
+        finally:
+            db.close()
+        if not lines:
+            return "not mailed: no chat took place"
+        n = ticket.get("request_no") or "?"
+        subj = re.sub(r"[\x00-\x1f\x7f]", "", str(ticket.get("subject") or ""))
+        head = [f"Request #{n}: {subj}",
+                f"Filed: {ticket.get('received_at') or '?'}",
+                "Times are UTC.", ""]
+        body = "\n".join(head + lines + ["", "PlayOnline GM"])
+        raw, subject = self._gm_mail(to, f"Your GM Call transcript (request #{n})", body)
+        try:
+            db = _db()
+            try:
+                accounts.deliver_mail(db, to, raw, sender=self.GM_MAIL_FROM, subject=subject)
+            finally:
+                db.close()
+        except Exception as exc:
+            return f"not mailed: {exc}"
+        with self._GM_TICKET_LOCK:
+            st = self._gm_ticket_state()
+            cur = dict(st.get(tid) or {})
+            cur["transcript_at"] = time.time()
+            st[tid] = cur
+            try:
+                tmp = self.GM_TICKET_STATE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(st, f, indent=1)
+                os.replace(tmp, self.GM_TICKET_STATE)
+            except OSError:
+                pass
+        return f"mailed to {to} ({len(lines)} line(s))"
+
+    @staticmethod
+    def _handle_for_nick(db, nick):
+        """A chat nick is the scrambled POL ID ('U' + 8 characters)."""
+        try:
+            import polnick
+            polid = polnick.polid_for_nick(nick)
+            row = db.execute("SELECT id FROM member WHERE polid = %s", (polid,)).fetchone()
+            h = accounts.primary_handle_row(db, row["id"]) if row else None
+            return h["handle_name"] if h else None
+        except Exception:
+            return None
+
+    # -- the invite picker ----------------------------------------------------- #
+    def _gm_players(self):
+        """GET ?q=: handles whose name contains q, or whose POL ID starts with
+        it, with what the desk needs to tell two alike names apart."""
+        from urllib.parse import urlsplit, parse_qs
+        q = ((parse_qs(urlsplit(self.path).query).get("q") or [""])[0]).strip()
+        if len(q) < 2:
+            return self._send(200, [])
+        pat = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        out = []
+        db = _db()
+        try:
+            rows = db.execute(
+                "SELECT h.id, h.handle_name, h.client_guid, h.member_id, m.polid "
+                "FROM handle h JOIN member m ON m.id = h.member_id "
+                "WHERE h.handle_name ILIKE %s ESCAPE '\\' OR m.polid ILIKE %s "
+                "ORDER BY lower(h.handle_name), h.id LIMIT 20",
+                (pat, q.replace("%", "").replace("_", "") + "%")).fetchall()
+            for r in rows:
+                face = 0
+                try:
+                    fid = accounts.get_handle_profile(db, r["id"]).get(self.PORTRAIT_FIELD)
+                    face = fid if isinstance(fid, int) and 0 < fid < 1 << 16 else 0
+                except Exception:
+                    pass
+                out.append({"handle_id": int(r["id"]), "handle": r["handle_name"],
+                            "polid": r["polid"], "face": face,
+                            "can_invite": bool(r["client_guid"])})
+        finally:
+            db.close()
+        self._send(200, out)
+
+    #: A handle's portrait is handle_profile field 19; tile `id & 7` of the
+    #: Viewer's hnf<id >> 3>.png, 4 x 2 portraits of 64x96 (app.dll 0x4a7d199).
+    PORTRAIT_FIELD = 19
+    FACES_DIR = os.environ.get("POL_ADMIN_FACES", "/app/boardart/faces")
+
+    def _face_sheet(self):
+        from urllib.parse import urlsplit, parse_qs
+        n = (parse_qs(urlsplit(self.path).query).get("n") or [""])[0]
+        if not n.isdigit() or len(n) > 4:
+            return self._send(404, {"error": "no such sheet"})
+        try:
+            with open(os.path.join(self.FACES_DIR, "hnf%03d.png" % int(n)), "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._send(404, {"error": "no such sheet"})
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
 
     # -- the GM desk: queue control, and the room ----------------------------- #
     #

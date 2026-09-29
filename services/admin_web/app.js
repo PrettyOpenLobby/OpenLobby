@@ -1637,42 +1637,90 @@ function gmRenderTicket() {
     : `<button class="act" data-knock="1" title="Tell the player GM chat is ready">Knock</button>`;
   // INVITE TO JOIN: another player into this request's chat. Their Viewer is
   // knocked with this request's number, which is not theirs, so it offers Join.
+  // Picked from a search by HANDLE ID, with the POL ID beside each name:
+  // two handles can differ only in case.
   const inv = r.status === "closed" ? "" :
     `<div class="gm-invite">` +
-    (r.invited || []).map((i) => `<span class="gm-st live">${esc(i.handle)} invited ` +
-      `<a href="#" data-uninvite="${esc(i.handle)}" title="Withdraw the invitation">×</a></span>`).join("") +
-    `<input type="text" id="gmInvName" placeholder="Invite a player by handle" autocomplete="off">` +
-    `<button class="ghost" data-invite="1">Invite to join</button></div>`;
+    (r.invited || []).map((i) => `<span class="gm-st live">${esc(i.handle)}` +
+      (i.polid ? ` (${esc(i.polid)})` : "") + ` invited ` +
+      `<a href="#" data-uninvite-guid="${esc(String(i.guid || ""))}" data-uninvite="${esc(i.handle)}"` +
+      ` title="Withdraw the invitation">×</a></span>`).join("") +
+    `<div class="gm-picker"><input type="text" id="gmInvQ" placeholder="Invite a player: search by handle or POL ID"` +
+    ` autocomplete="off" value="${esc(GM_INV.q)}"><div class="gm-picks" id="gmInvRes">${gmPicks()}</div></div></div>`;
   $("#gmTActions").innerHTML = knock +
     (r.status === "open" ? btn("answered", "Mark answered", "ghost") + btn("closed", "Close", "ghost")
     : r.status === "answered" ? btn("closed", "Close", "ghost") + btn("open", "Reopen", "ghost")
     : btn("open", "Reopen", "ghost")) + inv;
 }
 
+// The invite picker's query and results survive the desk's 4-second redraws.
+const GM_INV = { q: "", rows: [], timer: null, seq: 0 };
+function gmFace(fid) {
+  if (!fid) return `<span class="gm-face"></span>`;
+  const t = fid & 7;
+  return `<span class="gm-face" style="background-image:url('/api/face-sheet?n=${fid >> 3}');` +
+    `background-position:${(t % 4) * 100 / 3}% ${Math.floor(t / 4) * 100}%"></span>`;
+}
+function gmPicks() {
+  return GM_INV.rows.map((p) =>
+    `<button class="gm-pick" data-pick-id="${p.handle_id}" data-pick-name="${esc(p.handle)}"` +
+    ` data-pick-pol="${esc(p.polid || "")}"${p.can_invite ? "" : " disabled title=\"Has not logged in yet\""}>` +
+    `${gmFace(p.face)}<span class="who"><b>${esc(p.handle)}</b>` +
+    `<span class="pid">POL ID ${esc(p.polid || "?")}${p.can_invite ? "" : " · never logged in"}</span></span></button>`
+  ).join("") || (GM_INV.q.length >= 2 ? `<div class="gmn-empty">No player matches.</div>` : "");
+}
+async function gmInvSearch() {
+  const q = GM_INV.q, seq = ++GM_INV.seq;
+  if (q.length < 2) { GM_INV.rows = []; const el = $("#gmInvRes"); if (el) el.innerHTML = gmPicks(); return; }
+  try {
+    const rows = await api("/api/gm-players?q=" + encodeURIComponent(q));
+    if (seq !== GM_INV.seq) return;          // a newer keystroke won
+    GM_INV.rows = Array.isArray(rows) ? rows : [];
+  } catch (e) { GM_INV.rows = []; }
+  const el = $("#gmInvRes");
+  if (el) el.innerHTML = gmPicks();
+}
+$("#gmTActions").addEventListener("input", (e) => {
+  if (e.target.id !== "gmInvQ") return;
+  GM_INV.q = e.target.value.trim();
+  clearTimeout(GM_INV.timer);
+  GM_INV.timer = setTimeout(gmInvSearch, 250);
+});
+
 $("#gmTActions").onclick = (e) => {
   const k = e.target.closest("button[data-knock]");
   if (k && GM_SEL) return gmKnock(GM_SEL, k.dataset.knock === "1");
-  if (e.target.closest("button[data-invite]") && GM_SEL) {
-    const name = ($("#gmInvName").value || "").trim();
-    return name ? gmInvite(GM_SEL, { invite: name }) : toast("Type the player's handle", true);
+  const p = e.target.closest("button[data-pick-id]");
+  if (p && GM_SEL) {
+    const label = p.dataset.pickName + (p.dataset.pickPol ? ` (${p.dataset.pickPol})` : "");
+    GM_INV.q = ""; GM_INV.rows = [];
+    return gmInvite(GM_SEL, { invite_handle_id: Number(p.dataset.pickId) }, label);
   }
   const u = e.target.closest("[data-uninvite]");
-  if (u && GM_SEL) { e.preventDefault(); return gmInvite(GM_SEL, { uninvite: u.dataset.uninvite }); }
+  if (u && GM_SEL) {
+    e.preventDefault();
+    const body = u.dataset.uninviteGuid ? { uninvite_guid: Number(u.dataset.uninviteGuid) }
+      : { uninvite: u.dataset.uninvite };
+    return gmInvite(GM_SEL, body, u.dataset.uninvite);
+  }
   const b = e.target.closest("button[data-st]");
   if (b && GM_SEL) gmSetStatus(GM_SEL, b.dataset.st);
 };
 
-async function gmInvite(id, body) {
+async function gmInvite(id, body, label) {
+  const who = label || body.invite || body.uninvite || "the player";
+  const undo = body.uninvite || body.uninvite_guid;
   try {
     const out = await api("/api/gm-ticket", gmPost({ id, ...body }));
     const r = GM_CALLS.find((x) => x.id === id);
-    if (r) r.invited = (out.invited || []).map((i) => ({ handle: i.handle, at: i.at }));
+    if (r) r.invited = (out.invited || []).map((i) =>
+      ({ handle: i.handle, polid: i.polid, guid: i.guid, at: i.at }));
     GM_TICKET_SIG = "";
     gmRenderTicket();
-    toast(body.uninvite ? `Invitation for ${body.uninvite} withdrawn`
-      : out.knock_message === "sent" ? `${body.invite} invited: their GM Call screen offers Join`
-      : `${body.invite} invited. They will see Join on their GM Call screen, but the live message was not sent: ${out.knock_message}`,
-      !body.uninvite && out.knock_message !== "sent");
+    toast(undo ? `Invitation for ${who} withdrawn`
+      : out.knock_message === "sent" ? `${who} invited: their GM Call screen offers Join`
+      : `${who} invited. They will see Join on their GM Call screen, but the live message was not sent: ${out.knock_message}`,
+      !undo && out.knock_message !== "sent");
   } catch (e) { toast(e.message, true); }
 }
 
