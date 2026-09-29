@@ -386,6 +386,12 @@
     .gm-diag summary { cursor: pointer; color: var(--muted); font-size: 13px;
       font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
     .gm-diag[open] summary { margin-bottom: 8px; }
+    .gmn-sec { margin-top: 12px; }
+    .gmn-item { border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+      margin: 8px 0; display: grid; gap: 6px; }
+    .gmn-item .row { margin: 0; }
+    .gmn-item textarea { resize: vertical; min-height: 54px; }
+    .gmn-empty { color: var(--muted); font-size: 13px; margin: 6px 0; }
     .gm-diag-h { font-size: 12px; color: var(--muted); text-transform: uppercase;
       letter-spacing: .5px; margin: 18px 0 4px; }
     .navbadge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 6px;
@@ -1051,6 +1057,18 @@
           <div class="hint" id="gmComposeHint"></div>
         </div>
       </div>
+
+      <details class="panel gm-diag" id="gmNotices">
+        <summary>Notices</summary>
+        <p class="hint">The list players read on Service &amp; Support &gt; GM Call &gt; Next. Publishing updates the page right away.</p>
+        <div class="row" style="margin-top:6px">
+          <div><label>Language</label>
+            <select id="gmnLoc"><option value="en-US">English</option><option value="ja-JP">Japanese</option></select></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="act" id="gmnSave">Publish</button></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmnReload">Discard changes</button></div>
+        </div>
+        <div id="gmnSecs"></div>
+      </details>
 
       <details class="panel gm-diag" id="gmDiag">
         <summary>Diagnostics</summary>

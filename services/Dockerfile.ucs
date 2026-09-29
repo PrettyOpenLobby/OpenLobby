@@ -41,6 +41,7 @@ COPY contentlist.py /app/contentlist.py
 COPY gmchat.py /app/gmchat.py
 COPY gmcrypt.py /app/gmcrypt.py
 COPY gmd.py /app/gmd.py
+COPY gmnotices.py /app/gmnotices.py
 COPY pmlrefs.py /app/pmlrefs.py
 COPY polnick.py /app/polnick.py
 # gmcrypt loads its CAST-128 s-boxes at import -- the file must ride or the
