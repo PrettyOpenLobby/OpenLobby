@@ -213,7 +213,19 @@ GM_NAME = os.environ.get("POL_GMCHAT_NAME", "GM").encode("cp932", "replace")
 GM_HID = int(os.environ.get("POL_GMCHAT_HID", "0") or 0)
 
 
-def encode_roster(chan, name=None, hid=None, gm=True):
+def roster_tail(request):
+    """The padding a roster record ends with, in the ASKER's own style.
+
+    The Viewer ends its records with the literal `dummy`
+    (`HRu87960930222113Casdummy`) and reads the name by its length field.
+    Dirge of Cerberus's in-game GM chat sends none (`HRu87960930222668
+    Hazelnut`) and reads the name to the end of the record, so a `dummy` in
+    our answer drew the GM as "GMdummy" there (2026-09-29). Answer each
+    client the way it asks."""
+    return b"dummy" if request.endswith(b"dummy") else b""
+
+
+def encode_roster(chan, name=None, hid=None, gm=True, tail=b"dummy"):
     """An 'H' roster answer: `HA<room>:<p><%013u hid><hexlen><name>dummy`.
 
     Built exactly as app.dll's own answer at 0x4ab369b. The 'H' handler
@@ -232,7 +244,7 @@ def encode_roster(chan, name=None, hid=None, gm=True):
         name = name.encode("cp932", "replace")
     p = b"G" if gm else b"U"
     return (b"HA" + chan + b":" + p + b"%013d" % (GM_HID if hid is None else hid)
-            + _hexlen(len(name)) + name + b"dummy")
+            + _hexlen(len(name)) + name + tail)
 
 
 def is_roster_request(rec):
