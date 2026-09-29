@@ -962,6 +962,18 @@ def _verb_mode(arg, nick, srv, peer_ip, sess):
         mode_str = os.environ.get("POL_ZONE_MODE", "+l 64").encode()
     elif _is_listed_chan(target):
         mode_str = os.environ.get("POL_LISTED_ROOM_MODE", "+l 21").encode()
+    elif _gm_roster_nick(target):
+        # A GM CALL ROOM HOLDS AT LEAST THE PLAYER AND THE GM. The limit is not
+        # decoration: app.dll's GM chat roster rebuild (0x4ab3754) walks only
+        # the first `+l` slots of polcore's member array (the count it reads,
+        # [0x4dbdcb4], is the channel's +l, stored at chan+0x94 by the 324
+        # handler at 0x37d7790). With +l 1 it read the player's own slot and
+        # never the GM's, so the GM was never listed and every GM line was
+        # dropped for want of a speaker (2026-09-29; the same limit hid two
+        # players from each other in #gmchat001 on 2026-08-17). 64 is polcore's
+        # array capacity, and the rebuild has no bound check of its own, so it
+        # must not go higher.
+        mode_str = os.environ.get("POL_GM_ROOM_MODE", "+l 64").encode()
     else:
         mode_str = os.environ.get("POL_ROOM_MODE", "+l 1").encode()
     # WHAT THE ROOM ACTUALLY SET WINS. SE's answer for the created, keyed
