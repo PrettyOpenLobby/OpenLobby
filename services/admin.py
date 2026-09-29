@@ -2957,6 +2957,11 @@ class Handler(BaseHTTPRequestHandler):
         knock = body.get("knock")
         invite = (body.get("invite") or "").strip()
         uninvite = (body.get("uninvite") or "").strip()
+        # The GM's note on how it was resolved, mailed with the transcript.
+        resolution = str(body.get("resolution") or "").strip()
+        if len(resolution) > self.REPLY_MAX:
+            return self._send(400, {"error": f"keep the resolution under "
+                                             f"{self.REPLY_MAX} characters"})
         # The desk's picker names the player by HANDLE ID: two handles can
         # differ only in case, and a name lookup ignores case.
         try:
@@ -3017,8 +3022,14 @@ class Handler(BaseHTTPRequestHandler):
             st = self._gm_ticket_state()
             cur = dict(st.get(tid) or {})
             was_closed = cur.get("status") == "closed"
+            # Who was in the call when it closes: they are told it ended and
+            # mailed the transcript, and the list is emptied below.
+            was_invited = [i for i in cur.get("invited") or []
+                           if isinstance(i, dict) and i.get("guid")]
             if status is not None:
                 cur.update(status=status, by=who, at=time.time())
+            if status == "closed" and not was_closed and resolution:
+                cur["resolution"] = resolution
             cur.setdefault("status", "open")
             if knock:
                 cur.update(knocked_at=time.time(), knocked_by=who)
@@ -3070,6 +3081,29 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 message = f"not sent ({exc})"
             print(f"[admin] knock message for {tid}: {message}", flush=True)
+        if action == 2 and not was_closed:
+            # EVERY PLAYER IN THE CALL is told it ended, not only the one who
+            # filed it: an invited player's Viewer holds Join (and the home GM
+            # button) until a close knock or its own gmd check-in clears it,
+            # and an invitee with no request of their own does not check in.
+            # In the background: each waits on authsess, and the desk's answer
+            # must not wait on all of them.
+            def close_invitees(tid=tid, invited=list(was_invited)):
+                for i in invited:
+                    try:
+                        with open(os.path.join(GM_CALL_DIR, tid + ".json"),
+                                  encoding="utf-8", errors="replace") as f:
+                            ticket = json.load(f)
+                        got = _request_knock(dict(ticket, handle=i.get("handle") or "",
+                                                  guid=i["guid"]), action=2)
+                        said = "sent" if got.get("ok") else got.get("error") or "not sent"
+                    except Exception as exc:
+                        said = f"not sent ({exc})"
+                    print(f"[admin] close message for {tid} to invited "
+                          f"{i.get('handle')}: {said}", flush=True)
+            if was_invited:
+                threading.Thread(target=close_invitees, daemon=True,
+                                 name="gm-close-invitees").start()
         if invitee:
             # The invitee's knock: this request's room and number, which is not
             # theirs, so their Viewer offers Join (app.dll 0x4ab2656).
@@ -3086,22 +3120,25 @@ class Handler(BaseHTTPRequestHandler):
                 message = f"not sent ({exc})"
             print(f"[admin] {who} invited {invitee['handle']} into {tid}: "
                   f"message {message}", flush=True)
-        # CLOSING MAILS THE TRANSCRIPT to the player who filed the request, to
-        # their PlayOnline Mail inbox, each time it is closed (a reopened
-        # request may have gone on). Invited players do not get it: the
-        # conversation is the requester's. No chat, no mail.
+        # CLOSING MAILS THE TRANSCRIPT, with the GM's resolution note if one
+        # was written, to the PlayOnline Mail inbox of everyone in the call:
+        # the player who filed it and the players the desk invited (the only
+        # people the confidentiality rule lets see it). Sent each time it is
+        # closed, since a reopened request may have gone on. With no chat and
+        # no note there is nothing to send.
         transcript = None
         if status == "closed" and not was_closed:
-            transcript = self._gm_mail_transcript(tid)
+            transcript = self._gm_mail_transcript(tid, resolution, was_invited)
             print(f"[admin] transcript of {tid}: {transcript}", flush=True)
         self._send(200, {"ok": True, "id": tid, "status": status,
                          "knocked_at": cur.get("knocked_at"),
                          "invited": cur.get("invited") or [],
                          "knock_message": message, "transcript": transcript})
 
-    def _gm_mail_transcript(self, tid):
-        """Mail the chat of request `tid` to the requester. Returns what
-        happened, for the desk."""
+    def _gm_mail_transcript(self, tid, resolution="", invited=()):
+        """Mail request `tid`'s chat, and the GM's resolution note, to the
+        requester and the players invited into it. Returns what happened,
+        for the desk."""
         try:
             with open(os.path.join(GM_CALL_DIR, tid + ".json"),
                       encoding="utf-8", errors="replace") as f:
@@ -3109,20 +3146,26 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             return "not mailed: the ticket could not be read"
         room = str(ticket.get("room") or "")
-        lines = []
+        lines, to_all = [], []
         db = _db()
         try:
+            def mailbox(h):
+                if h is None:
+                    return ""
+                row = db.execute("SELECT mail_address FROM member WHERE id = %s",
+                                 (h["member_id"],)).fetchone()
+                addr = (row["mail_address"] if row else "") or ""
+                return addr if "@" in addr else ""
             h = (accounts.handle_by_name(db, ticket.get("handle"))
                  if ticket.get("handle") else None)
             if h is None and ticket.get("guid"):
                 h = accounts.handle_by_client_guid(db, ticket["guid"])
-            if h is None:
-                return "not mailed: the caller is not a known player"
-            row = db.execute("SELECT mail_address FROM member WHERE id = %s",
-                             (h["member_id"],)).fetchone()
-            to = (row["mail_address"] if row else "") or ""
-            if "@" not in to:
-                return "not mailed: the caller has no PlayOnline Mail address"
+            for addr in [mailbox(h)] + [mailbox(accounts.handle_by_client_guid(db, i["guid"]))
+                                        for i in invited]:
+                if addr and addr not in to_all:
+                    to_all.append(addr)
+            if not to_all:
+                return "not mailed: nobody in the call has a PlayOnline Mail address"
             names = {}
             for rec in gmchat.transcript(room.encode(), 2000) if room else []:
                 raw = bytes.fromhex(rec.get("raw") or "")
@@ -3142,23 +3185,31 @@ class Handler(BaseHTTPRequestHandler):
                 lines.append(f"[{when}] {who}: {text}")
         finally:
             db.close()
-        if not lines:
-            return "not mailed: no chat took place"
+        if not lines and not resolution:
+            return "not mailed: no chat took place and no resolution was written"
         n = ticket.get("request_no") or "?"
         subj = re.sub(r"[\x00-\x1f\x7f]", "", str(ticket.get("subject") or ""))
         head = [f"Request #{n}: {subj}",
-                f"Filed: {ticket.get('received_at') or '?'}",
-                "Times are UTC.", ""]
-        body = "\n".join(head + lines + ["", "PlayOnline GM"])
-        raw, subject = self._gm_mail(to, f"Your GM Call transcript (request #{n})", body)
+                f"Filed: {ticket.get('received_at') or '?'}", ""]
+        if resolution:
+            head += ["Resolution:", resolution, ""]
+        chat = (["Chat (times are UTC):"] + lines) if lines else ["No chat took place."]
+        body = "\n".join(head + chat + ["", "PlayOnline GM"])
+        sent = []
         try:
             db = _db()
             try:
-                accounts.deliver_mail(db, to, raw, sender=self.GM_MAIL_FROM, subject=subject)
+                for to in to_all:
+                    raw, subject = self._gm_mail(
+                        to, f"Your GM Call has been closed (request #{n})", body)
+                    accounts.deliver_mail(db, to, raw, sender=self.GM_MAIL_FROM,
+                                          subject=subject)
+                    sent.append(to)
             finally:
                 db.close()
         except Exception as exc:
-            return f"not mailed: {exc}"
+            return f"mailed to {', '.join(sent) or 'nobody'}; then failed: {exc}"
+        to = ", ".join(sent)
         with self._GM_TICKET_LOCK:
             st = self._gm_ticket_state()
             cur = dict(st.get(tid) or {})
