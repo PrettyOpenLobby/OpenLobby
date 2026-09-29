@@ -623,7 +623,7 @@ def _verb_join(arg, nick, srv, peer_ip, sess):
         member = getattr(sess, "member", None)
         if not gmchat.room_allowed(chan, member):
             log("authserv", f"  GM room {chan.decode('latin1')}: {nick!r} "
-                            f"(member {member}) REFUSED -- not the requester "
+                            f"(member {gmchat.member_key(member)}) REFUSED -- not the requester "
                             f"and not invited")
             return [b":" + srv + b" 473 " + nick + b" " + chan +
                     b" :Cannot join channel (+i)"]
