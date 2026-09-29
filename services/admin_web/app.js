@@ -1647,14 +1647,23 @@ function gmRenderTicket() {
       ` title="Withdraw the invitation">×</a></span>`).join("") +
     `<div class="gm-picker"><input type="text" id="gmInvQ" placeholder="Invite a player: search by handle or POL ID"` +
     ` autocomplete="off" value="${esc(GM_INV.q)}"><div class="gm-picks" id="gmInvRes">${gmPicks()}</div></div></div>`;
+  // CLOSE asks for a resolution first: it is mailed, with the transcript, to
+  // everyone in the call.
+  const closing = GM_CLOSING === r.id ?
+    `<div class="gm-close-box"><label>Resolution <span class="hint" style="display:inline">` +
+    `(optional; mailed with the chat transcript to the player and anyone invited)</span></label>` +
+    `<textarea id="gmResolution" maxlength="2000">${esc(GM_RESOLUTION)}</textarea>` +
+    `<div><button class="act" data-close-go="1">Close and mail</button> ` +
+    `<button class="ghost" data-close-cancel="1">Cancel</button></div></div>` : "";
   $("#gmTActions").innerHTML = knock +
     (r.status === "open" ? btn("answered", "Mark answered", "ghost") + btn("closed", "Close", "ghost")
     : r.status === "answered" ? btn("closed", "Close", "ghost") + btn("open", "Reopen", "ghost")
-    : btn("open", "Reopen", "ghost")) + inv;
+    : btn("open", "Reopen", "ghost")) + (closing || inv);
 }
 
 // The invite picker's query and results survive the desk's 4-second redraws.
 const GM_INV = { q: "", rows: [], timer: null, seq: 0 };
+let GM_CLOSING = null, GM_RESOLUTION = "";
 function gmFace(fid) {
   if (!fid) return `<span class="gm-face"></span>`;
   const t = fid & 7;
@@ -1681,6 +1690,7 @@ async function gmInvSearch() {
   if (el) el.innerHTML = gmPicks();
 }
 $("#gmTActions").addEventListener("input", (e) => {
+  if (e.target.id === "gmResolution") { GM_RESOLUTION = e.target.value; return; }
   if (e.target.id !== "gmInvQ") return;
   GM_INV.q = e.target.value.trim();
   clearTimeout(GM_INV.timer);
@@ -1703,7 +1713,22 @@ $("#gmTActions").onclick = (e) => {
       : { uninvite: u.dataset.uninvite };
     return gmInvite(GM_SEL, body, u.dataset.uninvite);
   }
+  if (e.target.closest("button[data-close-cancel]")) {
+    GM_CLOSING = null; GM_TICKET_SIG = ""; return gmRenderTicket();
+  }
+  if (e.target.closest("button[data-close-go]") && GM_SEL) {
+    const res = GM_RESOLUTION.trim();
+    GM_CLOSING = null; GM_RESOLUTION = "";
+    return gmSetStatus(GM_SEL, "closed", false, { resolution: res });
+  }
   const b = e.target.closest("button[data-st]");
+  if (b && GM_SEL && b.dataset.st === "closed") {
+    GM_CLOSING = GM_SEL; GM_RESOLUTION = ""; GM_TICKET_SIG = "";
+    gmRenderTicket();
+    const t = $("#gmResolution");
+    if (t) t.focus();
+    return;
+  }
   if (b && GM_SEL) gmSetStatus(GM_SEL, b.dataset.st);
 };
 
@@ -1738,16 +1763,18 @@ async function gmKnock(id, on) {
   } catch (e) { toast(e.message, true); }
 }
 
-async function gmSetStatus(id, status, quiet) {
+async function gmSetStatus(id, status, quiet, extra) {
   try {
-    await api("/api/gm-ticket", gmPost({ id, status }));
+    const out = await api("/api/gm-ticket", gmPost({ id, status, ...(extra || {}) }));
     const r = GM_CALLS.find((x) => x.id === id);
     if (r) r.status = status;
     GM_LIST_SIG = GM_TICKET_SIG = "";
     gmBadge(GM_CALLS);
     gmRenderList();
     gmRenderTicket();
-    if (!quiet) toast(status === "open" ? "Reopened" : `Marked ${status}`);
+    if (!quiet) toast(status === "open" ? "Reopened"
+      : status === "closed" && out.transcript ? `Closed. Transcript ${out.transcript}`
+      : `Marked ${status}`, status === "closed" && /^not mailed|failed/.test(out.transcript || ""));
   } catch (e) { toast(e.message, true); }
 }
 
