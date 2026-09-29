@@ -365,7 +365,8 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                             # (gmchat.encode_roster). Straight to this socket,
                             # not the spool: only the asker needs it.
                             if _rec and gmchat.is_roster_request(_rec):
-                                _ha = gmchat.encode_roster(gm_room)
+                                _ha = gmchat.encode_roster(
+                                    gm_room, tail=gmchat.roster_tail(_rec))
                                 if chat_sess.send([gmchat.privmsg(
                                         gm_room, _ha,
                                         ircband._irc_host(prefix[1:]))]):
