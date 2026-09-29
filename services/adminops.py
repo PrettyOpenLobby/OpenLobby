@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 
 import adminusers
+import gmd
+import gmduty
 import live_sessions
 import webpush
 
@@ -213,7 +215,7 @@ class Worker(threading.Thread):
     code and returns True if it did; `audit(...)` records it."""
 
     def __init__(self, ticket_dir, may_push, content_label, expire_code, audit,
-                 every=5.0):
+                 every=5.0, auto_reply=None):
         super().__init__(daemon=True, name="admin-worker")
         self.ticket_dir = ticket_dir
         self.may_push = may_push
@@ -221,6 +223,9 @@ class Worker(threading.Thread):
         self.expire_code = expire_code
         self.audit = audit
         self.every = every
+        #: auto_reply(rec, name) -> str: answers a request filed while nobody
+        #: is on duty (admin._gm_auto_reply). None = no auto-reply.
+        self.auto_reply = auto_reply
         self._retries = {}
         self._last_sweep = 0.0
 
@@ -276,25 +281,40 @@ class Worker(threading.Thread):
                     adminusers.alerted_add(conn, name, "unreadable")
                 continue
             self._retries.pop(name, None)
-            adminusers.alerted_add(conn, name, self.announce(conn, rec))
+            adminusers.alerted_add(conn, name, self.announce(conn, rec, name=name))
 
-    def announce(self, conn, rec, test=False):
+    def announce(self, conn, rec, test=False, name=None):
         handle = clean(rec.get("handle"), 40) or "a player"
         subject = clean(rec.get("subject"), 120) or "(no subject)"
         cid = rec.get("content_id")
         title_name = self.content_label(cid) if cid is not None else ""
         panel = (adminusers.get_setting(conn, "panel_url") or "").rstrip("/")
         results = []
+        # Who is at the desk (gmduty.py). With nobody on duty the caller is
+        # told so by mail at once and every GM is alerted; with GMs on duty,
+        # only they are.
+        on_duty = sorted(gmduty.gms(gmd.read_control()))
+        if not on_duty and self.auto_reply and not test:
+            try:
+                results.append(self.auto_reply(rec, name or ""))
+            except Exception as exc:
+                results.append(f"auto-reply failed: {exc}")
+        duty_line = ("On duty: " + ", ".join(on_duty) if on_duty
+                     else "No GM on duty: the player was told by mail that a GM will reply")
 
         url = adminusers.get_setting(conn, "discord_webhook")
         if url:
             text = (f"**GM call** from **{handle}**"
                     + (f" ({title_name})" if title_name else "") + f": {subject}"
+                    + f"\n{duty_line}"
                     + (f"\n{panel}/#gmcalls" if panel else ""))
             ok, detail = discord_post(url, text)
             results.append("discord " + ("ok" if ok else "failed: " + detail))
 
         subs = [s for s in adminusers.push_list(conn) if self.may_push(s)]
+        if on_duty:
+            mine = [s for s in subs if s["username"] in on_duty]
+            subs = mine or subs
         if subs:
             sent, total = push_to(conn, subs, {
                 "title": f"GM call from {handle}",

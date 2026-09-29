@@ -73,6 +73,7 @@ import gmchat  # noqa: E402  -- the GM chat record language and its spool
 #: was never told. Importing it binds no socket -- `serve()` does that.
 import gmd  # noqa: E402
 import gmnotices  # noqa: E402  -- the GM notices list and its data.pml
+import gmduty  # noqa: E402  -- who is on duty, and Discord links
 #: The database layer's error types (the connections come from accounts and
 #: adminusers). Named so, because `db` is every connection's name below.
 from polcore import db as polcore_db  # noqa: E402
@@ -1297,7 +1298,7 @@ _POST_PERMS = {
     "/api/sessions/revoke": "any", "/api/me/password": "any",
     "/api/codes": "codes", "/api/codes/random": "codes",
     "/api/gm-control": "gm", "/api/gm-say": "gm", "/api/gm-ticket": "gm",
-    "/api/gm-notices": "gm",
+    "/api/gm-notices": "gm", "/api/gm-discord": "gm",
     "/api/push/subscribe": "gm", "/api/push/test": "gm",
     "/api/push/unsubscribe": "any",
     "/api/triage": "reports", "/api/report-reply": "reports",
@@ -1326,6 +1327,7 @@ _AUDIT_ACTIONS = {
     "/api/gm-control": "changed the GM desk", "/api/gm-say": "wrote in GM chat",
     "/api/gm-ticket": "set a GM call's status",
     "/api/gm-notices": "published the GM notices",
+    "/api/gm-discord": "linked or unlinked a Discord account for GM duty",
     "/api/triage": "set a report's status",
     "/api/report-reply": "answered a report by mail",
     "/api/account-create": "created an account",
@@ -2271,6 +2273,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._gm_ticket()
         if path == "/api/gm-notices":
             return self._gm_notices_save()
+        if path == "/api/gm-discord":
+            return self._gm_discord()
         if path == "/api/triage":
             return self._triage()
         if path == "/api/report-reply":
@@ -3063,6 +3067,7 @@ class Handler(BaseHTTPRequestHandler):
     def _gm_state(self):
         """Everything the desk screen shows, read fresh. Never raises."""
         ctl = gmd.read_control()
+        me = (self._session() or {}).get("user") or "operator"
         flags, why = gmd.effective_flags(ctl)
         serving = {}
         try:
@@ -3100,6 +3105,12 @@ class Handler(BaseHTTPRequestHandler):
             "join": bool(flags & 0x40), "start": bool(flags & 0x20),
             "on_duty": gmd.on_duty(ctl),
             "on_duty_until": ctl.get("on_duty_until"),
+            # Per GM (gmduty.py): who is on, until when, and from where.
+            "gms": [{"user": u, "until": c["until"], "via": c["via"]}
+                    for u, c in sorted(gmduty.gms(ctl).items())],
+            "me": me,
+            "me_on_duty": me in gmduty.gms(ctl),
+            "discord": self._gm_discord_link(me),
             # None = never set, so the screen can say "nobody has said" rather
             # than claiming a GM has signed off when none ever signed on.
             "duty": ctl.get("duty"),
@@ -3166,6 +3177,39 @@ class Handler(BaseHTTPRequestHandler):
     #: it invites a caller into a room with nobody in it.
     DUTY_TTL = int(os.environ.get("POL_ADMIN_GM_DUTY_TTL", "180"))
 
+    def _gm_discord_link(self, user):
+        """{"discord_id", "name"} this desk account is linked to, or None."""
+        try:
+            conn = adminusers.connect()
+            try:
+                return gmduty.discord_for(conn, user)
+            finally:
+                conn.close()
+        except Exception:
+            return None
+
+    def _gm_discord(self):
+        """POST {code}: link the Discord user who ran /gm link to this account,
+        so /gm duty in Discord acts as it. POST {unlink: true} undoes it."""
+        body = self._json_body()
+        user, role, _perms = self._caller()
+        conn = adminusers.connect()
+        try:
+            if body.get("unlink"):
+                old = gmduty.unlink(conn, user)
+                print(f"[admin] {user} unlinked Discord"
+                      + (f" ({old['name']})" if old and old.get("name") else ""), flush=True)
+                return self._send(200, {"ok": True, "discord": None})
+            try:
+                got = gmduty.redeem(conn, body.get("code"), user, role)
+            except gmduty.LinkError as exc:
+                return self._send(400, {"error": str(exc)})
+        finally:
+            conn.close()
+        print(f"[admin] {user} linked Discord {got.get('name') or got['discord_id']}",
+              flush=True)
+        self._send(200, {"ok": True, "discord": got})
+
     def _gm_control(self):
         """Set (or take back) what gmd tells callers.
 
@@ -3175,30 +3219,27 @@ class Handler(BaseHTTPRequestHandler):
         short of editing a file inside a container.
         """
         body = self._json_body()
-        ctl = gmd.read_control()
+        user = (self._session() or {}).get("user") or "operator"
         changed = []
-        if "on_duty" in body:
-            # TRI-STATE, like the two pins below and for the same reason: null
-            # hands the decision back to POL_GMD_STATUS_FLAGS. Without it the
-            # first operator ever to touch this panel takes the flags away from
-            # compose permanently, which is a one-way door -- and on a stack that
-            # runs unattended, "nobody has said anything" is the correct resting
-            # state, not "a GM signed off".
-            if body["on_duty"] is None:
-                ctl["duty"], ctl["on_duty_until"] = None, None
-                changed.append("duty cleared (back to POL_GMD_STATUS_FLAGS)")
-            else:
-                ctl["duty"] = bool(body["on_duty"])
-                ctl["on_duty_until"] = (time.time() + self.DUTY_TTL
-                                        if ctl["duty"] else None)
-                changed.append("on duty" if ctl["duty"] else "off duty")
-        elif body.get("renew"):
-            # The panel's heartbeat. It EXTENDS a claim and never creates one:
-            # a renew that could turn duty on would mean a stale tab left open
-            # in another window quietly re-opens the desk after the operator
-            # deliberately closed it.
-            if gmd.on_duty(ctl):
-                ctl["on_duty_until"] = time.time() + self.DUTY_TTL
+        # DUTY IS PER GM (gmduty.py): going on duty puts THIS account on, and
+        # the desk is staffed while anyone is. null takes everyone off and hands
+        # the flags back to POL_GMD_STATUS_FLAGS.
+        try:
+            if "on_duty" in body:
+                if body["on_duty"] is None:
+                    gmduty.clear_all()
+                    changed.append("duty cleared (back to POL_GMD_STATUS_FLAGS)")
+                else:
+                    gmduty.set_duty(user, bool(body["on_duty"]), self.DUTY_TTL, "desk")
+                    changed.append("on duty" if body["on_duty"] else "off duty")
+            elif body.get("renew"):
+                # The panel's heartbeat. It EXTENDS this GM's desk claim and
+                # never creates one: a stale tab must not re-open a desk its GM
+                # deliberately left.
+                gmduty.renew(user, self.DUTY_TTL)
+        except OSError as exc:
+            return self._send(500, {"error": f"could not write the desk: {exc}"})
+        ctl = gmd.read_control()
         for key in ("flags", "queue"):
             if key not in body:
                 continue
@@ -4273,7 +4314,63 @@ def _start_worker():
             return ""
 
     adminops.Worker(GM_CALL_DIR, may_push, label, expire_code,
-                    lambda *a: _audit(*a)).start()
+                    lambda *a: _audit(*a), auto_reply=_gm_auto_reply).start()
+
+
+#: The mail a request gets when it is filed while nobody is on duty
+#: (gmduty.py). Sent once, by the alert worker, when the ticket is first seen.
+GM_AWAY_SUBJECT = os.environ.get("POL_GM_AWAY_SUBJECT", "Your GM Call (request #{n})")
+GM_AWAY_TEXT = os.environ.get("POL_GM_AWAY_TEXT", (
+    "Thank you for contacting the Game Masters.\n\n"
+    "No Game Master is on duty right now. Your request #{n} has been recorded, "
+    "and a Game Master will reply to you by PlayOnline Mail as soon as one is "
+    "available.\n\n"
+    "PlayOnline GM"))
+
+
+def _gm_auto_reply(rec, name):
+    """Answer a request filed while no GM is on duty, by POL mail to the caller
+    alone, and note it on the ticket. Returns what happened, for the alert log."""
+    if gmduty.staffed():
+        return "a GM is on duty"
+    n = rec.get("request_no") or "?"
+    db = _db()
+    try:
+        h = accounts.handle_by_name(db, rec.get("handle")) if rec.get("handle") else None
+        if h is None and rec.get("guid"):
+            h = accounts.handle_by_client_guid(db, rec["guid"])
+        if h is None:
+            return "no GM on duty; caller unknown, no auto-reply"
+        row = db.execute("SELECT mail_address FROM member WHERE id = %s",
+                         (h["member_id"],)).fetchone()
+        to = (row["mail_address"] if row else "") or ""
+        if "@" not in to:
+            return "no GM on duty; caller has no mail address, no auto-reply"
+        raw, subject = Handler._gm_mail(to, GM_AWAY_SUBJECT.format(n=n),
+                                        GM_AWAY_TEXT.format(n=n))
+        accounts.deliver_mail(db, to, raw, sender=Handler.GM_MAIL_FROM, subject=subject)
+    finally:
+        db.close()
+    tid = name[:-len(".json")] if name.endswith(".json") else name
+    with Handler._GM_TICKET_LOCK:
+        try:
+            with open(Handler.GM_TICKET_STATE, encoding="utf-8") as f:
+                st = json.load(f)
+            st = st if isinstance(st, dict) else {}
+        except (OSError, ValueError):
+            st = {}
+        cur = st.get(tid) or {"status": "open"}
+        cur["auto_reply_at"] = time.time()
+        st[tid] = cur
+        try:
+            tmp = Handler.GM_TICKET_STATE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(st, f, indent=1)
+            os.replace(tmp, Handler.GM_TICKET_STATE)
+        except OSError:
+            pass
+    print(f"[admin] no GM on duty: request #{n} answered by mail to {to}", flush=True)
+    return "no GM on duty; auto-reply mailed"
 
 
 def main():

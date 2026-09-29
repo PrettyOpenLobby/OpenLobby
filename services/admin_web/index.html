@@ -1058,6 +1058,25 @@
         </div>
       </div>
 
+      <details class="panel gm-diag" id="gmDutyPanel">
+        <summary>Duty</summary>
+        <p class="hint">While nobody is on duty, a new request gets an automatic reply by
+          PlayOnline Mail saying a GM will answer by mail. While GMs are on duty, only they get
+          alerts. Duty from this page lasts while the page is open; from Discord, for the hours
+          you choose.</p>
+        <div id="gmDutyList" class="gmn-sec"></div>
+        <h3 class="gm-diag-h">Discord</h3>
+        <div id="gmDiscordState" class="hint"></div>
+        <div class="row" id="gmDiscordLinkRow" style="margin-top:6px">
+          <div><label>Link code <span class="hint" style="display:inline">(run /gm link in Discord)</span></label>
+            <input type="text" id="gmDiscordCode" class="mono" maxlength="12" autocomplete="off"></div>
+          <div style="flex:0 0 auto; min-width:0"><button class="act" id="gmDiscordLink">Link</button></div>
+        </div>
+        <div id="gmDiscordUnlinkRow" style="margin-top:6px" hidden>
+          <button class="ghost" id="gmDiscordUnlink">Unlink Discord</button>
+        </div>
+      </details>
+
       <details class="panel gm-diag" id="gmNotices">
         <summary>Notices</summary>
         <p class="hint">The list players read on Service &amp; Support &gt; GM Call &gt; Next. Publishing updates the page right away.</p>

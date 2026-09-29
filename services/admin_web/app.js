@@ -1186,23 +1186,29 @@ async function loadGmDesk() {
   gmRenderChatState(d);
   // Hold the on-duty claim open while this tab is. It EXTENDS and never creates,
   // so a forgotten tab cannot re-open a desk somebody deliberately closed.
-  if (d.on_duty) {
+  if (d.me_on_duty) {
     try { await api("/api/gm-control", gmPost({ renew: true })); } catch (e) {}
   }
 }
 
 function gmRenderDuty(d) {
-  const on = !!d.on_duty;
-  $("#gmLight").classList.toggle("on", on);
-  $("#gmState").textContent = on ? "You're on duty"
-    : d.duty === null ? "Nobody is at the desk" : "Off duty";
+  const mine = !!d.me_on_duty;
+  const gms = d.gms || [];
+  const others = gms.filter((g) => g.user !== d.me).map((g) => g.user);
+  $("#gmLight").classList.toggle("on", gms.length > 0);
+  $("#gmState").textContent = mine
+    ? "You're on duty" + (others.length ? ` with ${others.join(", ")}` : "")
+    : gms.length ? `${others.join(", ")} ${others.length === 1 ? "is" : "are"} on duty`
+    : "Nobody is on duty";
   const sv = d.serving || {};
   const polled = sv.at ? ` · a caller last checked in ${gmAgo(sv.at)}` : "";
-  $("#gmStateSub").textContent =
-    `Players get Start when you knock their request · ${d.waiting} on a GM Call now${polled}`;
+  const away = gms.length ? "Players get Start when you knock their request"
+    : "New requests get an automatic reply by mail";
+  $("#gmStateSub").textContent = `${away} · ${d.waiting} on a GM Call now${polled}`;
   const btn = $("#gmDutyBtn");
-  btn.textContent = on ? "Go off duty" : "Go on duty";
-  btn.className = on ? "ghost" : "act";
+  btn.textContent = mine ? "Go off duty" : "Go on duty";
+  btn.className = mine ? "ghost" : "act";
+  gmRenderDutyPanel(d);
 
   // A pin beats the duty switch. That is exactly how the desk ended up telling
   // every caller "no chat buttons" while showing "on duty" (09-26): flags had
@@ -1219,6 +1225,36 @@ function gmRenderDuty(d) {
     $("#gmWarn").hidden = true;
   }
 }
+
+function gmRenderDutyPanel(d) {
+  const gms = d.gms || [];
+  $("#gmDutyList").innerHTML = gms.length
+    ? gms.map((g) => `<div>${esc(g.user)}${g.user === d.me ? " (you)" : ""} · until ${esc(gmTime(g.until))}
+        · ${g.via === "discord" ? "from Discord" : "from this page"}</div>`).join("")
+    : `<div class="gmn-empty">Nobody is on duty.</div>`;
+  const link = d.discord;
+  $("#gmDiscordState").textContent = link
+    ? `Linked to ${link.name || "Discord user " + link.discord_id}. /gm duty in Discord acts as you.`
+    : "Not linked. Link a Discord account to go on or off duty with /gm duty.";
+  $("#gmDiscordLinkRow").hidden = !!link;
+  $("#gmDiscordUnlinkRow").hidden = !link;
+}
+
+$("#gmDiscordLink").onclick = async () => {
+  try {
+    await api("/api/gm-discord", gmPost({ code: $("#gmDiscordCode").value }));
+    $("#gmDiscordCode").value = "";
+    toast("Discord linked");
+    loadGmDesk();
+  } catch (e) { toast(e.message, true); }
+};
+$("#gmDiscordUnlink").onclick = async () => {
+  try {
+    await api("/api/gm-discord", gmPost({ unlink: true }));
+    toast("Discord unlinked");
+    loadGmDesk();
+  } catch (e) { toast(e.message, true); }
+};
 
 function gmRenderDiag(d) {
   const line = (k, v, hot) =>
@@ -1356,7 +1392,7 @@ async function gmControl(body, msg) {
 
 $("#gmDutyBtn").onclick = () => {
   const d = GM_DESK || {};
-  if (d.on_duty) return gmControl({ on_duty: false }, "Off duty");
+  if (d.me_on_duty) return gmControl({ on_duty: false }, "Off duty");
   // Going on duty means "let callers in", so it also drops any pins that would
   // hide the buttons. A pin is a diagnostic; leaving one in force here is how
   // the 09-26 caller got a desk that looked open and was not.
