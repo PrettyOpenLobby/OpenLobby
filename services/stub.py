@@ -1018,19 +1018,26 @@ def run_http():
         threads.append(t)
         log("http", f"HTTP listening on {port}")
     https_ports = listen.get("https", [])
+    # POL_HTTPS_BIND: the addresses the https listeners take, comma or space
+    # separated. The default, every address, keeps 443 from anything else on the
+    # host; naming addresses leaves 443 on the others free, e.g. for a DNAS gate
+    # on the public address while the stub keeps https on a private one.
+    https_binds = (os.environ.get("POL_HTTPS_BIND", "").replace(",", " ").split()
+                   or ["0.0.0.0"])
     if https_ports:
         cert, key = _make_cert()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key)
         for port in https_ports:
-            srv = LoggingHTTPServer(("0.0.0.0", port), StubHandler)
-            srv.scheme = "https"
-            srv.socket = ctx.wrap_socket(srv.socket, server_side=True,
-                                         do_handshake_on_connect=False)
-            t = threading.Thread(target=srv.serve_forever, daemon=True)
-            t.start()
-            threads.append(t)
-            log("http", f"HTTPS listening on {port}")
+            for addr in https_binds:
+                srv = LoggingHTTPServer((addr, port), StubHandler)
+                srv.scheme = "https"
+                srv.socket = ctx.wrap_socket(srv.socket, server_side=True,
+                                             do_handshake_on_connect=False)
+                t = threading.Thread(target=srv.serve_forever, daemon=True)
+                t.start()
+                threads.append(t)
+                log("http", f"HTTPS listening on {addr}:{port}")
     for t in threads:
         t.join()
 
