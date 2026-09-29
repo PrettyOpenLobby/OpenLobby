@@ -72,6 +72,7 @@ import gmchat  # noqa: E402  -- the GM chat record language and its spool
 #: that here is how the panel ends up telling an operator something the caller
 #: was never told. Importing it binds no socket -- `serve()` does that.
 import gmd  # noqa: E402
+import gmnotices  # noqa: E402  -- the GM notices list and its data.pml
 #: The database layer's error types (the connections come from accounts and
 #: adminusers). Named so, because `db` is every connection's name below.
 from polcore import db as polcore_db  # noqa: E402
@@ -1276,7 +1277,7 @@ def _content_label(codes_csv):
 #: panel's page and script, which are not secret from a moderator).
 _GET_PERMS = {
     "/": "any", "/api/content-names": "any", "/api/sessions": "any",
-    "/api/gm-calls": "gm", "/api/gm-desk": "gm",
+    "/api/gm-calls": "gm", "/api/gm-desk": "gm", "/api/gm-notices": "gm",
     "/api/codes": "codes",
     "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
     "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
@@ -1296,6 +1297,7 @@ _POST_PERMS = {
     "/api/sessions/revoke": "any", "/api/me/password": "any",
     "/api/codes": "codes", "/api/codes/random": "codes",
     "/api/gm-control": "gm", "/api/gm-say": "gm", "/api/gm-ticket": "gm",
+    "/api/gm-notices": "gm",
     "/api/push/subscribe": "gm", "/api/push/test": "gm",
     "/api/push/unsubscribe": "any",
     "/api/triage": "reports", "/api/report-reply": "reports",
@@ -1323,6 +1325,7 @@ _AUDIT_ACTIONS = {
     "/api/grant": "granted content", "/api/revoke": "revoked content",
     "/api/gm-control": "changed the GM desk", "/api/gm-say": "wrote in GM chat",
     "/api/gm-ticket": "set a GM call's status",
+    "/api/gm-notices": "published the GM notices",
     "/api/triage": "set a report's status",
     "/api/report-reply": "answered a report by mail",
     "/api/account-create": "created an account",
@@ -2194,6 +2197,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._gm_calls_list()
         if path == "/api/gm-desk":
             return self._gm_desk()
+        if path == "/api/gm-notices":
+            return self._send(200, gmnotices.load())
         if path == "/api/pml-list":
             return self._pml_list()
         if path == "/api/pml-load":
@@ -2264,6 +2269,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._gm_say()
         if path == "/api/gm-ticket":
             return self._gm_ticket()
+        if path == "/api/gm-notices":
+            return self._gm_notices_save()
         if path == "/api/triage":
             return self._triage()
         if path == "/api/report-reply":
@@ -2900,6 +2907,24 @@ class Handler(BaseHTTPRequestHandler):
             rec["polid"] = polid.get(mid)
             rec["reports"] = [r for r, m in rep_mid.items() if mid and m == mid]
         self._send(200, out)
+
+    def _gm_notices_save(self):
+        """Save the GM notices and publish them: the Viewer's GM Call > Next
+        page reads /pcd/gmcall/<lang>/data.pml (gmnotices.py)."""
+        if not _www_writable():
+            return self._send(409, {"error": f"{WWW_ROOT} is mounted read-only, so "
+                                             f"the notices cannot be published."})
+        try:
+            data = gmnotices.save(self._json_body().get("data") or {})
+            written = gmnotices.publish(WWW_ROOT, data)
+        except gmnotices.NoticeError as exc:
+            return self._send(400, {"error": str(exc)})
+        except OSError as exc:
+            return self._send(500, {"error": f"could not write: {exc}"})
+        who = (self._session() or {}).get("user") or "operator"
+        print(f"[admin] {who} published the GM notices ({len(written)} file(s))",
+              flush=True)
+        self._send(200, {"ok": True, "data": data, "written": written})
 
     def _gm_ticket(self):
         """Mark a ticket open / answered / closed. CLOSED reaches the player:
@@ -4275,6 +4300,11 @@ def main():
         print("[admin] auth: OPEN (no credential set) -- safe only while bound "
               "to loopback", flush=True)
     _start_worker()
+    # The GM notices pages are generated and not tracked in git; a fresh
+    # checkout has none until they are written.
+    wrote = gmnotices.ensure(WWW_ROOT)
+    if wrote:
+        print(f"[admin] wrote the missing GM notices page(s): {wrote}", flush=True)
     n = _load_sessions()
     if n:
         print(f"[admin] restored {n} remembered sign-in(s) from {SESSION_STORE}",

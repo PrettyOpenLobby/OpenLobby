@@ -1378,6 +1378,71 @@ $("#gmUnpin").onclick = () => {
 };
 $("#gmShowTech").onchange = () => { GM_LOG_SIG = ""; if (GM_DESK) gmRenderLog(GM_DESK); };
 
+// -- notices ----------------------------------------------------------------
+// The GM Call > Next page's list (gmnotices.py). The sections are SE's and
+// fixed; a GM adds, edits and removes the notices inside them.
+let GMN = null;
+const GMN_MARKS = [["normal", "No mark"], ["updated", "Updated"], ["new", "New"]];
+async function loadGmNotices() {
+  try { GMN = await api("/api/gm-notices"); } catch (e) { toast(e.message, true); return; }
+  gmnRender();
+}
+function gmnRender() {
+  if (!GMN) return;
+  const loc = $("#gmnLoc").value;
+  $("#gmnSecs").innerHTML = GMN[loc].sections.map((sec, si) => `
+    <div class="gmn-sec">
+      <h3 class="gm-diag-h">${esc(sec.title)}</h3>
+      ${sec.items.length ? "" : `<div class="gmn-empty">Empty. Players see "${esc(GMN[loc].empty)}"</div>`}
+      ${sec.items.map((it, ii) => `
+        <div class="gmn-item" data-s="${si}" data-i="${ii}">
+          <div class="row">
+            <div><label>Title</label>
+              <input type="text" data-k="title" maxlength="80" value="${esc(it.title)}"></div>
+            <div style="flex:0 0 140px"><label>Mark</label>
+              <select data-k="mark">${GMN_MARKS.map(([v, t]) =>
+                `<option value="${v}"${it.mark === v ? " selected" : ""}>${t}</option>`).join("")}</select></div>
+          </div>
+          <div><label>Hover text <span class="hint" style="display:inline">(blank = the title)</span></label>
+            <input type="text" data-k="hover" maxlength="120" value="${esc(it.hover)}"></div>
+          <div><label>Details <span class="hint" style="display:inline">(blank = no details sheet)</span></label>
+            <textarea data-k="body" maxlength="2000">${esc(it.body)}</textarea></div>
+          <div><button class="ghost" data-act="del">Remove</button>
+            ${ii ? `<button class="ghost" data-act="up">Move up</button>` : ""}</div>
+        </div>`).join("")}
+      <button class="ghost" data-act="add" data-s="${si}">Add a notice</button>
+    </div>`).join("");
+}
+$("#gmnSecs").addEventListener("input", (ev) => {
+  const box = ev.target.closest(".gmn-item"), k = ev.target.dataset.k;
+  if (!box || !k) return;
+  GMN[$("#gmnLoc").value].sections[+box.dataset.s].items[+box.dataset.i][k] = ev.target.value;
+});
+$("#gmnSecs").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-act]");
+  if (!b) return;
+  const secs = GMN[$("#gmnLoc").value].sections;
+  if (b.dataset.act === "add") {
+    secs[+b.dataset.s].items.push({ title: "", hover: "", body: "", mark: "new" });
+  } else {
+    const box = b.closest(".gmn-item"), items = secs[+box.dataset.s].items, i = +box.dataset.i;
+    if (b.dataset.act === "del") items.splice(i, 1);
+    if (b.dataset.act === "up") items.splice(i - 1, 0, items.splice(i, 1)[0]);
+  }
+  gmnRender();
+});
+$("#gmnLoc").onchange = gmnRender;
+$("#gmnReload").onclick = () => loadGmNotices();
+$("#gmnSave").onclick = async () => {
+  try {
+    const out = await api("/api/gm-notices", gmPost({ data: GMN }));
+    GMN = out.data;
+    gmnRender();
+    toast(out.written.length ? "Notices published" : "No changes to publish");
+  } catch (e) { toast(e.message, true); }
+};
+$("#gmNotices").addEventListener("toggle", () => { if ($("#gmNotices").open && !GMN) loadGmNotices(); });
+
 async function gmSay(body) {
   if (!GM_ROOM) { toast("No chat room is available. Check that the GM service is running.", true); return false; }
   try {
