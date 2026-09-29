@@ -49,6 +49,18 @@ CONFIG_PATH = os.environ.get("POL_CONFIG", "/config/server.yaml")
 LOG_DIR = os.environ.get("POL_LOG_DIR", "/logs")
 WWW_DIR = os.environ.get("POL_WWW_DIR", "/www")
 
+
+def _ua_lang(ua):
+    """The page-tree language for a Viewer User-Agent, `... [en] (...)` ->
+    `en-US`. Same mapping as core/portalpages._ua_lang (kept inline: the stub
+    also runs standalone, without the core package)."""
+    m = re.search(r"\[([A-Za-z-]{2,5})\]", ua or "")
+    if not m:
+        return None
+    tag = m.group(1)
+    return {"ja": "ja-JP", "jp": "ja-JP", "en": "en-US",
+            "de": "de-DE", "fr": "fr-FR"}.get(tag, tag)
+
 #: HTTP content-mirror settings, populated by run_http() from config `content:`.
 #: When mirror is on, a request for a listed host that we have no local file for
 #: is forwarded to the REAL SE host and the response archived under /www, so a
@@ -788,6 +800,14 @@ class StubHandler(BaseHTTPRequestHandler):
         rp = ([region] if region else [])
         keys += [os.path.join(*(rp + [host_only, bare])),
                  os.path.join(host_only, bare), bare]       # region-flat fallback
+        # The language overlay goes FIRST, as the band portal orders its roots
+        # (portalpages._portal_roots: www/_lang/<lang>/ before the shared tree).
+        # Downloads reach this door over https (sslterm -> ucs -> here), so
+        # without it an English client got the shared tree's Japanese-lettered
+        # greeting card.
+        lang = _ua_lang(self.headers.get("User-Agent", ""))
+        if lang:
+            keys = [os.path.join("_lang", lang, k) for k in keys[:1] + [os.path.join(host_only, bare)]] + keys
         try:
             from srvcore import shim_build_hidden
         except ImportError:                     # standalone use outside services/
