@@ -168,14 +168,39 @@ def command_def():
                                              "message"}]}]}
 
 
+#: How long `/gm duty on:true` lasts when no hours are given.
+GM_DUTY_HOURS = 4
+
+
+def gm_command_def():
+    """/gm: the GM desk's duty switch, for GMs away from the admin panel.
+    Every subcommand answers privately; only `link` works for anyone, and a
+    code does nothing until a GM enters it on the panel (gmduty.py)."""
+    return {"name": "gm", "type": 1, "integration_types": [0, 1],
+            "contexts": [0, 1, 2],
+            "description": "GM desk: go on or off duty",
+            "options": [
+                {"type": 1, "name": "duty", "description": "Go on or off GM duty",
+                 "options": [
+                     {"type": 5, "name": "on", "required": True,
+                      "description": "On duty (true) or off duty (false)"},
+                     {"type": 4, "name": "hours", "required": False,
+                      "min_value": 1, "max_value": 12,
+                      "description": "How long to stay on duty (default %d)" % GM_DUTY_HOURS}]},
+                {"type": 1, "name": "status", "description": "Who is on GM duty"},
+                {"type": 1, "name": "link", "description": "Get a code to link this "
+                                                          "Discord account to your GM desk account"}]}
+
+
 def register_commands():
     if not (ARGS.token and ARGS.app_id):
         return None
-    st, data = api("PUT", "/applications/%s/commands" % ARGS.app_id, [command_def()])
+    st, data = api("PUT", "/applications/%s/commands" % ARGS.app_id,
+                   [command_def(), gm_command_def()])
     if st not in (200, 201):
-        log("could not register /playonline (%s %s)" % (st, str(data)[:160]))
+        log("could not register /playonline and /gm (%s %s)" % (st, str(data)[:160]))
     else:
-        log("/playonline registered for app %s" % ARGS.app_id)
+        log("/playonline and /gm registered for app %s" % ARGS.app_id)
     return st
 
 
@@ -376,6 +401,53 @@ def on_command(data):
         ldb.close()
 
 
+def _gm_duty_lines(ctl):
+    import gmduty
+    on = gmduty.gms(ctl)
+    if not on:
+        return "Nobody is on GM duty."
+    return "On GM duty:\n" + "\n".join(
+        "- **%s** until <t:%d:t> (%s)" % (u, int(c["until"]),
+                                           "Discord" if c["via"] == "discord" else "admin panel")
+        for u, c in sorted(on.items()))
+
+
+def on_gm_command(data):
+    """/gm link | duty | status. The desk account a Discord user acts as is
+    re-checked on every command (gmduty.account_for)."""
+    import adminusers
+    import gmd
+    import gmduty
+    uid, uname = _user(data)
+    opts = (data.get("data") or {}).get("options") or []
+    sub = str(opts[0].get("name")) if opts else "status"
+    args = {o.get("name"): o.get("value") for o in (opts[0].get("options") or [])} if opts else {}
+    conn = adminusers.connect()
+    try:
+        if sub == "link":
+            code = gmduty.new_link_code(conn, uid, uname)
+            return _say("Your GM desk link code is **%s** (good for %d minutes). Enter it on "
+                        "the admin panel's GM Calls tab, under Duty, while signed in to your "
+                        "own account." % (code, gmduty.LINK_CODE_TTL // 60))
+        user = gmduty.account_for(conn, uid)
+    finally:
+        conn.close()
+    if not user:
+        return _say("This Discord account is not linked to a GM desk account. Run "
+                    "`/gm link` and enter the code on the admin panel.")
+    if sub == "duty":
+        on = bool(args.get("on"))
+        hours = max(1, min(gmduty.DISCORD_MAX_HOURS, int(args.get("hours") or GM_DUTY_HOURS)))
+        ctl = gmduty.set_duty(user, on, hours * 3600, via="discord")
+        log("%s (%s) went %s duty from Discord" % (user, uname, "on" if on else "off"))
+        if on:
+            until = gmduty.gms(ctl)[user]["until"]
+            return _say("You are on GM duty until <t:%d:t>. New GM calls will alert you, "
+                        "and players get no \"nobody is on duty\" mail." % int(until))
+        return _say("You are off GM duty.\n" + _gm_duty_lines(ctl))
+    return _say(_gm_duty_lines(gmd.read_control()))
+
+
 def _owned_reply(ldb, rid, uid):
     """The reply context behind a button, if THIS user may use it."""
     ctx = discordlink.get_reply(ldb, rid)
@@ -474,6 +546,8 @@ def interaction(data):
         return {"type": 1}
     if t == 2 and (data.get("data") or {}).get("name") == "playonline":
         return on_command(data)
+    if t == 2 and (data.get("data") or {}).get("name") == "gm":
+        return on_gm_command(data)
     cid = str((data.get("data") or {}).get("custom_id") or "")
     if t == 3 and cid.startswith("pol:reply:"):
         return on_reply_button(data, cid[len("pol:reply:"):])

@@ -446,6 +446,8 @@ def read_control(path=None):
         out["on_duty_until"] = None
     out["duty"] = None if raw.get("duty") is None else bool(raw["duty"])
     out["by"], out["at"] = raw.get("by"), raw.get("at")
+    # Per-GM claims (gmduty.py). Kept as read; gmduty filters the expired ones.
+    out["gms"] = raw.get("gms") if isinstance(raw.get("gms"), dict) else {}
     return out
 
 
@@ -469,9 +471,16 @@ def on_duty(ctl, now=None):
     than none: it invites a caller into a room nobody is in. The panel re-arms it
     while it is open, so the expiry is only ever reached by going away.
     """
+    now = now or time.time()
+    for c in (ctl.get("gms") or {}).values():
+        try:
+            if float(c.get("until") or 0) > now:
+                return True
+        except (TypeError, ValueError, AttributeError):
+            continue
     if not ctl.get("duty") or not ctl.get("on_duty_until"):
         return False
-    return (now or time.time()) < ctl["on_duty_until"]
+    return now < ctl["on_duty_until"]
 
 
 def effective_flags(ctl, now=None):
