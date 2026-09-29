@@ -40,6 +40,10 @@ try:
     import pmlfallback      # built-in pages for a www/ with no portal capture
 except ImportError:  # pragma: no cover
     pmlfallback = None
+try:
+    import kbserve          # the Q&A knowledge base, /polapps/s/s.kb.pml.*
+except ImportError:  # pragma: no cover
+    kbserve = None
 
 CONFIG_PATH = os.environ.get("POL_CONFIG", "/config/server.yaml")
 LOG_DIR = os.environ.get("POL_LOG_DIR", "/logs")
@@ -608,6 +612,22 @@ class StubHandler(BaseHTTPRequestHandler):
         #    which already dispatches on kinou_id for the sign-up wizard.
         if self._try_ucs_cgi(body):
             return
+        # 0b) the Q&A knowledge base. Its https links arrive here decrypted by
+        #     sslterm, so the pages it links onward say https.
+        if kbserve is not None:
+            got = kbserve.handle(self.command, self.path, body, dict(self.headers.items()),
+                                 "https", host.split(":", 1)[0])
+            if got:
+                status, ctype, page = got
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(page)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(page)
+                log("http", f"  Q&A {self.path.split('?')[0]} ({len(page)} bytes)")
+                return
         # 1) serve a local mirror if we already have this URL under /www
         if self._try_serve(host):
             return

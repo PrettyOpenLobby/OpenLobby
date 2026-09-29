@@ -94,6 +94,10 @@ try:
 except ImportError:
     pmlfallback = None
 try:
+    import kbserve              # the Q&A knowledge base, /polapps/s/s.kb.pml.*
+except ImportError:
+    kbserve = None
+try:
     import extmail              # mail to/from the internet; inert until configured
 except ImportError:
     extmail = None
