@@ -387,6 +387,18 @@
       font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
     .gm-diag[open] summary { margin-bottom: 8px; }
     .gmn-sec { margin-top: 12px; }
+    .gm-picker { position: relative; flex: 1 1 260px; min-width: 0; }
+    .gm-picker input { width: 100%; }
+    .gm-picks { display: grid; gap: 4px; margin-top: 6px; }
+    .gm-pick { display: flex; align-items: center; gap: 10px; text-align: left;
+      padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+      background: transparent; color: inherit; cursor: pointer; }
+    .gm-pick:hover:not(:disabled) { border-color: var(--accent); }
+    .gm-pick:disabled { opacity: .5; cursor: not-allowed; }
+    .gm-pick .who { display: grid; }
+    .gm-pick .pid { color: var(--muted); font-size: 12px; }
+    .gm-face { width: 32px; height: 48px; flex: 0 0 32px; border-radius: 4px;
+      background-color: var(--line); background-size: 400% 200%; }
     .gmn-item { border: 1px solid var(--line); border-radius: 8px; padding: 10px;
       margin: 8px 0; display: grid; gap: 6px; }
     .gmn-item .row { margin: 0; }

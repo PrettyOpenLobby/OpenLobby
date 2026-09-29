@@ -910,6 +910,15 @@ class Gmd:
             log("    0x1101 with no held ticket -- answered, nothing to cancel")
             return
         name, rec = ses.held
+        # A DESK CLOSE ALSO ARRIVES AS A 0x1101: the close knock makes the
+        # Viewer end its call, which it reports the same way as a player's
+        # Cancel. A ticket the desk has already closed is not the player's
+        # cancel, and must not be recorded as one.
+        st = _ticket_state(os.path.join(TICKET_DIR, "gm-tickets.json"))
+        if (st.get(name[:-len(".json")]) or {}).get("status") == "closed":
+            log(f"    0x1101 after the desk closed {name} -- the call ended, not cancelled")
+            ses.held, ses.req_no = None, 0
+            return
         rec = dict(rec, cancelled_at=time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                    time.gmtime()))
         path = os.path.join(TICKET_DIR, name)
