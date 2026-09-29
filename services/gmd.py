@@ -304,6 +304,36 @@ def open_ticket_for(guid, req_no=0, ticket_dir=None):
     return None
 
 
+def waiting_requests(ticket_dir=None):
+    """{handle id: request number} of every caller still waiting for the desk:
+    their newest ticket is open (not closed, not cancelled) and not yet
+    knocked. One entry per caller, however many sessions they have open."""
+    import json
+    d = ticket_dir or TICKET_DIR
+    try:
+        names = sorted((n for n in os.listdir(d) if TICKET_RE.fullmatch(n)),
+                       reverse=True)
+    except OSError:
+        return {}
+    state = _ticket_state(os.path.join(d, "gm-tickets.json"))
+    seen, out = set(), {}
+    for name in names:
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        guid = rec.get("guid") if isinstance(rec, dict) else None
+        if not guid or guid in seen:
+            continue
+        seen.add(guid)                     # only their newest ticket counts
+        st = state.get(name[:-len(".json")]) or {}
+        if rec.get("cancelled_at") or st.get("status") == "closed" or st.get("knocked_at"):
+            continue
+        out[guid] = int(rec.get("request_no") or 0)
+    return out
+
+
 def invite_for(guid, ticket_dir=None):
     """The room of an open request whose desk state invites this caller's
     handle id (gm-tickets.json `invited`: [{"guid": ...}]), or None."""
@@ -1021,16 +1051,18 @@ class Gmd:
                     flags = (flags | BIT_HELD) if ses.held else (flags & ~BIT_HELD)
                     flags = self.caller_flags(ses, flags)
                     q = self.queue_depth(ses)
-                    stamp = (flags, q, why)
+                    place = self.queue_place(ses)
+                    stamp = (flags, q, place, why)
                     if stamp != self.control_seen:
                         self.control_seen = stamp
                         log(f"    serving flags={flags:#x} ({why}), "
-                            f"queue={q}"
+                            f"queue={q}, place={place}"
                             + (f", set by {self.control['by']}"
                                if self.control.get("by") else ""))
                     self.publish_serving(flags, why, q)
-                    def edit(m, q=q, flags=flags):
+                    def edit(m, q=q, place=place, flags=flags):
                         struct.pack_into("<H", m, 0x1A, q)         # body +0x02
+                        struct.pack_into("<H", m, 0x1C, place)     # body +0x04
                         struct.pack_into("<I", m, 0x24, flags)     # body +0x0C
                 rep, n = self.generic(ses, rtype_out, echoA, echoC, edit)
                 log(f"[>] {rtype:#06x} -> {rtype_out:#06x} (total {n:#x})"
@@ -1075,10 +1107,25 @@ class Gmd:
                 return int(QUEUE_OVERRIDE, 0) & 0xFFFF
             except ValueError:
                 pass
-        now = time.time()
-        n = sum(1 for s in self.sessions
-                if s is not me and s.req_no and now - s.last_seen <= IDLE_S)
+        # Counted by REQUEST, one per caller (waiting_requests): counting live
+        # sessions made one player with two open sessions two people, and the
+        # screen said "0 of 2" to a caller alone in the queue (2026-09-29).
+        mine = session_guid(me) if me is not None else 0
+        n = sum(1 for g in waiting_requests() if g != mine)
         return min(n, 0xFFFF)
+
+    def queue_place(self, me):
+        """The caller's place in line, 1-based, for body +0x04; 0 once the desk
+        has knocked (or with no open request).
+
+        The screen reads "Currently <body +0x04> of <body +0x02 + 1>": with
+        +0x04 left at zero it showed "0 of 2" while +0x02 was 1. Inferred from
+        that one screen, not traced in the client."""
+        waiting = waiting_requests()
+        mine = waiting.get(session_guid(me)) if me is not None else None
+        if not mine:
+            return 0
+        return min(1 + sum(1 for r in waiting.values() if 0 < r < mine), 0xFFFF)
 
     @staticmethod
     def local_ip_for(peer_ip):

@@ -81,6 +81,25 @@ def is_gm_room(chan):
 TICKET_DIR = os.environ.get("POL_GMD_TICKET_DIR", "/data/gm-calls")
 
 
+def member_key(member):
+    """The member id from what a chat session holds: its `member` is the whole
+    member row, not the id. int(row) raised, the check caught it and refused
+    the requester their own room (473, POL-4570 on screen, 2026-09-29)."""
+    if member is None or isinstance(member, bool):
+        return 0
+    if isinstance(member, int):
+        return member
+    for get in (lambda m: m["id"], lambda m: m.id):
+        try:
+            return int(get(member))
+        except Exception:
+            pass
+    try:
+        return int(member)
+    except (TypeError, ValueError):
+        return 0
+
+
 def room_allowed(chan, member_id, ticket_dir=None, db=None):
     """May member `member_id` be in GM room `chan`?
 
@@ -92,6 +111,7 @@ def room_allowed(chan, member_id, ticket_dir=None, db=None):
     """
     if isinstance(chan, bytes):
         chan = chan.decode("latin1", "replace")
+    member_id = member_key(member_id)
     if not chan or not member_id:
         return False
     d = ticket_dir or TICKET_DIR
