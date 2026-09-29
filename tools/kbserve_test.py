@@ -186,6 +186,36 @@ check("a hostile keyword is escaped, never markup",
       ('onclick="y' in text, "<sheet>" in text.split("value=")[-1].split(">")[0],
        "x&quot; onclick=&quot;y&#39; &#60;sheet&#62;" in text), (False, False, True))
 
+print("the second TLS route")
+# The Viewer sends a page's includes through whichever TLS band it picks; the
+# 51305 route ends at ucscgi. On 2026-09-29 the Q&A search page loaded on one
+# route and its first include, cont1.pml, came through ucscgi and got a 404.
+os.makedirs(os.path.join(WWW, HOST, "pml", "pml_s", "path", "cs"))
+open(os.path.join(WWW, HOST, "pml", "pml_s", "path", "cs", "cont1.pml"), "wb").write(b"<!-- cont1 -->")
+os.environ["POL_UCS_PORTAL_PORT"] = str(srv.server_address[1])
+import ucscgi  # noqa: E402
+ucscgi.PORTAL_PORT = srv.server_address[1]
+usrv = ThreadingHTTPServer(("127.0.0.1", 0), ucscgi.Handler)
+threading.Thread(target=usrv.serve_forever, daemon=True).start()
+
+
+def via_ucs(method, path, body=b""):
+    c = http.client.HTTPConnection("127.0.0.1", usrv.server_address[1], timeout=15)
+    c.request(method, path, body=body or None, headers={"Host": HOST, "Accept-Language": "en-US"})
+    r = c.getresponse()
+    data = r.read()
+    c.close()
+    return r.status, data
+
+
+st, data = via_ucs("GET", "/pml/pml_s/path/cs/cont1.pml")
+check("an include arriving at ucscgi is served from the portal", (st, data), (200, b"<!-- cont1 -->"))
+st, data = via_ucs("POST", "/polapps/s/s.kb.pml.List", b"c1=1&k=party")
+check("...and so is a Q&A search posted there", (st, data.decode("utf-8-sig").count("s.kb.pml.Qa2?")), (200, 1))
+st, data = via_ucs("GET", "/pml-cgi-bin/?kinou_id=999")
+check("the CGI's own requests stay with the CGI", (st, b"Function 999" in data), (404, True))
+usrv.shutdown()
+
 srv.shutdown()
 for fh in list(getattr(stub, "_LOG_HANDLES", {}).values()):
     try:

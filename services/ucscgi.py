@@ -155,6 +155,13 @@ LOG_DIR = os.environ.get("POL_LOG_DIR", "/logs")
 #: `ucs/img_s/` subtree is reachable -- this is not a general web server and the
 #: port is exposed to the network.
 WWW_DIR = os.environ.get("POL_UCS_WWW", "/www/ucs.pol.com")
+# The portal page server (stub.py). The Viewer's https fetches reach this
+# process through the 51305 TLS route whatever page they are for: a Q&A page
+# opened on the other route pulled its first include through this one and got
+# a 404 (POL-1404 on screen, 2026-09-29). Anything that is not ours is relayed
+# there, the mirror of stub.py sending /pml-cgi-bin/ here.
+PORTAL_HOST = os.environ.get("POL_UCS_PORTAL_HOST", "127.0.0.1")
+PORTAL_PORT = int(os.environ.get("POL_UCS_PORTAL_PORT", "80"))
 
 #: Extension -> content type for that subtree. `.ang` is SE's own animated
 #: sprite container ('@ANG'); the Viewer dispatches on the PML `src`, not on
@@ -3271,7 +3278,47 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(blob)
         return True
 
+    def _is_ours(self):
+        path = self.path.split("?", 1)[0]
+        return (path.startswith("/pml-cgi-bin/") or path.startswith("/ucs/img_s/")
+                or "kinou_id=" in self.path)
+
+    def _relay_portal(self):
+        """Pass a portal request to stub.py and its answer back verbatim."""
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n) if n else b""
+        req = f"{self.command} {self.path} HTTP/1.1\r\n"
+        for k, v in self.headers.items():
+            if k.lower() not in ("connection", "keep-alive", "transfer-encoding"):
+                req += f"{k}: {v}\r\n"
+        req += "Connection: close\r\n\r\n"
+        try:
+            with socket.create_connection((PORTAL_HOST, PORTAL_PORT), timeout=15) as up:
+                up.sendall(req.encode("latin-1", "replace") + body)
+                chunks = []
+                while True:
+                    d = up.recv(65536)
+                    if not d:
+                        break
+                    chunks.append(d)
+        except OSError as exc:
+            log(f"portal relay {self.path} -> {PORTAL_HOST}:{PORTAL_PORT} FAILED: {exc}")
+            self.send_error(502)
+            return
+        raw = b"".join(chunks)
+        log(f"portal relay {self.command} {self.path.split('?')[0]} -> "
+            f"{PORTAL_HOST}:{PORTAL_PORT} ({len(raw)} bytes)")
+        self.wfile.write(raw)
+        self.close_connection = True
+
+    def do_HEAD(self):
+        if not self._is_ours():
+            return self._relay_portal()
+        self.send_error(405)
+
     def do_GET(self):
+        if not self._is_ours():
+            return self._relay_portal()
         try:
             self._log_request()
             path, q = self._query()
@@ -3329,6 +3376,8 @@ class Handler(BaseHTTPRequestHandler):
         right precedence: the URL supplies kinou_id/step/t, the body supplies
         what the user entered.
         """
+        if not self._is_ours():
+            return self._relay_portal()
         try:
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else b""
