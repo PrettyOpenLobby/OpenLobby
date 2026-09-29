@@ -7,7 +7,7 @@ import time
 from srvcore import shim_build_hidden  # noqa: E402
 from srvcore import hexdump, log, save_capture
 import sessioncrypt
-from .deps import issuereport, pmlfallback
+from .deps import issuereport, kbserve, pmlfallback
 from . import authcap, framing, lobbybind, lobbycapture, lobbyreply, lobbysession, pacing, portalauth, portalpages, tlsrelay
 
 
@@ -170,6 +170,22 @@ def _serve_http_on_lobby(conn, first, peer, port):
         if rel.startswith("pml-cgi-bin/"):
             tlsrelay._relay_ucs_cgi(conn, method, path, hdrs, body_in, peer)
             return served + 1
+        # THE Q&A KNOWLEDGE BASE (kbserve.py). The Japanese GM Call pages link
+        # it over plain http, which lands on this door; https reaches stub.py.
+        if kbserve is not None and rel.startswith("polapps/s/s.kb.pml."):
+            got = kbserve.handle(method.decode("latin1"), uri, body_in,
+                                 {k.decode("latin1"): v.decode("latin1") for k, v in hdrs.items()},
+                                 "http", host or "wh000.pol.com")
+            if got:
+                _st, ctype, page = got
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: " + ctype.encode()
+                             + b"\r\nCache-Control: no-cache\r\nContent-Length: "
+                             + str(len(page)).encode() + b"\r\nConnection: keep-alive\r\n\r\n"
+                             + (page if method != b"HEAD" else b""))
+                served += 1
+                if hdrs.get(b"connection", b"").lower() != b"keep-alive":
+                    return served
+                continue
         # Mutual-auth handshake (opt-in) -- ONLY for the POL realm host. SE's
         # challenge is scoped (`domain="/pml/"`) and the client only digest-auths
         # wh000; it does NOT authenticate other hosts (e.g. info.playonline.com's
