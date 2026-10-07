@@ -373,21 +373,21 @@ except Exception as exc:
 # now these fell off the end of the PRIVMSG handler and vanished -- the target is
 # not a channel, so there was nothing to broadcast to.
 # --------------------------------------------------------------------------- #
-lex = FakeSession("ALICENICK")
-responders.PRESENCE.register(ids["Lex"][0], lex)
+alice = FakeSession("ALICENICK")
+responders.PRESENCE.register(ids["Lex"][0], alice)
 yui.sent.clear()
 responders._auth_session_reply(b"PRIVMSG CYNNICK :hello there", b"ALICENICK",
-                               b"pol", sess=lex)
+                               b"pol", sess=alice)
 check("whisper reaches the named nick", len(yui.sent), 1)
 check("whisper body survives", b":hello there" in yui.sent[0][0], True)
 check("whisper is attributed to the sender",
       yui.sent[0][0].startswith(b":ALICENICK!~x@"), True)
-check("no echo to the sender", len(lex.sent), 0)
+check("no echo to the sender", len(alice.sent), 0)
 
 # A whisper to somebody who is not online is dropped, not an error.
 yui.sent.clear()
 responders._auth_session_reply(b"PRIVMSG NOBODY :hi", b"ALICENICK", b"pol",
-                               sess=lex)
+                               sess=alice)
 check("whisper to an absent nick is inert", len(yui.sent), 0)
 
 # And the whole thing stays inert when the push is disabled.

@@ -1754,8 +1754,8 @@ def page_login(kinou, tok, ret_url, title, error=None, polid="", known=False):
     typed, so a mistyped password does not also cost them the ID.
 
     Either way this stays inside the form SE already drew: same POST, same
-    `kinou_id`/`step`/`t`, no new page and no new route
-   . The password is always checked.
+    `kinou_id`/`step`/`t`, no new page and no new route.
+    The password is always checked.
     """
     if known and polid:
         fields = (_line(TOP, f"Signed in as {polid}.")

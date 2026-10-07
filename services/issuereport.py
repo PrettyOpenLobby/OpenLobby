@@ -769,7 +769,7 @@ def _selftest():
             out.append(b + b"\n")
         return b"".join(out)
 
-    raw = build({"host": "DECK", "handle": "lex", "nonsense": "keep me"},
+    raw = build({"host": "DECK", "handle": "alice", "nonsense": "keep me"},
                 [("description.txt", "it broke\nwhen I zoned".encode()),
                  ("polshim.log", b"[a] one\n[b] two\n")])
     meta, files = parse_bundle(raw)

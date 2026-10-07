@@ -1321,7 +1321,7 @@ def _rewrite_greeting(data, stub_ip, port):
     return _GREETING.sub(sub, data)
 
 
-#: POLP patch-protocol magic (tcp/54000). See an earlier note in memory.
+#: POLP patch-protocol magic (tcp/54000).
 POLP_MAGIC = b"POLP"
 
 

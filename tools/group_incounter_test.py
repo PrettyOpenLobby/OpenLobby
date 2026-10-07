@@ -122,30 +122,30 @@ def main():
     print("\nN -- the in-room roster ->")
     chan = ("#XXL%016X" % gid).encode()
     srv = b"pol-1049-51244.pol.com"
-    lex = Sess(b"TESTNICK1", ids["Lex"][0], ip=b"203.0.113.177")
+    alice = Sess(b"TESTNICK1", ids["Lex"][0], ip=b"203.0.113.177")
     yui = Sess(b"UDXS6FWXX", ids["Yui"][0], ip=b"192.0.2.2")
-    R.ROOMS.join(chan, lex)
+    R.ROOMS.join(chan, alice)
     R.ROOMS.join(chan, yui)
 
-    names = R._names_line(chan, lex.nick, srv, sess=lex)
+    names = R._names_line(chan, alice.nick, srv, sess=alice)
     print("      " + names.decode("latin1"))
     roster = names.split(b":", 2)[2].split()
     check(len(roster) == 2, "353 lists exactly the two who joined",
           f"{len(roster)}: {b' '.join(roster).decode()}")
-    check({n.lstrip(b"@") for n in roster} == {lex.nick, yui.nick},
+    check({n.lstrip(b"@") for n in roster} == {alice.nick, yui.nick},
           "and lists the right two")
-    check([n for n in roster if n.startswith(b"@")] == [b"@" + lex.nick],
+    check([n for n in roster if n.startswith(b"@")] == [b"@" + alice.nick],
           "the '@' is on the group MASTER, as retail's 353 has it",
           b" ".join(roster).decode())
 
-    lines = R._auth_session_reply(b"WHO " + chan, lex.nick, srv,
-                                  peer_ip=lex.peer_ip, sess=lex)
+    lines = R._auth_session_reply(b"WHO " + chan, alice.nick, srv,
+                                  peer_ip=alice.peer_ip, sess=alice)
     who_rows = [l.split()[7] for l in (lines or []) if b" 352 " in l]
     check(len(who_rows) == 2, "352 agrees with 353 -- two rows, not three",
           f"{len(who_rows)}: {b' '.join(who_rows).decode()}")
-    check(set(who_rows) == {lex.nick, yui.nick}, "and names the same two")
+    check(set(who_rows) == {alice.nick, yui.nick}, "and names the same two")
     flags = {l.split()[7]: l.split()[8] for l in lines if b" 352 " in l}
-    check(flags.get(lex.nick, b"").endswith(b"@")
+    check(flags.get(alice.nick, b"").endswith(b"@")
           and not flags.get(yui.nick, b"@").endswith(b"@"),
           "352 puts the operator flag on the same person 353 does",
           repr(flags))

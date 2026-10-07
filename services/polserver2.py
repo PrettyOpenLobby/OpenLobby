@@ -124,7 +124,7 @@ def paced_send(conn, data):
     # Pacing the WRITES is not enough on a long path. While cwnd is still
     # small (slow start, several round trips at 300+ ms), the kernel holds
     # what we write and each returning ACK releases it as one burst, which is
-    # exactly what PCSX2 cannot take. A remote PCSX2 (203.0.113.126, rtt ~340
+    # exactly what PCSX2 cannot take. A remote PCSX2 (rtt ~340
     # ms) reset every FFXI list 1.4-2.2 s in, 2026-09-30, while LAN clients
     # rarely fail. SO_MAX_PACING_RATE makes the kernel space the segments
     # themselves (TCP internal pacing; prod runs fq_codel + cubic, which

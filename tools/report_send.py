@@ -191,12 +191,12 @@ def _selftest():
         ("shot.png", bytes(range(256)) * 4),      # binary, NUL bytes and all
         ("polshim.log", b""),                     # empty is legal
     ]
-    meta = {"host": "DECK", "handle": "lex", "title": "FMO", "when": "now"}
+    meta = {"host": "DECK", "handle": "alice", "title": "FMO", "when": "now"}
     raw = build_bundle(meta, payload)
     got_meta, got_files = issuereport.parse_bundle(raw)
 
     check("round trip: header", got_meta["host"] == "DECK"
-          and got_meta["handle"] == "lex" and got_meta["title"] == "FMO")
+          and got_meta["handle"] == "alice" and got_meta["title"] == "FMO")
     check("round trip: file count", len(got_files) == len(payload))
     check("round trip: names", [n for n, _ in got_files] == [n for n, _ in payload])
     check("round trip: bytes are IDENTICAL",

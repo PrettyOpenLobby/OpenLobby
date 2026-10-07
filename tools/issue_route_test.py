@@ -129,7 +129,7 @@ def main():
 
         # -- the happy path -------------------------------------------------- #
         body = report_send.build_bundle(
-            {"host": "DECK", "handle": "lex", "title": "FE"},
+            {"host": "DECK", "handle": "alice", "title": "FE"},
             [("description.txt", b"the capital door would not open"),
              ("polshim.log", b"[fe] 0x20AC sent, no 0x1166\n")])
         line, out = post("_shim/report", body, b"200")

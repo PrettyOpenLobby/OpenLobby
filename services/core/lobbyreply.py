@@ -315,7 +315,7 @@ def _acct_payload(n, base=None):
     # SLOT0 (0x098) IS NO LONGER WRITTEN. It is the STARRED "Standard PlayOnline
     # Mail address", so whatever sits here wins the Sender selection -- and the
     # client kept snapping the account back to it. That made the bare local part
-    # ("lex") the active sender, which is not a deliverable address, so mail could
+    # ("alice") the active sender, which is not a deliverable address, so mail could
     # not even be attempted. 0x008 already renders correctly as
     # "<polid>@pol.com" and is the address we actually serve, so leaving SLOT0
     # EMPTY lets that one be selected instead. Set POL_ACCT_MAIL_SLOT0=1 to

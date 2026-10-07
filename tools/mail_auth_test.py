@@ -54,13 +54,13 @@ def check(label, got, want=True):
 
 c = accounts.connect(DB)
 accounts.create_polid(c, "MAILPOLID", "polid-pw-1")
-lex = accounts.add_member(c, "MAILPOLID", "casmember", "pw-lex-0001")
+alice = accounts.add_member(c, "MAILPOLID", "alicemember", "pw-alice-0001")
 bob = accounts.add_member(c, "MAILPOLID", "bobmember", "pw-bob-0001")
-accounts.assign_mail_address(c, lex, "lex")
+accounts.assign_mail_address(c, alice, "alice")
 accounts.assign_mail_address(c, bob, "bob")
 c.commit()
 DOM = R.MAIL_DOMAIN
-LEX, BOB = f"lex@{DOM}", f"bob@{DOM}"
+ALICE, BOB = f"alice@{DOM}", f"bob@{DOM}"
 HERE, ELSEWHERE = "198.51.100.5", "198.51.100.6"
 BANNER = "<1.2@test>"
 
@@ -70,50 +70,50 @@ def apop(pw):
 
 
 print("\nNo password on file, no live session: nothing gets in")
-check("POP3 PASS refused", R._mail_login_allowed("lex", HERE, "whatever")[0], False)
-check("APOP refused", R._pop3_check_apop("lex", BANNER, apop("x"), HERE)[0], False)
-check("SMTP MAIL FROM refused", R._smtp_sender_allowed(LEX, HERE)[0], False)
+check("POP3 PASS refused", R._mail_login_allowed("alice", HERE, "whatever")[0], False)
+check("APOP refused", R._pop3_check_apop("alice", BANNER, apop("x"), HERE)[0], False)
+check("SMTP MAIL FROM refused", R._smtp_sender_allowed(ALICE, HERE)[0], False)
 check("SMTP null sender passes (impersonates nobody)",
       R._smtp_sender_allowed("", HERE)[0], True)
 check("SMTP foreign domain refused",
-      R._smtp_sender_allowed("lex@example.com", HERE)[0], False)
+      R._smtp_sender_allowed("alice@example.com", HERE)[0], False)
 check("SMTP unknown local address refused",
       R._smtp_sender_allowed(f"nobody@{DOM}", HERE)[0], False)
 
 print("\nThe member's own signed-in Viewer (a live session from this address)")
-accounts.open_session(c, lex, nick="Lex", peer_ip=HERE)
+accounts.open_session(c, alice, nick="Lex", peer_ip=HERE)
 c.commit()
-check("POP3 PASS from the session's address", R._mail_login_allowed("lex", HERE, "x")[0])
-check("APOP from the session's address", R._pop3_check_apop("lex", BANNER, apop("x"), HERE)[0])
-check("SMTP as lex from the session's address", R._smtp_sender_allowed(LEX, HERE)[0])
-check("...also with the bare local part", R._smtp_sender_allowed("lex", HERE)[0])
+check("POP3 PASS from the session's address", R._mail_login_allowed("alice", HERE, "x")[0])
+check("APOP from the session's address", R._pop3_check_apop("alice", BANNER, apop("x"), HERE)[0])
+check("SMTP as alice from the session's address", R._smtp_sender_allowed(ALICE, HERE)[0])
+check("...also with the bare local part", R._smtp_sender_allowed("alice", HERE)[0])
 check("POP3 PASS from ANOTHER address still refused",
-      R._mail_login_allowed("lex", ELSEWHERE, "x")[0], False)
-check("SMTP as lex from another address refused",
-      R._smtp_sender_allowed(LEX, ELSEWHERE)[0], False)
-check("the impersonation case: lex's box cannot send as bob",
+      R._mail_login_allowed("alice", ELSEWHERE, "x")[0], False)
+check("SMTP as alice from another address refused",
+      R._smtp_sender_allowed(ALICE, ELSEWHERE)[0], False)
+check("the impersonation case: alice's box cannot send as bob",
       R._smtp_sender_allowed(BOB, HERE)[0], False)
 check("...nor read bob's inbox", R._mail_login_allowed("bob", HERE, "x")[0], False)
 
 print("\nA stored mail password is checked, and then the address stops mattering")
-accounts.set_mail_password(c, lex, "mailpw-lex")
+accounts.set_mail_password(c, alice, "mailpw-alice")
 c.commit()
-check("PASS right password, other address", R._mail_login_allowed("lex", ELSEWHERE, "mailpw-lex")[0])
-check("PASS wrong password, own address", R._mail_login_allowed("lex", HERE, "nope")[0], False)
+check("PASS right password, other address", R._mail_login_allowed("alice", ELSEWHERE, "mailpw-alice")[0])
+check("PASS wrong password, own address", R._mail_login_allowed("alice", HERE, "nope")[0], False)
 check("APOP right digest, other address",
-      R._pop3_check_apop("lex", BANNER, apop("mailpw-lex"), ELSEWHERE)[0])
+      R._pop3_check_apop("alice", BANNER, apop("mailpw-alice"), ELSEWHERE)[0])
 check("APOP wrong digest, own address",
-      R._pop3_check_apop("lex", BANNER, apop("nope"), HERE)[0], False)
+      R._pop3_check_apop("alice", BANNER, apop("nope"), HERE)[0], False)
 check("PASS is constant-time-compared, not prefix-matched",
-      R._mail_login_allowed("lex", HERE, "mailpw-ca")[0], False)
-accounts.set_mail_password(c, lex, "hashed-only", store_plain=False)
+      R._mail_login_allowed("alice", HERE, "mailpw-alic")[0], False)
+accounts.set_mail_password(c, alice, "hashed-only", store_plain=False)
 c.commit()
 check("PASS against the hash when no plaintext is kept",
-      R._mail_login_allowed("lex", ELSEWHERE, "hashed-only")[0])
+      R._mail_login_allowed("alice", ELSEWHERE, "hashed-only")[0])
 check("APOP cannot be verified against a hash -> session rule (own address ok)",
-      R._pop3_check_apop("lex", BANNER, apop("hashed-only"), HERE)[0])
+      R._pop3_check_apop("alice", BANNER, apop("hashed-only"), HERE)[0])
 check("APOP cannot be verified against a hash -> session rule (other address no)",
-      R._pop3_check_apop("lex", BANNER, apop("hashed-only"), ELSEWHERE)[0], False)
+      R._pop3_check_apop("alice", BANNER, apop("hashed-only"), ELSEWHERE)[0], False)
 
 print("\nThe knobs")
 os.environ["POL_MAIL_STRICT"] = "1"

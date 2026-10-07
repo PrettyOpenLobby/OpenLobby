@@ -240,7 +240,7 @@ CONTENT_NAMES = {1: "FinalFantasyXI", 2: "TetraMaster", 3: "Janhourou",
 # [mail]
 # PlayOnline Mail. One row per stored message; the mailbox is keyed on the
 # LOCAL PART of the address rather than member_id, because that is all a POP3
-# login carries (the client sends either "lex" or "lex@pol.com" as the user id
+# login carries (the client sends either "alice" or "alice@pol.com" as the user id
 # and there is no POL ID anywhere in the session). `member_id` is kept when we
 # can resolve one, for joins and for cascade-delete.
 #
@@ -1124,7 +1124,7 @@ def mail_box_name(address):
     """Normalise an address (or bare local part) to a mailbox key.
 
     The Viewer sends the POP3 user id as whatever the account's "Account Name"
-    field holds -- observed both as `lex` and as `lex@pol.com` -- so both have to
+    field holds -- observed both as `alice` and as `alice@pol.com` -- so both have to
     land in the same mailbox.
     """
     if not address:
@@ -2587,7 +2587,7 @@ def clear_login_token(conn, member_id):
     THIS -- not the password above -- is the credential the lobby login checks.
     `responders.resolve_account` compares the NICK line's 11-char token against
     `member.login_token` and, with POL_ACCOUNTS_ENFORCE(_PW) on, refuses a
-    mismatch with SE reject 0xCA (measured 2026-08-17, an earlier note).
+    mismatch with SE reject 0xCA (measured 2026-08-17).
     The stored password hash is only read by the ucs-cgi account servlet.
 
     So the two are separate keys and this is the lockout escape hatch: an

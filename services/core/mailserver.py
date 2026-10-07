@@ -55,7 +55,7 @@ def _mail_db():
     Mail storage rides the SAME database as everything else rather than a
     maildir of its own: an address belongs to a member, and putting it anywhere
     else means a second thing to back up and a second thing that can disagree
-    about who owns `lex@pol.com`.
+    about who owns `alice@pol.com`.
     """
     if accounts is None or os.environ.get("POL_ACCOUNTS", "1") != "1":
         return None
@@ -568,12 +568,12 @@ def _smtp_addr(arg):
 
     The angle-bracket form is tried FIRST, on purpose. These used to be one
     alternation, `<([^>]*)>|(\\S+@\\S+)`, and re.search is leftmost-match rather
-    than best-match: given the standard `RCPT TO:<lex@pol.com>`, the bare-address
-    branch matches at "TO:<lex@pol.com>" -- earlier in the string than the `<` --
-    so the recipient came back as `TO:<lex@pol.com>`, its domain parsed as
+    than best-match: given the standard `RCPT TO:<alice@pol.com>`, the bare-address
+    branch matches at "TO:<alice@pol.com>" -- earlier in the string than the `<` --
+    so the recipient came back as `TO:<alice@pol.com>`, its domain parsed as
     "pol.com>", and the message was dropped as off-domain.
 
-    It went unnoticed because the Viewer sends `RCPT TO: lex@pol.com` WITH a
+    It went unnoticed because the Viewer sends `RCPT TO: alice@pol.com` WITH a
     space, where "TO:" has no `@` to attach to and the bare branch matches the
     address correctly. So POL mail worked and every standard client silently did
     not. Found 2026-08-12 while seeding a mailbox with smtplib.
