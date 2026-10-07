@@ -117,9 +117,9 @@ CONTENT_NAMES = {1: "FinalFantasyXI", 2: "TetraMaster", 3: "Janhourou",
 # [login_alias]
 # Extra login NICKs that map to an existing member. The NICK is derived by the
 # CLIENT from the credentials the user typed, and different clients derive it
-# DIFFERENTLY for one and the same account: the US Viewer logs in as UK4TMZP37
+# DIFFERENTLY for one and the same account: the US Viewer logs in as UDXS6FWXX
 # while the standalone Friend List (PolFL.exe), which predates Square Enix
-# accounts, derives UJ6DXNA93 from the same POL ID. Without this table the
+# accounts, derives UUA9T2OZX from the same POL ID. Without this table the
 # second client is either rejected (POL_ACCOUNTS_ENFORCE=1 -> POL-0008) or
 # auto-provisioned as a SEPARATE member, which logs in fine but shows an empty
 # friend list because it is a different account.
@@ -2547,7 +2547,7 @@ def set_account_password(conn, ident, password):
     `ident` is resolved the way `verify_member` resolves its login field --
     login name, then POL ID, then bound login NICK -- because those three
     diverge on a real account (member 1 holds POL ID `EFGH5678` and logs in as
-    `UK4TMZP37`) and the panel lists the POL ID, which is the one thing
+    `UDXS6FWXX`) and the panel lists the POL ID, which is the one thing
     `set_member_password` does NOT accept. Handles stay out for the same reason
     they do there: a handle is public.
 
@@ -3241,7 +3241,7 @@ def verify_member(conn, login_name, password):
     caller that asks a HUMAN for it -- the ucs-cgi account servlet, whose field
     is labelled "PlayOnline ID" -- was matching the label against the wrong
     column. For an account whose ID and login name diverge (member 1 holds POL ID
-    `EFGH5678` with login name `UK4TMZP37`, the scrambled NICK the client sent at
+    `EFGH5678` with login name `UDXS6FWXX`, the scrambled NICK the client sent at
     first login) that meant the field could
     only be satisfied by a value the user has never been shown.
 
@@ -5319,7 +5319,7 @@ if __name__ == "__main__":
 
         # --- THE ucs LOGIN FIELD SAYS "PlayOnline ID", SO ONE MUST WORK -------
         # An account whose login name is the client's scrambled NICK (member 1 on
-        # the live DB: POL ID EFGH5678, login name UK4TMZP37) could otherwise only
+        # the live DB: POL ID EFGH5678, login name UDXS6FWXX) could otherwise only
         # be reached by a value its owner has never been shown.
         assert verify_member(c, "TESTPOLID", "pw-member")["id"] == mid, \
             "the POL ID must satisfy a field labelled PlayOnline ID"

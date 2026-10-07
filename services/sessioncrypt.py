@@ -232,7 +232,7 @@ def _ks_from_block0(P, S, ks8, length):
 
 # Nicks are constant per account (see pol-login-protocol): try known ones first so
 # the common case needs NO brute force at all.
-#   UJ6DXNA93 is the standalone Friend List (PolFL.exe). A client derives its own
+#   UUA9T2OZX is the standalone Friend List (PolFL.exe). A client derives its own
 #   nick, so the SAME account presents a different one per client -- see the
 #   login_alias table in accounts.py. The brute-force fallback below finds these
 #   anyway; listing them just takes the fast path.
@@ -252,7 +252,7 @@ def _ks_from_block0(P, S, ks8, length):
 # account DB at startup, `remember_nick` on every successful recovery, which also
 # covers auto-provisioned accounts whose nick is not derivable). Keep the three
 # static entries as a seed so a server with no account DB behaves as before.
-_SEED_NICKS = (b"UR2PWCF58", b"UK4TMZP37", b"UJ6DXNA93")
+_SEED_NICKS = (b"UL2CLE42S", b"UDXS6FWXX", b"UUA9T2OZX")
 #: Bound: the crib is tried in order before the brute force, so a runaway list
 #: would just be a slower prefix. 512 covers every account we will ever have.
 _NICKS_MAX = 512

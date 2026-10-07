@@ -123,7 +123,7 @@ def main():
     chan = ("#XXL%016X" % gid).encode()
     srv = b"pol-1049-51244.pol.com"
     alice = Sess(b"TESTNICK1", ids["Lex"][0], ip=b"203.0.113.177")
-    yui = Sess(b"UK4TMZP37", ids["Yui"][0], ip=b"192.0.2.2")
+    yui = Sess(b"UDXS6FWXX", ids["Yui"][0], ip=b"192.0.2.2")
     R.ROOMS.join(chan, alice)
     R.ROOMS.join(chan, yui)
 

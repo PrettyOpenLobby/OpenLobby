@@ -141,8 +141,8 @@ def _warn_stranded_registration(db, nick, peer_ip):
     account has never been logged into.
 
     The client DERIVES the nick it sends from the PlayOnline ID typed under Add
-    Member -- and differently per client (one account, `UK4TMZP37` from the US
-    Viewer, `UJ6DXNA93` from
+    Member -- and differently per client (one account, `UDXS6FWXX` from the US
+    Viewer, `UUA9T2OZX` from
     PolFL). We cannot compute it, so a freshly registered account cannot be
     recognised on its FIRST login: with enforcement off it is silently
     auto-provisioned as a NEW empty account, and the registration -- handle,
@@ -976,7 +976,7 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
         # to check -- unlike the 32-hex digest, which is salted per session. See
         # nick_credential().
         nick_fields = nick_pt[5:].split(b":")
-        nick = nick_fields[0].strip() or b"UK4TMZP37"
+        nick = nick_fields[0].strip() or b"UDXS6FWXX"
         cred = nick_credential(nick_fields[2]) if len(nick_fields) > 2 else None
         # WHICH client build this is. The same account's token differs between
         # the PC and PS2 Viewers, so the credential check is scoped by it.
