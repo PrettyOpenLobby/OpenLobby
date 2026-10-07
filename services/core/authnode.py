@@ -11,7 +11,7 @@ import sessioncrypt
 # base64decode of an all-'T' token (A64[0]) is all zeros, so base=0, modexp=0,
 # and K = 8 zero bytes -- a known key, independent of SE's RSA (e,n). We send
 # that token so the NEXT hop's NICK is encrypted under K=0, which both proves the
-# trick and lets us recover the IV from the known 'NICK UGCH7WDQ4 ' plaintext.
+# trick and lets us recover the IV from the known 'NICK UK4TMZP37 ' plaintext.
 A64 = "TSG8IncW3HFKokOg79qzeCmZs2yBYEQVAUxR5rbwi4P@jMDLtpvad0f_J1hlN6uX"
 TOKEN0 = A64[0] * 47                        # decodes to all-zero -> base 0 -> K=0
 K0_IV = bytes.fromhex("4f5f4d4661d9c59f")   # = SE modulus[0:8], recovered

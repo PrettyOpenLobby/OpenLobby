@@ -79,7 +79,7 @@ import authrelay                                             # noqa: E402
 
 K0_P, K0_S = sessioncrypt.bf_setkey(b"\x00" * 8)
 IV = bytes.fromhex("1122334455667788")
-NICK = b"UGCH7WDQ4"
+NICK = b"UK4TMZP37"
 
 FAILS = []
 VERBOSE = False

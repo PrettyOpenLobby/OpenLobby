@@ -105,7 +105,7 @@ def main():
 
     # --- transcript ----------------------------------------------------------
     gmchat.record(room, "out", b"UMXGR8ETQ", t)
-    gmchat.record(room, "in", b"UGCH7WDQ4", cap)
+    gmchat.record(room, "in", b"UK4TMZP37", cap)
     rows = gmchat.transcript(room)
     check("both directions are recorded", len(rows) == 2, str(len(rows)))
     check("the transcript keeps the RAW BYTES, not just the text",
@@ -116,7 +116,7 @@ def main():
     # A record we cannot decode must still be RECORDED -- that is the whole
     # value of the capture, and dropping it would lose the only evidence of
     # whatever shape the client actually speaks.
-    gmchat.record(room, "in", b"UGCH7WDQ4", b"K\x01\x02undecoded")
+    gmchat.record(room, "in", b"UK4TMZP37", b"K\x01\x02undecoded")
     rows = gmchat.transcript(room)
     check("an undecodable record is kept anyway", len(rows) == 3
           and rows[2]["raw"] == b"K\x01\x02undecoded".hex(), rows[2]["text"][:40])
@@ -158,7 +158,7 @@ def main():
     saved, gmchat.TRANSCRIPT_MAX = gmchat.TRANSCRIPT_MAX, 5
     try:
         for i in range(20):
-            gmchat.record(room, "in", b"UGCH7WDQ4", gmchat.encode_text(f"line {i}"))
+            gmchat.record(room, "in", b"UK4TMZP37", gmchat.encode_text(f"line {i}"))
         gmchat.trim(room)
         rows = gmchat.transcript(room, 100)
         check("trim holds a room to TRANSCRIPT_MAX", len(rows) == 5, str(len(rows)))

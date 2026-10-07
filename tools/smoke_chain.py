@@ -193,7 +193,7 @@ AUTH_IV = bytes.fromhex("1122334455667788")
 
 def _make_nick(iv):
     """A valid K=0 NICK line the authserv's recover_iv fast-path accepts."""
-    line = b"NICK UGCH7WDQ4:" + b"0" * 32 + b":8:pol"
+    line = b"NICK UK4TMZP37:" + b"0" * 32 + b":8:pol"
     return sessioncrypt.ofb_apply(K0_P, K0_S, iv, line)
 
 
@@ -340,7 +340,7 @@ def hop_rooms():
     real client is byte-for-byte unchanged.
     """
     R = responders
-    NICK, SRV, IP, CH = b"US77G53VV", b"pol-1000-51242.pol.com", b"127.0.0.1", b"#01CUSMOKE"
+    NICK, SRV, IP, CH = b"UR2PWCF58", b"pol-1000-51242.pol.com", b"127.0.0.1", b"#01CUSMOKE"
     # WARNING: THE PREFIX HOST IS EMPTY -- `nick!~x@` with nothing after the `@`, which
     # is what SE sends and what the 2026-08-15 capture measures. Putting the
     # server name there is our old invention; every user-prefixed line in this
@@ -871,8 +871,8 @@ def hop_two_clients():
     decrypts to a valid header under exactly one session's IV. Both are asserted
     here.
     """
-    A_TOK, A_NICK, A_IV = b"launchAAA", b"UGCH7WDQ4", bytes.fromhex("1122334455667788")
-    B_TOK, B_NICK, B_IV = b"launchBBB", b"US77G53VV", bytes.fromhex("8877665544332211")
+    A_TOK, A_NICK, A_IV = b"launchAAA", b"UK4TMZP37", bytes.fromhex("1122334455667788")
+    B_TOK, B_NICK, B_IV = b"launchBBB", b"UR2PWCF58", bytes.fromhex("8877665544332211")
 
     a_reply = _login(A_TOK, A_NICK, A_IV)
     b_reply = _login(B_TOK, B_NICK, B_IV)
