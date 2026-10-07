@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import accounts  # noqa: E402
 import contentlist  # noqa: E402  -- the shared content-id title table
 import newsgen    # noqa: E402  -- announcements store + every news PML we write
+import eventnews  # noqa: E402  -- the event calendar's posts (newsgen adds them)
 import pmleval    # noqa: E402  -- template evaluator for the preview
 import pmlrefs    # noqa: E402  -- which pages reference which files
 #: The shared /data every container mounts. Computed before the two GM modules
@@ -82,6 +83,7 @@ from polcore import db as polcore_db  # noqa: E402
 import adminusers  # noqa: E402
 #: GM-call alerts, code expiry, and the Overview's status probes.
 import adminops  # noqa: E402
+import admingames  # noqa: E402  -- the Games section's tool proxy
 import webpush  # noqa: E402
 
 try:
@@ -1299,6 +1301,8 @@ _GET_PERMS = {
     "/api/pml-list": "pml", "/api/pml-load": "pml", "/api/pml-refs": "pml",
     "/api/pml-resolve": "pml", "/api/page": "pml",
     "/api/audit": "audit", "/api/health": "health", "/api/alerts": "settings",
+    # the list is cut to the caller's games; /games/<key>/ checks its own
+    "/api/games": "any",
 }
 #: Path prefixes, for routes that carry a path of their own. /art/ draws the
 #: pictures in both the PML preview and the news preview.
@@ -1853,6 +1857,8 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(detail.get("items"), list):
             detail["items"] = "%d item(s)" % len(detail["items"])
         status = getattr(self, "_status", 0)
+        if resp.get("kick_error"):
+            detail["kick_error"] = resp["kick_error"]
         if status >= 400 and resp.get("error"):
             detail["error"] = resp["error"]
         user, role, _p = self._caller()
@@ -2162,8 +2168,12 @@ class Handler(BaseHTTPRequestHandler):
                                            posixpath.basename(path)))
         if not self._authed(path):
             return
+        if path.startswith("/games/"):
+            return self._game_tool("GET")
         if not self._permit(path, _GET_PERMS):
             return
+        if path == "/api/games":
+            return self._send(200, {"games": admingames.listing(self._can)})
         if path == "/api/mods":
             return self._mods_list()
         if path == "/api/audit":
@@ -2242,6 +2252,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._logout()
         if not self._authed(path):
             return
+        if path.startswith("/games/"):
+            return self._game_tool("POST")
         if not self._permit(path, _POST_PERMS):
             return
         try:
@@ -2315,6 +2327,48 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/news/render":
             return self._news_render()
         return self._send(404, {"error": "not found"})
+
+    # -- games ---------------------------------------------------------------- #
+    def _game_tool(self, method):
+        """/games/<key>/<path>: a game's own tool page or endpoint, proxied
+        (admingames.forward). Permission is per game; a change is audited."""
+        raw, _, query = self.path.partition("?")
+        parts = admingames.split(raw)
+        if parts is None or parts[0] not in admingames.GAMES:
+            return self._send(404, {"error": "not found"})
+        key, sub = parts
+        if raw == "/games/" + key:
+            # the tool pages address their endpoints relative to this folder
+            return self._send(301, "", "text/plain",
+                              headers=[("Location", raw + "/" + ("?" + query if query else ""))])
+        if not self._can(admingames.perm_for(key)):
+            return self._send(403, {"error": "You don't have permission to do that.",
+                                    "forbidden": True})
+        body, ctype = None, None
+        if method == "POST":
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            if n > admingames.MAX_BODY:
+                return self._send(413, {"error": "too large"})
+            body = self.rfile.read(n) if n else b""
+            ctype = self.headers.get("Content-Type")
+        user, role, _p = self._caller()
+        status, headers, data = admingames.forward(key, sub, method, query, body,
+                                                   ctype, user)
+        self._send(status, data, dict(headers).get("Content-Type", "text/plain"),
+                   headers=[h for h in headers if h[0] != "Content-Type"])
+        if method == "POST":
+            try:
+                req = json.loads(body or b"{}")
+            except ValueError:
+                req = {"text": (body or b"")[:200].decode("utf-8", "replace")}
+            if not isinstance(req, dict):
+                req = {}
+            detail = {"tool": sub or "/"}
+            detail.update({k: v for k, v in req.items()
+                           if k not in _AUDIT_SECRET and isinstance(v, (str, int, float, bool))
+                           and len(str(v)) <= 120})
+            _audit(user, role, "used the %s tools" % admingames.GAMES[key]["title"],
+                   target=key, detail=detail, ok=status < 400, addr=self._addr())
 
     # -- static / art -------------------------------------------------------- #
     def _file(self, fs_path):
@@ -3406,7 +3460,26 @@ class Handler(BaseHTTPRequestHandler):
                 limit = 200
             rb = room.encode()
             gmchat.trim(rb)
-            out["transcript"] = gmchat.transcript(rb, limit)
+            # Roster (H) records are most of a room's log and never shown; drop
+            # them BEFORE the limit, or a busy room pushes the chat itself out.
+            rows = [r for r in gmchat.transcript(rb, gmchat.TRANSCRIPT_MAX)
+                    if not str(r.get("raw") or "").startswith("48")][-limit:]
+            names = {}
+            try:
+                db = accounts.connect()
+                try:
+                    for r in rows:
+                        nick = r.get("nick") or ""
+                        if r.get("dir") == "in" and nick:
+                            if nick not in names:
+                                names[nick] = self._handle_for_nick(db, nick)
+                            if names[nick]:
+                                r["who"] = names[nick]
+                finally:
+                    db.close()
+            except Exception:
+                pass
+            out["transcript"] = rows
             out["pending"] = gmchat.pending(rb)
         else:
             out["transcript"], out["pending"] = [], 0
@@ -3915,12 +3988,15 @@ class Handler(BaseHTTPRequestHandler):
         pol = body.get("polid")
         code = body.get("code")
         until = body.get("until")
+        kick = body.get("kick", False)
         if not isinstance(pol, str) or not pol.strip():
             return self._send(400, {"error": "polid required"})
         if type(code) is not int:
             return self._send(400, {"error": "code must be an integer"})
         if until is not None and not isinstance(until, str):
             return self._send(400, {"error": "until must be an ISO 8601 datetime"})
+        if type(kick) is not bool:
+            return self._send(400, {"error": "kick must be a boolean"})
         pol = pol.strip()
         db = _db()
         try:
@@ -3937,8 +4013,22 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[admin] {who} set account {pol!r} refusal to {code:#04x} "
               f"until {until or 'cleared manually'}",
               flush=True)
-        self._send(200, {"ok": True, "polid": pol, "code": code,
-                         "until": until})
+        response = {"ok": True, "polid": pol, "code": code, "until": until}
+        if kick and code:
+            try:
+                result = _request_kick(pol)
+                if result.get("ok"):
+                    response["kicked"] = result["kicked"]
+                    print(f"[admin] {who} kicked {result['kicked']} live channel(s) "
+                          f"for {pol!r} after setting a refusal", flush=True)
+                else:
+                    response["kick_error"] = result.get("error", "kick failed")
+            except Exception as exc:
+                response["kick_error"] = f"auth service unavailable: {exc}"
+            if response.get("kick_error"):
+                print(f"[admin] {who} could not kick {pol!r} after setting a "
+                      f"refusal: {response['kick_error']}", flush=True)
+        self._send(200, response)
 
     def _account_info(self):
         """Configure a notice carried in the successful login token."""
@@ -4237,6 +4327,10 @@ class Handler(BaseHTTPRequestHandler):
             # one. See newsgen.CONTENT_ICONS.
             "content_icons": newsgen.CONTENT_ICONS,
             "categories": newsgen.CATEGORIES,
+            # The event calendar's posts that are up right now. Read-only: they
+            # are computed at every publish and the event timer keeps them
+            # current, so they never enter the store (eventnews.py).
+            "auto": _event_posts(),
         })
 
     def _news_art(self):
@@ -4436,8 +4530,9 @@ class Handler(BaseHTTPRequestHandler):
                          f"volume in docker-compose and recreate the container."})
         try:
             items = newsgen.load()
-            res = newsgen.publish(items, WWW_ROOT,
-                                  prune=body.get("prune", True), dry_run=dry)
+            with _NEWS_LOCK:
+                res = newsgen.publish(items, WWW_ROOT,
+                                      prune=body.get("prune", True), dry_run=dry)
         except newsgen.NewsError as exc:
             return self._send(400, {"error": str(exc)})
         except OSError as exc:
@@ -4614,6 +4709,57 @@ def _gm_auto_reply(rec, name):
     return "no GM on duty; auto-reply mailed"
 
 
+#: One publish at a time: the News tab's Publish and the event timer write the
+#: same files.
+_NEWS_LOCK = threading.Lock()
+
+
+def _event_posts():
+    try:
+        return eventnews.items()
+    except Exception as exc:
+        print(f"[admin] event posts unavailable: {exc!r}", flush=True)
+        return []
+
+
+def _event_news_loop():
+    """Keep the event calendar's posts current (eventnews.py).
+
+    Republishes the last PUBLISHED announcements whenever the set of event
+    posts changes: one appears a few days before a cup, and comes down once
+    its results close. POL_EVENT_NEWS_INTERVAL seconds between checks
+    (default 300); POL_EVENT_NEWS=0 turns the posts off."""
+    try:
+        every = max(30, int(os.environ.get("POL_EVENT_NEWS_INTERVAL", "300")))
+    except ValueError:
+        every = 300
+    last, said = None, None
+    while True:
+        try:
+            sig = eventnews.signature()
+            if sig != last:
+                if not _www_writable():
+                    note = f"{WWW_ROOT} is read-only"
+                    res = None
+                else:
+                    with _NEWS_LOCK:
+                        res = eventnews.sync(WWW_ROOT)
+                    note = res.get("held")
+                if note:
+                    if note != said:
+                        print(f"[admin] event posts not published: {note}",
+                              flush=True)
+                        said = note
+                else:
+                    print(f"[admin] event posts: {len(sig)} up; "
+                          f"{len(res['written'])} file(s) written, "
+                          f"{len(res['pruned'])} pruned", flush=True)
+                    last, said = sig, None
+        except Exception as exc:
+            print(f"[admin] event posts: {exc!r}", flush=True)
+        time.sleep(every)
+
+
 def main():
     if _cli(sys.argv[1:]):
         return
@@ -4643,6 +4789,8 @@ def main():
     wrote = gmnotices.ensure(WWW_ROOT)
     if wrote:
         print(f"[admin] wrote the missing GM notices page(s): {wrote}", flush=True)
+    if eventnews.enabled():
+        threading.Thread(target=_event_news_loop, daemon=True).start()
     n = _load_sessions()
     if n:
         print(f"[admin] restored {n} remembered sign-in(s) from {SESSION_STORE}",

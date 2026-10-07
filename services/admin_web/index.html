@@ -354,11 +354,6 @@
       gap: 10px; flex-wrap: wrap; margin-top: 20px; padding-top: 14px;
       border-top: 1px solid var(--line); }
     .gm-chat-head h2 { margin: 0 0 8px; }
-    .gm-room { font: 12px 'Consolas', monospace; text-transform: none;
-      letter-spacing: 0; color: var(--muted); margin-left: 4px; width: auto;
-      padding: 2px 6px; vertical-align: baseline; }
-    .gm-room-note { font-size: 12px; color: var(--warn); margin: -2px 0 8px; }
-    .gm-room-note[hidden] { display: none; }
     .gm-chat-state { font-size: 12.5px; color: var(--muted); }
     .gm-chat-state.good { color: var(--good); }
     .gm-chat-state.warn { color: var(--warn); }
@@ -561,6 +556,30 @@
 
     /* ---- PML preview: layout ---- */
     body.wide main { max-width: none; }
+    /* Games: a menu of each title's tools beside the open one */
+    .gx { display: grid; grid-template-columns: 220px 1fr; gap: 16px; align-items: start; }
+    .gx-side { margin-bottom: 0; position: sticky; top: 70px; }
+    .gx-game { margin-bottom: 14px; }
+    .gx-game:last-child { margin-bottom: 0; }
+    .gx-game h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--text); }
+    .gx-game button { display: block; width: 100%; text-align: left; background: none;
+      border: 0; border-radius: 7px; color: var(--muted); padding: 7px 10px; cursor: pointer;
+      font: inherit; }
+    .gx-game button:hover { color: var(--text); background: var(--panel2); }
+    .gx-game button.on { color: var(--text); background: var(--panel2);
+      box-shadow: inset 3px 0 0 var(--accent); }
+    .gx-frame { width: 100%; height: calc(100vh - 110px); min-height: 480px; display: block;
+      border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+      color-scheme: dark; }
+    .gx-empty { color: var(--muted); }
+    @media (max-width: 800px) {
+      .gx { grid-template-columns: 1fr; }
+      .gx-side { position: static; }
+      .gx-game { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+      .gx-game h3 { width: 100%; }
+      .gx-game button { width: auto; }
+      .gx-frame { height: calc(100vh - 170px); }
+    }
     .pv { display: grid; grid-template-columns: 300px minmax(0, 1fr) auto; gap: 16px;
       align-items: start; }
     .pv .panel { margin-bottom: 12px; }
@@ -725,6 +744,12 @@
     .nw-item .flag { font-size: 10.5px; padding: 1px 7px; border-radius: 10px;
       background: rgba(255,207,107,.15); color: var(--warn); white-space: nowrap; }
     .nw-empty { padding: 16px 14px; color: var(--muted); }
+    .nw-autohead { padding: 10px 14px 4px; font-size: 11.5px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .04em;
+      border-top: 1px solid rgba(51,57,73,.6); }
+    .nw-item.nw-auto { cursor: default; opacity: .8; }
+    .nw-item.nw-auto:hover { background: transparent; }
+    .nw-item.nw-auto .flag { background: rgba(90,169,255,.13); color: var(--accent); }
     .nw-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; margin-top: 2px; }
     .nw-row .nw-date { grid-column: 1 / -1; }
     .nw-row .nw-date .datefield input { flex: 1; min-width: 0; }
@@ -739,8 +764,6 @@
     .nw-preview { position: sticky; top: 70px; }
     .nw-pvbar { display: flex; justify-content: space-between; align-items: center;
       gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
-    .nw-raw { max-height: 360px; overflow: auto; white-space: pre-wrap; font-size: 12px;
-      background: var(--panel2); padding: 10px; border-radius: 8px; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -756,6 +779,7 @@
       <button data-tab="gmcalls">GM Calls<span class="navbadge" id="gmBadge" hidden></span></button>
       <button data-tab="news">News</button>
       <button data-tab="pml">PML Preview</button>
+      <button data-tab="games">Games</button>
       <button data-tab="security">Security</button>
     </nav>
     <div class="tools">
@@ -1056,20 +1080,19 @@
             <div class="gm-ticket-meta" id="gmTMeta"></div>
             <div class="gm-ticket-body" id="gmTBody"></div>
             <div class="gm-ticket-actions" id="gmTActions"></div>
-          </div>
 
-          <div class="gm-chat-head">
-            <h2>Chat <select class="gm-room" id="gmRoomPick" title="Which chat room to show"></select></h2>
-            <span class="gm-chat-state" id="gmChatState"></span>
+            <div class="gm-chat-head">
+              <h2>Chat</h2>
+              <span class="gm-chat-state" id="gmChatState"></span>
+            </div>
+            <div class="gm-log" id="gmLog"></div>
+            <div class="gm-compose">
+              <textarea id="gmSay" rows="2" maxlength="400"
+                placeholder="Reply to the player. Enter sends, Shift+Enter for a new line."></textarea>
+              <button class="act" id="gmSend">Send</button>
+            </div>
+            <div class="hint" id="gmComposeHint"></div>
           </div>
-          <div class="gm-room-note" id="gmRoomNote" hidden></div>
-          <div class="gm-log" id="gmLog"></div>
-          <div class="gm-compose">
-            <textarea id="gmSay" rows="2" maxlength="400"
-              placeholder="Reply to the player. Enter sends, Shift+Enter for a new line."></textarea>
-            <button class="act" id="gmSend">Send</button>
-          </div>
-          <div class="hint" id="gmComposeHint"></div>
         </div>
       </div>
 
@@ -1078,18 +1101,8 @@
         <p class="hint">While nobody is on duty, a new request gets an automatic reply by
           PlayOnline Mail saying a GM will answer by mail. While GMs are on duty, only they get
           alerts. Duty from this page lasts while the page is open; from Discord, for the hours
-          you choose.</p>
+          you choose. Link your Discord account on the Security tab.</p>
         <div id="gmDutyList" class="gmn-sec"></div>
-        <h3 class="gm-diag-h">Discord</h3>
-        <div id="gmDiscordState" class="hint"></div>
-        <div class="row" id="gmDiscordLinkRow" style="margin-top:6px">
-          <div><label>Link code <span class="hint" style="display:inline">(run /gm link in Discord)</span></label>
-            <input type="text" id="gmDiscordCode" class="mono" maxlength="12" autocomplete="off"></div>
-          <div style="flex:0 0 auto; min-width:0"><button class="act" id="gmDiscordLink">Link</button></div>
-        </div>
-        <div id="gmDiscordUnlinkRow" style="margin-top:6px" hidden>
-          <button class="ghost" id="gmDiscordUnlink">Unlink Discord</button>
-        </div>
       </details>
 
       <details class="panel gm-diag" id="gmNotices">
@@ -1102,51 +1115,6 @@
           <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmnReload">Discard changes</button></div>
         </div>
         <div id="gmnSecs"></div>
-      </details>
-
-      <details class="panel gm-diag" id="gmDiag">
-        <summary>Diagnostics</summary>
-        <p class="hint">Values sent to callers' GM Call screens. A pin overrides the duty switch until it is cleared.</p>
-        <div class="inv" id="gmDesk" style="margin-top:10px"></div>
-        <div class="row" style="margin-top:14px">
-          <div><label>Pin the queue count <span class="hint" style="display:inline">(blank = live)</span></label>
-            <input type="text" id="gmQueue" class="mono" placeholder="live" autocomplete="off"></div>
-          <div><label>Pin the flags <span class="hint" style="display:inline">(blank = from duty)</span></label>
-            <input type="text" id="gmFlags" class="mono" placeholder="e.g. 0x60" autocomplete="off"></div>
-          <div style="flex:0 0 auto; min-width:0"><button class="act" id="gmPin">Apply pins</button></div>
-          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmUnpin">Clear pins</button></div>
-          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmClearDuty">Hand duty back to config</button></div>
-        </div>
-
-        <h3 class="gm-diag-h">Chat records</h3>
-        <label class="chip" style="display:inline-flex; margin:4px 0 0">
-          <input type="checkbox" id="gmShowTech"> Show presence heartbeats and raw bytes</label>
-        <div class="row" style="margin-top:6px">
-          <div><label>Send as nick <span class="hint" style="display:inline">(blank = the GM; "self" = the player)</span></label>
-            <input type="text" id="gmNick" class="mono" placeholder="GM" autocomplete="off"></div>
-          <div><label>Reply prefix</label>
-            <input type="text" id="gmPrefix" class="mono" value="" autocomplete="off"></div>
-        </div>
-        <div class="row" style="margin-top:6px">
-          <div><label>Membership event</label>
-            <select id="gmEvent">
-              <option value="">-</option>
-              <option value="S">S: started</option>
-              <option value="G">G: joined</option>
-              <option value="E">E: left</option>
-              <option value="A">A: suspended</option>
-              <option value="R">R: resumed</option>
-            </select></div>
-          <div><label>About</label>
-            <input type="text" id="gmEventWho" class="mono" placeholder="Abe" autocomplete="off"></div>
-          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmSendEvent">Send event</button></div>
-        </div>
-        <div class="row" style="margin-top:6px">
-          <div style="flex:3"><label>Raw record <span class="hint" style="display:inline">(<code>\xNN</code> escapes work)</span></label>
-            <input type="text" id="gmRaw" class="mono" placeholder="T\x07literally these bytes" autocomplete="off"></div>
-          <div style="flex:0 0 auto; min-width:0"><button class="ghost" id="gmSendRaw">Send raw</button></div>
-        </div>
-        <p class="hint">Replies are sent under the player's own nick, which is the only speaker the client displays.</p>
       </details>
     </section>
 
@@ -1231,11 +1199,6 @@
             <div class="pv-stagescale" id="newsStageScale"><div id="newsStage" class="pml-stage"></div></div>
           </div>
           <div id="newsNote" class="pv-note"></div>
-          <details class="nw-more">
-            <summary>Files a publish writes</summary>
-            <select id="newsOutput" style="margin-top:8px"></select>
-            <pre id="newsRaw" class="mono nw-raw"></pre>
-          </details>
         </div>
       </div>
 
@@ -1355,6 +1318,20 @@
       </div>
     </section>
 
+    <!-- GAMES -->
+    <section id="tab-games" class="tab">
+      <div class="gx">
+        <aside class="gx-side panel">
+          <h2>Games</h2>
+          <div id="gamesList"></div>
+        </aside>
+        <div>
+          <div class="panel gx-empty" id="gamesEmpty" hidden>No game tools are available.</div>
+          <iframe class="gx-frame" id="gamesFrame" title="Game tool" hidden></iframe>
+        </div>
+      </div>
+    </section>
+
     <!-- SECURITY -->
     <section id="tab-security" class="tab">
       <!-- A moderator's own password. The owner's is the panel below. -->
@@ -1401,6 +1378,23 @@
           <th>Allowed</th><th>Codes / 24 h</th><th>Status</th><th>Last active</th>
           <th></th></tr></thead>
           <tbody id="modsBody"></tbody></table></div>
+      </div>
+
+      <div class="panel" id="gmLinkPanel" data-perm="gm">
+        <h2>GM Discord link</h2>
+        <p class="hint">Link this login to a Discord account so <code class="mono">/gm duty</code>
+          and the Knock button on GM call alerts act as you. Run <code class="mono">/gm link</code>
+          in Discord and paste the code below.</p>
+        <div id="gmDiscordState" class="hint" style="margin:4px 0 6px"></div>
+        <div class="row" id="gmDiscordLinkRow">
+          <div style="flex:1"><label>Link code</label>
+            <input type="text" id="gmDiscordCode" class="mono" maxlength="12" autocomplete="off"></div>
+          <div style="flex:0 0 auto; min-width:0; align-self:end">
+            <button class="act" id="gmDiscordLink">Link</button></div>
+        </div>
+        <div id="gmDiscordUnlinkRow" style="margin-top:6px" hidden>
+          <button class="ghost" id="gmDiscordUnlink">Unlink Discord</button>
+        </div>
       </div>
 
       <div class="panel" id="alertsPanel" data-perm="settings">
@@ -1517,6 +1511,9 @@
         <input type="datetime-local" id="stateUntil">
       </div>
       <p class="hint" id="stateDurationHint"></p>
+      <label class="chip" style="margin-top:12px; display:inline-flex">
+        <input type="checkbox" id="stateKick" checked> Kick current sessions when setting a refusal
+      </label>
       <div class="foot">
         <button class="ghost" id="stateCancel">Cancel</button>
         <button class="act" id="stateGo">Save refusal</button>

@@ -413,20 +413,33 @@ def record(chan, direction, nick, rec, note=None):
         pass
 
 
-def transcript(chan, limit=200):
-    """The last `limit` records of a room, oldest first. Never raises."""
+def transcript(chan, limit=200, since=None):
+    """The last `limit` records of a room, oldest first. Never raises.
+
+    `since`, if given, is a floor on `at`: every row with `at > since` is
+    returned regardless of `limit`. The Discord relay uses this to back-fill:
+    a room with lots of roster (`H`) chatter easily overruns a 200-row window
+    between a player's first line and the GM's knock, and slicing by count
+    alone dropped the line from the back-fill (2026-09-29, "hiii").
+    """
     try:
         with open(_tpath(chan), encoding="utf-8") as f:
             lines = f.readlines()
     except OSError:
         return []
-    out = []
-    for ln in lines[-max(1, limit):]:
+    parsed = []
+    for ln in lines:
         try:
-            out.append(json.loads(ln))
+            parsed.append(json.loads(ln))
         except ValueError:
             continue                   # a half-written tail is not an error
-    return out
+    if since is None:
+        return parsed[-max(1, limit):]
+    kept = [r for r in parsed if float(r.get("at") or 0) > float(since)]
+    tail = parsed[-max(1, limit):]
+    if kept and (not tail or float(kept[0].get("at") or 0) < float(tail[0].get("at") or 0)):
+        return kept
+    return tail
 
 
 def rooms():

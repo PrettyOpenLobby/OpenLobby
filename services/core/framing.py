@@ -143,10 +143,22 @@ def _http_request_complete(buf):
     menu pulls ~27 files one connection at a time, so that alone serialised into a
     >30s page load and let the client give up with POL-0008 partway through.
 
-    Methods that can carry a body are deliberately NOT matched -- they fall
-    through to the idle window rather than risk truncating a payload.
+    A request WITH a body (POST, PUT) is also done at the blank line now: the
+    one caller hands it to `lobbyserver._serve_http_on_lobby`, which reads the
+    rest by Content-Length itself. These used to fall through to the idle
+    window, and that cost the shim's report POST everything: a 4 MB bundle was
+    read here 4 KB at a time until `maxwait` (8 s), re-testing the whole growing
+    buffer as a lobby frame on every chunk, so a report took ~18 s and the
+    shim's 20 s timeout fired first ("the server did not accept it",
+    2026-10-04).
     """
-    return buf.startswith((b"GET ", b"HEAD ")) and b"\r\n\r\n" in buf
+    return buf.startswith(_HTTP_REQUEST_METHODS) and b"\r\n\r\n" in buf
+
+
+#: Request lines this port can carry (lobbyreply._HTTP_METHODS, kept here so
+#: framing does not import the reply builder).
+_HTTP_REQUEST_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"OPTIONS ",
+                         b"CONNECT ")
 
 
 def _lobby_frame_complete(buf, peer_ip=None):
@@ -210,8 +222,9 @@ def _lobby_until(peer_ip=None, http=False):
     HTTP request, for the first read of a connection where the portal tunnels
     over this same port -- see `_http_request_complete`."""
     def done(buf):
-        if http and _http_request_complete(buf):
-            return True
+        if http and buf.startswith(_HTTP_REQUEST_METHODS):
+            # HTTP is never a lobby frame; do not decrypt it as one per chunk.
+            return _http_request_complete(buf)
         return _lobby_frame_complete(buf, peer_ip)
     done.pending = lambda buf: _lobby_frame_pending(buf, peer_ip)
     return done

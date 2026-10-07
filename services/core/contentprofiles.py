@@ -563,9 +563,20 @@ def _identity_content_entries(db, hid):
     else:
         allow = set(_CONTENT_SCHEMAS)
     shown = []
+    seen_codes = set()
     for link in links[:profilerecord._IDREC_CONTENT_MAX]:
         code = int(link["content_code"])
         if allow is not None and code not in allow:
+            continue
+        if code in seen_codes:
+            # ONE ROW PER GAME, not one per Content ID. A handle may hold several
+            # Content IDs for one content code -- a title's extra character slots
+            # (FFXI mints one per character) -- and this card names the GAME the
+            # player owns, so the separate characters belong on that title's own
+            # select screen (the 1:3 list `_db_chars` builds), not as repeated
+            # rows here. `handle_content_list` orders by (content_code, slot), so
+            # the one kept is slot 0, the handle's identity for that game. Without
+            # this the profile listed a game once per character.
             continue
         f02 = code if f02_const is None else f02_const
         try:
@@ -576,6 +587,8 @@ def _identity_content_entries(db, hid):
             # A link with no Content ID names no character, and an entry whose
             # ids are zero is what an EMPTY slot looks like -- so skip it rather
             # than minting a selectable row the content request cannot resolve.
+            # Not marked seen: a later slot of the same game that DOES carry an id
+            # should still get the one row (an unpaired slot 0 must not hide it).
             continue
         ctsid = cid
         world = _titles_mod.character_world(code, cid)
@@ -585,6 +598,7 @@ def _identity_content_entries(db, hid):
         struct.pack_into("<HHII", out, off, present & 0xFFFF, f02 & 0xFFFF,
                          ctsid & 0xFFFFFFFF, cid & 0xFFFFFFFF)
         shown.append(f"code {code} (flags {present:#x}) z_ctsid {ctsid:#010x} z_ctid {cid}")
+        seen_codes.add(code)             # this game now has its one card row
     if shown:
         log("lobby", f"profile contents: {len(shown)} entry(ies) at idrec "
                      f"+{profilerecord._IDREC_CONTENT_AT:#04x} -- " + "; ".join(shown))

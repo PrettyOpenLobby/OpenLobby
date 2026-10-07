@@ -115,10 +115,14 @@ def _pop3_messages(user):
         rows = accounts.list_mail(db, box)
         if seed and not rows \
                 and not accounts.list_mail(db, box, include_deleted=True):
+            # `read=True` -- the Viewer's Mail app recounts locally on open,
+            # not via POP3, so a welcome seed that lands unread would badge
+            # for ever with no path to clear itself; the row is still there
+            # for a genuine POP3 client that walks the mailbox.
             accounts.deliver_mail(db, box, _welcome_message(user),
                                   sender=f"info@{MAIL_DOMAIN}",
                                   subject="Welcome to PlayOnline",
-                                  uidl="welcome-1")
+                                  uidl="welcome-1", read=True)
             rows = accounts.list_mail(db, box)
         return [(r["id"], r["uidl"], bytes(r["raw"])) for r in rows]
     finally:
@@ -486,11 +490,12 @@ def handle_pop3(conn, addr, port=110):
                     f.write(b"-ERR no such message\r\n")
                     f.flush()
                     continue
-                b = msgs[i - 1][2]
+                mail_id, _uidl, b = msgs[i - 1]
                 if cmd == "TOP":
                     # `TOP n lines` = full header block + `lines` body lines. The
                     # client uses it for previews; sending the whole message back
-                    # would be answering a different question.
+                    # would be answering a different question. TOP is a peek, so
+                    # it also does NOT stamp `read_at` -- only RETR does.
                     try:
                         nlines = int(parts2[1])
                     except (IndexError, ValueError):
@@ -503,6 +508,21 @@ def handle_pop3(conn, addr, port=110):
                 for ln in b.split(b"\r\n"):
                     f.write((b"." + ln if ln.startswith(b".") else ln) + b"\r\n")
                 f.write(b".\r\n")
+                if cmd == "RETR" and mail_id is not None:
+                    # Mark UNREAD -> READ so the gate badge stops showing this
+                    # message. Best effort: a failure here would only leave the
+                    # badge count wrong, and the RETR itself has already been
+                    # answered above.
+                    try:
+                        _db = _mail_db()
+                        if _db is not None:
+                            try:
+                                accounts.mark_mail_read(_db, mail_id)
+                            finally:
+                                _db.close()
+                    except Exception as exc:
+                        log("mail", f"{peer} POP3 RETR mail_id={mail_id} "
+                                    f"read-stamp failed ({exc!r})")
             elif cmd == "DELE":
                 i = _pop3_msgno(arg, msgs, deleted)
                 if i is None:

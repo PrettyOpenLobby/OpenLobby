@@ -8,7 +8,7 @@ import titles                   # the title-plugin seam (services/titles.py)  # 
 from srvcore import _LOGIN_TRACE, _trace, _trace_begin, _trace_done, _trace_dump, bind_peer, hexdump, log, save_capture
 from authtoken import _STAMPS, _STAMPS_LOCK, _stamps_refresh, build_redirect_token, build_session_token, remember_stamp, session_token_key
 import sessioncrypt
-from .deps import accounts, contentlist
+from .deps import accounts, contentlist, issuereport
 from authtoken import _ACCT_STATUS
 from . import contentprofiles, authcap, authkick, authnode, authresume, chatsession, friendroster, ircband, lobbybind, lobbysession, logingate, presence, pushrecord, redirect, roomregistry
 
@@ -1133,17 +1133,18 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             lobby_token = build_redirect_token(
                 lobby_ip, lobby_port, status=info_code or _ACCT_STATUS)
             # The gate record carries the unread-mail count the badge shows at
-            # boot (byte +0x11), so serve this member's real mailbox depth. Best
-            # effort: a mail-DB hiccup must never cost anyone their login, so any
-            # failure here just means a zero badge.
+            # boot (byte +0x11), so serve this member's real UNREAD depth --
+            # mail with `read_at IS NULL AND deleted_at IS NULL`. Counting
+            # everything undeleted made a welcome mail no client ever DELEs sit
+            # on the badge forever ("Leave mail on server", the Viewer default).
+            # Best effort: a mail-DB hiccup must never cost anyone their login,
+            # so any failure here just means a zero badge.
             unread = 0
             try:
                 if member is not None:
-                    _box = accounts.mail_box_name(
-                        member["mail_address"] if "mail_address" in member.keys()
-                        else member["login_name"])
-                    if _box:
-                        unread = len(accounts.list_mail(acct_db, _box))
+                    _box = (member["mail_address"] if "mail_address" in member.keys()
+                            else member["login_name"])
+                    unread = accounts.unread_mail_count(acct_db, _box)
             except Exception as exc:
                 log("authserv", f"{peer} unread-mail count unavailable ({exc!r}); "
                                 f"badge will read 0")
@@ -1366,6 +1367,21 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
             # suppresses it with a log line. 0 restores the immediate wipe.
             presence._logout_or_grace(int(member["id"]), member["login_name"], peer,
                              lobbysession._session_sid())
+            # A PS2 SESSION THAT ENDED LIKE A CRASH files itself a report (see
+            # issuereport.auto_ps2). Every ordinary PS2 exit is a clean EOF;
+            # a reset, a refused PING or a read timeout is not. The 60 s wait
+            # fills the log window and drops it if the console is back.
+            _why = getattr(chat_sess, "close_why", "")
+            if (issuereport is not None and _why.startswith(
+                    ("socket read failed", "TCP refused our PING",
+                     "read timed out"))
+                    and accounts.client_label(client_sig) == "PS2"):
+                _mid = int(member["id"])
+                issuereport.auto_ps2(
+                    _mid, member["login_name"], chat_sess.sid, peer,
+                    f"the connection ended with: {_why}", at=time.time(),
+                    delay=60,
+                    still_gone=lambda: not presence.PRESENCE.sessions_for(_mid))
         log("authserv", f"{peer} closing hop {port} to trigger client's next dial")
     except Exception as e:
         log("authserv", f"{peer} hop {port} error: {e}")

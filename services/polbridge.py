@@ -48,6 +48,22 @@ try:
 except ImportError:
     polgateway = None
 
+try:
+    import newsgen
+except ImportError as _e:                            # pragma: no cover
+    newsgen = None
+    _NEWSGEN_ERR = str(_e)
+else:
+    _NEWSGEN_ERR = None
+
+try:
+    import eventremind          # cup reminders from the event calendar
+except ImportError as _e:                            # pragma: no cover
+    eventremind = None
+    _EVENTREMIND_ERR = str(_e)
+else:
+    _EVENTREMIND_ERR = None
+
 DISCORD_API = polboards.DISCORD_API
 _UA = "DiscordBot (https://playonline.invalid/polbridge, 1) polbridge"
 
@@ -63,6 +79,51 @@ REPLY_PER_HOUR = int(os.environ.get("POL_BRIDGE_REPLY_PER_HOUR", "30"))
 #: A message file younger than this is left for the next scan: `_mail_mint`
 #: and the lobby both write it in one go, but "in one go" is not atomic.
 MIN_AGE = float(os.environ.get("POL_BRIDGE_MIN_AGE", "1.0"))
+
+#: Seconds between passes over the announcement store. Announcements are rare
+#: and the store is a file poll, so this can be much longer than the mail poll.
+ANNOUNCE_POLL = float(os.environ.get("POL_BRIDGE_ANNOUNCE_POLL", "30"))
+
+#: Seconds a cup's last reminder stays up after the cup's final session ends.
+#: An earlier reminder goes as soon as the next one for the same cup is posted.
+EVENT_POST_KEEP_S = float(os.environ.get("POL_EVENT_REMIND_KEEP_S", "3600") or 3600)
+#: discord_meta key holding the reminders that are still up, as a JSON list of
+#: {guild, channel, id, cup, end}.
+EVENT_POSTS_META = "event-remind-posts"
+
+#: News posts (announcements and cup reminders) go out through a webhook the
+#: bridge creates in the bound channel, so each post can carry its game's own
+#: name and avatar. Needs Manage Webhooks there; without it, or with this set
+#: to 0, the bridge posts as itself.
+NEWS_WEBHOOK = os.environ.get("POL_BRIDGE_NEWS_WEBHOOK", "1") != "0"
+NEWS_WEBHOOK_NAME = "OpenLobby News"
+#: content -> the user id of that game's own bot, "tetra=123,jan=456": a post
+#: for that content borrows the bot's name and avatar. Contents without a bot
+#: (PlayOnline itself) post under the bridge's own.
+GAME_BOTS = {k.strip(): v.strip() for k, _, v in
+             (p.partition("=") for p in os.environ.get("POL_BRIDGE_GAME_BOTS", "").split(","))
+             if k.strip() and v.strip()}
+#: user id -> (when looked up, {"username", "avatar_url"} or None)
+_PROFILES = {}
+PROFILE_TTL_S = 3600.0
+#: channel id -> when a webhook could not be made there (retried after an hour)
+_HOOK_REFUSED = {}
+
+#: Per-`kind` embed colour. Kept next to `KINDS` in newsgen (info / update /
+#: maintenance / recovery / issue) plus `event` for the eventnews-derived posts,
+#: which arrive with a kind of their own. Anything unknown falls back to info.
+ANNOUNCE_COLORS = {
+    "info":        0x2B5DB8,
+    "update":      0x3BA55D,
+    "maintenance": 0xF0B84A,
+    "recovery":    0x57C7A2,
+    "issue":       0xED4245,
+    "event":       0x9B59B6,
+}
+
+#: Manage Server or Administrator: who may bind, unbind or change ping roles.
+#: Same bits as polboards uses for `/<board>board`.
+_ADMIN_BITS = 0x20 | 0x8
 
 #: Where a member redeems a code, as `/playonline link` tells them. The real
 #: path through SE's own Support pages (walked in the client 2026-09-13): the
@@ -149,9 +210,29 @@ def dm_channel(ldb, link):
     return None
 
 
+def _content_choices():
+    """The `game` choices for `/playonline announce role`, from newsgen's own
+    label table so a new service added there shows up here too. Discord caps
+    a choice list at 25 (well over the 10 services we ship)."""
+    if newsgen is None:
+        return []
+    return [{"name": label[:100], "value": key}
+            for key, label in newsgen.CONTENT_LABELS.items()]
+
+
 def command_def():
     """The one slash command. Usable in servers, the bot's DMs and as a
-    user-installed app, so a member never needs to share a server with it."""
+    user-installed app, so a member never needs to share a server with it.
+
+    The `announce` subcommand group is server-only (context 0): it configures a
+    channel, which a DM does not have. The other subcommands stay available in
+    DMs and as a user-installed app.
+    """
+    role_opts = [{"type": 3, "name": "game", "required": True,
+                  "description": "Which game the role is for",
+                  "choices": _content_choices()},
+                 {"type": 8, "name": "role", "required": False,
+                  "description": "Role to ping (omit to clear)"}]
     return {"name": "playonline", "type": 1, "integration_types": [0, 1],
             "contexts": [0, 1, 2],
             "description": "PlayOnline messages in Discord",
@@ -165,7 +246,22 @@ def command_def():
                 {"type": 1, "name": "notify", "description": "Turn message DMs on or off",
                  "options": [{"type": 5, "name": "on", "required": True,
                               "description": "Send a DM for each new PlayOnline "
-                                             "message"}]}]}
+                                             "message"}]},
+                {"type": 2, "name": "announce",
+                 "description": "PlayOnline server announcements in this channel",
+                 "options": [
+                    {"type": 1, "name": "here",
+                     "description": "Post server announcements in this channel"},
+                    {"type": 1, "name": "off",
+                     "description": "Stop posting announcements in this server"},
+                    {"type": 1, "name": "status",
+                     "description": "Show the announcement channel and ping roles"},
+                    {"type": 1, "name": "role",
+                     "description": "Set (or clear) the role pinged for one game",
+                     "options": role_opts},
+                    {"type": 1, "name": "test",
+                     "description": "Post the newest announcement now to check"},
+                 ]}]}
 
 
 #: How long `/gm duty on:true` lasts when no hours are given.
@@ -175,10 +271,13 @@ GM_DUTY_HOURS = 4
 def gm_command_def():
     """/gm: the GM desk's duty switch, for GMs away from the admin panel.
     Every subcommand answers privately; only `link` works for anyone, and a
-    code does nothing until a GM enters it on the panel (gmduty.py)."""
+    code does nothing until a GM enters it on the panel (gmduty.py).
+
+    The `channel` subgroup is server-only (context 0): it binds a channel,
+    which a DM does not have."""
     return {"name": "gm", "type": 1, "integration_types": [0, 1],
             "contexts": [0, 1, 2],
-            "description": "GM desk: go on or off duty",
+            "description": "GM desk: go on or off duty, bind an alerts channel",
             "options": [
                 {"type": 1, "name": "duty", "description": "Go on or off GM duty",
                  "options": [
@@ -189,7 +288,20 @@ def gm_command_def():
                       "description": "How long to stay on duty (default %d)" % GM_DUTY_HOURS}]},
                 {"type": 1, "name": "status", "description": "Who is on GM duty"},
                 {"type": 1, "name": "link", "description": "Get a code to link this "
-                                                          "Discord account to your GM desk account"}]}
+                                                          "Discord account to your GM desk account"},
+                {"type": 2, "name": "channel",
+                 "description": "Post new GM calls in a Discord channel",
+                 "options": [
+                     {"type": 1, "name": "here",
+                      "description": "Post new GM calls in this channel",
+                      "options": [
+                          {"type": 8, "name": "role", "required": False,
+                           "description": "Role to ping on each new call (optional)"}]},
+                     {"type": 1, "name": "off",
+                      "description": "Stop posting GM calls in this server"},
+                     {"type": 1, "name": "status",
+                      "description": "Show the bound channel"},
+                 ]}]}
 
 
 def register_commands():
@@ -341,6 +453,356 @@ def watch():
 
 
 # --------------------------------------------------------------------------- #
+# announcements -> channel posts
+# --------------------------------------------------------------------------- #
+
+def _load_announcements():
+    """The current set of announcements as newsgen sees them (serial-stamped),
+    or None if newsgen is unavailable or the store cannot be read. A missing or
+    empty store yields []."""
+    if newsgen is None:
+        return None
+    try:
+        return newsgen.load()
+    except (newsgen.NewsError, OSError, ValueError) as e:      # noqa: PERF203
+        log("cannot read announcements (%r)" % e)
+        return None
+
+
+def _max_serial(items):
+    return max((int(i.get("serial") or 0) for i in items), default=0)
+
+
+def _content_label(item):
+    if newsgen is None:
+        return item.get("content") or "PlayOnline"
+    return newsgen.CONTENT_LABELS.get(item.get("content") or "",
+                                      item.get("content") or "PlayOnline")
+
+
+def announce_payload(item, ping_role=None):
+    """One announcement as a channel post. Role ping (if any) rides on the
+    top-level `content`; `allowed_mentions.roles` restricts it to that one id,
+    so a rogue title mention cannot @-everyone. Body is markdown-escaped like
+    a DM: the announcement is shown as it was authored."""
+    body = (item.get("body") or "").strip()
+    link = (item.get("link") or "").strip()
+    if link:
+        body = ("%s\n\n%s" % (body, link)) if body else link
+    label = _content_label(item)
+    kind = item.get("kind") or "info"
+    embed = {
+        "title": (item.get("title") or "(no title)")[:256],
+        "footer": {"text": ("%s - %s" % (label, kind))[:2048]},
+        "color": ANNOUNCE_COLORS.get(kind, ANNOUNCE_COLORS["info"]),
+    }
+    if body:
+        embed["description"] = md(body)[:4000]
+    if item.get("date"):
+        embed["author"] = {"name": str(item["date"])[:256]}
+    payload = {"embeds": [embed],
+               "allowed_mentions": {"parse": [],
+                                    "roles": [str(ping_role)] if ping_role else []}}
+    if ping_role:
+        payload["content"] = "<@&%s>" % ping_role
+    return payload
+
+
+def _profile(uid):
+    """{"username", "avatar_url"} of Discord user `uid` ("@me" = the bridge),
+    cached for an hour; None when it cannot be read."""
+    now = time.time()
+    hit = _PROFILES.get(uid)
+    if hit and now - hit[0] < PROFILE_TTL_S:
+        return hit[1]
+    st, data = api("GET", "/users/%s" % uid)
+    prof = None
+    if st == 200 and isinstance(data, dict) and data.get("id"):
+        prof = {"username": str(data.get("global_name") or data.get("username") or "")[:80]}
+        if data.get("avatar"):
+            prof["avatar_url"] = ("https://cdn.discordapp.com/avatars/%s/%s.png?size=256"
+                                  % (data["id"], data["avatar"]))
+    _PROFILES[uid] = (now, prof)
+    return prof
+
+
+def _identity(content):
+    """The username / avatar_url a news post for `content` goes out under:
+    the game's own bot, else the bridge, else just the content's label."""
+    prof = _profile(GAME_BOTS[content]) if content in GAME_BOTS else _profile("@me")
+    out = {"username": (prof or {}).get("username") or _content_label({"content": content})}
+    if (prof or {}).get("avatar_url"):
+        out["avatar_url"] = prof["avatar_url"]
+    return out
+
+
+def _hook_key(channel_id):
+    return "news-webhook:%s" % channel_id
+
+
+def _news_hook(ldb, channel_id):
+    """{"id", "token"} of the bridge's webhook in `channel_id`, made on first
+    use; None when webhooks are off or Discord will not let us make one."""
+    if not NEWS_WEBHOOK:
+        return None
+    try:
+        hook = json.loads(discordlink.get_meta(ldb, _hook_key(channel_id), "") or "null")
+    except ValueError:
+        hook = None
+    if isinstance(hook, dict) and hook.get("id") and hook.get("token"):
+        return hook
+    if time.time() - _HOOK_REFUSED.get(channel_id, 0) < 3600:
+        return None
+    st, data = api("POST", "/channels/%s/webhooks" % channel_id, {"name": NEWS_WEBHOOK_NAME})
+    if st in (200, 201) and isinstance(data, dict) and data.get("id") and data.get("token"):
+        hook = {"id": str(data["id"]), "token": str(data["token"])}
+        discordlink.set_meta(ldb, _hook_key(channel_id), json.dumps(hook))
+        log("made the news webhook in channel %s" % channel_id)
+        return hook
+    _HOOK_REFUSED[channel_id] = time.time()
+    log("cannot make a webhook in channel %s (%s %s) -- news posts go out as the "
+        "bridge; give it Manage Webhooks there for per-game names"
+        % (channel_id, st, str(data)[:120]))
+    return None
+
+
+def news_post(ldb, channel_id, payload, content):
+    """Post a news `payload` into `channel_id` under `content`'s game identity.
+    Returns (status, data, webhook id or None). A webhook that is gone (deleted
+    in Discord) is forgotten and the post goes out as the bridge instead."""
+    hook = _news_hook(ldb, channel_id)
+    if hook:
+        body = dict(payload)
+        body.update(_identity(content))
+        st, data = api("POST", "/webhooks/%s/%s?wait=true" % (hook["id"], hook["token"]), body)
+        if st in (200, 201):
+            return st, data, hook["id"]
+        log("news webhook in channel %s refused the post (%s %s)"
+            % (channel_id, st, str(data)[:120]))
+        if st in (401, 403, 404):
+            discordlink.set_meta(ldb, _hook_key(channel_id), "")
+    st, data = api("POST", "/channels/%s/messages" % channel_id, payload)
+    return st, data, None
+
+
+def _post_announcement(ldb, channel_id, item, roles):
+    """Send one announcement to one channel. Returns True on 2xx, False
+    otherwise (the caller stops the run so the same item is retried next
+    pass; a hard 404 also returns False and the operator sees it in the
+    log)."""
+    ping = roles.get(item.get("content") or "")
+    st, data, _hook = news_post(ldb, channel_id, announce_payload(item, ping_role=ping),
+                                item.get("content") or "playonline")
+    if st in (200, 201):
+        log("announced serial %s (%s) in channel %s"
+            % (item.get("serial"), item.get("title", "")[:40], channel_id))
+        return True
+    log("announce to channel %s failed (%s %s)"
+        % (channel_id, st, str(data)[:160]))
+    return False
+
+
+def scan_announce(now=None):
+    """One pass over the announcement store. Returns how many posts went out
+    across all bound channels."""
+    items = _load_announcements()
+    if items is None:
+        return 0
+    ldb = discordlink.connect()
+    sent = 0
+    try:
+        for row in discordlink.announce_rows(ldb):
+            last = int(row["last_serial"])
+            new = sorted((i for i in items if int(i.get("serial") or 0) > last),
+                         key=lambda i: int(i.get("serial") or 0))
+            if not new:
+                continue
+            roles = discordlink.announce_roles(ldb, row["guild_id"])
+            for it in new:
+                if not _post_announcement(ldb, row["channel_id"], it, roles):
+                    break                        # try again next pass
+                discordlink.bump_announce_serial(ldb, row["guild_id"],
+                                                 int(it["serial"] or 0))
+                sent += 1
+        return sent
+    finally:
+        ldb.close()
+
+
+def event_reminders_on():
+    return (eventremind is not None
+            and os.environ.get("POL_BRIDGE_EVENT_REMIND", "1") != "0")
+
+
+def event_reminder_payload(rem, ping_role=None, now=None):
+    """One cup reminder (eventremind.due) as a channel post, shaped like an
+    announcement so the two read alike in the channel."""
+    title, body = eventremind.message(rem, now)
+    content = eventremind.eventnews.GAMES[rem["cup"]["game"]][0]
+    label = _content_label({"content": content})
+    payload = {"embeds": [{"title": title, "description": body[:4000],
+                           "footer": {"text": "%s - event" % label},
+                           "color": ANNOUNCE_COLORS["event"]}],
+               "allowed_mentions": {"parse": [],
+                                    "roles": [str(ping_role)] if ping_role else []}}
+    if ping_role:
+        payload["content"] = "<@&%s>" % ping_role
+    return payload
+
+
+def scan_event_reminders(now=None):
+    """Post the cup reminders that are due into every bound announcement
+    channel, each once per guild. Returns how many went out.
+
+    eventremind decides what is due; a reminder is only due until the next one
+    for the same cup, so a bridge that was down posts the current reminder and
+    never a backlog. A failed post is retried on the next pass."""
+    if not event_reminders_on():
+        return 0
+    now = time.time() if now is None else now
+    try:
+        rems = eventremind.due(now)
+    except Exception as e:                       # noqa: BLE001
+        log("cannot work out cup reminders (%r)" % e)
+        return 0
+    if not rems:
+        return 0
+    ldb = discordlink.connect()
+    sent = 0
+    posts = _event_posts(ldb)
+    try:
+        for row in discordlink.announce_rows(ldb):
+            roles = None
+            for rem in rems:
+                name = "event-remind:%s:%s" % (row["guild_id"], rem["key"])
+                if discordlink.is_notified(ldb, name):
+                    continue
+                if roles is None:
+                    roles = discordlink.announce_roles(ldb, row["guild_id"])
+                content = eventremind.eventnews.GAMES[rem["cup"]["game"]][0]
+                st, data, hook = news_post(ldb, row["channel_id"],
+                                           event_reminder_payload(rem, roles.get(content), now),
+                                           content)
+                if st not in (200, 201):
+                    log("cup reminder %s to channel %s failed (%s %s)"
+                        % (rem["key"], row["channel_id"], st, str(data)[:160]))
+                    break                        # try again next pass
+                discordlink.mark_notified(ldb, name, now)
+                sent += 1
+                log("cup reminder %s posted in channel %s"
+                    % (rem["key"], row["channel_id"]))
+                cup = rem["cup"]
+                for old in [p for p in posts if p["guild"] == row["guild_id"]
+                            and p["cup"] == cup["id"]]:
+                    if _delete_event_post(ldb, old, "replaced by %s" % rem["key"]):
+                        posts.remove(old)
+                mid = str((data or {}).get("id") or "")
+                if mid:
+                    posts.append({"guild": row["guild_id"], "channel": row["channel_id"],
+                                  "id": mid, "cup": cup["id"], "hook": hook,
+                                  "end": max(e for _s, e in cup["sessions"])})
+                _save_event_posts(ldb, posts)
+        return sent
+    finally:
+        ldb.close()
+
+
+def _event_posts(ldb):
+    try:
+        v = json.loads(discordlink.get_meta(ldb, EVENT_POSTS_META, "[]") or "[]")
+    except ValueError:
+        v = []
+    return [p for p in v if isinstance(p, dict) and p.get("id") and p.get("channel")]
+
+
+def _save_event_posts(ldb, posts):
+    discordlink.set_meta(ldb, EVENT_POSTS_META, json.dumps(posts, sort_keys=True))
+
+
+def _delete_event_post(ldb, p, why):
+    """Delete one reminder post. True when it is gone or can never be deleted
+    (404 already gone, 403 no permission), so the caller stops tracking it. A
+    post made through the news webhook is deleted through it (the bridge
+    itself would need Manage Messages)."""
+    path = "/channels/%s/messages/%s" % (p["channel"], p["id"])
+    if p.get("hook"):
+        try:
+            hook = json.loads(discordlink.get_meta(ldb, _hook_key(p["channel"]), "") or "null")
+        except ValueError:
+            hook = None
+        if isinstance(hook, dict) and hook.get("id") == p["hook"] and hook.get("token"):
+            path = "/webhooks/%s/%s/messages/%s" % (hook["id"], hook["token"], p["id"])
+    st, data = api("DELETE", path)
+    if st in (200, 204, 404):
+        log("cup reminder %s deleted from channel %s (%s)" % (p["id"], p["channel"], why))
+        return True
+    if st == 403:
+        log("cup reminder %s in channel %s cannot be deleted (403), dropped"
+            % (p["id"], p["channel"]))
+        return True
+    log("could not delete cup reminder %s in channel %s (%s %s), will retry"
+        % (p["id"], p["channel"], st, str(data)[:160]))
+    return False
+
+
+def sweep_event_posts(now=None):
+    """Delete the reminders whose cup ended more than EVENT_POST_KEEP_S ago.
+    Returns how many went."""
+    now = time.time() if now is None else now
+    ldb = discordlink.connect()
+    try:
+        posts = _event_posts(ldb)
+        keep = [p for p in posts
+                if now < float(p.get("end") or 0) + EVENT_POST_KEEP_S
+                or not _delete_event_post(ldb, p, "cup %s is over" % p.get("cup"))]
+        if len(keep) != len(posts):
+            _save_event_posts(ldb, keep)
+        return len(posts) - len(keep)
+    finally:
+        ldb.close()
+
+
+def announce_watch():
+    while True:
+        try:
+            scan_announce()
+        except Exception as e:                   # noqa: BLE001 -- never die
+            log("announce watcher error (%r) -- still running" % e)
+        try:
+            scan_event_reminders()
+        except Exception as e:                   # noqa: BLE001 -- never die
+            log("cup reminder error (%r) -- still running" % e)
+        try:
+            sweep_event_posts()
+        except Exception as e:                   # noqa: BLE001 -- never die
+            log("cup reminder sweep error (%r) -- still running" % e)
+        time.sleep(max(5.0, float(ANNOUNCE_POLL)))
+
+
+def gm_relay_watch():
+    """Poll every bound GM channel for new tickets, and every open thread for
+    both halves of the relay. Its own thread so a scan exception in one half
+    does not stop the other, and so its cadence (chat-turn fast) is not tied
+    to the message watcher's (mail-arrival slow)."""
+    import gmconsole
+    poll = max(0.5, float(os.environ.get("POL_BRIDGE_GM_POLL", "2")))
+    while True:
+        try:
+            gmconsole.scan_new_tickets()
+        except Exception as e:                   # noqa: BLE001
+            log("gm ticket scan error (%r) -- still running" % e)
+        try:
+            gmconsole.relay_tick()
+        except Exception as e:                   # noqa: BLE001
+            log("gm relay error (%r) -- still running" % e)
+        try:
+            gmconsole.sync_desk_state()
+        except Exception as e:                   # noqa: BLE001
+            log("gm desk sync error (%r) -- still running" % e)
+        time.sleep(poll)
+
+
+# --------------------------------------------------------------------------- #
 # interactions
 # --------------------------------------------------------------------------- #
 
@@ -369,10 +831,121 @@ def _member_label(member_id):
         return "member %s" % member_id
 
 
+def _sub_opts(sub):
+    """Options a subcommand carries, as {name: value}. Discord sends each as
+    {name, type, value}; a subcommand group nests another list, handled by the
+    caller."""
+    out = {}
+    for opt in (sub.get("options") or []):
+        out[str(opt.get("name"))] = opt.get("value")
+    return out
+
+
+def on_announce(data, group):
+    """`/playonline announce ...` (server only). `group` is the subcommand
+    group option, whose `options[0]` is the actual subcommand."""
+    guild = str(data.get("guild_id") or (data.get("guild") or {}).get("id") or "")
+    if not guild:
+        return _say("Announcements can only be set up inside a Discord server.")
+    subs = group.get("options") or []
+    if not subs:
+        return _say("Pick one: here, off, status, role, test.")
+    sub = subs[0]
+    name = str(sub.get("name") or "")
+    channel = str(data.get("channel_id") or (data.get("channel") or {}).get("id") or "")
+    try:
+        perms = int(((data.get("member") or {}).get("permissions")) or 0)
+    except (TypeError, ValueError):
+        perms = 0
+    admin = bool(perms & _ADMIN_BITS)
+
+    if newsgen is None and name in ("here", "test"):
+        return _say("Announcements are not available on this server "
+                    "(newsgen could not be loaded: %s)." % (_NEWSGEN_ERR or "?"))
+
+    ldb = discordlink.connect()
+    try:
+        row = discordlink.announce_row(ldb, guild)
+        if name == "status":
+            if row is None:
+                return _say("No announcement channel is set. An admin can run "
+                            "`/playonline announce here` in the channel they want.")
+            roles = discordlink.announce_roles(ldb, guild)
+            lines = ["Posting server announcements in <#%s>." % row["channel_id"]]
+            if roles:
+                lines.append("Ping roles:")
+                for content, role_id in sorted(roles.items()):
+                    label = (newsgen.CONTENT_LABELS.get(content, content)
+                             if newsgen else content)
+                    lines.append("- %s: <@&%s>" % (label, role_id))
+            else:
+                lines.append("No game has a ping role set. Use "
+                             "`/playonline announce role` to add one.")
+            if event_reminders_on():
+                lines.append("Cup reminders from the event calendar post here "
+                             "too (a day before, and a few hours before each "
+                             "night of sessions).")
+            return _say("\n".join(lines))
+
+        if name == "here":
+            if not admin:
+                return _say("Only members who can Manage Server may bind the "
+                            "announcement channel.")
+            items = _load_announcements() or []
+            baseline = _max_serial(items)
+            discordlink.bind_announce(ldb, guild, channel, baseline)
+            note = ("" if row is None else " (moved from <#%s>)" % row["channel_id"])
+            return _say("Announcements will post here%s. Existing items are "
+                        "treated as already seen, so only new ones will show up."
+                        % note)
+
+        if name == "off":
+            if not admin:
+                return _say("Only members who can Manage Server may unbind the "
+                            "announcement channel.")
+            if not discordlink.unbind_announce(ldb, guild):
+                return _say("No announcement channel is set.")
+            return _say("Stopped posting announcements in this server.")
+
+        if name == "role":
+            if not admin:
+                return _say("Only members who can Manage Server may change "
+                            "ping roles.")
+            vals = _sub_opts(sub)
+            game = str(vals.get("game") or "")
+            role_id = vals.get("role")
+            if newsgen is not None and game not in newsgen.CONTENTS:
+                return _say("That game is not one I know about.")
+            discordlink.set_announce_role(ldb, guild, game, role_id or "")
+            label = (newsgen.CONTENT_LABELS.get(game, game) if newsgen else game)
+            if role_id:
+                return _say("Announcements tagged **%s** will now ping <@&%s>."
+                            % (label, role_id))
+            return _say("Cleared the ping role for **%s**." % label)
+
+        if name == "test":
+            if row is None:
+                return _say("No announcement channel is set. Run "
+                            "`/playonline announce here` first.")
+            items = _load_announcements() or []
+            if not items:
+                return _say("There are no announcements to post.")
+            newest = max(items, key=lambda i: int(i.get("serial") or 0))
+            roles = discordlink.announce_roles(ldb, guild)
+            ok = _post_announcement(ldb, row["channel_id"], newest, roles)
+            return _say("Sent the newest announcement." if ok
+                        else "The post did not go out. Check the bridge log.")
+        return _say("I do not know that one.")
+    finally:
+        ldb.close()
+
+
 def on_command(data):
     uid, uname = _user(data)
     opts = (data.get("data") or {}).get("options") or []
     sub = str(opts[0].get("name")) if opts else "status"
+    if opts and int(opts[0].get("type") or 0) == 2 and sub == "announce":
+        return on_announce(data, opts[0])
     ldb = discordlink.connect()
     try:
         link = discordlink.link_by_discord(ldb, uid)
@@ -413,8 +986,8 @@ def _gm_duty_lines(ctl):
 
 
 def on_gm_command(data):
-    """/gm link | duty | status. The desk account a Discord user acts as is
-    re-checked on every command (gmduty.account_for)."""
+    """/gm link | duty | status | channel. The desk account a Discord user
+    acts as is re-checked on every command (gmduty.account_for)."""
     import adminusers
     import gmd
     import gmduty
@@ -422,6 +995,16 @@ def on_gm_command(data):
     opts = (data.get("data") or {}).get("options") or []
     sub = str(opts[0].get("name")) if opts else "status"
     args = {o.get("name"): o.get("value") for o in (opts[0].get("options") or [])} if opts else {}
+    if sub == "channel":
+        # Subgroup: options[0].options[0] is the leaf (here/off/status), and
+        # its own options[] carry the args. Delegated to gmconsole, which does
+        # the same gmduty auth check as the leaves below.
+        import gmconsole
+        leaf_opts = (opts[0].get("options") or [{}])
+        leaf = str(leaf_opts[0].get("name") or "status")
+        leaf_args = {o.get("name"): o.get("value")
+                     for o in (leaf_opts[0].get("options") or [])}
+        return gmconsole.on_channel_command(data, leaf, leaf_args)
     conn = adminusers.connect()
     try:
         if sub == "link":
@@ -553,6 +1136,14 @@ def interaction(data):
         return on_reply_button(data, cid[len("pol:reply:"):])
     if t == 5 and cid.startswith("pol:send:"):
         return on_reply_submit(data, cid[len("pol:send:"):])
+    if t == 3 and cid.startswith("pol:knock:claimed:"):
+        return _say("This call is already being handled.")
+    if t == 3 and cid.startswith("pol:knock:"):
+        import gmconsole
+        return gmconsole.on_knock(data, cid[len("pol:knock:"):])
+    if t == 3 and cid.startswith("pol:gmclose:"):
+        import gmconsole
+        return gmconsole.on_close(data, cid[len("pol:gmclose:"):])
     return _say("I do not know that one.")
 
 
@@ -686,9 +1277,19 @@ def main(argv=None):
     if not ARGS.token:
         log("no bot token: DMs are OFF until POL_BRIDGE_DISCORD_BOT_TOKEN is set")
     else:
+        import gmconsole
+        gmconsole.wire(api, logger=log)
         threading.Thread(target=register_commands, name="polbridge-commands",
                          daemon=True).start()
         threading.Thread(target=watch, name="polbridge-watch", daemon=True).start()
+        threading.Thread(target=gm_relay_watch, name="polbridge-gm-relay",
+                         daemon=True).start()
+        if newsgen is not None:
+            threading.Thread(target=announce_watch,
+                             name="polbridge-announce", daemon=True).start()
+        else:
+            log("newsgen unavailable (%s): /playonline announce is disabled"
+                % (_NEWSGEN_ERR or "?"))
         start_presence()
     while True:
         time.sleep(3600)

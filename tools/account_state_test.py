@@ -10,7 +10,8 @@ Four parts, each printing PASS:
     cleared once sent; an every-login notice is sent every time;
   * the encrypted NICK reply carries a refusal on the ERROR line and a notice
     in the successful 300 token, both at record byte 6;
-  * the admin panel sets both and kicks a live channel: the kick request
+  * the admin panel sets both and can kick a live channel while saving a
+    refusal (the panel's checkbox defaults on): the kick request
     crosses the live-state store to the auth side, which sends the IRC KILL
     and retires every session row the member had. A moderator with only
     "Look up accounts" can read but not change any of it, and the audit log
@@ -225,6 +226,16 @@ def main():
             status, body = owner.call(*endpoints[2])
             assert status == 503, (status, body)
             assert kv.llen(R.KICK_QUEUE) == 0, kv.lrange(R.KICK_QUEUE)
+            status, body = owner.call("api/account-state", {
+                "polid": polid, "code": 0xED, "until": future, "kick": True})
+            assert status == 200 and body.get("kick_error"), (status, body)
+            assert A.login_reject_code(db, member) == 0xED
+            assert kv.llen(R.KICK_QUEUE) == 0, kv.lrange(R.KICK_QUEUE)
+            status, body = owner.call("api/account-state", {
+                "polid": polid, "code": 0xED, "kick": False})
+            assert status == 200 and "kicked" not in body and "kick_error" not in body
+            assert owner.call("api/account-state", {
+                "polid": polid, "code": 0xED, "kick": "yes"})[0] == 400
 
             # No auth handler is running for this socket: the kick request
             # must itself deliver KILL and retire all captured session rows.
@@ -249,7 +260,8 @@ def main():
 
             thread = threading.Thread(target=answer_one, daemon=True)
             thread.start()
-            status, result = owner.call(*endpoints[2])
+            status, result = owner.call("api/account-state", {
+                "polid": polid, "code": 0xED, "until": future, "kick": True})
             assert status == 200 and result["kicked"] == 1, (status, result)
             encrypted = bytearray()
             while True:

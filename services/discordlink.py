@@ -206,3 +206,239 @@ def sent_since(conn, member_id, window, now=None):
     now = time.time() if now is None else now
     return conn.execute("SELECT COUNT(*) FROM discord_sent WHERE member_id = %s AND at >= %s",
                         (int(member_id), now - window)).fetchone()[0]
+
+
+# --------------------------------------------------------------------------- #
+# announcement channels + ping roles
+# --------------------------------------------------------------------------- #
+
+def bind_announce(conn, guild_id, channel_id, baseline_serial=0, now=None):
+    """Bind (or move) this guild's announcement channel. `baseline_serial` is
+    the highest existing serial; anything at or below it is treated as already
+    posted so a bind never dumps the backlog. Moving to a new channel keeps the
+    baseline: the previous channel's posts stand."""
+    now = time.time() if now is None else now
+    existing = conn.execute("SELECT last_serial FROM discord_announce"
+                            " WHERE guild_id = %s",
+                            (str(guild_id),)).fetchone()
+    baseline = int(baseline_serial or 0)
+    if existing is not None and int(existing["last_serial"]) > baseline:
+        baseline = int(existing["last_serial"])
+    conn.execute("INSERT INTO discord_announce (guild_id, channel_id, last_serial,"
+                 " bound_at) VALUES (%s,%s,%s,%s)"
+                 " ON CONFLICT (guild_id) DO UPDATE SET"
+                 " channel_id = excluded.channel_id,"
+                 " last_serial = excluded.last_serial,"
+                 " bound_at = excluded.bound_at",
+                 (str(guild_id), str(channel_id), baseline, now))
+    conn.commit()
+    return announce_row(conn, guild_id)
+
+
+def unbind_announce(conn, guild_id):
+    n = conn.execute("DELETE FROM discord_announce WHERE guild_id = %s",
+                     (str(guild_id),)).rowcount
+    conn.commit()
+    return n > 0
+
+
+def announce_row(conn, guild_id):
+    return conn.execute("SELECT * FROM discord_announce WHERE guild_id = %s",
+                        (str(guild_id),)).fetchone()
+
+
+def announce_rows(conn):
+    return conn.execute("SELECT * FROM discord_announce").fetchall()
+
+
+def bump_announce_serial(conn, guild_id, serial):
+    """Move a channel's last_serial forward. Only forward: a lower value from a
+    stale republish must not resend what we already put in the channel."""
+    conn.execute("UPDATE discord_announce SET last_serial = %s"
+                 " WHERE guild_id = %s AND last_serial < %s",
+                 (int(serial), str(guild_id), int(serial)))
+    conn.commit()
+
+
+def set_announce_role(conn, guild_id, content, role_id):
+    """Set (role_id truthy) or clear (role_id falsy) the ping role for one
+    content id in this guild."""
+    if role_id:
+        conn.execute("INSERT INTO discord_announce_role (guild_id, content, role_id)"
+                     " VALUES (%s,%s,%s)"
+                     " ON CONFLICT (guild_id, content) DO UPDATE"
+                     " SET role_id = excluded.role_id",
+                     (str(guild_id), str(content), str(role_id)))
+    else:
+        conn.execute("DELETE FROM discord_announce_role"
+                     " WHERE guild_id = %s AND content = %s",
+                     (str(guild_id), str(content)))
+    conn.commit()
+
+
+def announce_roles(conn, guild_id):
+    """{content: role_id} for one guild."""
+    rows = conn.execute("SELECT content, role_id FROM discord_announce_role"
+                        " WHERE guild_id = %s",
+                        (str(guild_id),)).fetchall()
+    return {r["content"]: r["role_id"] for r in rows}
+
+
+# --------------------------------------------------------------------------- #
+# GM Call console: alerts channel per guild, one thread per open call
+# --------------------------------------------------------------------------- #
+
+def bind_gm_channel(conn, guild_id, channel_id, role_id=None,
+                    baseline_ticket="", bound_by=None, now=None):
+    """Bind (or move) this guild's GM-alerts channel. `baseline_ticket` is the
+    newest ticket_id already on disk; anything at or below it lexicographically
+    is treated as already alerted so a bind never dumps the backlog. Moving to
+    a new channel keeps the baseline: the old channel's alerts stand.
+
+    Mirrors bind_announce for the announcement channel."""
+    now = time.time() if now is None else now
+    existing = conn.execute("SELECT last_ticket FROM discord_gm_channel"
+                            " WHERE guild_id = %s",
+                            (str(guild_id),)).fetchone()
+    baseline = str(baseline_ticket or "")
+    if existing is not None and str(existing["last_ticket"]) > baseline:
+        baseline = str(existing["last_ticket"])
+    conn.execute("INSERT INTO discord_gm_channel (guild_id, channel_id, role_id,"
+                 " last_ticket, bound_at, bound_by) VALUES (%s,%s,%s,%s,%s,%s)"
+                 " ON CONFLICT (guild_id) DO UPDATE SET"
+                 " channel_id = excluded.channel_id,"
+                 " role_id = excluded.role_id,"
+                 " last_ticket = excluded.last_ticket,"
+                 " bound_at = excluded.bound_at,"
+                 " bound_by = excluded.bound_by",
+                 (str(guild_id), str(channel_id),
+                  str(role_id) if role_id else None,
+                  baseline, now, bound_by))
+    conn.commit()
+    return gm_channel_row(conn, guild_id)
+
+
+def unbind_gm_channel(conn, guild_id):
+    n = conn.execute("DELETE FROM discord_gm_channel WHERE guild_id = %s",
+                     (str(guild_id),)).rowcount
+    conn.commit()
+    return n > 0
+
+
+def gm_channel_row(conn, guild_id):
+    return conn.execute("SELECT * FROM discord_gm_channel WHERE guild_id = %s",
+                        (str(guild_id),)).fetchone()
+
+
+def gm_channel_rows(conn):
+    return conn.execute("SELECT * FROM discord_gm_channel").fetchall()
+
+
+def bump_gm_last_ticket(conn, guild_id, ticket_id):
+    """Move a channel's last_ticket forward. Only forward: a lower value from a
+    replay must not re-alert on tickets we already posted."""
+    conn.execute("UPDATE discord_gm_channel SET last_ticket = %s"
+                 " WHERE guild_id = %s AND last_ticket < %s",
+                 (str(ticket_id), str(guild_id), str(ticket_id)))
+    conn.commit()
+
+
+def gm_alert_get(conn, ticket_id):
+    return conn.execute("SELECT * FROM discord_gm_alert WHERE ticket_id = %s",
+                        (str(ticket_id),)).fetchone()
+
+
+def gm_alert_record(conn, ticket_id, room, guild_id, channel_id, message_id, now=None):
+    now = time.time() if now is None else now
+    conn.execute("INSERT INTO discord_gm_alert (ticket_id, room, guild_id,"
+                 " channel_id, message_id, posted_at) VALUES (%s,%s,%s,%s,%s,%s)"
+                 " ON CONFLICT (ticket_id) DO UPDATE SET"
+                 " room = excluded.room,"
+                 " guild_id = excluded.guild_id,"
+                 " channel_id = excluded.channel_id,"
+                 " message_id = excluded.message_id,"
+                 " posted_at = excluded.posted_at",
+                 (str(ticket_id), str(room or ""), str(guild_id),
+                  str(channel_id), str(message_id), now))
+    conn.commit()
+
+
+def gm_alert_claim(conn, ticket_id, who, now=None):
+    now = time.time() if now is None else now
+    conn.execute("UPDATE discord_gm_alert SET claimed_by = %s, claimed_at = %s"
+                 " WHERE ticket_id = %s", (str(who), now, str(ticket_id)))
+    conn.commit()
+
+
+def gm_alert_unclaim(conn, ticket_id):
+    conn.execute("UPDATE discord_gm_alert SET claimed_by = NULL, claimed_at = NULL"
+                 " WHERE ticket_id = %s", (str(ticket_id),))
+    conn.commit()
+
+
+def gm_alert_drop(conn, ticket_id):
+    """Forget an alert whose message is gone. Only a pointer to a Discord
+    message; the ticket and the thread rows are the record."""
+    conn.execute("DELETE FROM discord_gm_alert WHERE ticket_id = %s",
+                 (str(ticket_id),))
+    conn.commit()
+
+
+def gm_alerts_all(conn):
+    return conn.execute("SELECT * FROM discord_gm_alert ORDER BY posted_at").fetchall()
+
+
+def gm_thread_by_room(conn, room):
+    return conn.execute("SELECT * FROM discord_gm_thread"
+                        " WHERE room = %s AND closed_at IS NULL",
+                        (str(room),)).fetchone()
+
+
+def gm_thread_by_thread(conn, thread_id):
+    return conn.execute("SELECT * FROM discord_gm_thread WHERE thread_id = %s",
+                        (str(thread_id),)).fetchone()
+
+
+def gm_thread_open(conn, room, ticket_id, thread_id, guild_id, parent_id,
+                   knocker_id, knocker_name=None, knocker_nick=None,
+                   last_relay_at=None, now=None):
+    """Bind a room to a fresh Discord thread. The unique index enforces at most
+    one open row per room; a prior thread must be closed first."""
+    now = time.time() if now is None else now
+    seed = now if last_relay_at is None else float(last_relay_at)
+    conn.execute("INSERT INTO discord_gm_thread (room, ticket_id, thread_id,"
+                 " guild_id, parent_id, knocker_id, knocker_name, knocker_nick,"
+                 " created_at, last_relay_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                 (str(room), str(ticket_id), str(thread_id), str(guild_id),
+                  str(parent_id), str(knocker_id), knocker_name, knocker_nick,
+                  now, seed))
+    conn.commit()
+    return gm_thread_by_thread(conn, thread_id)
+
+
+def gm_thread_close(conn, thread_id, now=None):
+    now = time.time() if now is None else now
+    n = conn.execute("UPDATE discord_gm_thread SET closed_at = %s"
+                     " WHERE thread_id = %s AND closed_at IS NULL",
+                     (now, str(thread_id))).rowcount
+    conn.commit()
+    return n > 0
+
+
+def gm_thread_note_msg(conn, thread_id, last_msg_id):
+    conn.execute("UPDATE discord_gm_thread SET last_msg_id = %s"
+                 " WHERE thread_id = %s",
+                 (str(last_msg_id), str(thread_id)))
+    conn.commit()
+
+
+def gm_thread_note_relay(conn, room, at):
+    conn.execute("UPDATE discord_gm_thread SET last_relay_at = %s"
+                 " WHERE room = %s AND closed_at IS NULL",
+                 (float(at), str(room)))
+    conn.commit()
+
+
+def gm_threads_open(conn):
+    return conn.execute("SELECT * FROM discord_gm_thread WHERE closed_at IS NULL"
+                        " ORDER BY created_at").fetchall()

@@ -285,6 +285,39 @@ def _db_chars():
                 extra = [l for l in links if int(l.get("slot", 0)) != 0]
                 order = primary + extra
                 if len(order) > _CHAR_PER_HANDLE:
+                    # OVER THE CEILING, usually because a title was granted after
+                    # this handle's extra character slots were minted. One record
+                    # must fall off the wire, and it MUST be an empty create slot,
+                    # never a slot a character sits on -- a dropped character is
+                    # POL-0001 at select with nothing on screen to explain it.
+                    # `extra` is only ever a title that mints a Content ID per
+                    # character, so order it so the slots a character sits on
+                    # sort first (kept) and the unused create slots last (dropped
+                    # first). A title that issues one Content ID per character
+                    # gives every id it has recorded a character for a world
+                    # identity (`titles.character_world`, the same hook
+                    # `_char_record` reads below), so a non-None world identity is
+                    # "a character is here" and None is "an empty create slot".
+                    # Nothing is deactivated -- the slot reappears the moment the
+                    # handle has room -- this only chooses WHICH extra slot the
+                    # existing truncation sheds. Guarded: if the lookup fails
+                    # (e.g. a title's id map cannot be read), fall back to the old
+                    # slot order, no worse than before this guard existed.
+                    try:
+                        def _keep_characters_first(link):
+                            try:
+                                cid = int(str(link.get("content_id") or "").strip() or 0)
+                            except (TypeError, ValueError):
+                                cid = 0
+                            code = int(link.get("content_code", 0))
+                            has_char = bool(cid) and \
+                                titles.character_world(code, cid) is not None
+                            return (0 if has_char else 1, int(link.get("slot", 0)))
+                        order = primary + sorted(extra, key=_keep_characters_first)
+                    except Exception as exc:
+                        log("lobby", f"  handle {hid}: could not rank extra slots by"
+                                     f" character ({exc!r}); keeping slot order")
+                        order = primary + extra
                     dropped = [(int(l["content_code"]), int(l.get("slot", 0)))
                                for l in order[_CHAR_PER_HANDLE:]]
                     log("lobby", f"  handle {hid} holds {len(order)} Content IDs,"
@@ -435,6 +468,11 @@ def _list_paylen(op1, op2, count):
     return n
 
 
+#: Bytes of comment the 0:9 record carries at +0x20: the client copies 0x32
+#: UTF-16 units from there (see `_handle_record`).
+_HANDLE_COMMENT_MAX = 0x32 * 2
+
+
 def _handle_record(slot, name, rec, base_bytes=None, guid=0, face_icon=0,
                    comment=None):
     """One 0:9 record: **a HANDLE**, in slot `slot`, named `name`.
@@ -542,11 +580,17 @@ def _handle_record(slot, name, rec, base_bytes=None, guid=0, face_icon=0,
     #
     # With no comment to serve we write ZEROS, not the name: an empty comment is
     # what SE sends for an empty comment, and blank beats garbage.
+    #
+    # THE FIELD IS 50 CHARACTERS, NOT 50 BYTES. polcore 0x37de264 passes 0x32 to
+    # 0x380dcb0, which is a wcsncpy (copies u16 units, `dec ecx` per unit), and
+    # then stores the terminator at dest+0x64. It used to be cut at 48 BYTES,
+    # i.e. 24 characters, so a long comment showed in full until the next login
+    # re-read this list and then stopped at 24 (reported 2026-10-03, "beesbees").
     cmt = ("" if comment is None else str(comment)).encode("utf-16-le", "replace")
-    cmt = cmt[:48] + b"\x00\x00"                       # 50B field, always terminated
+    cmt = cmt[:_HANDLE_COMMENT_MAX] + b"\x00\x00"      # 0x32 units + terminator
     if base_bytes is None:
         out[0x10:0x10 + 15] = raw[:15].ljust(15, b"\x00")
-        out[0x20:0x20 + 50] = cmt.ljust(50, b"\x00")
+        out[0x20:0x20 + len(cmt)] = cmt
     else:
         v = raw[:14] + b"\x00"
         out[0x10:0x10 + len(v)] = v
@@ -809,6 +853,10 @@ def _list_payload(op1, op2, n, req_pt=None):
                 # _db_friends does, so the two stay in lockstep per-peer.
                 # POL_GROUP_PEER_CLIENTGUID overrides the default explicitly.
                 own_name = lobbysession._session_handle_name()
+                # Every handle of this member is "own" for the packed word: the
+                # client's handle table holds all of them, raw (see
+                # _group_member_packed). The push uses the same member-wide rule.
+                own_names = {hn for _hid, hn, _p in _db_handles()}
                 peer_cg = os.environ.get(
                     "POL_GROUP_PEER_CLIENTGUID",
                     os.environ.get("POL_FRIEND_GUID_CLIENT", "1")) == "1"
@@ -837,7 +885,8 @@ def _list_payload(op1, op2, n, req_pt=None):
                             friendgroups._group_member_record(
                                 guid, nm, cls=cls,
                                 self_guid=selfguids.get(nm)
-                                if (peer_cg or nm == own_name) else None)
+                                if (peer_cg or nm == own_name) else None,
+                                own=nm in own_names)
                         off += _GROUP_MEMBER_REC
                 log("lobby", "  7:12 groups: " + ", ".join(
                     f"{friends[g][1]!r}={out[1 + g]} member(s)"

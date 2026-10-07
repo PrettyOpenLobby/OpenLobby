@@ -941,7 +941,7 @@ def _push_deliver_grouprows(rec, db=None):
             return 0
     try:
         byname = {r["handle_name"]: r for r in db.execute(
-            "SELECT id, handle_name, client_guid FROM handle")}
+            "SELECT id, handle_name, client_guid, member_id FROM handle")}
         icons = handlelists._face_icons_by_handle()
     finally:
         if own:
@@ -1010,7 +1010,11 @@ def _push_deliver_grouprows(rec, db=None):
                 # "View Profile" would resolve). Two producers, one comparison:
                 # the low 44 bits differed for every member, every push
                 # appended, and the roster doubled. See `_group_member_packed`.
-                packed = friendgroups._group_member_packed(guid, cls)
+                # The recipient's OWN row matches the row their client built
+                # from its handle table, not the tagged id (2026-10-03, see
+                # _group_member_packed's third writer).
+                packed = friendgroups._group_member_packed(
+                    guid, cls, own=bool(h) and int(h["member_id"] or 0) == member)
                 # A REMOVAL is class 1 with nothing else. Project Crystal Server
                 # tells a group that a member left, was removed, or that the
                 # group is gone by pushing that member's row at rank 1 with only

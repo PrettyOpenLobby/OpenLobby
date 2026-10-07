@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
@@ -165,6 +166,27 @@ def main():
               rows[-1]["text"])
     finally:
         gmchat.TRANSCRIPT_MAX = saved
+
+    # --- since= reaches past the row-count limit (Discord relay back-fill) --
+    # Regression: a player's first "hiii" was pushed off the 200-row window by
+    # roster chatter before the GM knocked, and the back-fill silently dropped
+    # it. The since= floor must survive even when `limit` alone would not.
+    shutil.rmtree(SPOOL, ignore_errors=True)
+    room2 = b"#gmcallsince"
+    hiii = gmchat.encode_text("hiii")
+    gmchat.record(room2, "in", b"Bluebell", hiii)
+    knock_at = time.time()
+    time.sleep(0.01)
+    for i in range(50):
+        gmchat.record(room2, "in", b"Bluebell", b"HRu87960930222113" + b"Bluebell")
+    rows_count = gmchat.transcript(room2, limit=10)
+    check("limit alone hides an early T behind later H chatter",
+          not any(r["raw"].startswith("54") for r in rows_count),
+          "count-window unexpectedly kept the T")
+    rows_since = gmchat.transcript(room2, limit=10, since=knock_at - 60)
+    check("since= reaches past the row-count window to keep the earlier T",
+          any(r["raw"].startswith("54") for r in rows_since),
+          "back-fill did not include the T")
 
     # --- a missing spool is not an error -------------------------------------
     shutil.rmtree(SPOOL, ignore_errors=True)

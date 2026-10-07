@@ -9,15 +9,12 @@ from . import chatsession, framing, gamenotice, lobbyrooms, lobbysession, member
 
 #: A ROOM'S NAME LIVES IN ITS IRC TOPIC, encoded: SE's `332` for Novice_Hall read
 #: `zT95ToiTK7IT` + `Novice_Hall`, and for the created FOXROOM `zt9rTojTK7IT` +
-#: `FOXROOM`. The leading twelve symbols are POL-base64 (nine bytes of room
-#: settings, 'T' being that alphabet's zero) and they differ per room, so what
-#: they MEAN is not established -- which is why this is a knob and not a constant
-#: buried in a format string.
-#:
-#: The default is SE's own listed-room blob. Our client emits `zT7TTTTTTTTT` for a
-#: room it creates with default settings, so an all-zero body is clearly legal;
-#: SE's is used here because these three rooms are SE's rooms.
-_ROOM_TOPIC_PREFIX = "zT95ToiTK7IT"
+#: `FOXROOM`. The leading twelve symbols are POL-base64 of nine bytes of room
+#: settings (zone, members, purpose, language -- decoded at
+#: `lobbyrooms._parse_room_topic`), so a fixture's prefix is built from its own
+#: row by `lobbyrooms._room_settings_topic`. It used to be SE's Novice_Hall blob
+#: for every fixture, which put each one in zone 1100 with Novice_Hall's
+#: settings. POL_ROOM_TOPIC_PREFIX still overrides.
 
 
 def _room_topic(chan):
@@ -32,7 +29,8 @@ def _room_topic(chan):
         return stored
     for room in lobbyrooms._room_list():
         if lobbyrooms._room_chan(room) == chan:
-            prefix = os.environ.get("POL_ROOM_TOPIC_PREFIX", _ROOM_TOPIC_PREFIX)
+            prefix = (os.environ.get("POL_ROOM_TOPIC_PREFIX")
+                      or lobbyrooms._room_settings_topic(room))
             return (prefix + room["handle_name"]).encode("cp932", "replace")
     return None
 
@@ -1200,6 +1198,16 @@ def _verb_pong(arg, nick, srv, peer_ip, sess):
     # Empty list, NOT None: `[]` means "handled, nothing to send" and skips
     # both the log and the send (see the `if not reply` guard at the call
     # site). Returning None here would restore the noise.
+    #
+    # *** BUT THE JP PS2 CLIENT WANTS ITS PONG ANSWERED. *** It never echoes
+    # our `PING :POL<n>` token; it answers every ping with `PONG a`, a key of
+    # its own. A retail JP PS2 install (member 61, 2026-09-30) hung up 0.3 s
+    # after our 6th ping in 11 of 14 sessions and never once passed #6, while
+    # other clients ran to #20..#233. Project-Crystal-Server answers a client
+    # PONG with `PONG :<key>` (POLAuth/MessageHandler.cs), so we do the same.
+    # POL_PONG_ECHO=0 restores the silent consume.
+    if os.environ.get("POL_PONG_ECHO", "1") != "0" and arg:
+        return [b"PONG :" + arg.lstrip(b":")]
     return []
 
 

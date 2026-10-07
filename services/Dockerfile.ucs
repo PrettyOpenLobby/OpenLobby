@@ -35,6 +35,9 @@ COPY pmleval.py /app/pmleval.py
 # admin.py). tools/gen_news.py imports this same module, so the CLI and the
 # panel can never render different files.
 COPY newsgen.py /app/newsgen.py
+COPY eventnews.py /app/eventnews.py
+COPY eventcal.py /app/eventcal.py
+COPY event-calendar.json /app/event-calendar.json
 # The transitive closure of the modules above (see the matching note in
 # ./Dockerfile): local imports of shipped modules ride along, guarded or not.
 COPY contentlist.py /app/contentlist.py

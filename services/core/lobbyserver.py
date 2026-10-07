@@ -65,15 +65,23 @@ def _serve_http_on_lobby(conn, first, peer, port):
             clen = 0
         body_in = b""
         if clen > 0:
-            while len(buf) < clen:
+            # BIG READS INTO A BYTEARRAY. This was recv(4096) + `bytes +=`, and on
+            # prod each pass of this loop cost ~20 ms, so a 4 MB report bundle
+            # drained at ~200 KB/s: 21 s from prod's own loopback (2026-10-04).
+            # The shim gives up after 20 s, so the half-read upload died as a
+            # connection reset, nothing was filed, and the player got "the server
+            # did not accept it". Taking whatever is queued per pass (and
+            # appending to a bytearray, not re-copying bytes) cuts the passes.
+            acc = bytearray(buf)
+            while len(acc) < clen:
                 try:
-                    more = conn.recv(4096)
+                    more = conn.recv(min(clen - len(acc), 1 << 20))
                 except socket.timeout:
                     return served
                 if not more:
                     return served
-                buf += more
-            body_in, buf = buf[:clen], buf[clen:]
+                acc += more
+            body_in, buf = bytes(acc[:clen]), bytes(acc[clen:])
             # Shim log POSTs get their own (quieter) logging in the store; the
             # live streamer alone would otherwise put a 120-byte body preview
             # here every few seconds per client.

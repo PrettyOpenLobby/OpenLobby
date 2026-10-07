@@ -208,6 +208,7 @@ SUITES = [
     # arm, and a routing bug would otherwise be found by a tester getting a 404
     # at the moment they were trying to report something.
     ("issue_route",   [sys.executable, "issue_route_test.py"], TOOLS, {}),
+    ("issue_auto",    [sys.executable, "issue_auto_test.py"], TOOLS, {}),
 
     # --- record builders, checked against bytes captured from SE -----------
     # The group member table's TWO writers must name a member identically, or
@@ -306,6 +307,10 @@ SUITES = [
     ("contentauth",   [sys.executable, "contentauth.py"], SERVICES, {}),
     # The shared event calendar the title plugins' tournaments read.
     ("eventcal",      [sys.executable, "eventcal.py", "--selftest"], SERVICES, {}),
+    # The calendar's cups as news posts (eventnews.py + the newsgen seam).
+    ("event_news",    [sys.executable, "event_news_test.py"], TOOLS, {}),
+    # The same cups as Discord reminders (polbridge posts what this says is due).
+    ("eventremind",   [sys.executable, "eventremind.py", "--selftest"], SERVICES, {}),
     # The Viewer password, checked through the NICK digest, and the arm gate on
     # binding a login token (trust-on-first-use).
     ("login_digest",  [sys.executable, "login_digest_test.py"], TOOLS, {}),

@@ -106,6 +106,21 @@ _SE_ROOMS = (
     (1100, "#01CP", "ZYOTYU000005", "Traveller's_Haven", 100, 200, 301),
 )
 
+#: OUR fixtures, not SE's: the Lounge's three rooms mirrored into the JongHoLow
+#: zone (1104), same names, settings and language pairing. SE served nothing
+#: outside 1100, and its Viewer hides 1104 on every non-Japanese client -- the
+#: shim's chatzones patch (HippaulMod patches.cpp sites E/F) is what lists it.
+#: The ids only need to be unique channel names; the JHLOWR stem cannot collide
+#: with SE's ZYOTYU numbering.
+_JAN_ROOMS = (
+    (1104, "#00CP", "JHLOWR000000", "出会いの広場", 102, 201, 300),
+    (1104, "#00CP", "JHLOWR000001", "初心者の館", 100, 202, 300),
+    (1104, "#00CP", "JHLOWR000002", "旅立ちの部屋", 100, 200, 300),
+    (1104, "#01CP", "JHLOWR000003", "Novice_Hall", 100, 202, 301),
+    (1104, "#01CP", "JHLOWR000004", "Town_Square", 102, 201, 301),
+    (1104, "#01CP", "JHLOWR000005", "Traveller's_Haven", 100, 200, 301),
+)
+
 
 #: *** PLAYER-CREATED ROOMS ARE LISTED TOO, AND THIS IS WHERE THEY LIVE. ***
 #: Everything outside the six fixtures above is created by somebody and lasts as
@@ -184,6 +199,21 @@ def _parse_room_topic(topic):
         return None, name
     zone, members, purpose, lang = struct.unpack_from("<HHHH", blob, 0)
     return {"zone": zone, "f41": members, "f44": purpose, "lang": lang}, name
+
+
+def _room_settings_topic(room):
+    """The twelve settings symbols a TOPIC opens with, from the room's own row.
+
+    The layout is `_parse_room_topic`'s: u16 zone, members, purpose, language,
+    then a zero byte. It reproduces all four captured samples (SE's Novice_Hall
+    `zT95ToiTK7IT`, FOXROOM, CYNROOM and a default `zT7TTTTTTTTT`), so SE's
+    constant falls out of it for Novice_Hall -- and a room outside zone 1100
+    no longer announces itself as a PlayOnline Lounge room.
+    """
+    from .logingate import _b64encode
+    blob = struct.pack("<HHHHB", room["zone"] & 0xFFFF, room.get("f41", 0) & 0xFFFF,
+                       room.get("f44", 0) & 0xFFFF, room.get("lang", 0) & 0xFFFF, 0)
+    return _b64encode(blob)
 
 #: *** THE ZONE HAS TO CROSS A PROCESS BOUNDARY, AND THAT IS THE WHOLE PROBLEM. ***
 #: The browse (`5:3`) arrives on the LOBBY band, which is the `login` container;
@@ -579,7 +609,7 @@ def _persistent_rooms():
     if not env:
         return [{"zone": z, "prefix": p, "room_id": i, "handle_name": n,
                  "f41": a, "f44": b, "lang": g}
-                for z, p, i, n, a, b, g in _SE_ROOMS]
+                for z, p, i, n, a, b, g in _SE_ROOMS + _JAN_ROOMS]
     out = []
     for item in env.split(","):
         item = item.strip()

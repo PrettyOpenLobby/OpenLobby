@@ -327,7 +327,24 @@ def _client_guid_map():
 #: WARNING: The class (bit 50) and the slot (bit 53) sit ABOVE the compared 44 bits and
 #: cannot affect the push's match. Only the low 32 can -- which is the half that
 #: carries an identity, and therefore the half that gets "improved".
-def _group_member_packed(guid, cls, slot=0, self_guid=None):
+#:
+#: *** THERE IS A THIRD WRITER, AND IT IS THE CLIENT ITSELF (2026-10-03). ***
+#: When a client joins or creates a group locally, polcore `FUN_037e8be0` ->
+#: `FUN_037e8b20` builds the viewer's OWN row without asking the server: +0x00 =
+#: own_id, and +0x20 = a 0x18-byte copy of the active handle's slot in the
+#: handle table at `0x3bc5800 + slot*0x28`. That slot was filled from the 0:9
+#: handle record, whose +0x08/+0x0C carry the RAW `handle_guid` -- so the own
+#: row's low 44 bits are `0x800_0000004B`, not the tagged `0x20004B` this word
+#: carries for everyone else. Reported live 2026-10-03 (Vela in Bluebell's
+#: 'hoooot'): the accept push's Vela row missed the client-built "Inviting"
+#: row, APPENDED, and Vela sat in the group twice, the real self row stuck at
+#: class 2 so the group stayed unusable, with "Read Message" offered on their
+#: own duplicate. `own=True` writes the raw 44 bits for the recipient's own
+#: handle in BOTH the 7:12 record and the push, so all three writers agree. The
+#: tagged form only exists for a group row's View Profile, and on your own row
+#: the raw id falls back to your own profile, which is the right answer there.
+#: POL_GROUP_OWN_RAWGUID=0 reverts.
+def _group_member_packed(guid, cls, slot=0, self_guid=None, own=False):
     """The 64-bit word at `07:12` member record +0x08 and in the roster push's
     OBJECT field. Built ONCE, for both. See the note above."""
     # Both halves of the packed word are sweepable: the class is range-checked
@@ -379,6 +396,10 @@ def _group_member_packed(guid, cls, slot=0, self_guid=None):
     # of OUR handle_guids -- a foreign guid's low bits are left as they
     # were. POL_GROUP_MEMBER_ZHID=0 restores the raw low bits.
     low = int(ident) & 0xFFFFFFFF
+    if own and os.environ.get("POL_GROUP_OWN_RAWGUID", "1") == "1":
+        # The viewer's own row: exactly the 44 bits 0:9 put in the handle table.
+        packed |= int(guid) & 0xFFFFFFFFFFF
+        return packed & 0xFFFFFFFFFFFFFFFF
     if os.environ.get("POL_GROUP_MEMBER_ZHID", "1") == "1" \
             and accounts is not None \
             and (int(ident) & ~0xFFFFFFFF) == accounts.HANDLE_GUID_BASE:
@@ -387,7 +408,8 @@ def _group_member_packed(guid, cls, slot=0, self_guid=None):
     return packed & 0xFFFFFFFFFFFFFFFF
 
 
-def _group_member_record(guid, name, slot=0, cls=None, self_guid=None):
+def _group_member_record(guid, name, slot=0, cls=None, self_guid=None,
+                         own=False):
     """One 32-byte 07:12 member record.
 
         +0x00  u64  member id -- read at 0x1011cdc0 as [edi]/[edi+4] and resolved
@@ -496,7 +518,8 @@ def _group_member_record(guid, name, slot=0, cls=None, self_guid=None):
     if os.environ.get("POL_GROUP_MEMBER_MASK", "0") == "1":
         ident ^= pushchannel._PUSH_GUID_MASK
     struct.pack_into("<Q", out, 0x00, ident & 0xFFFFFFFFFFFFFFFF)
-    packed = _group_member_packed(guid, cls, slot, self_guid=self_guid)
+    packed = _group_member_packed(guid, cls, slot, self_guid=self_guid,
+                                  own=own)
     struct.pack_into("<Q", out, 0x08, packed & 0xFFFFFFFFFFFFFFFF)
     raw = str(name).encode("cp932", "replace")[:15]
     out[0x10:0x10 + len(raw)] = raw

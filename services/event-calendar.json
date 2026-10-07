@@ -1,5 +1,5 @@
 {
-  "_doc": "Event calendar read by services/eventcal.py. Times are UTC. TM runs SESSIONS: a weekly or holiday occurrence is a season (Fri 12:00 + 72 h, or the day from 12:00) and the tournaments are the one-hour sessions inside it at 19:00 and 02:00 UTC (European and American evenings), each with its own rankings and prizes. An event that overlaps a weekly occurrence replaces that whole occurrence; one event at a time per game. TM missions are 'type:count': 0 combos (more than N), 1 perfect wins, 2 wins in a row, 3 Rotating Block conversions (more than N), 4 ties, 5 wins acting first, 6 Chance Block conversions (more than N); 7 (vs a Defense Up card) is not counted and is never set. TM prizes: money for 1st/2nd/3rd, cards for 1st/2nd/3rd, pack = PackPrm record for the cards.",
+  "_doc": "Event calendar read by services/eventcal.py. Times are UTC. TM runs SESSIONS: a weekly or holiday occurrence is a season (Fri 12:00 + 72 h, or the day from 12:00) and the tournaments are the one-hour sessions inside it at 19:00 and 02:00 UTC (European and American evenings), each with its own rankings and prizes. An event that overlaps a weekly occurrence replaces that whole occurrence; one event at a time per game. TM missions are 'type:count': 0 combos (more than N), 1 perfect wins, 2 wins in a row, 3 Rotating Block conversions (more than N), 4 ties, 5 wins acting first, 6 Chance Block conversions (more than N); 7 (vs a Defense Up card) is not counted and is never set. TM prizes: money for 1st/2nd/3rd, cards for 1st/2nd/3rd, pack = PackPrm record for the cards, mission_money per cleared mission, class_money for the highest class reached (Bronze/Silver/Gold). Scaled 2026-10-03 to about a tenth: a cup paid more than a regular player earns in their whole career.",
   "tm": {
     "weekly": {
       "key": "chocobo-cup",
@@ -9,7 +9,7 @@
       "guide": "Win matches to move your chocobo up the track!|Clear the three missions for extra prizes.",
       "ticker": "The Chocobo Cup is under way! Advance your chocobo and go for the gold!",
       "missions": "rotate",
-      "prizes": {"money": [50000, 30000, 10000], "cards": [3, 2, 1], "pack": 20, "mission_money": 5000}
+      "prizes": {"money": [5000, 3000, 1500], "cards": [3, 2, 1], "pack": 20, "mission_money": 500, "class_money": [300, 800, 1500]}
     },
     "events": [
       {"key": "new-year-cup", "name": "New Year's Cup", "yearly": "01-01", "days": 1, "hour": 12,
@@ -17,31 +17,31 @@
        "guide": "Happy New Year! Start the year at the top of the track!|Clear all three missions.",
        "ticker": "Happy New Year! The New Year's Cup has begun!",
        "missions": "0:3,1:1,5:2",
-       "prizes": {"money": [80000, 50000, 20000], "cards": [4, 3, 2], "pack": 20, "mission_money": 8000}},
+       "prizes": {"money": [8000, 5000, 2000], "cards": [4, 3, 2], "pack": 20, "mission_money": 800, "class_money": [500, 1300, 2400]}},
       {"key": "valentines-cup", "name": "Valentine's Cup", "yearly": "02-14", "days": 1, "hour": 12,
        "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
        "guide": "Share the love of cards! Win together, tie together.|Ties count for a mission today.",
        "ticker": "The Valentine's Cup is on! Tie a game and share the love!",
        "missions": "4:2,2:2,5:1",
-       "prizes": {"money": [60000, 40000, 20000], "cards": [3, 2, 1], "pack": 20, "mission_money": 6000}},
+       "prizes": {"money": [6000, 4000, 2000], "cards": [3, 2, 1], "pack": 20, "mission_money": 600, "class_money": [400, 1000, 1800]}},
       {"key": "ffix-anniversary-cup", "name": "FFIX Anniversary Cup", "yearly": "07-07", "days": 1, "hour": 12,
        "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
        "guide": "Celebrate Final Fantasy IX's anniversary!|Prizes come from the FFIX Celebrity Pack.",
        "ticker": "Happy anniversary, FFIX! The Anniversary Cup has begun!",
        "missions": "1:2,0:4,3:2",
-       "prizes": {"money": [100000, 60000, 30000], "cards": [5, 3, 2], "pack": 24, "mission_money": 10000}},
+       "prizes": {"money": [10000, 6000, 3000], "cards": [5, 3, 2], "pack": 24, "mission_money": 1000, "class_money": [600, 1600, 3000]}},
       {"key": "halloween-cup", "name": "Halloween Cup", "yearly": "10-31", "days": 1, "hour": 12,
        "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
        "guide": "A spooky night at the card tables!|Chance Blocks play tricks tonight.",
        "ticker": "Trick or treat! The Halloween Cup has begun!",
        "missions": "6:2,3:1,2:3",
-       "prizes": {"money": [70000, 40000, 20000], "cards": [4, 2, 1], "pack": 21, "mission_money": 7000}},
+       "prizes": {"money": [7000, 4000, 2000], "cards": [4, 2, 1], "pack": 21, "mission_money": 700, "class_money": [400, 1100, 2100]}},
       {"key": "holiday-cup", "name": "Holiday Cup", "yearly": "12-24", "days": 3, "hour": 12,
        "sessions": {"hours": [19, 2], "minutes": 60, "from": "2026-09-28"},
        "guide": "Happy holidays! Win matches to climb to the top!|Clear all three missions for extra gifts.",
        "ticker": "Happy holidays! The Holiday Cup has begun!",
        "missions": "0:4,1:2,6:3",
-       "prizes": {"money": [100000, 60000, 30000], "cards": [5, 3, 2], "pack": 20, "mission_money": 10000}}
+       "prizes": {"money": [10000, 6000, 3000], "cards": [5, 3, 2], "pack": 20, "mission_money": 1000, "class_money": [600, 1600, 3000]}}
     ]
   },
   "jan": {

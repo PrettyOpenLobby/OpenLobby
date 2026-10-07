@@ -201,14 +201,35 @@ for nm in ("Lex", "Yui", "Tobin"):
           f"{nm}: push gpacked low-44 == 7:12 record +0x08 low-44",
           f"push=0x{(gp or 0) & _MATCH44:012X} record=0x{(rp or 0) & _MATCH44:012X}")
 
-#     And the tag must still BE there. A "fix" that made both sides raw would
-#     pass the equality above and silently undo the 08-22 View Profile fix, so
-#     pin the VALUE, not only the agreement.
-_want_low = R._FRIEND_HID_TAG | (accounts.handle_guid(ids["Lex"][1]) & 0x7FFFF)
-check(recs.get("Lex") is not None and (recs["Lex"] & 0xFFFFFFFF) == _want_low,
-      "and the low 32 bits are still the TAGGED z_hid form, not the raw guid "
-      "-- 'View Profile' on a group row needs it",
-      f"0x{recs.get('Lex', 0) & 0xFFFFFFFF:08X} want 0x{_want_low:08X}")
+#     And the tag must still BE there on a PEER's row. A "fix" that made both
+#     sides raw for everyone would pass the equality above and silently undo
+#     the 08-22 View Profile fix, so pin the VALUE, not only the agreement.
+_want_low = R._FRIEND_HID_TAG | (accounts.handle_guid(ids["Yui"][1]) & 0x7FFFF)
+check(recs.get("Yui") is not None and (recs["Yui"] & 0xFFFFFFFF) == _want_low,
+      "and a PEER's low 32 bits are still the TAGGED z_hid form, not the raw "
+      "guid -- 'View Profile' on a group row needs it",
+      f"0x{recs.get('Yui', 0) & 0xFFFFFFFF:08X} want 0x{_want_low:08X}")
+
+# --- 6. THE THIRD WRITER: THE CLIENT'S OWN ROW ------------------------------ #
+#     On a local join or create the client builds its own member row itself
+#     (polcore FUN_037e8b20), copying the identity word from its HANDLE TABLE,
+#     i.e. from the 0:9 record's +0x08/+0x0C. Live 2026-10-03: Vela accepted
+#     an invite, the push named them by the tagged id, missed that row and
+#     appended a second Vela. So the viewer's own row must carry the 0:9 word.
+print("\n6. the viewer's own row matches the row the client builds from 0:9 ->")
+_h09 = R._handle_record(0, "Lex", 136, guid=accounts.handle_guid(HID))
+_lo, _hi = struct.unpack_from("<II", _h09, 0x08)
+_want44 = (_lo | ((_hi & 0xFFF) << 32)) & _MATCH44
+for _src, _val in (("7:12 record", recs.get("Lex")), ("push", gpacked.get("Lex"))):
+    check(_val is not None and (int(_val) & _MATCH44) == _want44,
+          f"Lex (own row): {_src} low-44 == 0:9 handle word",
+          f"0x{int(_val or 0) & _MATCH44:012X} want 0x{_want44:012X}")
+#     NEGATIVE CONTROL: the tagged form, which is what the push sent on
+#     2026-10-03, misses the client-built row.
+_tagged = R._FRIEND_HID_TAG | (accounts.handle_guid(HID) & 0x7FFFF)
+check(_tagged & _MATCH44 != _want44,
+      "the tagged id the live push carried does NOT match the client-built row",
+      f"0x{_tagged:012X} vs 0x{_want44:012X}")
 
 #     NEGATIVE CONTROL. One producer IS the fix, so prove a SECOND one
 #     reproduces the bug: this is the line `_push_deliver_grouprows` carried,

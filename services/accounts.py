@@ -1152,11 +1152,18 @@ def member_by_mail(conn, address):
     return row
 
 
-def deliver_mail(conn, address, raw, sender=None, subject=None, uidl=None):
+def deliver_mail(conn, address, raw, sender=None, subject=None, uidl=None,
+                 read=False):
     """Put one RFC822 message in a mailbox. Returns its UIDL.
 
     UIDL defaults to a content hash, which makes redelivery of the identical
     message idempotent instead of showing it twice.
+
+    `read=True` lands the row pre-read, so it does NOT badge on the next login
+    gate. Used for the diagnostic welcome-seed in mailserver._pop3_messages:
+    the Viewer's Mail app doesn't POP3 on "open Mail" (it recounts from its
+    own local cache), so a seeded welcome that lands unread would badge for
+    ever with no path to clear it. A real inbound message is not `read`.
     """
     box = mail_box_name(address)
     if not box:
@@ -1166,12 +1173,13 @@ def deliver_mail(conn, address, raw, sender=None, subject=None, uidl=None):
     if uidl is None:
         uidl = hashlib.sha1(raw).hexdigest()[:24]
     member = member_by_mail(conn, box)
+    now = _now()
     conn.execute(
         "INSERT INTO mail (box, member_id, uidl, sender, subject, "
-        "                  raw, received_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+        "                  raw, received_at, read_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
         (box, member["id"] if member else None, uidl, sender, subject,
-         raw, _now()))
+         raw, now, now if read else None))
     conn.commit()
     return uidl
 
@@ -1192,6 +1200,27 @@ def delete_mail(conn, mail_ids):
                      "  AND deleted_at IS NULL",
                      [(now, i) for i in mail_ids])
     conn.commit()
+
+
+def mark_mail_read(conn, mail_id):
+    """Stamp `read_at` on a mail row that has been RETR'd. Idempotent: a
+    re-RETR does not move the timestamp."""
+    conn.execute("UPDATE mail SET read_at = %s WHERE id = %s AND read_at IS NULL",
+                 (_now(), mail_id))
+    conn.commit()
+
+
+def unread_mail_count(conn, address):
+    """How many undeleted, un-RETR'd messages this mailbox has -- what the
+    lobby gate's byte +0x11 should carry so the boot badge reflects UNREAD
+    rather than "not yet DELE'd" (which POL Viewer's Mail app rarely does)."""
+    box = mail_box_name(address)
+    if not box:
+        return 0
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM mail WHERE box = %s"
+        "  AND deleted_at IS NULL AND read_at IS NULL",
+        (box,)).fetchone()[0])
 
 
 def set_handle(conn, member_id, handle_name, primary=None):
@@ -1335,16 +1364,21 @@ def register_account(conn, handle, password, code=None, profile=None,
                     " content_id = COALESCE(handle_content.content_id, excluded.content_id),"
                     " status = 'active'",
                     (handle_id, int(c), allocate_content_id(conn), now))
-                # A title that issues one Content ID per CHARACTER
-                # (titles.Title.content_slots) gets the whole set at sign-up
-                # rather than on demand: its server offers a member's unspent
-                # ids as the client's empty character slots, so slots that
-                # exist here are slots the player can actually create into.
-                # Inside the same transaction as everything else --
-                # ensure_content_slots does not commit, by contract.
+            # A title that issues one Content ID per CHARACTER
+            # (titles.Title.content_slots) gets its character slots here -- AFTER
+            # the grant loop, not inside it, so `safe_slot_target` can reserve a
+            # binding position for every OTHER title this member owns (the count
+            # is only complete once every grant above has its content row and
+            # slot-0 link). Its server offers a member's unspent ids as the
+            # client's empty character slots, so slots that exist here are slots
+            # the player can actually create into. Inside the same transaction as
+            # everything else -- ensure_content_slots does not commit, by contract.
+            for c in granted:
                 want = content_slots_for(c)
                 if want > 1:
-                    ensure_content_slots(conn, handle_id, int(c), want)
+                    ensure_content_slots(conn, handle_id, int(c),
+                                         safe_slot_target(conn, handle_id, int(c),
+                                                          want, member_id))
             if profile:
                 cols = [k for k in PROFILE_COLUMNS if profile.get(k)]
                 if cols:
@@ -2260,6 +2294,42 @@ def ensure_content_slots(conn, handle_id, content_code, want, status="active"):
     return want - have
 
 
+def safe_slot_target(conn, handle_id, content_code, want, member_id=None):
+    """Cap `want` so a title's extra character slots never claim a binding
+    position that a title the member OWNS but has not placed yet will need.
+
+    The wire (`responders._db_chars`) protects
+    whole TITLES by dropping an extra character slot when a handle is over the
+    ceiling, so what a late grant strands is a character the player created --
+    POL-0001 at select, with nothing on screen. Reserving here stops the slots
+    being minted in the first place: one binding position for each distinct
+    OTHER title the member owns that is not yet linked to ANY of their handles
+    (those land on a handle when placed). A title already placed elsewhere is
+    not reserved -- it will not move here on its own and does not occupy this
+    handle's room -- so a handle dedicated to one title keeps its full set.
+    `ensure_content_slots` applies the physical 8-cap on top of this, and it
+    never returns less than 1 (the title keeps its primary character slot).
+    """
+    if want <= 1:
+        return want
+    if member_id is None:
+        r = conn.execute("SELECT member_id FROM handle WHERE id = %s",
+                         (int(handle_id),)).fetchone()
+        if r is None:
+            return want
+        member_id = int(r["member_id"])
+    placed = {int(x["content_code"]) for x in conn.execute(
+        "SELECT DISTINCT hc.content_code FROM handle_content hc"
+        " JOIN handle h ON h.id = hc.handle_id WHERE h.member_id = %s",
+        (int(member_id),)).fetchall()}
+    owned = {int(x["content_code"]) for x in conn.execute(
+        "SELECT DISTINCT content_code FROM content"
+        " WHERE member_id = %s AND status = 'active'",
+        (int(member_id),)).fetchall()}
+    reserve = len((owned - placed) - {int(content_code)})
+    return max(1, min(want, CONTENT_IDS_PER_HANDLE - reserve))
+
+
 def ensure_title_slots(conn, handle_id=None, member_id=None):
     """Top every handle holding a title that issues one Content ID per
     character up to that title's slot count (`title_content_slots`). Returns
@@ -2284,7 +2354,9 @@ def ensure_title_slots(conn, handle_id=None, member_id=None):
             q += " AND handle_id IN (SELECT id FROM handle WHERE member_id = %s)"
             params.append(int(member_id))
         for r in conn.execute(q, params).fetchall():
-            minted += ensure_content_slots(conn, int(r["handle_id"]), code, want)
+            minted += ensure_content_slots(
+                conn, int(r["handle_id"]), code,
+                safe_slot_target(conn, int(r["handle_id"]), code, want))
     if minted:
         conn.commit()
     return minted
@@ -2344,7 +2416,8 @@ def link_member_content_to_primary(conn, member_id):
         # a redeemed regcode (kinou 31) grants a title, so an account that gets
         # it from a code and one that gets it at sign-up end up identical.
         # `link_content_to_handle` has already committed, so this needs its own.
-        want = content_slots_for(row["content_code"])
+        want = safe_slot_target(conn, h["id"], int(row["content_code"]),
+                                content_slots_for(row["content_code"]), member_id)
         if want > 1 and ensure_content_slots(conn, h["id"],
                                              int(row["content_code"]), want):
             conn.commit()

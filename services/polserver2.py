@@ -77,6 +77,23 @@ def cstr(d, off, end):
 PS2_REGIONS = (b"PS2", b"P2U")
 
 
+#: A PC tool that updates a console's drive directly (psbbn-playonline's
+#: `playonline.update`) asks for the console's bundle with this mark after the
+#: region tag: "PS2+" or "P2U+". It is answered from the same bundle and is
+#: never paced, because ps2_request() does not match the marked tag. Pacing is
+#: for the PS2's own TCP stack; a PC pulling FFXI's 5 GB through it would take
+#: as many hours as the console. The mark fills the 4-byte field, so it cannot
+#: collide with a real region code.
+TOOL_MARK = "+"
+
+
+def bundle_region(region):
+    """(region the bundle is filed under, True when a tool asked)."""
+    if region.endswith(TOOL_MARK):
+        return region[:-len(TOOL_MARK)], True
+    return region, False
+
+
 def ps2_request(pkt, cmd):
     """True when this frame came from a PS2 client (region tag PS2_REGIONS).
 
@@ -104,6 +121,23 @@ def paced_send(conn, data):
         conn.sendall(data)
         return
     delay = float(os.environ.get("POL_PS2_CHUNK_DELAY_MS", "5")) / 1000.0
+    # Pacing the WRITES is not enough on a long path. While cwnd is still
+    # small (slow start, several round trips at 300+ ms), the kernel holds
+    # what we write and each returning ACK releases it as one burst, which is
+    # exactly what PCSX2 cannot take. A remote PCSX2 (203.0.113.126, rtt ~340
+    # ms) reset every FFXI list 1.4-2.2 s in, 2026-09-30, while LAN clients
+    # rarely fail. SO_MAX_PACING_RATE makes the kernel space the segments
+    # themselves (TCP internal pacing; prod runs fq_codel + cubic, which
+    # otherwise never paces). Linux only; elsewhere the write pacing below
+    # still applies.
+    rate = int(os.environ.get("POL_PS2_PACING_RATE", "0"))    # bytes/s
+    if rate == 0 and delay > 0:
+        rate = int(chunk / delay)                              # 280 KB/s default
+    if rate > 0:
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MAX_PACING_RATE", 47), rate)
+        except OSError:
+            pass
     deadline = time.monotonic()
     for i in range(0, len(data), chunk):
         conn.sendall(data[i:i + chunk])
@@ -459,7 +493,9 @@ class Server:
             region = cstr(pkt, 0x10, 0x14).decode("latin-1")
             prod = cstr(pkt, 0x14, 0x18).decode("latin-1")
             ver = cstr(pkt, 0x18, min(len(pkt), 0x58))
-            self.record_build(region, prod, ver, addr)
+            region, tool = bundle_region(region)
+            if not tool:
+                self.record_build(region, prod, ver, addr)
             b = self.bundles.get((region, prod))
             if not b:
                 if (region, prod) in self.current or self.current_all:
@@ -476,12 +512,14 @@ class Server:
             self.bump("cmd7")
             status = version_status(ver, b.oldest)
             self.log(f"[{addr[0]}] cmd7 {region}/{prod} ver={ver.decode('latin-1')!r}"
-                     f" -> {status}, latest={b.latest}")
+                     f" -> {status}, latest={b.latest}"
+                     + (" (PC drive updater)" if tool else ""))
             return build_cmd8(b.token, b.latest, dlhost or self.advertise, status)
 
         if cmd == 1:
             region = cstr(pkt, 0x10, 0x14).decode("latin-1")
             prod = cstr(pkt, 0x14, 0x18).decode("latin-1")
+            region, _tool = bundle_region(region)
             b = self.bundles.get((region, prod))
             if not b:
                 self.bump("reject")
@@ -502,6 +540,7 @@ class Server:
             except struct.error:
                 self.bump("reject")
                 return REJECT
+            region, _tool = bundle_region(region)
             b = self.bundles.get((region, prod))
             fp = b.blob_path(path) if b else None
             if not fp or not os.path.isfile(fp):

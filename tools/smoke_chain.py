@@ -562,7 +562,8 @@ def hop_created_rooms():
     rows = R._room_search_rows([], 1103)
     check("created: the topic's own zone files it, no session guess needed",
           [r["handle_name"] for r in rows] == ["MyRoom"] and
-          R._room_search_rows([], 1100) == R._persistent_rooms(), str(rows))
+          R._room_search_rows([], 1100) ==
+          [r for r in R._persistent_rooms() if r["zone"] == 1100], str(rows))
     check("created: the name is the topic minus its twelve settings symbols",
           rows[0]["handle_name"] == "MyRoom")
     check("created: members/purpose/language come from the CREATOR, not a constant",
@@ -755,7 +756,21 @@ def hop_room_zones():
     check("zones: 1103 is EMPTY, as SE answered it", names(1103) == [])
     check("zones: 1101 is EMPTY", names(1101) == [])
     check("zones: an unparsed request still lists everything",
-          len(R._room_search_rows([], None)) == 6)
+          len(R._room_search_rows([], None)) == len(R._persistent_rooms()) == 12)
+    check("zones: 1104 (JongHoLow) holds our mirrored Lounge set",
+          sorted(names(1104)) == sorted(names(1100)), str(names(1104)))
+    check("zones: 1104's channels do not collide with 1100's",
+          not ({R._room_chan(r) for r in rows(1104)} &
+               {R._room_chan(r) for r in rows(1100)}))
+    # A fixture's TOPIC is built from its own row: SE's constant for
+    # Novice_Hall falls out of it, and a 1104 room says 1104.
+    nh = next(r for r in rows(1100) if r["handle_name"] == "Novice_Hall")
+    check("topic: Novice_Hall's settings prefix is SE's captured one",
+          R._room_topic(R._room_chan(nh)) == b"zT95ToiTK7ITNovice_Hall",
+          str(R._room_topic(R._room_chan(nh))))
+    jr = next(r for r in rows(1104) if r["handle_name"] == "Novice_Hall")
+    check("topic: a JongHoLow room's topic parses back to zone 1104",
+          R._parse_room_topic(R._room_topic(R._room_chan(jr)))[0]["zone"] == 1104)
 
     by_name = {r["handle_name"]: r for r in rows(1100)}
     tpl = R._ROOM_RECORD_TEMPLATE

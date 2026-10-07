@@ -5,7 +5,7 @@ import time
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
 from srvcore import log
 import sessioncrypt
-from .deps import accounts, gmchat
+from .deps import accounts, gmchat, issuereport
 from . import authkick, authnode, authserv, chatsession, friendroster, gamenotice, ircband, lobbysearch, lobbysession, pacing, presence, roomregistry
 
 
@@ -95,6 +95,14 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
     band_role = "unclassified"
     band_open_at = time.time()
     close_why = "loop exited"
+    # PS2 HANG WATCH (issuereport.auto_ps2). A PS2 answers every PING for hours;
+    # one that stops while this is the player's ONLY channel has frozen with its
+    # network chip still holding the socket. Reported once per channel.
+    hang_after = float(os.environ.get("POL_PS2_HANG_AFTER", "200"))
+    hang_reported = not (keepalive and issuereport is not None
+                         and accounts is not None and hang_after > 0
+                         and accounts.client_label(
+                             getattr(chat_sess, "client_sig", None)) == "PS2")
     gm_poll = float(os.environ.get("POL_GMCHAT_POLL", "2"))
     if keepalive and gmchat is not None and gm_poll > 0:
         conn.settimeout(min(ping_every, gm_poll))
@@ -248,6 +256,26 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                     break
                 log("authserv", f"{peer} keepalive PING #{ping_seq} "
                                 f"(idle {ping_every}s); holding session open")
+                try:                   # never the reason a session drops
+                    _silent = time.time() - chat_sess.last_heard
+                    _m = getattr(chat_sess, "member", None)
+                    if (not hang_reported and _silent >= hang_after
+                            and _m is not None
+                            and not presence._member_has_other_channel(
+                                int(_m["id"]), chat_sess)):
+                        hang_reported = True
+                        log("authserv", f"{peer} PS2 silent {_silent:.0f}s on "
+                                        f"its only channel -- filing an auto "
+                                        f"report")
+                        issuereport.auto_ps2(
+                            int(_m["id"]), _m["login_name"],
+                            getattr(chat_sess, "sid", None), peer,
+                            f"no reply to our PINGs for {_silent:.0f}s while "
+                            f"this was the player's only channel (frozen?)",
+                            at=chat_sess.last_heard)
+                except Exception as _e:
+                    hang_reported = True
+                    log("authserv", f"{peer} PS2 hang watch raised {_e!r}")
                 # ...and hold it open in the SESSION STORE too, not just on the
                 # socket. `at` is otherwise only touched by auth events, so a
                 # client sitting on a menu aged out of `_SESSIONS` after
@@ -424,6 +452,8 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                                 + "; ".join(repr(l) for l in reply))
     except socket.timeout:
         close_why = 'read timed out'
+    # Kept for the teardown in authserv, which decides on an automatic PS2 report.
+    chat_sess.close_why = close_why
     # THE BAND VERDICT. One line per connection saying what it turned out to be,
     # how long it lasted and who ended it -- the three facts a pol-shim
     # "[tmband] WATCHDOG TRIPPED" line has to be read against. Never raises: a

@@ -71,7 +71,10 @@ const isOwner = () => SESSION.role !== "mod";
 const can = (p) => isOwner() || (SESSION.perms || []).includes(p);
 const TAB_PERM = { accounts: "accounts_view", codes: "codes", reports: "reports",
                    issues: "reports", gmcalls: "gm", news: "news_edit", pml: "pml" };
-const tabAllowed = (t) => !TAB_PERM[t] || (TAB_PERM[t] === "owner" ? isOwner() : can(TAB_PERM[t]));
+// Games has one permission per title ("games_<key>"); any of them opens the tab.
+const canGames = () => isOwner() || (SESSION.perms || []).some((p) => p.startsWith("games_"));
+const tabAllowed = (t) => t === "games" ? canGames()
+  : !TAB_PERM[t] || (TAB_PERM[t] === "owner" ? isOwner() : can(TAB_PERM[t]));
 const visibleTabs = () => TABS.filter(tabAllowed);
 
 function applyRole() {
@@ -92,7 +95,7 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach(
     (x) => x.classList.toggle("active", x.id === "tab-" + name));
   if (name !== "gmcalls") stopGmDesk();
-  document.body.classList.toggle("wide", name === "pml");
+  document.body.classList.toggle("wide", name === "pml" || name === "games");
   if (name === "pml") setTimeout(fitStage, 0);
   loadTab(name);
   return name;
@@ -107,6 +110,7 @@ function loadTab(name, refresh) {
   if (name === "issues") loadIssues().then(() => markSeen("issues"));
   if (name === "gmcalls") { loadGmCalls(); startGmDesk(); renderAlertBtn(); }
   if (name === "news") loadNews();
+  if (name === "games") loadGames(refresh);
   // The PML index is big and cached server-side; fetched at boot, and again
   // only when asked.
   if (name === "pml" && refresh) PML_LIST_READY = loadPmlFileList();
@@ -115,12 +119,15 @@ function loadTab(name, refresh) {
     if (isOwner()) loadMods();
     if (can("audit")) loadAudit();
     if (can("settings")) loadAlerts();
+    if (can("gm")) loadGmDesk();       // populates the GM Discord link panel
   }
 }
 
 async function applyHash() {
   const { tab, path } = parseHash();
-  if (showTab(tab) !== "pml" || !path || path === ACTIVE_FILE) return;
+  const shown = showTab(tab);
+  if (shown === "games") { if (path) openGameTool(path); return; }
+  if (shown !== "pml" || !path || path === ACTIVE_FILE) return;
   await PML_LIST_READY;   // openPmlFile reads SHAPES to decide the Show filter
   openPmlFile(path);
 }
@@ -132,13 +139,60 @@ document.querySelectorAll("nav button").forEach((b) => {
     const tab = b.dataset.tab;
     const before = location.hash;
     location.hash = "#" + tab
-      + (tab === "pml" && ACTIVE_FILE ? "/" + encPath(histEntry()) : "");
+      + (tab === "pml" && ACTIVE_FILE ? "/" + encPath(histEntry()) : "")
+      + (tab === "games" && GAME_TOOL ? "/" + GAME_TOOL : "");
     // Clicking the tab you are already on fires no hashchange, so apply it
     // here -- but only then, or every tab click would load its data twice.
     if (location.hash === before) applyHash();
   };
 });
 window.addEventListener("hashchange", applyHash);
+
+// ---- games ----
+// Each title's own tools, served by the game's server and proxied by the panel
+// under /games/<key>/. The open tool is in the hash: #games/fmo/gates.
+let GAMES = [];
+let GAME_TOOL = "";
+
+async function loadGames(refresh) {
+  try { GAMES = (await api("/api/games")).games || []; } catch (e) { GAMES = []; toast(e.message, true); }
+  const want = parseHash().path || GAME_TOOL;
+  renderGames();
+  openGameTool(want, refresh);
+}
+
+function gameToolIds() {
+  return GAMES.flatMap((g) => g.tools.map((t) => g.key + "/" + t.id));
+}
+
+function renderGames() {
+  $("#gamesEmpty").hidden = GAMES.length > 0;
+  $("#gamesFrame").hidden = GAMES.length === 0;
+  $("#gamesList").innerHTML = GAMES.map((g) => `<div class="gx-game"><h3>${esc(g.title)}</h3>`
+    + g.tools.map((t) => `<button data-tool="${esc(g.key + "/" + t.id)}"`
+      + `${GAME_TOOL === g.key + "/" + t.id ? ' class="on"' : ""}>${esc(t.label)}</button>`).join("")
+    + "</div>").join("") || '<div class="gx-empty">None</div>';
+}
+
+function openGameTool(id, reload) {
+  const ids = gameToolIds();
+  if (!ids.length) return;
+  if (!ids.includes(id)) id = ids[0];
+  const [key, tid] = id.split("/");
+  const tool = GAMES.find((g) => g.key === key).tools.find((t) => t.id === tid);
+  const src = "/games/" + key + "/" + tool.path;
+  const fr = $("#gamesFrame");
+  if (reload || fr.getAttribute("src") !== src) fr.setAttribute("src", src);
+  GAME_TOOL = id;
+  writeHash("games", id);
+  document.querySelectorAll("#gamesList button").forEach(
+    (b) => b.classList.toggle("on", b.dataset.tool === id));
+}
+
+$("#gamesList").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-tool]");
+  if (b) openGameTool(b.dataset.tool);
+});
 
 // ---- session / credentials ----
 // The panel is OPEN when no credential is set (first run, loopback bind), so
@@ -663,6 +717,7 @@ function syncStateDuration() {
   const code = Number($("#stateCode").value);
   const permanent = code === 0xE7;
   const disabled = code === 0 || permanent;
+  $("#stateKick").disabled = code === 0;
   $("#stateDuration").disabled = disabled;
   if (disabled) $("#stateDuration").value = "none";
   $("#stateUntilWrap").style.display = !disabled &&
@@ -683,6 +738,7 @@ function localDateTime(iso) {
 function askState(account) {
   STATE_POLID = account.polid;
   $("#statePolid").textContent = account.polid;
+  $("#stateKick").checked = true;
   const until = account.reject_until;
   $("#stateDuration").value = until && new Date(until) > new Date()
     ? "custom" : "none";
@@ -712,6 +768,7 @@ document.addEventListener("keydown", (e) => {
 });
 $("#stateGo").onclick = async () => {
   const polid = STATE_POLID, code = Number($("#stateCode").value);
+  const kick = code !== 0 && $("#stateKick").checked;
   const duration = $("#stateDuration").value;
   let until = null;
   if (code && code !== 0xE7 && duration !== "none") {
@@ -731,12 +788,16 @@ $("#stateGo").onclick = async () => {
   const button = $("#stateGo");
   button.disabled = true;
   try {
-    await api("/api/account-state", {
+    const result = await api("/api/account-state", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polid, code, until })
+      body: JSON.stringify({ polid, code, until, kick })
     });
     closeState();
-    toast(`${polid}: ${code ? stateLabel(code) : "refusal cleared"}`);
+    toast(result.kick_error
+      ? `${polid}: refusal saved, but current sessions could not be kicked: ${result.kick_error}`
+      : `${polid}: ${code ? stateLabel(code) : "refusal cleared"}` +
+        (kick ? `; disconnected ${result.kicked} current session${result.kicked === 1 ? "" : "s"}` : ""),
+      !!result.kick_error);
     loadAccounts();
   } catch (e) { toast(e.message, true); }
   finally { button.disabled = false; }
@@ -1024,7 +1085,7 @@ function showReport(r) {
     (calls.length ? ` <a href="#" id="repToGm">${calls.length} GM call${calls.length === 1 ? "" : "s"} from this player</a>` : "");
   const link = $("#repToGm");
   if (link) link.onclick = (e) => {
-    e.preventDefault(); GM_SEL = calls[0]; GM_AUTOSEL = true; GM_TICKET_SIG = ""; location.hash = "#gmcalls";
+    e.preventDefault(); GM_SEL = calls[0]; GM_TICKET_SIG = ""; location.hash = "#gmcalls";
   };
   $("#repReplyTo").textContent = r.from || "(no address)";
   repPaintReplies(r);
@@ -1126,16 +1187,15 @@ function triPaint(pfx, kind, r, after) {
 //     roster request with the GM's `HA...:G` record so it is drawn as the GM.
 //     The nick/raw probes live under Diagnostics;
 //   * each request has its OWN room (gmd names it #gmcallNNN from the request
-//     number and records it in the ticket), so selecting a request switches the
-//     chat to that room. Requests filed before that change were all put in the
-//     one shared room (#gmchat001), and say so. The room picker is there for
-//     the case where a client turns out to join somewhere else.
+//     number and records it in the ticket). The chat shown is always the
+//     selected request's room; with nothing selected, no chat shows. Pins
+//     (flags/queue) are set with tools/gmctl.py; the page only warns about one.
 //
 // WARNING: The poll only rebuilds a list when what it shows CHANGED. Rebuilding with
 // innerHTML every tick replaces the element under a press and the click never
 // lands.
 let GM_TIMER = null, GM_ROOM = "", GM_LOG_SIG = "", GM_LIST_SIG = "", GM_TICKET_SIG = "";
-let GM_CALLS = [], GM_SEL = null, GM_DESK = null, GM_AUTOSEL = true;
+let GM_CALLS = [], GM_SEL = null, GM_DESK = null;
 let GM_FILTER = "open";
 try { GM_FILTER = localStorage.getItem("gmFilter") || "open"; } catch (e) {}
 
@@ -1161,12 +1221,6 @@ function gmAgo(t) {
   return gmDay(t);
 }
 const gmIso = (iso) => (Date.parse(iso || "") / 1000) || 0;
-const gmHex = (n) => "0x" + (n >>> 0).toString(16);
-function gmFlagsSay(f) {
-  const j = f & 0x40, s = f & 0x20;
-  return j && s ? "Start and Join" : j ? "Join only" : s ? "Start only, no Join"
-    : "no chat buttons";
-}
 // The ticket body comes straight off the wire and can carry control bytes
 // (ticket #3 ends in a \x07). Drop them for reading; the file keeps them.
 const gmClean = (s) => String(s ?? "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
@@ -1174,16 +1228,17 @@ const gmClean = (s) => String(s ?? "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]
 // -- the desk ---------------------------------------------------------------
 async function loadGmDesk() {
   let d;
+  const room = GM_ROOM;
   try {
-    d = await api("/api/gm-desk" + (GM_ROOM ? "?room=" + encodeURIComponent(GM_ROOM) : ""));
+    d = await api("/api/gm-desk" + (room ? "?room=" + encodeURIComponent(room) : ""));
   } catch (e) { return; }          // a poll that fails must not toast every 4s
   GM_DESK = d;
-  GM_ROOM = d.room || GM_ROOM;
-  gmRenderRoomPick(d);
   gmRenderDuty(d);
-  gmRenderDiag(d);
-  gmRenderLog(d);
-  gmRenderChatState(d);
+  // A reply to a room the operator has since left must not draw over the new one.
+  if (room && room === GM_ROOM) {
+    gmRenderLog(d);
+    gmRenderChatState(d);
+  }
   // Hold the on-duty claim open while this tab is. It EXTENDS and never creates,
   // so a forgotten tab cannot re-open a desk somebody deliberately closed.
   if (d.me_on_duty) {
@@ -1200,11 +1255,9 @@ function gmRenderDuty(d) {
     ? "You're on duty" + (others.length ? ` with ${others.join(", ")}` : "")
     : gms.length ? `${others.join(", ")} ${others.length === 1 ? "is" : "are"} on duty`
     : "Nobody is on duty";
-  const sv = d.serving || {};
-  const polled = sv.at ? ` · a caller last checked in ${gmAgo(sv.at)}` : "";
-  const away = gms.length ? "Players get Start when you knock their request"
+  const away = gms.length ? "Players can start a chat once their request is knocked"
     : "New requests get an automatic reply by mail";
-  $("#gmStateSub").textContent = `${away} · ${d.waiting} on a GM Call now${polled}`;
+  $("#gmStateSub").textContent = `${away} · ${d.waiting} on a GM Call now`;
   const btn = $("#gmDutyBtn");
   btn.textContent = mine ? "Go off duty" : "Go on duty";
   btn.className = mine ? "ghost" : "act";
@@ -1216,10 +1269,9 @@ function gmRenderDuty(d) {
   const pf = d.pinned_flags, pq = d.pinned_queue;
   const has = (v) => v !== null && v !== undefined;
   if (has(pf) || has(pq)) {
-    const bits = [];
-    if (has(pf)) bits.push(`flags pinned to ${gmHex(pf)}: callers see ${gmFlagsSay(pf)} regardless of duty`);
-    if (has(pq)) bits.push(`queue count pinned to ${pq}`);
-    $("#gmWarnText").textContent = bits.join("; ").replace(/^./, (c) => c.toUpperCase()) + ".";
+    $("#gmWarnText").textContent = has(pf)
+      ? "An override is set: players' GM Call screens ignore duty until it is cleared."
+      : `An override is set: players see a queue of ${pq} until it is cleared.`;
     $("#gmWarn").hidden = false;
   } else {
     $("#gmWarn").hidden = true;
@@ -1256,69 +1308,21 @@ $("#gmDiscordUnlink").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
-function gmRenderDiag(d) {
-  const line = (k, v, hot) =>
-    `<div class="${hot ? "hot" : ""}"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
-  const sv = d.serving || {};
-  let html =
-    line("Flags now", `${gmHex(d.flags)} (${gmFlagsSay(d.flags)}): ${d.flags_why || ""}`) +
-    line("Last served to a caller",
-         sv.flags === undefined ? "nothing polled yet" : `${gmHex(sv.flags)} at ${gmTime(sv.at)}`,
-         sv.flags !== undefined && sv.flags !== d.flags) +
-    line("Queue", d.pinned_queue !== null && d.pinned_queue !== undefined
-         ? `${d.pinned_queue} (pinned)`
-         : `${d.waiting} waiting (live)` + (d.env_queue ? `, POL_GMD_QUEUE=${d.env_queue}` : ""));
-  if (d.by) html += line("Last changed by", d.by);
-  html += line("Undelivered in the spool", d.pending, d.pending > 0);
-  (d.callers || []).forEach((c) => html += line(
-    `Caller ${c.peer}`,
-    (c.request_no ? `request #${c.request_no}` : "no ticket yet")
-    + `, idle ${c.idle}s` + (c.live ? "" : " (aged out)")));
-  $("#gmDesk").innerHTML = html;
-  $("#gmClearDuty").disabled = d.duty === null;
-}
-
 // -- the room ---------------------------------------------------------------
-// Which rooms the picker offers: every room with traffic, plus the selected
-// request's own room, which has no file until someone speaks in it.
-function gmRenderRoomPick(d) {
-  const sel = $("#gmRoomPick");
-  const t = GM_CALLS.find((x) => x.id === GM_SEL);
-  const rooms = [...new Set([GM_ROOM, t && t.room, ...(d.rooms || [])].filter(Boolean))];
-  const sig = rooms.join("|") + ">" + GM_ROOM;
-  if (sel.dataset.sig !== sig) {
-    sel.dataset.sig = sig;
-    sel.innerHTML = rooms.map((r) => `<option${r === GM_ROOM ? " selected" : ""}>${esc(r)}</option>`).join("")
-      || `<option>(no chat room)</option>`;
-  }
-  const note = $("#gmRoomNote");
-  if (t && t.room_shared && GM_ROOM === t.room) {
-    note.textContent = "Shared room (older request): it contains messages from every caller.";
-    note.hidden = false;
-  } else if (t && t.room && GM_ROOM !== t.room) {
-    note.textContent = `Showing ${GM_ROOM}, not this request's room (${t.room}).`;
-    note.hidden = false;
-  } else {
-    note.hidden = true;
-  }
-}
-
 function gmSwitchRoom(room) {
-  if (!room || room === GM_ROOM) return;
+  room = room || "";
+  if (room === GM_ROOM) return;
   GM_ROOM = room;
   GM_LOG_SIG = "";
   $("#gmLog").innerHTML = "";
-  loadGmDesk();
+  $("#gmChatState").textContent = "";
+  if (room) loadGmDesk();
 }
-$("#gmRoomPick").onchange = (e) => gmSwitchRoom(e.target.value);
-
-const gmShowTech = () => $("#gmShowTech").checked;
 
 function gmRenderLog(d) {
   const rows = d.transcript || [];
-  const tech = gmShowTech();
   const last = rows.length ? rows[rows.length - 1].at : 0;
-  const sig = `${rows.length}:${last}:${tech}:${d.pending}`;
+  const sig = `${rows.length}:${last}:${d.pending}`;
   if (sig === GM_LOG_SIG) return;
   GM_LOG_SIG = sig;
   const log = $("#gmLog");
@@ -1327,28 +1331,24 @@ function gmRenderLog(d) {
   rows.forEach((r) => {
     const cls = (r.raw || "").slice(0, 2);           // the record's class byte, in hex
     // 'H' is the client's presence heartbeat. It is the bulk of the log and
-    // says nothing to a GM, so it only shows with the technical view on.
-    if (cls === "48" && !tech) return;
+    // says nothing to a GM, so it never shows.
+    if (cls === "48") return;
     const dd = gmDay(r.at);
     if (dd !== day) { day = dd; html += `<div class="gm-day">${esc(dd)}</div>`; }
-    const hex = tech ? `<span class="gm-hex">${esc(r.raw)}</span>` : "";
     if (cls === "54") {                               // 'T', a chat line
-      let text = r.text || "";
-      if (!tech) text = text.replace(/\s+\[head '[^']*'\]$/, "");
+      const text = (r.text || "").replace(/\s+\[head '[^']*'\]$/, "");
       const out = r.dir === "out";
-      const who = out ? "You (GM)" : `Player${r.nick ? " · " + r.nick : ""}`;
+      const who = out ? "GM" : (r.who || "Player");
       html += `<div class="gm-msg ${out ? "out" : "in"}">` +
         `<span class="gm-meta">${esc(who)} · ${esc(gmTime(r.at))}</span>` +
-        `<span class="gm-text">${esc(text)}</span>${hex}</div>`;
+        `<span class="gm-text">${esc(text)}</span></div>`;
     } else {
       // 'U' membership lines read as sentences already ("Abe joined").
-      html += `<div class="gm-sys">${esc(r.text || "")} · ${esc(gmTime(r.at))}` +
-        (tech ? `<br>${hex}` : "") + `</div>`;
+      html += `<div class="gm-sys">${esc(r.text || "")} · ${esc(gmTime(r.at))}</div>`;
     }
   });
   if (d.pending > 0)
-    html += `<div class="gm-sys">${d.pending} line${d.pending > 1 ? "s" : ""} queued ` +
-      `until the player is in the room.</div>`;
+    html += `<div class="gm-sys">${d.pending} line${d.pending > 1 ? "s" : ""} waiting to be delivered.</div>`;
   log.innerHTML = html || `<div class="gm-log-empty">No messages yet. Messages appear ` +
     `here once the player joins the chat from their GM Call screen.</div>`;
   if (wasBottom) log.scrollTop = log.scrollHeight;
@@ -1360,19 +1360,22 @@ function gmRenderChatState(d) {
   let lastIn = 0;
   for (let i = rows.length - 1; i >= 0; i--) if (rows[i].dir === "in") { lastIn = rows[i].at; break; }
   let text, cls = "";
-  if (d.pending > 0) {
-    text = "Waiting for the player to join"; cls = "warn";
-  } else if (lastIn && Date.now() / 1000 - lastIn < 600) {
+  if (lastIn && Date.now() / 1000 - lastIn < 600) {
     text = `Player active, last heard ${gmAgo(lastIn)}`; cls = "good";
+  } else if (lastIn) {
+    text = `Room quiet, last player line ${gmAgo(lastIn)}`;
   } else {
-    text = "Nobody in the room right now";
+    text = "Nobody has spoken in this room yet";
   }
   el.textContent = text;
   el.className = "gm-chat-state " + cls;
-  const as = $("#gmNick").value.trim() || "GM";
-  $("#gmComposeHint").textContent =
-    `Sent to ${GM_ROOM || "the room"} as ${as}. Knock the request first so ` +
-    `the player can start the chat.`;
+  gmRenderComposeHint();
+}
+
+function gmRenderComposeHint() {
+  const t = GM_CALLS.find((x) => x.id === GM_SEL);
+  $("#gmComposeHint").textContent = t && !t.knocked_at && t.status !== "closed"
+    ? "Knock first so the player can join the chat." : "";
 }
 
 const gmPost = (body) => ({
@@ -1402,17 +1405,6 @@ $("#gmDutyBtn").onclick = () => {
   gmControl(body, "On duty" + (pinned ? " (pins cleared)" : ""));
 };
 $("#gmWarnFix").onclick = () => gmControl({ flags: null, queue: null }, "Pins cleared");
-$("#gmClearDuty").onclick = () =>
-  gmControl({ on_duty: null }, "Duty reset to the server default");
-$("#gmPin").onclick = () => {
-  const q = $("#gmQueue").value.trim(), f = $("#gmFlags").value.trim();
-  gmControl({ queue: q === "" ? null : q, flags: f === "" ? null : f }, "Pins applied");
-};
-$("#gmUnpin").onclick = () => {
-  $("#gmQueue").value = ""; $("#gmFlags").value = "";
-  gmControl({ queue: null, flags: null }, "Pins cleared");
-};
-$("#gmShowTech").onchange = () => { GM_LOG_SIG = ""; if (GM_DESK) gmRenderLog(GM_DESK); };
 
 // -- notices ----------------------------------------------------------------
 // The GM Call > Next page's list (gmnotices.py). The sections are SE's and
@@ -1480,10 +1472,9 @@ $("#gmnSave").onclick = async () => {
 $("#gmNotices").addEventListener("toggle", () => { if ($("#gmNotices").open && !GMN) loadGmNotices(); });
 
 async function gmSay(body) {
-  if (!GM_ROOM) { toast("No chat room is available. Check that the GM service is running.", true); return false; }
+  if (!GM_ROOM) { toast("This request has no chat room.", true); return false; }
   try {
-    await api("/api/gm-say", gmPost({ ...body, room: GM_ROOM,
-      nick: $("#gmNick").value.trim() }));
+    await api("/api/gm-say", gmPost({ ...body, room: GM_ROOM }));
     GM_LOG_SIG = "";
     loadGmDesk();
     return true;
@@ -1495,8 +1486,7 @@ $("#gmSend").onclick = async () => {
   // chat line per line rather than a record with a raw newline in it.
   const lines = $("#gmSay").value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (!lines.length) return;
-  const prefix = $("#gmPrefix").value;
-  for (const l of lines) if (!(await gmSay({ say: prefix + l }))) return;
+  for (const l of lines) if (!(await gmSay({ say: l }))) return;
   $("#gmSay").value = "";
   // Replying is what "answered" means on a help desk; saves a click.
   const t = GM_CALLS.find((r) => r.id === GM_SEL);
@@ -1504,18 +1494,6 @@ $("#gmSend").onclick = async () => {
 };
 $("#gmSay").onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#gmSend").click(); }
-};
-$("#gmPrefix").oninput = () => { if (GM_DESK) gmRenderChatState(GM_DESK); };
-$("#gmNick").oninput = () => { if (GM_DESK) gmRenderChatState(GM_DESK); };
-$("#gmSendEvent").onclick = () => {
-  const ev = $("#gmEvent").value;
-  if (!ev) return toast("Pick an event", true);
-  gmSay({ event: ev, who: $("#gmEventWho").value.trim() || "GM" });
-};
-$("#gmSendRaw").onclick = () => {
-  const r = $("#gmRaw").value;
-  if (!r) return toast("Nothing to send", true);
-  gmSay({ raw: r });
 };
 
 // -- the requests -------------------------------------------------------------
@@ -1534,18 +1512,10 @@ async function loadGmCalls() {
   if (!Array.isArray(rows)) return;
   GM_CALLS = rows;
   gmBadge(rows);
-  if (GM_AUTOSEL) {
-    // First visit: open the newest request that still needs an answer, unless
-    // a link from a report already picked one.
-    if (!GM_SEL) {
-      const first = rows.find((r) => r.status === "open");
-      if (first) GM_SEL = first.id;
-    }
-    GM_AUTOSEL = false;
-    gmFollowTicketRoom();
-  }
+  if (GM_SEL && !rows.some((r) => r.id === GM_SEL)) GM_SEL = null;
   gmRenderList();
   gmRenderTicket();
+  gmFollowTicketRoom();
 }
 
 function gmRenderList() {
@@ -1576,18 +1546,16 @@ function gmRenderList() {
 $("#gmList").onclick = (e) => {
   const it = e.target.closest(".gm-item");
   if (!it) return;
-  GM_SEL = it.dataset.id;
+  GM_SEL = it.dataset.id === GM_SEL ? null : it.dataset.id;
   gmRenderList();
   gmRenderTicket();
   gmFollowTicketRoom();
 };
 
-// Selecting a request shows ITS room. Called on a click and when the first
-// load auto-selects one, never on a plain poll, so a room the operator picked
-// by hand is not yanked away every 4 seconds.
+// The chat shown is always the selected request's room, or none.
 function gmFollowTicketRoom() {
   const t = GM_CALLS.find((x) => x.id === GM_SEL);
-  if (t && t.room) gmSwitchRoom(t.room);
+  gmSwitchRoom(t ? t.room : "");
 }
 document.querySelectorAll(".gm-filter button").forEach((b) => {
   b.onclick = () => {
@@ -1615,11 +1583,9 @@ function gmRenderTicket() {
     (r.knocked_at ? `<span class="gm-st live">Knocked ${esc(gmAgo(r.knocked_at))}</span>` : "");
   const t = gmIso(r.received_at);
   const meta = [
-    r.content_label || (r.content_id != null ? `content ${r.content_id}` : ""),
-    r.issue != null ? `issue type ${r.issue}` : "",
+    r.content_label || "",
     r.request_no != null ? `request #${r.request_no}` : "",
     t ? `${gmDay(t)} ${gmTime(t)} (${gmAgo(t)})` : "",
-    r.peer ? `from ${String(r.peer).replace(/:\d+$/, "")}` : "",
     r.polid ? `POL ID ${r.polid}` : "",
   ].filter(Boolean);
   const reps = r.reports || [];
@@ -1659,6 +1625,7 @@ function gmRenderTicket() {
     (r.status === "open" ? btn("answered", "Mark answered", "ghost") + btn("closed", "Close", "ghost")
     : r.status === "answered" ? btn("closed", "Close", "ghost") + btn("open", "Reopen", "ghost")
     : btn("open", "Reopen", "ghost")) + (closing || inv);
+  gmRenderComposeHint();
 }
 
 // The invite picker's query and results survive the desk's 4-second redraws.
@@ -3008,7 +2975,7 @@ function renderNewsStatus() {
   let dot = "ok", text;
   if (NEWS_DIRTY) { dot = "warn"; text = "Unsaved changes (kept in this browser until you save)"; }
   else if (NEWS_PENDING === null) { text = "Saved"; }
-  else if (NEWS_PENDING > 0) { dot = "warn"; text = `Saved, not published yet (${NEWS_PENDING} file${NEWS_PENDING === 1 ? "" : "s"} to update)`; }
+  else if (NEWS_PENDING > 0) { dot = "warn"; text = "Saved, not published yet"; }
   else { text = "Published: players see what is here"; }
   el.innerHTML = `<span class="dot ${dot}"></span>${esc(text)}`;
   $("#newsSaveBtn").classList.toggle("act", NEWS_DIRTY);
@@ -3061,10 +3028,26 @@ function newsBadge(key) {
   const src = (NEWS_ART || {})[key];
   return src ? `<span class="plate"><img src="${src}" alt=""></span>` : "";
 }
+// The event calendar's posts (eventnews.py): shown for reference, never edited
+// here. They go up and come down with the calendar.
+function renderNewsAuto() {
+  const auto = (NEWS_META && NEWS_META.auto) || [];
+  if (!auto.length) return "";
+  return `<div class="nw-autohead">Event calendar</div>` + auto.map((it) => {
+    const k = (NEWS_META.kinds || {})[it.kind] || {};
+    const cat = (NEWS_META.categories || [])[k.category] || "";
+    return `<div class="nw-item nw-auto" title="Posted from the event calendar. It comes down on its own once the event's results close.">` +
+      `${newsBadge("ticker:" + (it.content || "playonline")) || "<span></span>"}` +
+      `<div style="min-width:0"><div class="t">${esc(it.title || "")}</div>` +
+      `<div class="m">${esc(it.date || "")} · ${esc(cat)}</div></div>` +
+      `<div><span class="flag">automatic</span></div></div>`;
+  }).join("");
+}
 function renderNewsList() {
   const box = $("#newsList");
   if (!NEWS.length) {
-    box.innerHTML = `<div class="nw-empty">No announcements yet. Use <b>New announcement</b> to write one.</div>`;
+    box.innerHTML = `<div class="nw-empty">No announcements yet. Use <b>New announcement</b> to write one.</div>` +
+      renderNewsAuto();
     return;
   }
   box.innerHTML = NEWS.map((it, i) => {
@@ -3078,11 +3061,11 @@ function renderNewsList() {
       `<div style="min-width:0"><div class="t">${esc(it.title || "(no headline)")}</div>` +
       `<div class="m">${esc(it.date || "no date")} · ${esc(cat)}</div></div>` +
       `<div>${flags.map((f) => `<span class="flag">${esc(f)}</span>`).join(" ")}</div></div>`;
-  }).join("");
+  }).join("") + renderNewsAuto();
 }
 $("#newsList").onclick = (e) => {
   const row = e.target.closest(".nw-item");
-  if (!row) return;
+  if (!row || row.classList.contains("nw-auto")) return;
   readNewsForm();
   NEWS_SEL = +row.dataset.i;
   renderNewsList();
@@ -3272,29 +3255,14 @@ $("#nwPubGo").onclick = async () => {
   finally { $("#nwPubGo").disabled = false; }
 };
 
-// The saved store's output files (for the "Files a publish writes" panel) and
-// whether what players see is up to date.
+// Whether what players see is up to date.
 async function loadNewsOutputs() {
   try {
     const j = await api("/api/news/outputs");
     NEWS_PENDING = typeof j.pending === "number" ? j.pending : null;
     renderNewsStatus();
-    const sel = $("#newsOutput"), keep = sel.value;
-    sel.innerHTML = j.files.filter((f) => /\/en-US\//.test(f.path) || f.path.endsWith("pml/info/news0.pml"))
-      .map((f) => `<option value="${esc(f.path)}">${esc(f.path)} (${f.bytes} B)</option>`).join("");
-    if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
-    showNewsFile();
   } catch (e) { /* the tab still works without it */ }
 }
-async function showNewsFile() {
-  const path = $("#newsOutput").value;
-  if (!path) return;
-  try {
-    const r = await fetch("/api/news/preview?path=" + encodeURIComponent(path));
-    $("#newsRaw").textContent = await r.text();
-  } catch (e) { $("#newsRaw").textContent = ""; }
-}
-$("#newsOutput").addEventListener("change", showNewsFile);
 
 // --- the live preview ---------------------------------------------------------------
 let NEWS_PV_TIMER = null, NEWS_PV_SEQ = 0;

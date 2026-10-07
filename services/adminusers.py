@@ -39,6 +39,10 @@ PERMS = {
     "audit": "See the activity log",
     "health": "See service status and backups",
     "settings": "Change GM alert and service check settings",
+    # one per game in admingames.GAMES ("games_<key>")
+    "games_fe": "Fantasy Earth tools: world builder",
+    "games_fmo": "Front Mission Online tools: lobby NPCs, story gates",
+    "games_ffxi": "Final Fantasy XI tools: federation worlds and providers",
 }
 
 

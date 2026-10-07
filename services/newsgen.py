@@ -112,6 +112,12 @@ SEED = os.path.join(ROOT, "content", "announcements.yaml")
 STORE = os.environ.get("POL_NEWS_STORE") or os.path.join(
     os.environ.get("POL_DATA_DIR", "/data"), "announcements.yaml")
 
+#: What was last PUBLISHED (the operator's own posts, not the calendar's). The
+#: admin service's event timer republishes THIS, never the saved store, so a
+#: draft saved but not published cannot go live because an event started.
+PUBLISHED = os.environ.get("POL_NEWS_PUBLISHED") or os.path.join(
+    os.path.dirname(STORE) or ".", "announcements.published.yaml")
+
 #: Locales to write the ticker, the news<N> lists and the detail bodies under.
 #: en-US is the only one our PC client has been observed asking for; ja-JP is
 #: here because the PS2 asks for it BY NAME (a 1.18.15f console resolves
@@ -229,6 +235,10 @@ KINDS = {
     "recovery":    (1,      2,       2,  2),
     "issue":       (0,      1,       1,  2),
     "update":      (0,      4,       1,  1),
+    # SE's "Events" category (inen01.pml $cat_d[3], "Information on events for
+    # games"), which no kind reached before. The stamp and flags are info's.
+    # eventnews.py files every calendar event here.
+    "event":       (1,      3,       1,  1),
 }
 
 #: What each `kind` actually does, in the operator's words. Kept HERE rather
@@ -248,6 +258,9 @@ KIND_NOTES = {
                    "“resolved” badge.",
     "issue":       "Something is broken right now. Draws the trouble badge.",
     "update":      "A patch or content change. Files under Updates.",
+    "event":       "A game event. Files under Events. Tetra Master and "
+                   "JongHoLow cups from the event calendar are posted here "
+                   "on their own.",
 }
 
 
@@ -601,6 +614,39 @@ def save(items, path=None):
                        default_flow_style=False, width=100)
     os.replace(tmp, path)
     return path, items
+
+
+def published_items(www=None):
+    """The announcements last published, for the event timer; None if unknown.
+
+    Read from PUBLISHED, which every publish writes. Before the first publish
+    that records it, the saved store stands in only when it is exactly what is
+    being served (a dry run of it, without event posts, changes nothing);
+    otherwise None, and the timer leaves the tree alone.
+    """
+    if os.path.exists(PUBLISHED):
+        return load(PUBLISHED)
+    items = load()
+    r = publish(items, www, dry_run=True, events=False, record=False)
+    if r["written"] or r["pruned"]:
+        return None
+    save(items, PUBLISHED)
+    return items
+
+
+def with_events(items, now=None, cal=None):
+    """`items` with the event calendar's posts in front (eventnews.py).
+
+    A failure here costs the event posts, never the operator's own."""
+    if any(it.get("auto") for it in items):
+        return items
+    try:
+        import eventnews
+        auto = eventnews.items(now, cal)
+    except Exception as exc:                          # pragma: no cover
+        print(f"[newsgen] event posts skipped: {exc!r}", flush=True)
+        return items
+    return auto + list(items)
 
 
 # --------------------------------------------------------------------------- #
@@ -1001,13 +1047,16 @@ def allowed(rel):
     return any(p.match(rel) for p in _ALLOW)
 
 
-def outputs(items, www=None):
+def outputs(items, www=None, events=True, events_now=None, events_cal=None):
     """Every file a publish would write: {relative path: text}.
 
     Built by reading the CURRENT tree, because news<N>.pml merges onto SE's
     archive -- so this is a preview of the real result, not an approximation.
+    The event calendar's posts are added unless `events` is False.
     """
     www = www or WWW_DIR
+    if events:
+        items = with_events(items, events_now, events_cal)
     out = {}
     feed_text = feed(items)
     for loc in FEED_LOCALES:
@@ -1043,13 +1092,16 @@ def outputs(items, www=None):
     return out
 
 
-def stale_details(items, www=None):
+def stale_details(items, www=None, events=True, events_now=None, events_cal=None):
     """Detail files we wrote for announcements that no longer exist.
 
     Restricted to `9xxxxx.pml` by the same rule as the writer, so a captured SE
-    article can never be swept up by this.
+    article can never be swept up by this. An event post that has come down is
+    one of these.
     """
     www = www or WWW_DIR
+    if events:
+        items = with_events(items, events_now, events_cal)
     live = {str(it["serial"]) for it in items}
     gone = []
     for loc in FEED_LOCALES:
@@ -1063,15 +1115,20 @@ def stale_details(items, www=None):
     return sorted(gone)
 
 
-def publish(items, www=None, prune=True, dry_run=False):
+def publish(items, www=None, prune=True, dry_run=False, events=True,
+            events_now=None, events_cal=None, record=True):
     """Render and write. Returns {written, skipped, pruned, backed_up}.
 
     Every first replacement of an existing file leaves a `.se-orig` sibling, the
     convention already used for latestnews.pml, so SE's captured bytes are
-    always one copy away.
+    always one copy away. The event calendar's posts are added (see
+    with_events), and a real publish records the operator's own posts in
+    PUBLISHED for the event timer.
     """
     www = www or WWW_DIR
-    files = outputs(items, www)
+    items = [it for it in items if not it.get("auto")]
+    ev = dict(events=events, events_now=events_now, events_cal=events_cal)
+    files = outputs(items, www, **ev)
     written, skipped, backed_up = [], [], []
     for rel, text in sorted(files.items()):
         if not allowed(rel):
@@ -1097,7 +1154,7 @@ def publish(items, www=None, prune=True, dry_run=False):
 
     pruned = []
     if prune:
-        for rel in stale_details(items, www):
+        for rel in stale_details(items, www, **ev):
             if not allowed(rel):
                 continue
             if not dry_run:
@@ -1106,5 +1163,10 @@ def publish(items, www=None, prune=True, dry_run=False):
                 except OSError:
                     continue
             pruned.append(rel)
+    if record and not dry_run:
+        try:
+            save(items, PUBLISHED)
+        except (OSError, NewsError) as exc:
+            print(f"[newsgen] {PUBLISHED} not written: {exc}", flush=True)
     return {"written": written, "skipped": skipped, "pruned": pruned,
             "backed_up": backed_up, "total": len(files)}

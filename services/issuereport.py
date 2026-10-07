@@ -50,6 +50,7 @@ import os
 import re
 import secrets
 import shutil
+import threading
 import time
 
 from srvcore import LOG_DIR, log
@@ -543,7 +544,16 @@ def store(body: bytes, hdrs: dict, peer: str):
         log("lobby", f"{peer}   report REFUSED: {e}")
         return b"400 Bad Request", ""
 
-    now = time.time()
+    return _file_bundle(meta, files, peer, time.time())
+
+
+def _file_bundle(meta: dict, files, peer: str, now: float, at: float = None):
+    """File one bundle: the client's files (if any), OUR logs cut around `at`
+    (default: `now`, the receipt time), a manifest, the loud log line and the
+    retention pass. Shared by the shim's POST and the server's own automatic
+    reports, so both land in the same directory the admin panel reads.
+    Returns (status line, report id)."""
+    at = now if at is None else at
     # THE CLIENT'S CLOCK DOES NOT SET THE WINDOW. A Steam Deck that has been
     # asleep can be minutes out, and a window cut around a wrong `when` selects
     # the wrong minutes of our logs while looking perfectly well-formed. We use
@@ -554,13 +564,14 @@ def store(body: bytes, hdrs: dict, peer: str):
     dest = os.path.join(ISSUE_DIR, rid)
 
     try:
-        os.makedirs(os.path.join(dest, "client"), exist_ok=True)
+        if files:
+            os.makedirs(os.path.join(dest, "client"), exist_ok=True)
         os.makedirs(os.path.join(dest, "server"), exist_ok=True)
         for name, blob in files:
             with open(os.path.join(dest, "client", name), "wb") as f:
                 f.write(blob)
-        srv, notes = capture_server_window(now - WINDOW_BEFORE,
-                                           now + WINDOW_AFTER, meta, peer)
+        srv, notes = capture_server_window(at - WINDOW_BEFORE,
+                                           at + WINDOW_AFTER, meta, peer)
         for name, blob in srv.items():
             with open(os.path.join(dest, "server", name), "wb") as f:
                 f.write(blob)
@@ -568,7 +579,8 @@ def store(body: bytes, hdrs: dict, peer: str):
         log("lobby", f"{peer}   report {rid} could not be stored ({e})")
         return b"500 Internal Server Error", ""
 
-    desc = ""
+    # A server-filed report has no description.txt; it says why in its meta.
+    desc = (meta.get("description") or "").strip()
     for name, blob in files:
         if name == "description.txt":
             desc = blob.decode("utf-8", "replace").strip()
@@ -609,6 +621,78 @@ def store(body: bytes, hdrs: dict, peer: str):
     for gone in prune():
         log("lobby", f"   report retention dropped {gone}")
     return b"200 OK", rid
+
+
+# --------------------------------------------------------------------------- #
+# Automatic reports -- the PS2 cannot send one, so the server files it
+# --------------------------------------------------------------------------- #
+#
+# A PS2 has no shim and no report key, and a console that froze could not send
+# anything anyway. What we DO have is every byte it spoke to us, so when a PS2
+# session ends the way a crash ends -- the socket reset, our PING refused, or
+# the console went silent while it was the player's only channel -- the server
+# files the same bundle a PC report gets, minus the client half: our logs cut
+# around the moment, correlated on the session id.
+#
+# The bar, measured on prod 2026-10-04 (authserv.log x4): every PS2 channel that
+# ended in those logs ended with a clean EOF, and the long silent stretches all
+# belonged to a STALE channel while the player's newer one was answering. So a
+# drop or a silence on the ONLY channel is genuinely unusual, and that is the
+# whole trigger. Off with POL_ISSUE_AUTO=0.
+
+AUTO_ON = os.environ.get("POL_ISSUE_AUTO", "1") != "0"
+#: One automatic report per account per this many seconds. A drop that follows
+#: a hang report is the same incident; a console stuck in a reconnect loop must
+#: not fill the retention budget on its own.
+AUTO_GAP = int(os.environ.get("POL_ISSUE_AUTO_GAP", "1800"))
+_auto_last = {}
+_auto_lock = threading.Lock()
+
+
+def auto_ps2(member_id, login, sid, peer, reason, at, delay=0.0,
+             still_gone=None):
+    """Schedule a server-only report for a PS2 session that ended badly.
+
+    `at` is when it went wrong (the window is cut around it), `delay` lets the
+    after-window fill in, and `still_gone`, when given, is asked once the delay
+    is up: a player who is already back online had a network blip, not a crash.
+    Never raises and never blocks the caller -- this is called from session
+    teardown on the auth band."""
+    if not AUTO_ON:
+        return
+    try:
+        now = time.time()
+        with _auto_lock:
+            last = _auto_last.get(member_id, 0)
+            if now - last < AUTO_GAP:
+                log("lobby", f"{peer}   auto report for {login} skipped: one was "
+                             f"filed {now - last:.0f}s ago ({reason})")
+                return
+            _auto_last[member_id] = now
+
+        def run():
+            try:
+                if delay:
+                    time.sleep(delay)
+                if still_gone is not None and not still_gone():
+                    log("lobby", f"{peer}   auto report for {login} dropped: "
+                                 f"back online within {delay:.0f}s ({reason})")
+                    with _auto_lock:
+                        _auto_last.pop(member_id, None)
+                    return
+                meta = {"host": login or "PS2", "session": sid or "",
+                        "title": "PS2 Viewer", "category": "auto",
+                        "source": "server (automatic, PS2)",
+                        "description": f"Automatic report: the PS2 session "
+                                       f"ended badly -- {reason}. Filed by the "
+                                       f"server; a PS2 sends no files of its own."}
+                _file_bundle(meta, [], peer, time.time(), at=at)
+            except Exception as e:      # noqa: BLE001 -- a daemon thread
+                log("lobby", f"{peer}   auto report for {login} FAILED: {e!r}")
+
+        threading.Thread(target=run, name="issue-auto", daemon=True).start()
+    except Exception as e:              # noqa: BLE001
+        log("lobby", f"{peer}   auto report for {login} not scheduled: {e!r}")
 
 
 # --------------------------------------------------------------------------- #

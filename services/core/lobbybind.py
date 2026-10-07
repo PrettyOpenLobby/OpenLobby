@@ -209,7 +209,7 @@ def _lobby_bind(frame, peer_ip, peer, exact=True):
     """
     cands = _lobby_iv_candidates(peer_ip)
     for sid, iv in cands:
-        if _lobby_header_ok(_lobby_crypt(frame[:8], iv), len(frame), exact=exact):
+        if _lobby_validates(frame[:8], iv, len(frame), exact):
             # The cipher this connection speaks -- `_bind_corroborate_mismatch`
             # needs it to teach the proven owner's session this IV.
             lobbysession._session_current.iv = iv
@@ -259,10 +259,36 @@ def _lobby_pick_iv(frame, candidates, exact=True):
         iv = cand[1] if isinstance(cand, tuple) else cand
         if not iv:
             continue
-        pt = _lobby_crypt(frame, iv)
-        if _lobby_header_ok(pt, len(frame), exact):
-            return iv, pt
+        if _lobby_validates(frame, iv, len(frame), exact):
+            return iv, _lobby_crypt(frame, iv)
     return None, None
+
+
+#: iv hex -> the key that validated this connection's frame under it. Per
+#: THREAD (one lobby connection per thread), so every later `_lobby_crypt` on
+#: the connection uses the key its first frame proved.
+_PIN = threading.local()
+
+
+def _lobby_validates(frame, iv, framelen, exact):
+    """True when the frame's header validates under `iv` with ANY key this IV
+    has carried; the winning key is pinned for this connection.
+
+    2026-10-03: the Viewer and Tetra Master share one launch IV but each hop
+    negotiates its own RSA key. TM's own hop recorded its key over the
+    Viewer's, while TM's lobby frames are encrypted with the VIEWER's key, so
+    the lobby tried one wrong key, answered garbage, and TM sat on "Updating
+    online status..." until it timed out."""
+    h = bytes(iv).hex()
+    for key in _lobby_keys_for_iv(iv):
+        P, S = sessioncrypt.bf_setkey(key)
+        if _lobby_header_ok(sessioncrypt.ofb_apply(P, S, iv, frame), framelen, exact):
+            pins = getattr(_PIN, "keys", None)
+            if pins is None:
+                pins = _PIN.keys = {}
+            pins[h] = key
+            return True
+    return False
 
 
 def _lobby_crypt(data, iv):
@@ -286,38 +312,51 @@ def _remember_iv_key(sid, iv, key):
     with lobbysession._SESSIONS_LOCK:
         slot = lobbysession._SESSIONS.get(sid) or {}
         ivk = dict(slot.get("iv_keys") or {})
-    ivk[bytes(iv).hex()] = bytes(key).hex()
+    h, k = bytes(iv).hex(), bytes(key).hex()
+    # A LIST per IV, newest first, not one key: hops of one launch share the
+    # IV with different keys, and the lobby cannot tell beforehand which hop a
+    # frame comes from (see _lobby_validates).
+    keys = [k] + [x for x in str(ivk.pop(h, "")).split(",") if x and x != k]
+    ivk[h] = ",".join(keys[:4])
     while len(ivk) > 8:                      # the slot keeps 8 IVs; match it
         del ivk[next(iter(ivk))]
     lobbysession._session_put(sid, iv_keys=ivk)
 
 
-def _lobby_key_for_iv(iv):
-    """The key a lobby frame under `iv` is encrypted with.
-
-    POL_LOBBY_KEY still wins; then an RSA session that recorded this IV
-    (_remember_iv_key), the bound session's first; then `_lobby_key()`, which
-    is what every lobby frame used before -- so with POL_AUTH_RSA off nothing
-    here can change.
-    """
+def _lobby_keys_for_iv(iv):
+    """Every key a lobby frame under `iv` may be encrypted with, best first:
+    the one pinned for this connection, the bound session's (newest first),
+    other sessions', then `_lobby_key()` -- so with POL_AUTH_RSA off nothing
+    here changes. POL_LOBBY_KEY alone when set."""
     if os.environ.get("POL_LOBBY_KEY"):
-        return lobbyreply._lobby_key()
+        return [lobbyreply._lobby_key()]
+    out = []
     h = bytes(iv).hex() if isinstance(iv, (bytes, bytearray)) else None
     if h:
+        pin = (getattr(_PIN, "keys", None) or {}).get(h)
+        if pin:
+            out.append(pin)
         with lobbysession._SESSIONS_LOCK:
             bound = lobbysession._SESSIONS.get(lobbysession._session_sid()) or {}
-            hit = (bound.get("iv_keys") or {}).get(h)
-            if hit is None:
-                for slot in lobbysession._SESSIONS.values():
-                    hit = (slot.get("iv_keys") or {}).get(h)
-                    if hit:
-                        break
-        if hit:
-            try:
-                return bytes.fromhex(hit)
-            except ValueError:
-                pass
-    return lobbyreply._lobby_key()
+            slots = [bound] + [s for s in lobbysession._SESSIONS.values() if s is not bound]
+            for slot in slots:
+                for x in str((slot.get("iv_keys") or {}).get(h) or "").split(","):
+                    try:
+                        kb = bytes.fromhex(x) if x else None
+                    except ValueError:
+                        kb = None
+                    if kb and kb not in out:
+                        out.append(kb)
+    dflt = lobbyreply._lobby_key()
+    if dflt not in out:
+        out.append(dflt)
+    return out
+
+
+def _lobby_key_for_iv(iv):
+    """The key a lobby frame under `iv` is encrypted with: the first of
+    `_lobby_keys_for_iv` (the pinned one once a frame has validated)."""
+    return _lobby_keys_for_iv(iv)[0]
 
 
 def _lobby_cksum(buf, seed=0):
