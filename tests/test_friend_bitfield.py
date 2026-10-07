@@ -54,7 +54,7 @@ word = 0x1EC96021 | 0x06000004 << 32
 chk("settled word: group 3, not pending", ((word >> 57) & 0xF, word >> 62 & 1),
     (3, 0))
 word = 0x1EC96021 | 0x5A000009 << 32
-chk("TombArrington pending word: bit 62 set", word >> 62 & 1, 1)
+chk("TomBarrington pending word: bit 62 set", word >> 62 & 1, 1)
 chk("SE row 0x21: valid, level 1, slot 0", (0x21 & 1, 0x21 >> 5 & 3, 0x21 >> 7 & 0x3F),
     (1, 1, 0))
 chk("SE ignore scope 0x31: ignore bit", 0x31 >> 4 & 1, 1)

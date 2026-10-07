@@ -852,7 +852,7 @@ def _profile_record(size, req_pt=None, force_hid=None):
 #:     +0x0C  u32  type flags    0x0800 friend | 0x1400 self | 0x0001 group
 #:     +0x10  16B  name, NUL-padded
 #:
-#: SE's list read: Mirabel(0x800), TombArrington(0x800), Examplemember(0x1400,
+#: SE's list read: Mirabel(0x800), TomBarrington(0x800), Examplemember(0x1400,
 #: the account's own handle), LexGroup(0x0001).
 FRIEND_ENTRY = 32
 FRIEND_SELF = 0x1400

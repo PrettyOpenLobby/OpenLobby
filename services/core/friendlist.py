@@ -69,7 +69,7 @@ _FRIEND_HID_TAG = 0x200000
 #:     (prof-ffxi-retail-20260823.log), and 0x511C75 is also Lex's group-member
 #:     word in SE's 7:12.
 #:   * Yui 0x27509D = (4 << 19) | 0x7509D, Mirabel 0x20F64B: +0x04 low byte 04.
-#:   * TombArrington's pending word 0x5A000009: byte 7 = 0x5A = bit 62 set
+#:   * TomBarrington's pending word 0x5A000009: byte 7 = 0x5A = bit 62 set
 #:     (temporary) + group 0xD. The settled 0x06000004 is group 3, bit 62 clear.
 #:   * SE's 2:6 frames (tools/friend_rename_test.py) have the header Crystal
 #:     describes -- u16 count at frame 0x154 (1, and 2 in the two-record write) --
@@ -301,7 +301,7 @@ def _friend_list_record(rec_size, guid, name, kind=0x0800, hid=0, status=0,
         # One login identifies the field outright instead of four guesses.
         # STATUS. SE's 168-byte records differ from each other at +0x04, and the
         # user's live ground truth named the states (2026-08-11):
-        #     0900005A  friend request PENDING   (TombArrington)
+        #     0900005A  friend request PENDING   (TomBarrington)
         #     04000006  OFFLINE                  (Mirabel, Gazlo)
         # Both share a 2160-prefixed dword at +0x00. We do not know the field's
         # internal structure, so this replays the two OBSERVED values verbatim
@@ -412,7 +412,7 @@ def _friend_list_record(rec_size, guid, name, kind=0x0800, hid=0, status=0,
             # Decoding every 2:3 record in BOTH SE captures shows the two bytes are
             # never independent -- six records, six times equal:
             #
-            #   TombArrington +0x08=00 +0x09=00      Yui   @136076 00 / 00
+            #   TomBarrington +0x08=00 +0x09=00      Yui   @136076 00 / 00
             #   Mirabel       +0x08=02 +0x09=02      Yui   @155268 00 / 00
             #   Gazlo         +0x08=01 +0x09=01      Tobin @155268 01 / 01
             #
@@ -456,7 +456,7 @@ def _friend_list_record(rec_size, guid, name, kind=0x0800, hid=0, status=0,
                 # the state each one is independently known to be in:
                 #
                 #   +0x04 dword   byte 0   who              state
-                #   5A000009        09     TombArrington    pending  (documented)
+                #   5A000009        09     TomBarrington    pending  (documented)
                 #   02000009        09     Gazlo            pending
                 #   06000004        04     Mirabel          OFFLINE  (documented)
                 #   04000004        04     Yui  @136076     offline
@@ -610,7 +610,7 @@ def _db_friends(kinds=None):
             if h is None:
                 return []
             # status=None so PENDING entries are listed too. SE's own capture had
-            # a pending friend (TombArrington) sitting in the 2:3 list with the
+            # a pending friend (TomBarrington) sitting in the 2:3 list with the
             # 0900005A status word -- "awaiting approval" is a row in the list,
             # not an absence from it. Filtering to active hid every friend request
             # the moment it was made, which reads as "adding a friend did nothing".

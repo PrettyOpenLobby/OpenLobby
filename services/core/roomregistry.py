@@ -452,7 +452,7 @@ class RoomRegistry:
                         m["o"] = None       # 475 whoever re-creates the token
             else:
                 # *** THE MASTER MOVES WHEN THE MASTER LEAVES. *** Measured live
-                # 2026-08-19: Lex (owner) parted RedbEacon, Amicable stayed, and
+                # 2026-08-19: Lex (owner) parted RedBeacon, Amicable stayed, and
                 # the registry kept owner=Lex with no explicit op set -- so
                 # `op_nicks` named a nick that had walked out and the room had no
                 # master at all. Promote the oldest remaining occupant (live

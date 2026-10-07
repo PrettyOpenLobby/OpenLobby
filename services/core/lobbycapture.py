@@ -316,10 +316,10 @@ def capture_handle_registration(pt):
     # EVERY 0:8 and minted junk two ways:
     #   * a 0:8 whose 0x70 held NO valid handle (a non-registration flavour whose
     #     buffer tail was full of room-browser leftovers) gave member 3 the junk
-    #     handles 'quare'(Town_Square), 'ans'(RedbEacon), '000004', 'TTTTTTTT'...
+    #     handles 'quare'(Town_Square), 'con'(RedBeacon), '000004', 'TTTTTTTT'...
     #   * a real registration for 'AmicableElm' let the walk read 0x078 -- which
     #     falls INSIDE the 11-char name at 0x70 -- and captured the substring
-    #     'Ash' as a phantom handle.
+    #     'Elm' as a phantom handle.
     # So: only scavenge the table when 0x70 holds a valid handle (a real
     # registration always does; the junk flavour did not), and start the walk
     # PAST the primary's own field so an overlong primary cannot alias itself.
@@ -339,7 +339,7 @@ def capture_handle_registration(pt):
         for off in range(0x78, min(len(pt) - 4, 0x78 + 0x40 * 0x10), 0x10):
             if off < prim_end:
                 # inside the primary name field -- a substring of it (this is how
-                # 'Ash' fell out of 'AmicableElm'), not a real slot
+                # 'Elm' fell out of 'AmicableElm'), not a real slot
                 continue
             txt = _run_at(off)
             if txt is None or txt == primary:

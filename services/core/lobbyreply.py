@@ -307,7 +307,7 @@ def _acct_payload(n, base=None):
         s = val.encode("ascii", "replace")[:_ACCT_STR_MAX] + b"\x00"
         out[off:off + len(s)] = s
     # LOCAL PART ONLY. The client appends "@pol.com" itself -- proven by the mail
-    # account dialog, which lists 0x008's "UDXS6FWXX" as "UDXS6FWXX@pol.com" and
+    # account dialog, which lists 0x008's "UGCH7WDQ4" as "UGCH7WDQ4@pol.com" and
     # shows all six of the record's strings as selectable senders. Writing a full
     # address here put an '@' inside the local part, which is what rendered as two
     # garbage symbols; "SLOT0-098" displayed perfectly. (My earlier UTF-16 theory
