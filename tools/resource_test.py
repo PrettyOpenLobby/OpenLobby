@@ -258,6 +258,27 @@ check("the sender field becomes that handle's guid",
 check("and what the sender calls itself is now on record",
       A.handle_by_client_guid(A.connect(),
                               CLIENT_SELF)["id"], SENDER_H)
+# THE NAME the reader shows as "From:", and gives back as the friend's name when
+# it accepts a request. A client can sign with a name that is no handle of ours
+# (2026-10-03); accepting that request asked a handle that does not exist.
+def signed(path, name):
+    rec = bytearray(R._b64decode(path[len(R._MAIL_PATH_PREFIX):]))
+    rec[0x10:0x20] = name.ljust(16, b"\x00")
+    return R._MAIL_PATH_PREFIX + R._b64encode(bytes(rec))
+
+
+NICKED = signed(SENT, b"Pebblewick")
+check("the sender name becomes that handle's name",
+      R._mail_meta(R._mail_normalise(NICKED, SENDER_H))["sender"], "Sender")
+check("and it is written the way a minted message writes it",
+      R._b64decode(R._mail_normalise(NICKED, SENDER_H)[4:])[0x10:0x20],
+      b"Sender".ljust(16, b"\x00"))
+os.environ["POL_MAIL_SENDER_NAME"] = "0"
+check("POL_MAIL_SENDER_NAME=0 leaves the name as sent",
+      R._mail_meta(R._mail_normalise(NICKED, SENDER_H))["sender"], "Pebblewick")
+os.environ["POL_MAIL_SENDER_NAME"] = "1"
+check("with no sender to attribute it to, the name is left as sent",
+      R._mail_meta(R._mail_normalise(NICKED, None))["sender"], "Pebblewick")
 # THE "To:" HALF. Until the recipient has named itself we cannot do better than
 # our own guid -- and saying so is the point, because that IS "Unknown User".
 check("a recipient who has never named itself is addressed by our guid",

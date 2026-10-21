@@ -49,6 +49,8 @@ from polcore import kv
 KEY = "contentauth:rows"
 
 #: Content ids (the 4:5 zone) that receive a minted value. Empty = feature off.
+#: Left at "4" on purpose, and the mint can be gated to a few members: the blob
+#: hash below needs no minted value, it works with the echoed zeros as well.
 ZONES = frozenset(int(z) for z in
                   os.environ.get("POL_CONTENT_AUTH_ZONES", "4").split(",")
                   if z.strip())
@@ -165,6 +167,234 @@ def candidates(peer_ip=None, zone=None, now=None):
     return out
 
 
+# ---------------------------------------------------------------------------
+# THE CREDENTIAL BLOB: what the client sends BACK.
+#
+# Every title's first packet carries a 52-byte "contents authentication
+# password" built by polcore at launch: FFXI puts it in the 0x26 lobby packet
+# at payload offset 24, Front Mission Online in 0x0321, Fantasy Earth in
+# 0xC007 and 0x400F, Dirge of Cerberus in its world-door handshake. The layout
+# is the one Project Crystal Server reads in SqCrypto.DecryptAuthPassword:
+#
+#   [0] = enc[14] ^ volume      [1] = [6]^[12]   [2] = [8]^[10]   [3] = [9]^[13]
+#   [4..51] = 48 bytes of ciphertext, XOR-chained (b[i] ^= b[i-1] undoes it)
+#
+# and the 48 bytes are SE's data-file cipher (tools/polfilecrypt.py, the env.dat
+# construction) under the key polfilecrypt names KEY_REC48 - the key of the
+# 48-byte record decryptor in the PS2 Viewer. Crystal left the seed at 0 with a
+# "find this in polcore.dll" note, which is why its port never opened a real
+# blob; ours does, trailer checksum and all, on every real blob we have tried.
+#
+# The 40-byte plaintext is a check byte, 23 bytes that are the same for every
+# launch and every client, and at +24 a 16-byte hash:
+#
+#   md5( the 16 bytes we answered in 4:5 || login time u32 LE || session key 8 )
+#
+# (Crystal: PolGenerateContentsAuthHashCode). The login time is the clock we put
+# in the session token's first dword (authtoken.build_session_token), the key is
+# the Blowfish key the client ended the auth handshake with (all zero under
+# TOKEN0, the RSA-wrapped random otherwise). Every input is ours, so the lobby
+# can compute the hash the moment it answers 4:5 and file it under the session;
+# a title then decodes its blob, looks the hash up, and knows the member without
+# ever looking at an address. That is how SE told two consoles behind one
+# router apart, and it is what `member_for_blob` does.
+#
+# The MD5 order has not been seen live yet (the first PS2 launch with this code
+# proves or disproves it), so `hash_candidates` also files the two byte orders
+# of the key. A miss is logged by the title with the blob's hash, so a wrong
+# formula shows up as "no session filed this hash", never as a wrong member.
+# ---------------------------------------------------------------------------
+import hashlib
+import struct
+
+BLOB_LEN = 52
+HASH_OFF = 24
+#: polfilecrypt.KEY_REC48, embedded so the service image does not need tools/.
+_REC48_KEY = bytes.fromhex("cb8324b7ba3e9e0a")
+_M32 = 0xFFFFFFFF
+_M64 = (1 << 64) - 1
+_MAGIC = 0xA1652347
+
+#: Where a filed hash lives: `contentauth:h:<hex>` = JSON {sid, member_id, zone,
+#: peer_ip, at}, expiring with the session.
+HASH_KEY = "contentauth:h:"
+
+
+def _rotl32(v, n):
+    v &= _M32
+    return ((v << n) | (v >> (32 - n))) & _M32
+
+
+def _sq_schedule(key8):
+    k = int.from_bytes(key8, "little")
+    hi, lo = (k >> 32) & _M32, k & _M32
+    seed = ((_rotl32(lo, 8) << 32) | _rotl32(hi, 16)) & _M64
+    t = bytearray(seed.to_bytes(8, "little"))
+    t[0] = (t[0] + 69) & 0xFF
+    for i in range(1, 8):
+        b = t[i - 1]
+        x = (b + t[i] + 212) & _M32
+        x ^= (b << 2) & _M32
+        t[i] = (x ^ 0x45) & 0xFF
+    words, deltas = [], []
+    v = int.from_bytes(t, "little")
+    for _ in range(32):
+        words.append(v)
+        deltas.append((8 * 0x78 - sum(v.to_bytes(8, "little"))) & 0xFF)
+        v = (v * 5) & _M64
+    return words, deltas
+
+
+def _sq_decrypt(data, key8):
+    """polfilecrypt.decrypt: (payload, checksum_ok)."""
+    words, deltas = _sq_schedule(key8)
+    buf = bytearray(data)
+    cksum = 0
+    nblk = len(buf) // 8
+    for n in range(nblk):
+        pos, row = n * 8, n & 31
+        d = deltas[row]
+        prev = (n ^ 0x45) & 0xFF
+        blk = bytearray(8)
+        for j in range(8):
+            c = buf[pos + j]
+            blk[j] = ((prev ^ c) + d) & 0xFF
+            prev = c
+        x = int.from_bytes(blk, "little")
+        p = pos & _M32
+        pp = (p | (p << 10) | (p << 20) | (p << 30)) & _M64
+        y = ((x - words[row]) & _M64) ^ ((pp + _MAGIC) & _M64) ^ words[row]
+        y = ((y << 32) | (y >> 32)) & _M64
+        buf[pos:pos + 8] = y.to_bytes(8, "little")
+        if n < nblk - 1:
+            cksum = (cksum + buf[pos] + buf[pos + 4]) & _M32
+    n_, want = struct.unpack_from("<II", buf, len(buf) - 8)
+    return bytes(buf[:n_]), cksum == want
+
+
+def decode_blob(blob):
+    """The 16-byte hash inside a 52-byte credential blob, or None when the
+    bytes are not one (the outer check bytes or the trailer checksum fail).
+    Accepts anything 52 bytes or longer and reads the first 52."""
+    if blob is None or len(blob) < BLOB_LEN:
+        return None
+    a = bytearray(blob[:BLOB_LEN])
+    if not (a[1] == (a[6] ^ a[12]) and a[2] == (a[8] ^ a[10])
+            and a[3] == (a[9] ^ a[13])):
+        return None
+    for i in range(BLOB_LEN - 1, 4, -1):
+        a[i] ^= a[i - 1]
+    try:
+        plain, ok = _sq_decrypt(bytes(a[4:4 + 48]), _REC48_KEY)
+    except (ValueError, struct.error):
+        return None
+    if not ok or len(plain) < HASH_OFF + 16:
+        return None
+    return bytes(plain[HASH_OFF:HASH_OFF + 16])
+
+
+def hash_for(reply16, stamp, key8):
+    """What polcore hashes from our 4:5 reply, the session clock and the key."""
+    return hashlib.md5(bytes(reply16[:16]).ljust(16, b"\0")
+                       + struct.pack("<I", int(stamp) & _M32)
+                       + bytes(key8[:8]).ljust(8, b"\0")).digest()
+
+
+def hash_candidates(reply16, stamp, key8):
+    """The hashes to file for one 4:5: both byte orders of the key (Crystal
+    swaps it before hashing; which order polcore uses is settled by the first
+    live match). Under TOKEN0 the key is zero and the two coincide."""
+    k = bytes(key8[:8]).ljust(8, b"\0")
+    out = [hash_for(reply16, stamp, k)]
+    if k[::-1] != k:
+        out.append(hash_for(reply16, stamp, k[::-1]))
+    return out
+
+
+def file_hashes(hashes, member_id, sid, zone, peer_ip="", now=None):
+    """Lobby side: record which session (and member) a hash belongs to.
+    Returns how many were written."""
+    if member_id is None or not sid:
+        return 0
+    now = time.time() if now is None else now
+    row = json.dumps({"sid": sid, "member_id": int(member_id),
+                      "zone": int(zone or 0), "peer_ip": peer_ip or "",
+                      "at": now})
+    n = 0
+    for h in hashes:
+        if h and len(h) == 16:
+            kv.set(HASH_KEY + bytes(h).hex(), row, ttl=TTL)
+            n += 1
+    return n
+
+
+def member_for_hash(h):
+    """Title side: the row filed for this hash, or None."""
+    if not h or len(h) != 16:
+        return None
+    try:
+        row = json.loads(kv.get(HASH_KEY + bytes(h).hex()) or "null")
+    except (ValueError, TypeError):
+        return None
+    return row if isinstance(row, dict) and row.get("member_id") else None
+
+
+def member_for_blob(blob, log=None, tag="content auth"):
+    """(member_id, row, how) for the member whose POL login produced this
+    credential blob, or (None, None, why). This is the identity SE's titles
+    used; nothing here reads an address. `log` is called with one line that
+    says what happened, so a miss is diagnosable from the title's log."""
+    h = decode_blob(blob)
+    if h is None:
+        why = ("no credential blob (bytes fail the check or the trailer checksum)"
+               if blob is not None and len(blob) >= BLOB_LEN
+               else f"no credential blob ({0 if blob is None else len(blob)}B)")
+        if log:
+            log(f"{tag}: {why}")
+        return None, None, why
+    row = member_for_hash(h)
+    if row is None:
+        why = (f"blob decodes (hash {h.hex()[:12]}..) but no session filed that "
+               f"hash - the lobby has not seen this login's 4:5, or the hash "
+               f"formula differs from this client's polcore")
+        if log:
+            log(f"{tag}: {why}")
+        return None, None, why
+    how = (f"credential blob hash {h.hex()[:12]}.. filed by session "
+           f"{row.get('sid')} (member {row['member_id']}, zone {row.get('zone')})")
+    if log:
+        log(f"{tag}: {how}")
+    return int(row["member_id"]), row, how
+
+
+def blob_for_selftest(hash16):
+    """A 52-byte credential blob carrying `hash16`, built the way polcore builds
+    one (tools/polfilecrypt encrypts the 40-byte record; the outer XOR chain
+    and check bytes follow Crystal's generator). For the offline suites of the
+    titles, which need a blob that decode_blob accepts; the encryptor lives in
+    tools/, so no service calls this at run time."""
+    import sys as _sys
+    tools = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "tools")
+    if tools not in _sys.path:
+        _sys.path.insert(0, tools)
+    import polfilecrypt
+    plain = bytearray(40)
+    plain[4:8] = b"\x01\0\0\0"
+    plain[HASH_OFF:HASH_OFF + 16] = bytes(hash16[:16]).ljust(16, b"\0")
+    plain[0] = plain[27] ^ plain[37]
+    enc = bytearray(polfilecrypt.encrypt(bytes(plain), polfilecrypt.KEY_REC48))
+    assert len(enc) == 48
+    blob = bytearray(52)
+    blob[4:52] = enc
+    for i in range(5, 52):
+        blob[i] ^= blob[i - 1]
+    blob[0] = blob[14] ^ 0x5A
+    blob[1] = blob[6] ^ blob[12]
+    blob[2] = blob[8] ^ blob[10]
+    blob[3] = blob[9] ^ blob[13]
+    return bytes(blob)
+
+
 def selftest():
     """Round-trip through an in-memory store, with twins that must FAIL."""
     import tempfile
@@ -197,6 +427,32 @@ def selftest():
         print(f"  unknown member is not published: {'OK' if not wrote else 'FAIL'}")
         ok &= not wrote
         print(f"  mint is never zero: {'OK' if all(any(mint()) for _ in range(64)) else 'FAIL'}")
+        # The credential blob, built the way polcore builds it (tools/polfilecrypt
+        # encrypts; the outer XOR chain and check bytes follow Crystal's
+        # generator) and read back by decode_blob. Twins: a flipped byte, a
+        # short buffer, and a hash nobody filed.
+        want = hash_for(b"\0" * 16, 0x68E6A5B8, b"\0" * 8)
+        blob = bytearray(blob_for_selftest(want))
+        got = decode_blob(bytes(blob) + b"\xAA" * 28)      # FMO's PC 0x0321 is 80B
+        print(f"  blob decodes to the filed hash: {'OK' if got == want else 'FAIL'}")
+        ok &= got == want
+        bad = bytearray(blob)
+        bad[30] ^= 0x01
+        twins = (decode_blob(bytes(bad)) is None and decode_blob(bytes(blob[:51])) is None
+                 and decode_blob(None) is None)
+        print(f"  flipped byte / short / missing blob are refused: "
+              f"{'OK' if twins else 'FAIL'}")
+        ok &= twins
+        m0 = member_for_blob(bytes(blob))[0]
+        n = file_hashes(hash_candidates(b"\0" * 16, 0x68E6A5B8, b"\0" * 8), 7, "uABC", 1,
+                        "192.0.2.9", now=t0)
+        m1, row, how = member_for_blob(bytes(blob))
+        print(f"  unfiled hash names nobody, filed hash names member 7 "
+              f"({n} row written): {'OK' if m0 is None and m1 == 7 and row['sid'] == 'uABC' else 'FAIL'}")
+        ok &= m0 is None and m1 == 7 and n == 1
+        n2 = len(hash_candidates(b"\0" * 16, 1, bytes(range(8))))
+        print(f"  a non-palindromic key files both byte orders: {'OK' if n2 == 2 else 'FAIL'}")
+        ok &= n2 == 2
         # The rollout gate, through the FILE (env unset), and its twins.
         global ENABLE_FILE
         saved_ef, saved_env = ENABLE_FILE, os.environ.pop("POL_CONTENT_AUTH_MEMBERS", None)

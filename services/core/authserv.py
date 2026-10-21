@@ -188,6 +188,28 @@ def login_digest_salts(peer_ip, sent_greetings):
     return out
 
 
+def _member_jailed(db, member):
+    """True when this member's account is in the `jail` state.
+
+    Retail jail, read off the client: it is not a refusal code. The
+    successful login's gate record carries a flag at +0x21 (polcore 0x037db6f0:
+    `mov al,[esi+0x21]; test; je` -> `mov [0x0386aa8c],1`, read back by
+    cft_1273). app.dll's login machine (0x049facd4) then takes state 0x22
+    (0x049fb03d), opens POL_JAIL_USER_LOGIN_URL
+    (`info.playonline.com/snews/<lang>/jail.pml`, built at 0x049ff601) and ends
+    the login sequence with the Viewer up and the flag set for the session.
+
+    Either the member row or its POL ID row may say `jail`. POL_JAIL=0 turns
+    the state back into the old refusal (0xC9)."""
+    if os.environ.get("POL_JAIL", "1") != "1" or member is None:
+        return False
+    if member["status"] == "jail":
+        return True
+    row = db.execute("SELECT status FROM polid WHERE polid = %s",
+                     (member["polid"],)).fetchone()
+    return row is not None and row["status"] == "jail"
+
+
 def _lockout_policy():
     """(fails, window_s) from POL_LOGIN_LOCKOUT_FAILS / _WINDOW_S; fails 0 = off."""
     try:
@@ -271,6 +293,15 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                             f"(member id={member['id']}, polid={member['polid']})")
             _warn_stranded_registration(db, nick, peer_ip)
         reject_code = accounts.login_reject_code(db, member)
+        if (reject_code == logingate.REJECT_UNKNOWN_ID
+                and member["status"] == "jail" and _member_jailed(db, member)):
+            # JAIL IS NOT A REFUSAL. The client logs a jailed member in and
+            # learns of the jail from the gate record (see _member_jailed);
+            # login_reject_code refuses every non-active member with 0xC9, so
+            # the jail state is let through here and nowhere else.
+            reject_code = 0
+            log("accounts", f"{peer_ip} {nick!r} is JAILED: logged in, gate "
+                            f"record +0x21 set, jail.pml opens")
         if reject_code:
             log("accounts", f"{peer_ip} REJECT {nick!r}: member status="
                             f"{member['status']}, reject code={reject_code:#04x}")
@@ -278,7 +309,7 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
             return None, None, reject_code, None
         # LOCKED OUT? After POL_LOGIN_LOCKOUT_FAILS (5) passwords the NICK digest
         # REFUSED within POL_LOGIN_LOCKOUT_WINDOW_S (900 s), every login of this
-        # member is refused with SE's 0xCB -- the right password too, which is
+        # member is refused with 0xCD (POL-0206) -- the right password too, which is
         # the point of a lockout -- until enough of those failures age out of
         # the window. Counted in the database (login_fail), so authsess and the
         # login container agree. `accounts.py <db> unlock <polid|login>` ends
@@ -348,7 +379,7 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                             log("accounts", f"{peer_ip} *** {nick!r} LOCKED OUT: "
                                             f"{n} failed logins in "
                                             f"{lock_window}s -- refused with "
-                                            "0xCB until they age out ***")
+                                            "0xCD (POL-0206) until they age out ***")
                     except Exception as exc:
                         log("accounts", f"{peer_ip} could not count the failed "
                                         f"login ({exc!r})")
@@ -397,26 +428,58 @@ def resolve_account(nick, peer_ip, iv, lobby_port=None, cred=None,
                 # ARMED, and what arms it (registering, or an operator running
                 # `accounts.py arm`) follows a real password proof.
                 #
-                # A SECOND CLIENT on an account that already holds tokens is a
-                # different risk with a different cost: the signature changes
-                # per machine and per build (one account can hold several), so
-                # gating it would refuse people who are simply on a new PC.
-                # It is therefore allowed by default and only logged;
-                # POL_TOKEN_ARM_CLIENTS=1 gates it too.
+                # A SECOND CLIENT on an account that already holds tokens is
+                # gated the same way. It used to be only logged, because the signature changes per machine and per
+                # build (one account can hold several) and the gate refuses a
+                # player who is simply on a new PC. But an unproven build could
+                # then bind its own token to any account whose POL ID it knew,
+                # with no password proof at all. So a new client signature on
+                # an account that already holds a token needs the NICK digest
+                # proven (pw_proven) or a live arm window, like the first bind.
+                # POL_TOKEN_ARM_CLIENTS=0 restores the old, logged-only
+                # behaviour for an operator who prefers it.
                 first_ever = legacy is None and not accounts.list_client_tokens(
                     db, member["id"])
                 gate = os.environ.get("POL_TOKEN_ARM", "1") == "1" and (
                     first_ever or
-                    os.environ.get("POL_TOKEN_ARM_CLIENTS", "0") == "1")
+                    os.environ.get("POL_TOKEN_ARM_CLIENTS", "1") == "1")
+                # WHO CAN BE GATED. The digest can only be proven for an
+                # account whose password copy we hold (login_pw_sealed); it is
+                # captured at registration and at any password proof (website,
+                # in-Viewer servlet). Many older members
+                # have NO copy, and a Viewer update gives every player a new
+                # client signature, so gating them would refuse them after the
+                # next patch with nothing they could type to get in. For those
+                # the new-client bind stays trust-on-first-use, logged, until a
+                # password proof captures the copy. POL_TOKEN_ARM_NOCOPY=1
+                # gates them too.
+                if (gate and not first_ever
+                        and os.environ.get("POL_TOKEN_ARM_NOCOPY", "0") != "1"):
+                    try:
+                        has_copy = accounts.get_login_password(db, member["id"]) is not None
+                    except Exception:
+                        has_copy = True        # unreadable copy: stay strict
+                    if not has_copy:
+                        gate = False
+                        log("accounts", f"{peer_ip} {nick!r}: new client "
+                                        f"{client_sig!r} bound WITHOUT a password "
+                                        "proof (no password copy held for this "
+                                        "account; one password proof on the "
+                                        "website or in the Viewer captures it)")
                 if (gate and not pw_proven
                         and not accounts.login_token_armed(db, member["id"])):
                     log("accounts",
                         f"{peer_ip} REJECT {nick!r}: this account is not armed "
                         f"to bind a login token"
                         + (" (it has never been played)" if first_ever else
-                           f" for a new client {client_sig!r}")
+                           f" for a new client {client_sig!r} (the account "
+                           "already holds a token and the password digest "
+                           "was not proven for this build)")
                         + ". Run `accounts.py arm` to arm it for a while. "
-                        "POL_TOKEN_ARM=0 disables this.")
+                        "POL_TOKEN_ARM=0 disables this"
+                        + ("." if first_ever else
+                           "; POL_TOKEN_ARM_CLIENTS=0 relaxes the new-client "
+                           "case only."))
                     db.close()
                     return None, None, logingate.REJECT_BAD_PASSWORD, None
                 if scoped:
@@ -604,7 +667,7 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
     addr = _front_preamble_addr(conn, addr)
     # Re-bind the advertise peer to the REAL client: _serve_one bound the relay's
     # loopback socket, so every address this hop hands out (the lobby handoff
-    # token) fell back to the global tailnet IP -- the real PS2 got
+    # token) fell back to the global VPN IP -- the real PS2 got
     # `accept -> lobby 127.0.0.1:51220` on 2026-09-18 after the directory fix
     # had already landed. The dialed address is unknown behind the relay;
     # advertise_for derives it from the route to the peer.
@@ -746,6 +809,14 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
                 lobbysession.session_bind(sid)
                 log("authserv", f"{peer} session {sid} (from this launch's USER "
                                 f"token, {len(utok)}B)")
+            if stamp is not None:
+                # The two inputs polcore folds into every title's credential
+                # blob besides our 4:5 reply: the clock from the session token
+                # and the key the handshake ends with (zero under TOKEN0). The
+                # lobby reads both back when it answers 4:5 and files the hash
+                # the titles will present (contentauth.file_hashes).
+                lobbysession._session_put(sid, stamp=int(stamp),
+                                          skey=(rsa_key or b"\0" * 8).hex())
         lobbysession._session_put(lobbysession._session_sid(), peer_ip=addr[0], user_token=utok.decode(
             "latin-1", "replace") or None)
         # Client keyed K=0 (our token0); recover the per-connection OFB IV from the
@@ -1154,8 +1225,15 @@ def handle_authserv(conn, addr, port, srv_name, next_port):
                 log("authserv", f"{peer} gate list stamps (POL_GATE_LIST_STAMPS): "
                                 + ", ".join(f"0x{o:02X}={v}" for o, v in
                                             sorted(stamps.items())))
+            jailed = False
+            try:
+                jailed = (acct_db is not None and member is not None
+                          and _member_jailed(acct_db, member))
+            except Exception as exc:
+                log("authserv", f"{peer} jail check failed ({exc!r}); not jailed")
             gate_rec = logingate.build_gate_record(lobby_ip, lobby_port, pad_to=0,
-                                         unread=unread, stamps=stamps)
+                                         unread=unread, stamps=stamps,
+                                         jail=jailed)
             p = prefix[1:]
             # The gate/redirect record rides in a NOTICE payload (command NOTICE ->
             # FUN_037d7f90 -> FUN_037d7ef0 -> FUN_037db6f0). FUN_037d7ef0 tokenises the

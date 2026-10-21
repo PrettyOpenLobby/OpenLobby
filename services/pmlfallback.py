@@ -15,9 +15,16 @@ title's Play button. This module fills that gap with a minimal menu of our own:
     pml/main/ad01.pml                an empty banner list
     pcd/ntool/<lang>/latestnews.pml  an empty news ticker (newsgen's shape)
     pcd/mainmenu/<lang>/data.pml     a comment-only override file
-    <anything else>/index.pml and
-    pml/game/<code>/*.pml            a "page not available" page with a Back
-    any other .pml                   an empty fragment (a comment)
+    any other whole page             a "page not available" page with a Back
+    any fragment (an include target) an empty fragment (a comment)
+
+Page or fragment: a missing file is a FRAGMENT when its name is something a
+served page pulls in with `<include src=...>` (scanned from the www/ tree, see
+`include_names`), one of the stock fragment names, or SE's include naming
+(`in01`, `mnin01`, `mn01`, `style` ...). Everything else is a page the player
+navigated to, and a blank screen with nothing to click is the worst answer
+for that, so it gets the "not available" page and a way back. A fragment must
+stay a fragment: a whole page inlined into its host would break the host.
 
 It is a FALLBACK: the http door and the lobby band both look for a real file
 first and call `fallback_page` only on a miss, so a page you drop under www/
@@ -74,6 +81,8 @@ render in the real client):
 """
 import os
 import re
+import threading
+import time
 
 try:
     import contentlist
@@ -101,6 +110,13 @@ FRIEND_LIST_ID = 14
 #: inside another page and a whole page inlined there would break it.
 _FRAGMENT_NAMES = {"in01.pml", "ad01.pml", "style.pml", "data.pml",
                    "latestnews.pml", "cont1.pml"}
+
+#: SE's own include naming, for a fragment no served page names literally
+#: (its include src is computed): `in01`, `prin01`, `upin001`, `mnin01`,
+#: `mein01`, `mn01`, `cont1`, the per-title news/service feeds.
+_FRAGMENT_RE = re.compile(
+    r"(?:[a-z]{0,4}in\d+|mn\d+|cont\d*|style\w*|data|list|anews|sfst\d+"
+    r"|ad\d+|latestnews|detail)\.pml", re.I)
 
 HITBOX = "file:/img_s/general/im01s.png"
 STAGE_W, STAGE_H = 640, 480
@@ -313,18 +329,29 @@ def game_contentid(cid):
 
 
 def unavailable(rel):
-    """Any other whole page: say so, and offer a way back."""
+    """Any other whole page: say so, and offer a way back.
+
+    Back is `backward:`, the Viewer's own history step that SE's pages use
+    (`pml/event/*/evpm01.pml`), so the player lands where the dead link was.
+    A second row goes somewhere fixed in case there is no history to step
+    back through (a page opened straight from a Viewer menu): the title page
+    for a page under `pml/game/<title>/`, else the main menu."""
     m = re.match(r"pml/game/([^/]+)/", rel)
     cid = dir_to_id(m.group(1)) if m else None
-    if cid is not None:
-        back, where = "/pml/game/%s/index.pml" % game_dir(cid), title_of(cid)
+    rows = [("Back", "backward:", "Return to the previous page.")]
+    if cid is not None and not re.fullmatch(r"pml/game/[^/]+/index\.pml",
+                                            rel, re.I):
+        rows.append(("%s Top Page" % title_of(cid),
+                     "/pml/game/%s/index.pml" % game_dir(cid),
+                     "Return to the %s page." % title_of(cid)))
     else:
-        back, where = "toviewer:", "the PlayOnline main menu"
+        rows.append(("Main Menu", "toviewer:",
+                     "Return to the PlayOnline main menu."))
     return (_head("Page not available")
             + '<body altbgcolor="#00000000">\r\n'
             + _heading("Page not available",
-                       "This server has no page at " + esc("/" + rel))
-            + _rows([("Back", back, "Return to %s." % where)], back)
+                       "This page is not available on this server.")
+            + _rows(rows, "backward:")
             + _tail())
 
 
@@ -413,17 +440,105 @@ EMPTY_FRAGMENT = "<!-- -->\r\n"
 
 
 # --------------------------------------------------------------------------- #
+# which names are fragments
+# --------------------------------------------------------------------------- #
+_INCLUDE_SRC_RE = re.compile(rb'<include\b[^>]*?\bsrc\s*=\s*"([^"]*)"', re.I)
+_PML_NAME_RE = re.compile(rb"([A-Za-z0-9_.-]+\.pml)", re.I)
+_INCLUDE_CACHE = {}
+#: How long one scan of the tree is trusted, seconds. A page added under www/
+#: is picked up after this without a restart.
+INCLUDE_SCAN_TTL = 600
+
+
+_SCAN_LOCK = threading.Lock()
+_SCANNING = set()
+
+
+def include_names(www, wait=True):
+    """Lower-cased file names that any served PML pulls in with `<include>`.
+
+    Only the NAME is kept: SE writes include srcs as expressions
+    (`$C_PATH1+'mnin01.pml'`), so the directory is usually not literal, but
+    the file name almost always is. A name that is both included somewhere
+    and linked somewhere counts as a fragment, the safe side: an empty
+    fragment where a page was wanted costs a blank page, a whole page inlined
+    into a host costs the host."""
+    if not www or not os.path.isdir(www):
+        return frozenset()
+    now = time.time()
+    hit = _INCLUDE_CACHE.get(www)
+    if hit and now - hit[0] < INCLUDE_SCAN_TTL:
+        return hit[1]
+    if not wait:
+        # A cold scan of a full portal tree reads ~4,800 files and has taken
+        # tens of seconds on a cold disk, which is not a cost one page
+        # request should pay. Scan in the background; until the first scan
+        # lands the answer is None and the caller keeps the old behaviour.
+        with _SCAN_LOCK:
+            if www not in _SCANNING:
+                _SCANNING.add(www)
+                threading.Thread(target=_scan_bg, args=(www,),
+                                 daemon=True).start()
+        return hit[1] if hit else None
+    names = set()
+    for d, _dirs, files in os.walk(www):
+        for f in files:
+            low = f.lower()
+            if ".pml" not in low or low.endswith((".polprov", ".polmeta")):
+                continue
+            try:
+                with open(os.path.join(d, f), "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue
+            for src in _INCLUDE_SRC_RE.findall(raw):
+                for n in _PML_NAME_RE.findall(src):
+                    names.add(n.decode("ascii", "replace").lower())
+    out = frozenset(names)
+    _INCLUDE_CACHE[www] = (time.time(), out)
+    return out
+
+
+def _scan_bg(www):
+    try:
+        include_names(www, wait=True)
+    finally:
+        with _SCAN_LOCK:
+            _SCANNING.discard(www)
+
+
+def is_fragment(rel, www=None, wait=False):
+    """True when a missing `rel` is something a page includes, not a page.
+
+    While the first scan of `www` is still running, a name that is neither a
+    stock fragment nor a known page shape is treated as a fragment (the
+    behaviour before the scan existed), so nothing is ever inlined wrongly."""
+    base = rel.rsplit("/", 1)[-1].lower()
+    if base in _FRAGMENT_NAMES or _FRAGMENT_RE.fullmatch(base):
+        return True
+    if www is None:
+        www = os.environ.get("POL_WWW_DIR")
+    names = include_names(www, wait=wait)
+    if names is None:
+        return not (base == "index.pml"
+                    or re.fullmatch(r"pml/game/[^/]+/[^/]+", rel, re.I))
+    return base in names
+
+
+# --------------------------------------------------------------------------- #
 # the entry point
 # --------------------------------------------------------------------------- #
 def _bytes(text):
     return text.encode("ascii", "replace")
 
 
-def fallback_page(host, path, content_ids=None, gm_call=None):
+def fallback_page(host, path, content_ids=None, gm_call=None, www=None):
     """The built-in page for `path` (any host), as bytes, or None when the
     path is not a PML page at all. `host` is accepted for symmetry with the
     servers that call this and for logging; every portal host gets the same
-    built-in tree. `content_ids` / `gm_call` override the environment."""
+    built-in tree. `content_ids` / `gm_call` override the environment; `www`
+    is the served tree whose includes say which names are fragments
+    (default POL_WWW_DIR)."""
     rel = (path or "").split("?", 1)[0].split("#", 1)[0].lstrip("/")
     rel = rel.replace("\\", "/")
     if not rel.lower().endswith(".pml"):
@@ -441,7 +556,7 @@ def fallback_page(host, path, content_ids=None, gm_call=None):
         return _bytes(latestnews())
 
     m = re.fullmatch(r"pml/game/([^/]+)/([^/]+\.pml)", rel, re.IGNORECASE)
-    if m and base not in _FRAGMENT_NAMES:
+    if m and not is_fragment(rel, www):
         cid = dir_to_id(m.group(1))
         if cid is not None:
             if base == "index.pml":
@@ -450,9 +565,9 @@ def fallback_page(host, path, content_ids=None, gm_call=None):
                 return _bytes(game_contentid(cid))
         return _bytes(unavailable(rel))
 
-    if base == "index.pml" and base not in _FRAGMENT_NAMES:
-        return _bytes(unavailable(rel))
-    return _bytes(EMPTY_FRAGMENT)
+    if is_fragment(rel, www):
+        return _bytes(EMPTY_FRAGMENT)
+    return _bytes(unavailable(rel))
 
 
 if __name__ == "__main__":                       # print one page, for a look

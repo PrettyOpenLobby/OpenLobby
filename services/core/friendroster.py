@@ -137,7 +137,7 @@ def _do_send_friend_roster(chat_sess, member_id):
             "loadguid", "POL_FRIEND_LOAD_GUID", "client") != "handle"
         for slot, r in sorted(slot_of.items()):
             if not _friend_push_slot_ok(slot) or not r["peer_handle"]:
-                continue                 # past the PC table (and < 0x40)
+                continue                 # past the client's 200-row table
             hg = accounts.handle_guid(int(r["peer_handle"]))
             cg = 0
             if want_client:
@@ -182,13 +182,14 @@ def _friend_push_slot_ok(slot):
 
     A push files a friend row at `table + slot*0xB0`; the table holds 200 rows
     (the blacklist table sits exactly 100*0xB0 below it at 0x386fc18), so any
-    slot the 2:3 list can serve (`_LOBBY_LIST[(0x02, 0x03)][2]`, 0x40) is in
+    slot the 2:3 list can serve (`_LOBBY_LIST[(0x02, 0x03)][2]`, 200) is in
     bounds. The 2026-08 note here calling slot 12+ "an OUT-OF-BOUNDS WRITE"
     rested on the 12-row misread corrected in `_LOBBY_LIST`. Every friend push
     path -- the 2:3 presence burst, the row/icon spool, login/logout/status
     presence, the accept pushes, the roster load -- skips a slot this says no
     to, and the deliverers check it again so a spool line from anywhere cannot
-    get past; the push records' own slot byte (+0x1c) is documented `< 0x40`.
+    get past; the push records' own slot byte (+0x1c) is a full byte the
+    client checks `< 0xC8` (polcore 0x37e50f0).
     """
     try:
         return 0 <= int(slot) < handlelists._LOBBY_LIST[(0x02, 0x03)][2]

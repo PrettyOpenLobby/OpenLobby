@@ -7,8 +7,7 @@ solved this for itself: it published a live-match marker on every match
 message, and both deploy scripts DEFER a login/authsess restart while that
 marker is live and fresh. But the gate was hard-wired to one marker and two
 services, so a push while someone was in an FE field or an FMO sortie or a
-mahjong hanchan bounced their service anyway (memory:
-feworld-push-restarts-live-session, seen twice).
+mahjong hanchan bounced their service anyway.
 
 THE CONTRACT. Any session-carrying service calls `start_heartbeat(service,
 count_fn)` once, at startup. A daemon then publishes

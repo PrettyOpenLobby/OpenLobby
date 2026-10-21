@@ -4,7 +4,7 @@
 WHY THIS EXISTS. Until 2026-09-05 POP3 `USER <name>` / `PASS anything` opened
 any member's inbox, APOP was checked only for accounts that had opted into a
 plaintext mail password, and SMTP took any `MAIL FROM` -- so any peer on the
-tailnet could read anyone's mail and send as anyone. The Viewer never needed
+VPN could read anyone's mail and send as anyone. The Viewer never needed
 that laxity: PlayOnline Mail runs inside a signed-in Viewer, and the session
 table records the address each session was opened from. The rules now are:
 

@@ -485,10 +485,25 @@ class ValkeyKV(_Base):
     def publish(self, channel, message):
         return self._r.publish(self._k(channel), _text(message))
 
+    #: Back-off between attempts to re-open a lost subscription, in seconds.
+    SUBSCRIBE_RETRY = (1.0, 30.0)
+
     def subscribe(self, channels, callback):
+        """Deliver every message on `channels` to `callback(channel, data)`
+        until the returned Subscription is closed - across server restarts.
+
+        valkey-py's run_in_thread() worker ends on the first ConnectionError,
+        so a Valkey restart (2026-10-08: the compose recreate for the log caps)
+        silently ended the presence subscription in authsess for the life of
+        the process, with one traceback in the log. This loop owns the pubsub
+        object instead: on any error it closes it, waits (1 s doubling to
+        30 s), opens a new one and subscribes again. Messages published while
+        the subscription was down are lost, as pub/sub messages always are;
+        the subscribers here all poll as well, so that costs one tick.
+        """
         names = self._channels(channels)
         n = len(self.prefix)
-        ps = self._r.pubsub(ignore_subscribe_messages=True)
+        stop_ev = threading.Event()
 
         def handler(msg):
             try:
@@ -496,17 +511,36 @@ class ValkeyKV(_Base):
             except Exception as exc:                # keep the subscription alive
                 print(f"[kv] subscriber callback raised: {exc!r}")
 
-        ps.subscribe(**{self._k(c): handler for c in names})
-        t = ps.run_in_thread(sleep_time=0.2, daemon=True)
+        def loop():
+            delay = self.SUBSCRIBE_RETRY[0]
+            while not stop_ev.is_set():
+                ps = None
+                try:
+                    ps = self._r.pubsub(ignore_subscribe_messages=True)
+                    ps.subscribe(**{self._k(c): handler for c in names})
+                    delay = self.SUBSCRIBE_RETRY[0]
+                    while not stop_ev.is_set():
+                        # Messages with a handler are dispatched inside
+                        # get_message; it returns None for those.
+                        ps.get_message(ignore_subscribe_messages=True, timeout=0.2)
+                except Exception as exc:
+                    if stop_ev.is_set():
+                        break
+                    print(f"[kv] subscription to {','.join(names)} lost "
+                          f"({exc!r}); re-subscribing in {delay:.0f}s")
+                    stop_ev.wait(delay)
+                    delay = min(delay * 2, self.SUBSCRIBE_RETRY[1])
+                finally:
+                    if ps is not None:
+                        try:
+                            ps.close()
+                        except Exception:
+                            pass
 
-        def stop():
-            t.stop()
-            try:
-                ps.close()
-            except Exception:
-                pass
-
-        return Subscription(stop, t)
+        t = threading.Thread(target=loop, daemon=True,
+                             name="kv-subscribe:" + ",".join(names))
+        t.start()
+        return Subscription(stop_ev.set, t)
 
     def flush(self):
         """Drop every key under this prefix (tests)."""

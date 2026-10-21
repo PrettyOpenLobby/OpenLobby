@@ -10,7 +10,7 @@ from srvcore import hexdump, log
 # The canned cmd-8 reply, captured verbatim from the live SE patch server. Its
 # checksum (bytes 4:8) is SE's own and is valid for these exact bytes, so we can
 # replay it without reversing the checksum -- as long as we do not modify it.
-# status="registered", download host=124.150.156.107, latest version=20110829_E.
+# status="registered", download host=the retail patch server, latest version=20110829_E.
 # Our target client is already at 20110829_E, so current == latest and it never
 # downloads; the download host / checksum are therefore never exercised.
 POLP_CMD8 = bytes.fromhex(

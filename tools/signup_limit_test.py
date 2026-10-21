@@ -15,6 +15,7 @@ private addresses, and a global per-day cap has to be what bounds those.
 """
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "services"))
@@ -109,6 +110,40 @@ for _ in range(50):
     ucscgi.note_signup(PUB)
 chk("0 means no limit", ucscgi.signup_over_limit(PUB), None)
 ucscgi.SIGNUP_PER_DAY, ucscgi.SIGNUP_PER_IP = saved
+
+print("\nthe forwarded address: taken from a loopback/private peer only")
+chk("a loopback peer with X-Forwarded-For counts as the forwarded address",
+    ucscgi.forwarded_peer("127.0.0.1", PUB), PUB)
+chk("the FIRST address of a chain is the client",
+    ucscgi.forwarded_peer("10.0.0.5", PUB + ", 10.0.0.1"), PUB)  # polcheck: allow
+chk("a PUBLIC peer's X-Forwarded-For is ignored",
+    ucscgi.forwarded_peer(PUB2, PUB), PUB2)
+chk("an unparsable header leaves the peer alone",
+    ucscgi.forwarded_peer("127.0.0.1", "not-an-address"), "127.0.0.1")
+chk("no header, no change", ucscgi.forwarded_peer("127.0.0.1", None), "127.0.0.1")
+
+print("\nrefused registration codes lock an address out")
+ucscgi.REGCODE_LOCK_FAILS, ucscgi.REGCODE_LOCK_WINDOW = 3, 900.0
+with ucscgi._RC_LOCK:
+    ucscgi._RC_FAILS.clear()
+chk("fresh address is not locked", ucscgi.regcode_locked(PUB), False)
+ucscgi.note_regcode_failure(PUB)
+ucscgi.note_regcode_failure(PUB)
+chk("two refusals: still allowed", ucscgi.regcode_locked(PUB), False)
+ucscgi.note_regcode_failure(PUB)
+chk("the third locks it", ucscgi.regcode_locked(PUB), True)
+chk("...and a different address is unaffected", ucscgi.regcode_locked(PUB2), False)
+chk("loopback is never counted (the terminator is not a person)",
+    (ucscgi.note_regcode_failure("127.0.0.1"), ucscgi.note_regcode_failure("127.0.0.1"),
+     ucscgi.note_regcode_failure("127.0.0.1"), ucscgi.regcode_locked("127.0.0.1")),
+    (None, None, None, False))
+chk("the window ages refusals out",
+    ucscgi.regcode_locked(PUB, now=time.time() + 901), False)
+ucscgi.clear_regcode_failures(PUB)
+chk("a redeemed code clears the count", ucscgi.regcode_locked(PUB), False)
+ucscgi.REGCODE_LOCK_FAILS = 0
+ucscgi.note_regcode_failure(PUB)
+chk("0 means no lockout", ucscgi.regcode_locked(PUB), False)
 
 print("\nFAILURES:", bad)
 sys.exit(1 if bad else 0)

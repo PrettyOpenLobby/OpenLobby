@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <link rel="manifest" href="/manifest.webmanifest">
-  <meta name="theme-color" content="#1c1f28">
+  <meta name="theme-color" content="#13161c" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
   <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -13,32 +14,83 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <title>OpenLobby Admin</title>
   <style>
+    /* Colours: dark unless the system or the theme switch asks for light. */
     :root {
-      --bg: #14161c; --panel: #1c1f28; --panel2: #232733; --line: #333949;
-      --text: #e6e8ee; --muted: #9aa2b4; --accent: #5aa9ff; --good: #57d38c;
-      --warn: #ffcf6b; --bad: #ff7a7a;
+      --bg: #0f1216; --panel: #161a20; --panel2: #1d222a; --line: #2a303b;
+      --text: #e6e9ef; --muted: #9aa3b2; --accent: #6ea6ff; --on-accent: #04121f;
+      --good: #43c08f; --warn: #e5a63e; --bad: #f2736b;
+      --hover: rgba(255,255,255,.05); --scheme: dark; --side: #13161c;
     }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) {
+        --bg: #f4f5f8; --panel: #ffffff; --panel2: #eef0f4; --line: #dde1e8;
+        --text: #161a21; --muted: #566070; --accent: #1f5fd6; --on-accent: #ffffff;
+        --good: #0f7a54; --warn: #935800; --bad: #c13a32;
+        --hover: rgba(0,0,0,.04); --scheme: light; --side: #ffffff;
+      }
+    }
+    :root[data-theme="light"] {
+      --bg: #f4f5f8; --panel: #ffffff; --panel2: #eef0f4; --line: #dde1e8;
+      --text: #161a21; --muted: #566070; --accent: #1f5fd6; --on-accent: #ffffff;
+      --good: #0f7a54; --warn: #935800; --bad: #c13a32;
+      --hover: rgba(0,0,0,.04); --scheme: light; --side: #ffffff;
+    }
+    :root { color-scheme: var(--scheme); }
     * { box-sizing: border-box; }
     body { margin: 0; font: 14px/1.45 'Segoe UI', system-ui, sans-serif;
       background: var(--bg); color: var(--text); }
-    header { padding: 10px 20px; border-bottom: 1px solid var(--line);
-      display: flex; align-items: center; gap: 16px; background: var(--panel);
-      position: sticky; top: 0; z-index: 30; }
-    header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
-    header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); }
-    nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none;
-      min-width: 0; flex: 1 1 auto; }
-    nav::-webkit-scrollbar { display: none; }
-    nav button { background: none; border: 0; color: var(--muted); padding: 7px 12px;
-      border-radius: 7px; cursor: pointer; font-size: 14px; white-space: nowrap; }
-    nav button:hover { color: var(--text); }
-    nav button.active { background: var(--panel2); color: var(--text); }
-    main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+    /* The shell: a sidebar of sections, each with a row of sub-tabs */
+    .shell { display: flex; min-height: 100vh; }
+    .side { flex: 0 0 236px; background: var(--side); border-right: 1px solid var(--line);
+      padding: max(14px, env(safe-area-inset-top)) 12px 14px max(12px, env(safe-area-inset-left));
+      display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0;
+      height: 100vh; overflow-y: auto; z-index: 30; }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 16px;
+      font-weight: 600; font-size: 15px; }
+    .brand .logo { width: 28px; height: 28px; border-radius: 7px; background: var(--accent);
+      color: var(--on-accent); display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+    .brand small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+    .side .grp { display: flex; align-items: center; gap: 10px; padding: 0 10px; min-height: 40px;
+      border-radius: 8px; color: var(--muted); background: none; border: 0; font: inherit;
+      font-weight: 500; cursor: pointer; text-align: left; width: 100%; }
+    .side .grp:hover { background: var(--hover); color: var(--text); }
+    .side .grp.on { background: var(--panel2); color: var(--text); }
+    .side .grp svg { width: 18px; height: 18px; flex: none; }
+    .side .grp .navbadge { margin-left: auto; }
+    .side .subnav { display: flex; flex-direction: column; margin: 2px 0 6px 26px;
+      border-left: 1px solid var(--line); padding-left: 6px; }
+    .side .subnav[hidden] { display: none; }
+    .side .foot { margin-top: auto; padding: 12px 6px 0; border-top: 1px solid var(--line);
+      display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; color: var(--muted); }
+    .side .foot .row2 { display: flex; gap: 6px; flex-wrap: wrap; }
+    .who { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .who button, .side .foot button { background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); padding: 5px 10px; border-radius: 7px;
+      cursor: pointer; font-size: 12.5px; }
+    .main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+    .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px;
+      padding: max(16px, env(safe-area-inset-top)) 28px 0; }
+    .topbar h1 { margin: 0; font-size: 22px; font-weight: 600; flex: 1 1 auto; }
+    .topbar .menu { display: none; background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; width: 40px; height: 40px;
+      align-items: center; justify-content: center; cursor: pointer; }
+    .topbar .menu svg { width: 20px; height: 20px; }
+    .subtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto;
+      padding: 0 28px; margin-top: 12px; scrollbar-width: none; }
+    .subtabs::-webkit-scrollbar { display: none; }
+    .subtabs[hidden] { display: none; }
+    .subtabs button { background: none; border: 0; border-bottom: 2px solid transparent;
+      color: var(--muted); padding: 10px 12px; font: inherit; font-weight: 500; cursor: pointer;
+      white-space: nowrap; }
+    .subtabs button:hover { color: var(--text); }
+    .subtabs button.active { color: var(--text); border-color: var(--accent); }
+    .subhide { display: none !important; }
+    .scrim { display: none; }
+    main { padding: 20px 28px; max-width: 1240px; width: 100%; box-sizing: border-box; }
     .tab { display: none; } .tab.active { display: block; }
     .panel { background: var(--panel); border: 1px solid var(--line);
       border-radius: 10px; padding: 16px 18px; margin-bottom: 18px; }
-    .panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted);
-      text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
+    .panel h2 { margin: 0 0 12px; font-size: 15px; color: var(--text); font-weight: 600; }
     label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
     input[type=text], input[type=datetime-local], textarea, select { background: var(--panel2); color: var(--text);
       border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
@@ -46,7 +98,7 @@
     textarea { font: 12.5px/1.5 'Consolas', monospace; resize: vertical; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
     .row > div { flex: 1; min-width: 160px; }
-    button.act { background: var(--accent); color: #04121f; border: 0;
+    button.act { background: var(--accent); color: var(--on-accent); border: 0;
       padding: 9px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; }
     button.ghost { background: var(--panel2); color: var(--text);
       border: 1px solid var(--line); padding: 9px 14px; border-radius: 8px; cursor: pointer; }
@@ -54,7 +106,7 @@
        there are unsaved edits. Needed because `button.ghost` is declared AFTER
        `button.act` at the same specificity, so adding `act` to a ghost button
        did nothing at all: Save had never once lit up for a dirty store. */
-    button.ghost.act { background: var(--accent); color: #04121f;
+    button.ghost.act { background: var(--accent); color: var(--on-accent);
       border-color: transparent; font-weight: 600; }
     .chips { display: flex; gap: 8px; flex-wrap: wrap; }
     .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2);
@@ -167,12 +219,6 @@
     .fileitem .badge.original { border-color: rgba(87,211,140,.45); color: var(--good); }
     .filelist .empty { color: var(--muted); padding: 16px; font-size: 13px; }
 
-    /* header identity / sign-out */
-    header .who { margin-left: auto; display: flex; align-items: center; gap: 10px;
-      color: var(--muted); font-size: 12.5px; }
-    header .who button { background: var(--panel2); color: var(--text);
-      border: 1px solid var(--line); padding: 5px 12px; border-radius: 7px;
-      cursor: pointer; font-size: 12.5px; }
     /* security tab */
     input[type=password] { background: var(--panel2); color: var(--text);
       border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
@@ -232,7 +278,7 @@
     .datefield button { flex: none; white-space: nowrap; padding: 8px 12px; }
     input[type=datetime-local] { background: var(--panel2); color: var(--text);
       border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
-      font: inherit; flex: none; color-scheme: dark; }
+      font: inherit; flex: none; color-scheme: var(--scheme); }
 
     /* destructive actions + confirm dialog */
     button.danger { background: none; color: var(--bad); border: 1px solid var(--line);
@@ -297,7 +343,7 @@
     .gm-filter button { background: none; border: 0; color: var(--muted);
       padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 12px; }
     .gm-filter button.on { background: var(--line); color: var(--text); }
-    #gmList { max-height: 560px; overflow-y: auto; color-scheme: dark; }
+    #gmList { max-height: 560px; overflow-y: auto; color-scheme: var(--scheme); }
     .gm-item { padding: 10px 14px; border-top: 1px solid var(--line);
       cursor: pointer; display: grid; gap: 2px; }
     .gm-item:hover { background: var(--panel2); }
@@ -359,7 +405,7 @@
     .gm-chat-state.warn { color: var(--warn); }
     .gm-log { background: var(--panel2); border: 1px solid var(--line);
       border-radius: 8px; padding: 12px; height: 340px; overflow-y: auto;
-      display: flex; flex-direction: column; gap: 8px; color-scheme: dark; }
+      display: flex; flex-direction: column; gap: 8px; color-scheme: var(--scheme); }
     .gm-msg { max-width: 78%; display: flex; flex-direction: column; gap: 2px;
       align-self: flex-start; }
     .gm-msg .gm-meta { font-size: 11px; color: var(--muted); }
@@ -408,7 +454,7 @@
       border-radius: 9px; background: var(--warn); color: #1a1406; font-size: 11px;
       font-weight: 700; line-height: 18px; text-align: center; }
     .navbadge[hidden] { display: none; }
-    .navbadge.info { background: var(--accent); color: #04121f; }
+    .navbadge.info { background: var(--accent); color: var(--on-accent); }
     [hidden] { display: none !important; }
     .permchip { display: inline-block; font-size: 11px; padding: 1px 8px; margin: 1px 3px 1px 0;
       border-radius: 20px; background: rgba(90,169,255,.13); color: var(--accent); }
@@ -426,6 +472,26 @@
       margin-right: 8px; background: var(--muted); vertical-align: middle; }
     .dot.ok { background: var(--good); } .dot.bad { background: var(--bad); }
     .dot.warn { background: var(--warn); }
+    .ops-sum { font-size: 15px; margin-bottom: 10px; }
+    .ops-sum.bad { color: var(--bad); } .ops-sum.ok { color: var(--good); }
+    .ops-list { list-style: none; margin: 0; padding: 0; }
+    .ops-list li { display: flex; align-items: center; gap: 12px; padding: 9px 0;
+      border-top: 1px solid var(--line); }
+    .ops-list li:first-child { border-top: 0; }
+    .ops-list .ops-text { flex: 1; min-width: 0; }
+    .ops-list .ops-name { font-weight: 600; }
+    .ops-list .ops-detail { color: var(--muted); font-size: 13px; margin-top: 2px; }
+    .ops-list li.bad .ops-detail { color: var(--bad); }
+    .ops-list li.quiet { padding: 6px 0; }
+    .ops-list li.quiet .ops-detail { display: none; }
+    .ops-list .ops-restart { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .ops-list button { flex: none; }
+    .ops-hist { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+    .ops-hist .fail { color: var(--bad); }
+    @media (max-width: 560px) {
+      .ops-list li { flex-wrap: wrap; }
+      .ops-list button { width: 100%; }
+    }
     .modal .card.wide { max-width: 860px; }
     .acct-head { display: flex; justify-content: space-between; gap: 12px;
       align-items: flex-start; margin-bottom: 12px; }
@@ -456,7 +522,7 @@
     .toolbar .grow { flex: 1 1 200px; }
     .toolbar input[type=search] { background: var(--panel2); color: var(--text);
       border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px;
-      font: inherit; width: 100%; color-scheme: dark; }
+      font: inherit; width: 100%; color-scheme: var(--scheme); }
     .toolbar .count { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
     .seg { display: inline-flex; gap: 2px; background: var(--panel2);
       border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
@@ -472,17 +538,38 @@
     .clients { color: var(--muted); font-size: 12px; }
     .muted { color: var(--muted); }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+    .botgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+               gap: 18px; align-items: start; }
+    .botgrid .panel { margin: 0; }
+    .botgrid h3 { margin: 0 0 2px; font-size: 15px; }
+    .botgrid .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; overflow-wrap: anywhere; }
+    .botgrid code { overflow-wrap: anywhere; }
+    .botgrid .rowacts { justify-content: flex-start; margin-top: 10px; }
+    .botgrid a.btnlink { background: var(--panel2); color: var(--text); text-decoration: none;
+      border: 1px solid var(--line); padding: 4px 10px; font-size: 12px; border-radius: 7px; }
+    .botgrid button:disabled { opacity: .45; cursor: default; }
+    .botcheck { list-style: none; margin: 4px 0 10px; padding: 0; font-size: 12.5px; }
+    .botcheck li { display: flex; gap: 8px; padding: 3px 0; overflow-wrap: anywhere; }
+    .botcheck .mark { flex: 0 0 16px; text-align: center; font-weight: 700; }
+    .botcheck li.ok .mark { color: var(--good); }
+    .botcheck li.todo .mark { color: var(--accent); }
+    .botcheck li.warn .mark { color: var(--warn); }
+    .botcheck li.info .mark { color: var(--muted); }
+    .botcheck b { font-weight: 600; }
+    .pill.live { background: rgba(87,211,140,.15); color: var(--good); }
+    .pill.wait { background: rgba(255,207,107,.15); color: var(--warn); }
+    .pill.env { background: rgba(154,162,180,.15); color: var(--muted); }
+    .pill.off { background: rgba(255,122,122,.15); color: var(--bad); }
     .grid2 > .panel { margin-bottom: 18px; }
+    .grid2 > * { min-width: 0; }
+    .feed li .t1 { min-width: 0; overflow-wrap: anywhere; }
+    .feed li .t2 { flex: none; }
     @media (max-width: 960px) { .grid2 { grid-template-columns: 1fr; } }
     .flash { animation: flash 1.2s ease-out; }
     @keyframes flash { from { box-shadow: 0 0 0 3px rgba(90,169,255,.6); } to { box-shadow: none; } }
-    header .tools { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
     #installBtn[hidden] { display: none; }
     /* Installed on a notched phone the page runs edge to edge (viewport-fit),
-       so keep the header and the content clear of the notch and home bar. */
-    header { padding-top: max(10px, env(safe-area-inset-top));
-      padding-left: max(20px, env(safe-area-inset-left));
-      padding-right: max(20px, env(safe-area-inset-right)); }
+       so keep the content clear of the notch and home bar. */
     main { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
     .toast { bottom: max(20px, env(safe-area-inset-bottom)); }
     /* An installed app has no browser chrome, so tap highlights and
@@ -490,9 +577,8 @@
     @media (display-mode: standalone) {
       body { -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
     }
-    header .tools .who { margin-left: 0; }
     #refreshBtn { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-      padding: 5px 10px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+      padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; }
     .kbd { font: 11px 'Consolas', monospace; border: 1px solid var(--line);
       border-radius: 4px; padding: 0 5px; color: var(--muted); }
 
@@ -503,7 +589,7 @@
       padding: 14px 16px; cursor: pointer; text-align: left; color: var(--text);
       font: inherit; display: flex; flex-direction: column; gap: 2px; }
     .stat:hover { border-color: #4b5468; }
-    .stat .lab { color: var(--muted); font-size: 12px; text-transform: uppercase;
+    .stat .lab { color: var(--muted); font-size: 13px; text-transform: none;
       letter-spacing: .5px; font-weight: 600; }
     .stat .num { font-size: 26px; font-weight: 600; line-height: 1.2;
       font-variant-numeric: tabular-nums; }
@@ -511,6 +597,31 @@
     .stat.warn .num { color: var(--warn); }
     .stat.good .num { color: var(--good); }
     .feed { list-style: none; margin: 0; padding: 0; }
+    .perm-edit { display: flex; flex-direction: column; gap: 8px; }
+    .perm-edit label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
+    .perm-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .perm-h { font-weight: 600; margin-top: 8px; }
+    .perm-core { display: grid; gap: 4px 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+    .perm-game { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 7px 0;
+      border-top: 1px solid var(--line); }
+    .perm-game .perm-view { flex: 0 0 210px; font-weight: 600; }
+    .perm-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+    .perm-tools .chip { padding: 3px 10px; font-size: 12.5px; }
+    .panel h2 .h2act { margin-left: auto; font-size: 13px; font-weight: 500; color: var(--accent);
+      text-decoration: none; }
+    .panel h2 .h2sub { font-size: 13px; font-weight: 400; color: var(--muted); }
+    .panel h2:has(.h2act) { display: flex; align-items: baseline; gap: 8px; }
+    .ov-tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+    .ov-tile { display: flex; flex-direction: column; gap: 4px; background: var(--panel2);
+      border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; color: var(--text);
+      text-decoration: none; min-width: 0; }
+    .ov-tile:hover { border-color: var(--muted); }
+    .ov-tile .nm { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .ov-tile .nm span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ov-tile .n { font-size: 20px; font-weight: 600; }
+    .ov-tile .n small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 4px; }
+    .ov-tile .d { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; }
     .feed li { display: flex; justify-content: space-between; gap: 12px;
       padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; cursor: pointer; }
     .feed li:first-child { border-top: 0; }
@@ -545,40 +656,103 @@
         justify-content: flex-start; padding-top: 8px; }
       .toolbar .seg { flex-wrap: wrap; }
     }
-    @media (max-width: 700px) {
-      header { flex-wrap: wrap; gap: 8px 12px; padding: max(10px, env(safe-area-inset-top))
-        max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); }
-      header nav { order: 3; flex-basis: 100%; }
-      header .tools { margin-left: auto; }
+    /* A phone or a narrow window: the sidebar slides in over the page from
+       the menu button */
+    @media (max-width: 900px) {
+      .side { position: fixed; left: 0; top: 0; bottom: 0; width: 260px;
+        transform: translateX(-105%); transition: transform .18s ease; }
+      body.sideopen .side { transform: none; box-shadow: 0 0 40px rgba(0,0,0,.35); }
+      body.sideopen .scrim { display: block; position: fixed; inset: 0; z-index: 29;
+        background: rgba(0,0,0,.35); }
+      .topbar .menu { display: inline-flex; }
+      .topbar { padding: max(12px, env(safe-area-inset-top)) 16px 0; }
+      .subtabs { padding: 0 16px; }
       main { padding: 16px; }
       .panel { padding: 14px; }
     }
 
     /* ---- PML preview: layout ---- */
     body.wide main { max-width: none; }
-    /* Games: a menu of each title's tools beside the open one */
-    .gx { display: grid; grid-template-columns: 220px 1fr; gap: 16px; align-items: start; }
-    .gx-side { margin-bottom: 0; position: sticky; top: 70px; }
-    .gx-game { margin-bottom: 14px; }
-    .gx-game:last-child { margin-bottom: 0; }
-    .gx-game h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--text); }
-    .gx-game button { display: block; width: 100%; text-align: left; background: none;
-      border: 0; border-radius: 7px; color: var(--muted); padding: 7px 10px; cursor: pointer;
-      font: inherit; }
-    .gx-game button:hover { color: var(--text); background: var(--panel2); }
-    .gx-game button.on { color: var(--text); background: var(--panel2);
-      box-shadow: inset 3px 0 0 var(--accent); }
-    .gx-frame { width: 100%; height: calc(100vh - 110px); min-height: 480px; display: block;
+    /* Games (games.js): a list of the server's games beside the open one --
+       every game's card, or one game's page with its tools as tabs */
+    .gx { display: block; }
+    .side .gx-item { min-height: 32px; font-size: 13px; }
+    .gx-item { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px;
+      text-align: left; background: none; border: 0; border-radius: 7px; color: var(--muted);
+      padding: 0 10px; cursor: pointer; font: inherit; }
+    .gx-item:hover, .gx-item.on { color: var(--text); background: var(--panel2); }
+    .gx-item .n { margin-left: auto; font-size: 12px; color: var(--muted); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block;
+      background: var(--good); }
+    .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+    .dot.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+    .gx .pill { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2);
+      color: var(--muted); font-weight: 500; white-space: nowrap; }
+    .gx .pill.good { color: var(--good); } .gx .pill.warn { color: var(--warn); }
+    .gx .pill.bad { color: var(--bad); } .gx .pill.off { background: var(--panel2); color: var(--muted); }
+    .gx .muted { color: var(--muted); } .gx .strong { font-weight: 600; }
+    .gx .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+    .gx-main { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+    .gx-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+    .gx-title { margin: 0; font-size: 21px; font-weight: 600; color: var(--text);
+      display: flex; align-items: center; gap: 10px; }
+    .gx-title .pill { font-size: 12px; }
+    .gx-crumb { font-size: 13px; color: var(--muted); margin-bottom: -10px; }
+    .gx-crumb a { color: var(--muted); text-decoration: none; }
+    .gx-crumb a:hover { color: var(--text); }
+    .gx-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); }
+    .gx-card { display: flex; flex-direction: column; gap: 12px; margin: 0; text-align: left;
+      font: inherit; color: var(--text); cursor: pointer; }
+    .gx-card:hover { border-color: var(--muted); }
+    .gx-head { display: flex; align-items: flex-start; gap: 10px; }
+    .gx-head .dot { margin-top: 7px; }
+    .gx-name { flex: 1; min-width: 0; font-weight: 600; font-size: 15px; }
+    .gx-name small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+    .gx-nums { display: flex; gap: 22px; }
+    .gx-nums span { font-size: 12px; color: var(--muted); }
+    .gx-nums b { display: block; font-size: 21px; font-weight: 600; color: var(--text); }
+    .gx-line { font-size: 13px; color: var(--muted); }
+    .gx-chips { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+    .gx-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+    .gx-tabs a { padding: 9px 12px; color: var(--muted); text-decoration: none; font-weight: 500;
+      border-bottom: 2px solid transparent; white-space: nowrap; }
+    .gx-tabs a:hover { color: var(--text); }
+    .gx-tabs a.on { color: var(--text); border-color: var(--accent); }
+    .gx-stats { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+    .gx-stat { margin: 0; }
+    .gx-stat .k { font-size: 13px; color: var(--muted); }
+    .gx-stat .v { font-size: 24px; font-weight: 600; margin-top: 2px; }
+    .gx-stat .v.long { font-size: 15px; margin-top: 8px; }
+    .gx-stat .s { font-size: 12px; color: var(--muted); min-height: 1em; }
+    .gx-layout { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+    .gx-layout .panel { margin: 0; min-width: 0; }
+    .gx-layout h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; display: flex;
+      align-items: center; gap: 8px; }
+    .gx-layout h3 button { margin-left: auto; }
+    .gx-wide { grid-column: 1 / -1; }
+    .gx-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .gx-row:last-child { border-bottom: 0; }
+    .gx-scroll { max-height: 420px; overflow-y: auto; padding-right: 4px; }
+    .gx-facts { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 10px 0 0; font-size: 13px; }
+    .gx-facts dt { color: var(--muted); } .gx-facts dd { margin: 0; }
+    .gx-ops { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+    .gx-acts { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+    .gx-act { display: flex; flex-direction: column; gap: 8px; background: var(--panel2);
+      border-radius: 9px; padding: 12px 14px; }
+    .gx-act label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+    .gx-act button { align-self: flex-start; }
+    .gx-act input[type=text] { background: var(--bg); width: 100%; }
+    .gx > * { min-width: 0; }
+    .gx-frame { width: 100%; height: calc(100vh - 230px); min-height: 480px; display: block;
       border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
-      color-scheme: dark; }
-    .gx-empty { color: var(--muted); }
+      color-scheme: var(--scheme); }
     @media (max-width: 800px) {
       .gx { grid-template-columns: 1fr; }
-      .gx-side { position: static; }
-      .gx-game { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-      .gx-game h3 { width: 100%; }
-      .gx-game button { width: auto; }
-      .gx-frame { height: calc(100vh - 170px); }
+      .gx-layout, .gx-grid { grid-template-columns: minmax(0, 1fr); }
+      .gx-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .gx-layout .panel { padding: 14px; }
+      .gx-frame { height: calc(100vh - 260px); }
     }
     .pv { display: grid; grid-template-columns: 300px minmax(0, 1fr) auto; gap: 16px;
       align-items: start; }
@@ -587,7 +761,7 @@
       display: flex; flex-direction: column; gap: 8px; }
     .pv-side input[type=search] { background: var(--panel2); color: var(--text);
       border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font: inherit;
-      width: 100%; color-scheme: dark; }
+      width: 100%; color-scheme: var(--scheme); }
     .pv-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .pv-filters summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
     .pv-lang label { margin: 0; color: var(--muted); font-size: 12.5px; }
@@ -595,7 +769,7 @@
     .pv-filters label { margin: 8px 0 3px; }
     .pv-filters select { padding: 6px 8px; }
     .pv-list { overflow-y: auto; flex: 1 1 auto; min-height: 120px; margin: 0 -12px;
-      border-top: 1px solid var(--line); color-scheme: dark; }
+      border-top: 1px solid var(--line); color-scheme: var(--scheme); }
     .pv-item { padding: 7px 12px; cursor: pointer; border-bottom: 1px solid rgba(51,57,73,.5); }
     .pv-item:hover { background: var(--panel2); }
     .pv-item.active { background: rgba(90,169,255,.14); box-shadow: inset 3px 0 0 var(--accent); }
@@ -637,7 +811,7 @@
     .pv-log summary .sp { flex: 1; }
     .pv-loglist { max-height: 220px; overflow-y: auto; margin-top: 6px; border: 1px solid var(--line);
       border-radius: 7px; background: var(--panel2); font: 11.5px 'Consolas', monospace;
-      color-scheme: dark; }
+      color-scheme: var(--scheme); }
     .pv-ev { display: grid; grid-template-columns: 58px 58px 1fr; gap: 8px; padding: 2px 8px;
       border-bottom: 1px solid rgba(51,57,73,.5); }
     .pv-ev .t { color: var(--muted); text-align: right; }
@@ -729,10 +903,10 @@
     .nw-status .dot { margin-right: 6px; }
     .nw-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
       gap: 16px; align-items: start; }
-    @media (max-width: 1100px) { .nw-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 1100px) { .nw-grid { grid-template-columns: minmax(0, 1fr); } }
     .nw-list-panel { padding: 6px 0; }
     .nw-list { max-height: 260px; overflow-y: auto; }
-    .nw-item { display: grid; grid-template-columns: auto 1fr auto; gap: 10px;
+    .nw-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px;
       align-items: center; padding: 9px 14px; cursor: pointer;
       border-bottom: 1px solid rgba(51,57,73,.6); }
     .nw-item:last-child { border-bottom: 0; }
@@ -767,66 +941,80 @@
   </style>
 </head>
 <body>
-  <header>
-    <span class="dot"></span>
-    <h1>OpenLobby Admin</h1>
-    <nav>
-      <button data-tab="overview" class="active">Overview</button>
-      <button data-tab="accounts">Accounts</button>
-      <button data-tab="codes">Codes</button>
-      <button data-tab="reports">Reports<span class="navbadge info" id="reportsBadge" hidden></span></button>
-      <button data-tab="issues">Issues<span class="navbadge info" id="issuesBadge" hidden></span></button>
-      <button data-tab="gmcalls">GM Calls<span class="navbadge" id="gmBadge" hidden></span></button>
-      <button data-tab="news">News</button>
-      <button data-tab="pml">PML Preview</button>
-      <button data-tab="games">Games</button>
-      <button data-tab="security">Security</button>
+  <div class="shell">
+    <nav class="side" id="side" aria-label="Sections">
+      <div class="brand"><div class="logo" aria-hidden="true">OL</div><div>OpenLobby Admin<small>Server admin</small></div></div>
+      <button class="grp" data-group="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>Overview</button>
+      <button class="grp" data-group="players"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"></path></svg>Players</button>
+      <button class="grp" data-group="inbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 13l3-8h12l3 8v6H3z"></path><path d="M3 13h5l1 2h6l1-2h5"></path></svg>Inbox<span class="navbadge" id="inboxBadge" hidden></span></button>
+      <button class="grp" data-group="games"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="2" y="7" width="20" height="11" rx="4"></rect><path d="M7 11v3M5.5 12.5h3"></path><circle cx="16" cy="12" r="1"></circle><circle cx="18" cy="14" r="1"></circle></svg>Games</button>
+      <div class="subnav" id="gamesList" hidden></div>
+      <button class="grp" data-group="news"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10v4h3l6 4V6L7 10z"></path><path d="M16 9c1 .8 1.5 1.8 1.5 3s-.5 2.2-1.5 3"></path></svg>News</button>
+      <button class="grp" data-group="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg>Settings</button>
+      <div class="foot">
+        <div class="who" id="who"></div>
+        <div class="row2"><button id="themeBtn" title="Follow the system, or keep light or dark">Theme: System</button>
+          <button id="installBtn" hidden title="Install the panel as an app">Install app</button></div>
+      </div>
     </nav>
-    <div class="tools">
-      <button id="installBtn" class="act sm" hidden title="Install the panel as an app">Install app</button>
-      <button id="refreshBtn" title="Reload this tab's data (R)">Refresh</button>
-      <div class="who" id="who"></div>
-    </div>
-  </header>
-
+    <div class="scrim" id="scrim"></div>
+    <div class="main">
+      <div class="topbar">
+        <button class="menu" id="menuBtn" aria-label="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg></button>
+        <h1 id="pageTitle">Overview</h1>
+        <button id="refreshBtn" title="Reload this page's data (R)">Refresh</button>
+      </div>
+      <nav class="subtabs" data-group="players" aria-label="Players" hidden>
+        <button data-tab="accounts">Accounts</button><button data-tab="codes">Registration codes</button>
+      </nav>
+      <nav class="subtabs" data-group="inbox" id="inboxSubtabs" aria-label="Inbox" hidden>
+        <button data-tab="gmcalls">GM calls<span class="navbadge" id="gmBadge" hidden></span></button>
+        <button data-tab="reports">Player reports<span class="navbadge info" id="reportsBadge" hidden></span></button>
+        <button data-tab="issues">Bug reports<span class="navbadge info" id="issuesBadge" hidden></span></button>
+      </nav>
+      <nav class="subtabs" data-group="settings" aria-label="Settings" hidden>
+        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts">Alerts and checks</button><button data-tab="bots">Discord bots</button><button data-tab="modules">Modules</button><button data-tab="activity">Activity log</button>
+      </nav>
   <main>
     <!-- OVERVIEW -->
     <section id="tab-overview" class="tab active">
       <div class="stats" id="ovStats"></div>
       <div class="grid2">
         <div class="panel">
-          <h2>Online now</h2>
-          <div id="ovGames" class="chiprow"></div>
-          <ul class="feed" id="ovOnline"></ul>
+          <h2>Needs attention</h2>
+          <ul class="feed" id="ovAttention"></ul>
         </div>
-        <div class="panel" data-perm="health">
-          <h2>Services</h2>
-          <ul class="feed" id="ovHealth"></ul>
-          <div class="hint" id="ovHealthFoot"></div>
+        <div class="panel ops" data-perm="health" id="opsPanel" hidden>
+          <h2>Server health</h2>
+          <div class="ops-sum" id="opsSum"></div>
+          <ul class="ops-list" id="opsList"></ul>
+          <div class="hint" id="opsFoot"></div>
         </div>
       </div>
+      <div class="panel" id="ovGamesPanel" hidden>
+        <h2>Games <span class="h2sub" id="ovGamesSum"></span><a class="h2act" href="#games">All games</a></h2>
+        <div class="ov-tiles" id="ovGames"></div>
+      </div>
       <div class="grid2">
+        <div class="panel" data-perm="accounts_view">
+          <h2>Signed in now</h2>
+          <ul class="feed" id="ovOnline"></ul>
+        </div>
         <div class="panel" data-perm="accounts_view">
           <h2>Newest accounts</h2>
           <ul class="feed" id="ovAccounts"></ul>
         </div>
-        <div class="panel">
-          <h2>Needs attention</h2>
-          <ul class="feed" id="ovAttention"></ul>
-        </div>
       </div>
-      <div class="panel">
-        <h2>Quick actions</h2>
-        <div class="quick">
-          <button class="act" data-go="accounts:newHandle" data-perm="accounts_manage">Create an account</button>
-          <button class="ghost" data-go="codes:code" data-perm="codes">Make registration codes</button>
-          <button class="ghost" data-go="accounts:grantPol" data-perm="accounts_manage">Grant content</button>
-          <button class="ghost" data-go="gmcalls" data-perm="gm">Open the GM desk</button>
-          <button class="ghost" data-go="news" data-perm="news_edit">Write an announcement</button>
+      <div class="grid2">
+        <div class="panel" data-perm="audit">
+          <h2>Recent activity <a class="h2act" href="#activity">Activity log</a></h2>
+          <ul class="feed" id="ovActivity"></ul>
         </div>
-        <p class="hint">Shortcuts: <span class="kbd">/</span> search the current list,
-          <span class="kbd">R</span> refresh, <span class="kbd">1</span>-<span class="kbd">9</span>
-          switch tabs, <span class="kbd">Esc</span> close a dialog.</p>
+        <div class="panel" data-perm="health">
+          <h2>Backups and ports</h2>
+          <ul class="feed" id="ovHealth"></ul>
+          <div class="hint" id="ovHealthFoot"></div>
+        </div>
       </div>
     </section>
 
@@ -1202,6 +1390,29 @@
         </div>
       </div>
 
+      <!-- Maintenance warning: forced news before Play, and a message to everyone online. -->
+      <div class="panel" id="maintPanel" data-perm="news_publish">
+        <h2 style="margin:0 0 2px">Maintenance warning</h2>
+        <div class="hint">The notice opens on a title page before the player can press Play, the way the retail service announced maintenance. The message reaches everyone who is online now, in a game or not.</div>
+        <div class="nw-status" id="maintStatus">&hellip;</div>
+        <label for="maintSubject">Subject</label>
+        <input type="text" id="maintSubject" maxlength="60" spellcheck="true" placeholder="All Worlds Maintenance">
+        <label for="maintText">Text</label>
+        <textarea id="maintText" rows="4" spellcheck="true" placeholder="Maintenance begins at 10:00 UTC and lasts about one hour."></textarea>
+        <label>Show the notice on <span class="hint" style="display:inline">(none ticked: every title)</span></label>
+        <div class="chips" id="maintTitles"></div>
+        <div class="nw-formbtns">
+          <button class="act sm" id="maintPostBtn">Show notice before Play</button>
+          <button class="ghost sm" id="maintClearBtn">Take notice down</button>
+          <span style="flex:1"></span>
+          <button class="act sm" id="maintMsgBtn">Message everyone online</button>
+        </div>
+        <div id="maintGamesWrap" hidden>
+          <label>Also announce inside these games <span class="hint" style="display:inline">(players in the game see it in their chat)</span></label>
+          <div class="chips" id="maintGames"></div>
+        </div>
+      </div>
+
       <!-- Publish: what will change, then confirm. -->
       <div class="modal" id="nwPubModal">
         <div class="card">
@@ -1321,21 +1532,51 @@
     <!-- GAMES -->
     <section id="tab-games" class="tab">
       <div class="gx">
-        <aside class="gx-side panel">
-          <h2>Games</h2>
-          <div id="gamesList"></div>
-        </aside>
-        <div>
-          <div class="panel gx-empty" id="gamesEmpty" hidden>No game tools are available.</div>
-          <iframe class="gx-frame" id="gamesFrame" title="Game tool" hidden></iframe>
-        </div>
+        <div class="gx-main" id="gamesMain"></div>
       </div>
     </section>
 
     <!-- SECURITY -->
+    <!-- DISCORD BOTS (owner only): adminbots.py, polcore/botcreds.py -->
+    <section id="tab-bots" class="tab">
+      <div class="panel">
+        <h2>Discord bots</h2>
+        <p class="hint">Every game's bot in one place. Paste a bot token and Save: Discord fills in the
+          app id and public key, and the bot's service restarts on it within about a minute. A bot with
+          nothing saved here keeps its <code>.env</code> values. Tokens are stored sealed with
+          <code>POL_BOT_KEY</code> and never shown again.</p>
+        <div class="note warn" id="botsNoKey" hidden><b>POL_BOT_KEY is not set.</b> Tokens cannot be
+          stored until it is in <code>.env</code> for the admin and bot services (any long random string).
+          Page addresses can still be saved.</div>
+        <div class="hint">Setting up a new bot: create an application in the Discord developer portal,
+          copy its bot token here, Save, then use <b>Invite</b> to add it to a server and
+          <b>Set endpoint</b> once the bot shows as running. In the server, run its
+          <code>/&lt;name&gt;board</code> command in the channel it should post in. Each card's checklist
+          says what is still to do; <b>Check</b> asks Discord again.</div>
+      </div>
+      <div class="botgrid" id="botsList"></div>
+    </section>
+
+    <section id="tab-modules" class="tab">
+      <div class="panel">
+        <h2>Game modules</h2>
+        <p class="hint">Each game is a module: a file in <span class="mono">services/adminmodules</span>,
+          one in this deployment's <span class="mono">POL_ADMIN_MODULES_DIR</span>, or a game server
+          that describes itself (docs/admin-modules.md). <span class="mono">POL_ADMIN_MODULES</span>
+          picks which ones show.</p>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>Key</th><th>From</th>
+          <th>Shown</th><th>Tools</th><th>Live status</th></tr></thead>
+          <tbody id="modulesBody"></tbody></table></div>
+      </div>
+      <div class="panel" id="modulesProblems" hidden>
+        <h2>Did not load</h2>
+        <ul class="feed" id="modulesProblemList"></ul>
+      </div>
+    </section>
+
     <section id="tab-security" class="tab">
       <!-- A moderator's own password. The owner's is the panel below. -->
-      <div class="panel narrow" id="mePanel" hidden>
+      <div class="panel narrow" id="mePanel" data-sub="account" hidden>
         <h2>Your password</h2>
         <div class="note" id="meState"></div>
         <label>Current password</label>
@@ -1349,7 +1590,7 @@
           browsers.</div>
       </div>
 
-      <div class="panel narrow" data-owner>
+      <div class="panel narrow" data-owner data-sub="account">
         <h2>Operator sign-in</h2>
         <div id="secState"></div>
         <label>Username</label>
@@ -1366,7 +1607,7 @@
         <div class="hint">At least 8 characters. Saving signs out your other browsers;
           moderators stay signed in.</div>
       </div>
-      <div class="panel" id="modsPanel" data-owner>
+      <div class="panel" id="modsPanel" data-owner data-sub="mods">
         <h2>Moderators</h2>
         <p class="hint">Additional logins with limited access. A moderator can only use the areas ticked for them. Adding moderators and the operator sign-in stay with the owner.</p>
         <div class="toolbar">
@@ -1380,7 +1621,7 @@
           <tbody id="modsBody"></tbody></table></div>
       </div>
 
-      <div class="panel" id="gmLinkPanel" data-perm="gm">
+      <div class="panel" id="gmLinkPanel" data-perm="gm" data-sub="account">
         <h2>GM Discord link</h2>
         <p class="hint">Link this login to a Discord account so <code class="mono">/gm duty</code>
           and the Knock button on GM call alerts act as you. Run <code class="mono">/gm link</code>
@@ -1397,7 +1638,7 @@
         </div>
       </div>
 
-      <div class="panel" id="alertsPanel" data-perm="settings">
+      <div class="panel" id="alertsPanel" data-perm="settings" data-sub="alerts">
         <h2>GM call alerts</h2>
         <p class="hint">New GM calls are posted to a Discord channel and sent to every
           device that turned alerts on from the GM Calls tab.</p>
@@ -1423,7 +1664,7 @@
         </details>
       </div>
 
-      <div class="panel" id="checksPanel" data-perm="settings">
+      <div class="panel" id="checksPanel" data-perm="settings" data-sub="alerts">
         <h2>Service checks</h2>
         <p class="hint">Shown on the Overview. One per line: a name and a port, or a
           name and <code class="mono">host:port</code>.</p>
@@ -1436,7 +1677,7 @@
         <div style="margin-top:12px"><button class="act sm" id="checksSave">Save checks</button></div>
       </div>
 
-      <div class="panel" id="auditPanel" data-perm="audit">
+      <div class="panel" id="auditPanel" data-perm="audit" data-sub="activity">
         <h2>Activity</h2>
         <p class="hint">Changes made through the panel, newest first. Passwords are never recorded.</p>
         <div class="toolbar">
@@ -1450,7 +1691,7 @@
           <tbody id="auditBody"></tbody></table></div>
       </div>
 
-      <div class="panel">
+      <div class="panel" data-sub="account">
         <h2>Signed-in browsers</h2>
         <p class="hint">Browsers currently signed in. Remembered sign-ins last 30 days; others end when the browser closes or after 12 idle hours.</p>
         <div class="toolbar">
@@ -1463,6 +1704,8 @@
       </div>
     </section>
   </main>
+    </div>
+  </div>
 
   <!-- Delete-account confirmation. Shows the inventory the server counted, and
        takes the POL ID typed back, because nothing here can be undone. -->
@@ -1587,12 +1830,12 @@
 
   <!-- Add or edit a moderator. -->
   <div class="modal" id="modModal">
-    <div class="card">
+    <div class="card wide">
       <h3 id="modTitle">Add a moderator</h3>
       <label>Username</label>
       <input type="text" id="modUser" autocomplete="off" spellcheck="false" maxlength="64">
       <label>Allowed to</label>
-      <div id="modPerms" style="display:grid; gap:6px"></div>
+      <div id="modPerms" class="perm-edit"></div>
       <label>Registration codes per 24 hours <span class="hint" style="display:inline">(blank = no limit)</span></label>
       <input type="text" id="modLimit" inputmode="numeric" maxlength="5" placeholder="no limit">
       <label>Codes may grant <span class="hint" style="display:inline">(none ticked = any title)</span></label>
@@ -1623,6 +1866,7 @@
   <script src="/static/pml.js"></script>
   <script src="/static/pmlexpr.js"></script>
   <script src="/static/pmlrt.js"></script>
+  <script src="/static/games.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

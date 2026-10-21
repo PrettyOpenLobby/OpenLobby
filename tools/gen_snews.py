@@ -38,9 +38,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "services"))
 
-#: The served content tree. It lives in the SEPARATE pol-www repo (and on the
-#: server, in the dataset bind-mounted at /www), so it is no longer a sibling of
-#: this file. Point POL_WWW_DIR at your clone, or pass --root explicitly.
+#: The served content tree. It is kept outside this repository (on the server,
+#: in the directory bind-mounted at /www), so it is not a sibling of this file.
+#: Point POL_WWW_DIR at it, or pass --root explicitly.
 WWW_DIR = os.environ.get("POL_WWW_DIR") or os.path.join(ROOT, "www")
 
 import ucscgi                                                # noqa: E402
@@ -62,7 +62,7 @@ def main():
                     help="where the Begin button points")
     ap.add_argument("--root", default=os.path.join(
         WWW_DIR, "info.playonline.com", "snews"),
-        help="output dir; defaults under $POL_WWW_DIR (the pol-www clone)")
+        help="output dir; defaults under $POL_WWW_DIR (the served content tree)")
     ap.add_argument("--i-mean-it", action="store_true",
                     help="required: this overwrites the Information page")
     a = ap.parse_args()

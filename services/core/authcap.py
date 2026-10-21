@@ -77,7 +77,7 @@ def _self_ip():
     Global default = main()'s stub_ip, else POL_ADVERTISE (a container that runs
     a responder without main(), e.g. the ucs path, used to fall through to
     127.0.0.1 here). Then srvcore.advertise_for chooses per client: a LAN peer
-    gets the LAN address it reached us on (or POL_ADVERTISE_LAN), a tailnet peer
+    gets the LAN address it reached us on (or POL_ADVERTISE_LAN), a VPN peer
     keeps the global one. Found live 2026-09-18: the real PS2 was redirected
     from ci000 to 127.0.0.1:51241 and hung on "verifying user info".
     """

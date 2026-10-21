@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""2:3 KGetFriendList: every client gets the whole list, up to the 0x40 row cap.
+"""2:3 KGetFriendList: every client gets the whole list, up to the 200-row cap.
 
 Until 2026-09-28 the PC reply was capped at 12 rows and only a mobile-marked
 request (the Tetra Master app, MOB1 at payload +0) got more. The 12 came from
@@ -7,8 +7,8 @@ polcore's 2:3 reader: `min(remaining*168, 0x7e0)` bytes per socket read, which
 is a 12-record READ CHUNK -- the reader files each chunk at slot byte +0x08 and
 re-enters the read until the U32 count is spent. Read as a list cap, it dropped
 every friend past the 12th for any account holding more (a member with 19
-friends never received 7 of them). The cap is now `_LOBBY_LIST[(2,3)][2]` = 0x40 for everyone, the
-ceiling the push records' slot byte (+0x1c) and the slot maps allow.
+friends never received 7 of them). The cap is now `_LOBBY_LIST[(2,3)][2]` = 200 for everyone, the
+size of the client friend table (push slot +0x1c is checked < 0xC8).
 
 Asserts, on an account with 20 friends (two of them outgoing-pending):
 
@@ -20,7 +20,7 @@ Asserts, on an account with 20 friends (two of them outgoing-pending):
     (never below it), so still 20 rows;
   * pushes: every friend push path (`push_friend_icons`, `push_presence_burst`,
     `field_push_lines`, the row/presence deliverers, `_broadcast_presence`)
-    addresses slots below 0x40 and refuses 0x40+, both at enqueue and delivery.
+    addresses slots below 200 and refuses 200+, both at enqueue and delivery.
 
 Drives the real path: `_lobby_paylen` (the declared length) then
 `_lobby_payload` with the decrypted request message, exactly as
@@ -244,8 +244,8 @@ def main():
     signed_marker[0:4] = marker
     struct.pack_into("<I", signed_marker, 4, R._lobby_cksum(bytes(marker)))
 
-    check(CAP == 0x40,
-          "the 2:3 record cap is 0x40 (not the 12-record read chunk)",
+    check(CAP == 0xC8,
+          "the 2:3 record cap is 200, the client friend table (not the 12-record read chunk)",
           f"cap={CAP}")
 
     print("PC (no marker) ->")

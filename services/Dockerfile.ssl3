@@ -21,7 +21,7 @@
 # thoroughly dead -- POODLE, BEAST, RC4 biases. That is fine here and only here:
 # the sole peer is a 2003 game client on a private network, and the content is
 # a sign-up form for a revived hobby service. Do NOT put this in front of
-# anything else, and do NOT expose it to the internet. Bind it to Tailscale.
+# anything else, and do NOT expose it to the internet. Bind it to a private network.
 # ---------------------------------------------------------------------------
 
 FROM debian:bookworm-slim AS build
@@ -154,5 +154,7 @@ RUN chmod +x /usr/local/bin/ssl3-entrypoint.sh
 
 # Where the generated self-signed cert lives; mount a volume to persist it.
 VOLUME ["/certs"]
+
+# Runs as root: the web role binds 443, a privileged port.
 
 ENTRYPOINT ["/usr/local/bin/ssl3-entrypoint.sh"]

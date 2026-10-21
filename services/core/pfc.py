@@ -21,12 +21,26 @@ def _content_profile_file():
     return os.path.join(root, "content-profiles.json")
 
 
+#: The parsed file and the (path, mtime, size) it was read from; a stat per
+#: call, the JSON parse only when the file moved (presence.py's control-file
+#: shape). The writer below replaces the file, which moves the mtime.
+_PROFILES_CACHE = {"key": None, "data": {}}
+
+
 def _content_profiles():
+    path = _content_profile_file()
     try:
-        with open(_content_profile_file(), encoding="utf-8") as f:
+        st = os.stat(path)
+        key = (path, st.st_mtime, st.st_size)
+        if key == _PROFILES_CACHE["key"]:
+            return dict(_PROFILES_CACHE["data"])
+        with open(path, encoding="utf-8") as f:
             d = json.load(f)
-        return d if isinstance(d, dict) else {}
+        d = d if isinstance(d, dict) else {}
+        _PROFILES_CACHE["key"], _PROFILES_CACHE["data"] = key, dict(d)
+        return d
     except (OSError, ValueError):
+        _PROFILES_CACHE["key"] = None
         return {}
 
 
@@ -90,6 +104,7 @@ def _content_profile_note(payload, tag):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)
         os.replace(tmp, path)
+        _PROFILES_CACHE["key"] = None
         named = ", ".join("<%s>" % g for g, _ in groups)
         log("authserv", f"  content profile write: STORED for Content ID {cid} "
                         f"({named})")

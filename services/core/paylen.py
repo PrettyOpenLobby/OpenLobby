@@ -47,9 +47,9 @@ _LOBBY_PAYLEN = {
     (0x04, 0x05): 32,     # KChangeMyStatus / KPutBusy -- both K classes reach this
                           # one builder. State 5 of the 0x37ddef0 machine reads
                           # 0x20. Like (4,6) it special-cases the -5314 "no data".
-    # ---- PS2-ONLY, resolved STATICALLY off the decrypted PS2 core 2026-09-18
-    # (work/ps2/polpex/polpex.c, base 0x00101000). The PC's 28 reqEncode sites
-    # never emit 4:0 or 4:1 (memory pol-lobby-handoff), which is why the PC
+    # ---- PS2-ONLY, resolved STATICALLY off the decrypted PS2 core
+    # (pol.pex, base 0x00101000). The PC's 28 reqEncode sites
+    # never emit 4:0 or 4:1, which is why the PC
     # captures could not size them and dev carried a 128/128 SWEEP that never
     # shipped. Prod therefore served the 8-byte default, and a console with no
     # stored handle (fresh drive) sends 4:1 as its FIRST lobby request, got
@@ -128,6 +128,17 @@ _LOBBY_PAYLEN = {
                           # tolerated, not asked for. Static 2026-09-11 off the
                           # decrypted PS2 core; body -> _chr_put. Memory
                           # ps2-lobby-1-10-is-sqprofdb-update-chlist.
+    (0x01, 0x0B): 48,     # CHARACTER BIND QUERY: a GAME (FFXI, DoC; never the
+                          # Viewer UI) names a character and asks which handle
+                          # holds it. US 1.15.05 pol.pex pump 0x001405a0 reads
+                          # `jal 0x12f530 a1=0x30 a2=1` (48 bytes, verified),
+                          # then +0x00 u64 guid, +0x10 15-byte name, +0x20 found
+                          # flag (0 -> -7186 CHARACTER_BIND_NO_HANDLE_NAME),
+                          # +0x21 u8. Same machine in the JP core
+                          # (polpex_0014f0d8), the 2016 core (0x1419f8) and the
+                          # PC polcore cft_1106. It fell to the 8-byte default and
+                          # the console waited out the 180 s idle timer (live
+                          # 10-06, 10-07). Body: characters.payload_char_bind.
     (0x02, 0x03): 8,      # **KGetFriendList**. 8 + count*168. count = U32.
                           # Machine @0x37e3bbc. Its WRITE half is 2:6.
     (0x07, 0x0C): 8,      # **KGetGroupList** (was "unidentified").
@@ -585,6 +596,12 @@ def paylen_fetch(req_pt):
                          "mismatch means the object was stored wrong.")
         if n:
             return n + 4
+    # A WINDOWED FILE is read at the window the reader asks for, at the same
+    # offset a message's reader declares its length (`_window_read`).
+    if resourcestore._windowed(path):
+        want = lobbymail._mail_read_len(req_pt)
+        if want is not None and want <= resourcestore._WINDOW_MAX:
+            return want + 4
     # A TITLE'S VARIABLE-LENGTH RESOURCES declare their length here: the
     # lists whose reader asks for `count * record` where the count is what
     # the title promised on the auth band, so no constant can be right for

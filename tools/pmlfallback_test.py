@@ -103,25 +103,27 @@ def lint(label, raw):
     check(f"{label}: under the 19 KiB include budget", len(raw) < 19 * 1024)
 
 
+def _plain(v):
+    """The evaluator's strings, with whole numbers as ints, as the checks
+    below compare them."""
+    if isinstance(v, str) and re.fullmatch(r"-?\d+", v):
+        return int(v)
+    return v
+
+
 def evaluate(label, text, sysvars=None):
     """Run the page through the evaluator; it must not fail and must read no
-    variable it did not define. Returns (flattened text, variables)."""
-    V = pmleval._Vars(pmleval.DEFAULT_SYSVARS)
-    if sysvars:
-        V.update(sysvars)
-    ctx = {"resolve": None, "depth": 0, "base": None, "unresolved": set()}
-    out = []
-    try:
-        root = pmleval._parse(text)
-        pmleval._walk(root["children"], V, out, ctx)
-        failed = ""
-    except Exception as exc:                           # noqa: BLE001
-        failed = repr(exc)
-    check(f"{label}: evaluator ran clean", failed, "")
-    check(f"{label}: no undefined variable read", sorted(V.missing), [])
-    flat = "".join(out)
+    variable it did not define. Returns (flattened text, {name: value}) with
+    names WITHOUT the sigil."""
+    report, env = {}, {}
+    flat = pmleval.expand(text, sysvars=sysvars, report=report, env=env)
+    failed = flat if flat.startswith("<!-- pmleval failed") else ""
+    check(f"{label}: evaluator ran clean", failed[:120], "")
+    check(f"{label}: no undefined variable read", report.get("missing"), [])
     check(f"{label}: no include left for the client to chase",
           "<include" in flat, False)
+    V = {k[1:]: _plain(v) for k, v in env.items()
+         if k.startswith("$") and not k.startswith("$_")}
     return flat, V
 
 
@@ -268,7 +270,8 @@ check("ad01: $adBanner ends at the # row", Va.get("adBanner"), [["#"]])
 news = page("/pcd/ntool/en-US/latestnews.pml")
 _f, Vn = evaluate("latestnews", news)
 check("latestnews: an empty feed with a zero count",
-      (Vn.get("LATESTNEWS"), Vn.get("LATESTNEWSMAX")), ([], 0))
+      ([r for r in Vn.get("LATESTNEWS") or [] if r not in ("", [])],
+       Vn.get("LATESTNEWSMAX")), ([], 0))
 check("latestnews: the same shape for any language",
       page("/pcd/ntool/de-DE/latestnews.pml"), news)
 data = page("/pcd/mainmenu/en-US/data.pml")
@@ -290,6 +293,39 @@ check("a fragment name under a title dir is an empty fragment",
       page("/pml/game/0011/style.pml"), "<!-- -->\r\n")
 check("an unknown fragment name is an empty fragment",
       page("/pml/info/in04.pml"), "<!-- -->\r\n")
+pmlfallback.include_names(WWW, wait=True)       # an empty tree: no includes
+deep = page("/pml/game/ff11/go/sqexacc.pml")
+lint("deep", deep.encode("ascii"))
+evaluate("deep", deep)
+check("a missing page two levels under a title is a page, not a blank",
+      "Page not available" in deep)
+check("its Back steps the Viewer's own history",
+      'href="backward:"' in deep and 'onkeycancel="backward:"' in deep)
+check("and a second row reaches that title's top page",
+      'href="/pml/game/ff11/index.pml"' in deep)
+off = page("/snews/en-US/jail.pml")
+check("a missing page outside pml/game/ is a page too",
+      "Page not available" in off and 'href="backward:"' in off
+      and 'href="toviewer:"' in off)
+check("the page does not echo the request path (no markup from the wire)",
+      "jail" in off, False)
+inc_host = os.path.join(WWW, HOST, "pml", "x", "host.pml")
+os.makedirs(os.path.dirname(inc_host))
+io.open(inc_host, "w", newline="").write(
+    "<pml><head><include src=\"$C_PATH1+'menudata.pml'\"></head></pml>\r\n")
+pmlfallback._INCLUDE_CACHE.clear()
+check("the include scan finds a computed include by its file name",
+      "menudata.pml" in pmlfallback.include_names(WWW, wait=True))
+check("so a missing include target is an empty fragment, never a page",
+      page("/pml/y/menudata.pml"), "<!-- -->\r\n")
+check("SE include naming is a fragment without any scan",
+      [pmlfallback.is_fragment(p, www=os.path.join(TMP, "nowhere"))
+       for p in ("pml/game/ff11/mnin01.pml", "pml/a/upin001.pml",
+                 "pcd/sftp/en-US/fmo/sfst02.pml", "pcd/sftp/en-US/ff11/anews.pml")],
+      [True, True, True, True])
+os.remove(inc_host)
+pmlfallback._INCLUDE_CACHE.clear()
+pmlfallback.include_names(WWW, wait=True)
 check("a non-PML path is not ours",
       pmlfallback.fallback_page(HOST, "/pml/main/ma_i/masc00i.png"), None)
 check("a bare path with no extension is not ours",
@@ -377,6 +413,56 @@ head, body, _ = band_get("/pml/main/in01.pml")
 check("band: its missing include is still synthesized",
       b'<array name="$arMenu1">' in body)
 os.remove(real)
+
+print()
+print("the band: the same page under another query, and missing art")
+qdir = os.path.join(WWW, HOST, "pml", "q")
+os.makedirs(qdir)
+io.open(os.path.join(qdir, "pg.pml%3Fdf%3D1%26vcrt%3D0%26id%3D0%26news_flg%3D1"),
+        "w", newline="").write("<pml><body>COPY NEWS1</body></pml>\r\n")
+io.open(os.path.join(qdir, "pg.pml%3Fdf%3D1%26vcrt%3D0%26id%3D0%26news_flg%3D0"),
+        "w", newline="").write("<pml><body>COPY NEWS0</body></pml>\r\n")
+head, body, _ = band_get("/pml/q/pg.pml?df=1&id=0&vcrt=0&news_flg=0")
+check("band: the same query in another order finds its copy",
+      body, b"<pml><body>COPY NEWS0</body></pml>\r\n")
+head, body, _ = band_get("/pml/q/pg.pml?df=1&id=0&vcrt=0&news_flg=1&dat=5")
+check("band: an unheld query gets the closest copy of the same page",
+      body, b"<pml><body>COPY NEWS1</body></pml>\r\n")
+head, body, _ = band_get("/pml/q/pg.pml")
+check("band: a bare request for a page held only as copies gets one",
+      body.startswith(b"<pml><body>COPY"))
+import core.portalpages as portalpages           # noqa: E402
+bare = os.path.join(WWW, portalpages.SE_BARE_DIR, "en-US", HOST, "pml", "q")
+os.makedirs(bare)
+io.open(os.path.join(bare, "pg.pml"), "w", newline="").write("SE BARE")
+era_root = os.path.join(TMP, "era")
+os.makedirs(os.path.join(era_root, HOST, "pml", "q"))
+io.open(os.path.join(era_root, HOST, "pml", "q", "pg.pml%3Fdf%3D9"), "w",
+        newline="").write("ERA COPY")
+roots_list = [(WWW, "www")]
+roots_era = [(era_root, "_eras/panel"), (WWW, "www")]
+p_, why = portalpages._query_variant(WWW, roots_list, HOST, "pml/q/pg.pml",
+                                     "/pml/q/pg.pml?df=2", "en-US")
+check("a list-era en-US client gets SE's bare page before a mismatched copy",
+      (os.path.basename(p_), "SE bare" in why), ("pg.pml", True))
+p_, why = portalpages._query_variant(WWW, roots_era, HOST, "pml/q/pg.pml",
+                                     "/pml/q/pg.pml?df=2", "en-US")
+check("an era client keeps its era copy ahead of the bare page",
+      open(p_).read(), "ERA COPY")
+p_, why = portalpages._query_variant(WWW, roots_list, HOST, "pml/q/pg.pml",
+                                     "/pml/q/pg.pml?news_flg=0&df=1&vcrt=0&id=0",
+                                     "en-US")
+check("an exact reordered match still beats the bare page",
+      open(p_, newline="").read(), "<pml><body>COPY NEWS0</body></pml>\r\n")
+check("nothing for a page with no copy at all",
+      portalpages._query_variant(WWW, roots_list, HOST, "pml/q/none.pml",
+                                 "/pml/q/none.pml?a=1", "en-US"), (None, None))
+head, body, _ = band_get("/pml/q/art/missing.png")
+check("band: a missing image is a 404 even with a PML Accept header",
+      head.startswith(b"HTTP/1.1 404"), True)
+head, body, _ = band_get("/pml/q/deeper/page.pml")
+check("band: a missing page is the not-available page, not a blank",
+      b"Page not available" in body)
 log_text = io.open(os.path.join(LOGS, "lobby.log"), encoding="utf-8",
                    errors="replace").read()
 check("band: the serve is logged with the agreed phrase",

@@ -278,6 +278,15 @@ def dns_parse_question(pkt):
         return None, None
 
 
+def dns_name_listed(name, hosts):
+    """True when `name` is one of `hosts` or a subdomain of one. Case and a
+    trailing dot are ignored on both sides."""
+    name = (name or "").lower().rstrip(".")
+    if not name:
+        return False
+    return any(name == h or name.endswith("." + h) for h in hosts if h)
+
+
 def dns_refused(query):
     """REFUSED, echoing the question and nothing else. It is never longer than
     the query it answers, so sending it to a forged source amplifies nothing."""
@@ -312,10 +321,10 @@ def run_dns():
     cfg = load_config()
     ip = advertise_ip(cfg)
     # PER-CLIENT-NETWORK ANSWER. `ip` is a single global address (POL_ADVERTISE),
-    # which on prod is the Tailscale address 127.0.0.1. A PC Viewer riding the
-    # tailnet reaches that fine, but a console behind PCSX2 egresses from the
-    # host's LAN NIC and CANNOT route to a tailnet /32 -- the patch connect to
-    # 127.0.0.1:54000 times out and the Viewer raises POL-1161 ("failed to
+    # which on a server reached over a VPN is its VPN address. A PC Viewer riding
+    # the VPN reaches that fine, but a console behind PCSX2 egresses from the
+    # host's LAN NIC and CANNOT route to a VPN /32 -- the patch connect to
+    # that address on 54000 times out and the Viewer raises POL-1161 ("failed to
     # connect to the patch server"). The same box IS reachable at its LAN IP, so
     # hand LAN-sourced queries that address instead. POL_ADVERTISE_LAN (an IP)
     # arms this; POL_ADVERTISE_LAN_CLIENTS (CIDR list) sets which sources qualify,
@@ -339,9 +348,10 @@ def run_dns():
     # real source address.
     public_ip = (os.environ.get("POL_ADVERTISE_PUBLIC") or "").strip()
     # POL_DNS_PUBLIC=1 lets clients OUTSIDE dns.clients ask, on these terms:
-    # they are answered for the redirected names and for nothing else. No
-    # forwarding, so this is not an open resolver; anything else draws a
-    # REFUSED no longer than the question. A PlayStation 2 asks for nothing but
+    # they are answered for the redirected names, and the few names listed in
+    # dns.public_forward are forwarded upstream for them. Nothing else is
+    # forwarded, so this is not an open resolver; anything else draws a
+    # REFUSED no longer than the question. A PlayStation 2 asks for little but
     # the game's own names, so that is all it needs. Off, outsiders are ignored
     # exactly as before.
     public_mode = os.environ.get("POL_DNS_PUBLIC", "0") == "1" and bool(public_ip)
@@ -387,6 +397,13 @@ def run_dns():
     # portal/content while we still intercept the login-critical hosts.
     redirect_only = [h.lower() for h in cfg.get("dns", {}).get("redirect_only", [])]
     upstream = cfg.get("dns", {}).get("upstream", "1.1.1.1")
+    # PUBLIC FORWARD ALLOWLIST. In PUBLIC mode an internet client is normally
+    # refused every name we do not redirect. These names (and their subdomains)
+    # are instead forwarded upstream for them, so a console can still reach a
+    # real host that is alive. Kept to a short fixed list so the public door is
+    # still not an open resolver.
+    public_forward = [h.lower().rstrip(".") for h in
+                      cfg.get("dns", {}).get("public_forward", []) or []]
     # WHO MAY ASK. This service forwards any name it does not redirect and
     # answers whoever asked, which on a LAN is the point and on a public
     # interface is a reflector -- an open resolver, published to the host as
@@ -456,7 +473,7 @@ def run_dns():
             return tag
         return ""
 
-    def do_forward(data, addr, qname, qt):
+    def do_forward(data, addr, qname, qt, tag=""):
         """Resolve one name upstream and relay the reply to `addr`."""
         fwd = None
         try:
@@ -481,16 +498,35 @@ def run_dns():
                 return
             sock.sendto(reply, addr)
             if qname:
-                log("dns", f"{addr[0]} {qt} {qname} -> forwarded")
+                log("dns", f"{addr[0]} {qt} {qname} -> forwarded{tag}")
         except Exception as e:
             log("dns", f"forward error for {qname}: {e}")
         finally:
             if fwd is not None:
                 fwd.close()
 
+    def public_forward_query(data, addr, qname, qt):
+        """Forward a public_forward name for an internet client, the same way
+        the LAN path forwards: off-loop when POL_DNS_ASYNC is on, inline when
+        every worker slot is busy or async is off."""
+        tag = " (public-forward)"
+        if async_fwd and fwd_slots.acquire(blocking=False):
+            def _run(data=data, addr=addr, qname=qname, qt=qt):
+                try:
+                    do_forward(data, addr, qname, qt, tag)
+                finally:
+                    fwd_slots.release()
+            threading.Thread(target=_run, daemon=True).start()
+        else:
+            t0 = time.monotonic()
+            do_forward(data, addr, qname, qt, tag)
+            note_stall(t0, qname)
+
     if public_mode:
         log("dns", f"PUBLIC mode: internet clients get {public_ip} for the "
-                   f"redirected names, REFUSED for anything else, never a forward")
+                   f"redirected names, an upstream forward for "
+                   f"{public_forward or 'nothing'} (dns.public_forward), "
+                   f"REFUSED for anything else")
     log("dns", f"listening on udp/53; zones {zones} -> {ip}"
                 f"{f' (LAN {lan_ip} for {lan_spec})' if lan_ip and lan_nets else ''}; "
                 f"upstream {upstream}; forward="
@@ -519,7 +555,10 @@ def run_dns():
             if not qname:
                 continue
             try:
-                if not matches(qname):
+                if not matches(qname) and dns_name_listed(qname, public_forward):
+                    pqt = {1: "A", 28: "AAAA", 5: "CNAME", 15: "MX"}.get(qtype, str(qtype))
+                    public_forward_query(data, addr, qname, pqt)
+                elif not matches(qname):
                     sock.sendto(dns_refused(data), addr)
                 elif qtype == 1:
                     sock.sendto(dns_build_answer(data, public_ip), addr)
@@ -585,6 +624,13 @@ def run_dns():
 # --------------------------------------------------------------------------- #
 # HTTP/HTTPS mode -- serve from /www/<host>/<path> if present, else 404; log all
 # --------------------------------------------------------------------------- #
+# Same list as core/lobbyserver.py _MEDIA_EXT: a missing file of these types is a
+# 404, never the empty PML page.
+_STUB_MEDIA_EXT = (".png", ".ang", ".jpg", ".jpeg", ".gif", ".bmp", ".tm2", ".bgm",
+                   ".pms", ".wav", ".ogg", ".slc", ".at3", ".scd", ".bgw", ".spw",
+                   ".wd", ".xma")
+
+
 class StubHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "PolStub/0.1"
@@ -624,6 +670,10 @@ class StubHandler(BaseHTTPRequestHandler):
         #    which already dispatches on kinou_id for the sign-up wizard.
         if self._try_ucs_cgi(body):
             return
+        # 0a) configured relays: a game's dynamic pages on a host whose static
+        #     files are served from www/ (POL_HTTP_RELAY).
+        if self._try_relay(host, body):
+            return
         # 0b) the Q&A knowledge base. Its https links arrive here decrypted by
         #     sslterm, so the pages it links onward say https.
         if kbserve is not None:
@@ -656,7 +706,8 @@ class StubHandler(BaseHTTPRequestHandler):
         bare_path = self.path.split("?", 1)[0]
         if (pmlfallback is not None and bare_path.lower().endswith(".pml")
                 and os.environ.get("POL_PML_FALLBACK", "1") == "1"):
-            page = pmlfallback.fallback_page(host.split(":", 1)[0], bare_path)
+            page = pmlfallback.fallback_page(host.split(":", 1)[0], bare_path,
+                                             www=WWW_DIR)
             if page:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/x-playonline-pml")
@@ -677,8 +728,12 @@ class StubHandler(BaseHTTPRequestHandler):
         #    never is). A 404 makes the Viewer sit on its loading spinner; a valid
         #    empty page lets it finish the load and move on, and we still log the
         #    exact URL so we know what to author next.
-        wants_pml = ("x-playonline-pml" in self.headers.get("Accept", "")
-                     or self.path.split("?", 1)[0].lower().endswith(".pml"))
+        # Never for media: the Viewer lists PML in Accept on every fetch, and
+        # PML bytes handed to an image or audio player draw garbage or crash it.
+        bare = self.path.split("?", 1)[0].lower()
+        wants_pml = (not bare.endswith(_STUB_MEDIA_EXT) and
+                     ("x-playonline-pml" in self.headers.get("Accept", "")
+                      or bare.endswith(".pml")))
         if wants_pml and os.environ.get("POL_HTTP_EMPTY_PML", "1") == "1":
             body_out = b"<!-- -->\r\n"
             self.send_response(200)
@@ -692,6 +747,66 @@ class StubHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    @staticmethod
+    def _relay_rules():
+        """[(host, path prefix, target, port)] from POL_HTTP_RELAY:
+        `host/prefix,host/prefix=ip:port` entries separated by `;`."""
+        rules = []
+        for entry in os.environ.get("POL_HTTP_RELAY", "").split(";"):
+            if "=" not in entry:
+                continue
+            sources, _, dest = entry.partition("=")
+            target, _, port = dest.strip().rpartition(":")
+            if not target or not port.isdigit():
+                continue
+            for src in sources.split(","):
+                host_part, _, prefix = src.strip().partition("/")
+                if host_part:
+                    rules.append((host_part.lower(), "/" + prefix.lower(),
+                                  target, int(port)))
+        return rules
+
+    def _try_relay(self, host, body):
+        """Relay a request matching a POL_HTTP_RELAY rule. True if handled.
+
+        For a game whose static pages live under www/<host>/ but which also has
+        pages that answer per player; those go to the game's own server."""
+        host_only = host.split(":", 1)[0].lower()
+        path = self.path.split("?", 1)[0].lower()
+        for rule_host, prefix, target, port in self._relay_rules():
+            if host_only == rule_host and path.startswith(prefix):
+                break
+        else:
+            return False
+        req = f"{self.command} {self.path} HTTP/1.1\r\n"
+        skip = ("connection", "keep-alive", "transfer-encoding")
+        for k, v in self.headers.items():
+            if k.lower() in skip:
+                continue
+            req += f"{k}: {v}\r\n"
+        req += "Connection: close\r\n\r\n"
+        try:
+            with socket.create_connection((target, port), timeout=15) as up:
+                up.sendall(req.encode("latin-1", "replace") + body)
+                chunks = []
+                while True:
+                    d = up.recv(65536)
+                    if not d:
+                        break
+                    chunks.append(d)
+        except OSError as exc:
+            log("http", f"  relay to {target}:{port} FAILED: {exc}")
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+        raw = b"".join(chunks)
+        log("http", f"  relay {host_only}{self.path.split('?')[0]} -> {target}:{port} "
+                    f"({len(raw)} bytes)")
+        self.wfile.write(raw)
+        self.close_connection = True
+        return True
 
     def _try_ucs_cgi(self, body):
         """Relay /pml-cgi-bin/ to the ucscgi service. True if handled.

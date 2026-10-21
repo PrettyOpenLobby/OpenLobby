@@ -174,11 +174,11 @@ def main():
     shutil.rmtree(SPOOL, ignore_errors=True)
     room2 = b"#gmcallsince"
     hiii = gmchat.encode_text("hiii")
-    gmchat.record(room2, "in", b"Bluebell", hiii)
+    gmchat.record(room2, "in", b"Marigold", hiii)
     knock_at = time.time()
     time.sleep(0.01)
     for i in range(50):
-        gmchat.record(room2, "in", b"Bluebell", b"HRu87960930222113" + b"Bluebell")
+        gmchat.record(room2, "in", b"Marigold", b"HRu87960930222113" + b"Marigold")
     rows_count = gmchat.transcript(room2, limit=10)
     check("limit alone hides an early T behind later H chatter",
           not any(r["raw"].startswith("54") for r in rows_count),

@@ -679,7 +679,79 @@ def _friend_put_slot(rec):
     slot = rec[_FRIEND_PUT_SLOT_AT]
     # The client's own cap on the 2:3 record's +0x08 -- a bigger number is heap,
     # not a slot, and must not be allowed to index anything.
-    return slot if slot < 0x40 else None
+    return slot if slot < 0xC8 else None
+
+
+#: Head bits of a 2:6 row (polcore's 2:6 builder 0x37e43f7, 2:3 copy
+#: 0x37deeb0): bit 0 row present, bit 1 slot freed (a delete), bit 4 the row
+#: belongs to the IGNORE table, bits 5-6 the ignore scope (1 handle, 2 the
+#: whole PlayOnline ID).
+_HEAD_VALID = 0x01
+_HEAD_FREED = 0x02
+_HEAD_IGNORE = 0x10
+
+
+def _friend_put_head(pt, index, start):
+    """The low 16 bits of record `index`'s bitfield head, or None."""
+    at = start + index * _FRIEND_PUT_REC - 4
+    if at < 0 or at + 2 > len(pt):
+        return None
+    return struct.unpack_from("<H", pt, at)[0]
+
+
+def _friend_put_ignore_records(pt, start, raw_recs):
+    """`[(op, slot, name, head, rec)]` for the IGNORE-table rows in a 2:6.
+
+    op is "add" (present + ignore bit) or "delete" (freed + ignore bit; the
+    client clears the slot with `(head & 0xf2) | 2`, which keeps bit 4). The
+    slot is the record's +0x04 byte (the client's +0x08), the index in the
+    ignore table, 0..99. These rows are not friends: an add must never reach
+    replace_friends (it would file a friend REQUEST to the person being
+    blocked), and a delete must never reach the friend-slot delete (it would
+    remove whichever FRIEND sits at the same index).
+    """
+    out = []
+    for i, rec in enumerate(raw_recs):
+        head = _friend_put_head(pt, i, start)
+        if head is None or not head & _HEAD_IGNORE:
+            continue
+        slot = rec[_FRIEND_PUT_SLOT_AT] if len(rec) > _FRIEND_PUT_SLOT_AT else None
+        if head & _HEAD_FREED and not head & _HEAD_VALID:
+            out.append(("delete", slot, None, head, rec))
+        elif head & _HEAD_VALID and not head & _HEAD_FREED:
+            out.append(("add", slot, _friend_put_text(rec), head, rec))
+    return out
+
+
+def _friend_put_apply_ignores(db, handle_id, ops):
+    """Store the ignore-table adds and deletes of one 2:6. Returns a summary."""
+    done = []
+    for op, slot, name, head, _rec in ops:
+        if slot is None or not 0 <= int(slot) < accounts.IGNORE_SLOTS:
+            log("lobby", f"  2:6 ignore {op}: index {slot} is outside the "
+                         f"client's {accounts.IGNORE_SLOTS}-entry table -- ignored")
+            continue
+        if op == "delete":
+            gone = accounts.ignore_delete_slot(db, handle_id, int(slot))
+            done.append(f"-{gone or '?'}@{slot}")
+            log("lobby", f"  2:6 ignore: REMOVED ignore entry {slot} "
+                         f"({gone!r})" if gone else
+                         f"  2:6 ignore: delete of ignore entry {slot}, which we "
+                         "do not hold")
+            continue
+        if not name:
+            log("lobby", f"  2:6 ignore: add at index {slot} carries no name -- "
+                         "not stored")
+            continue
+        scope = (int(head) >> 5) & 3 or accounts.IGNORE_SCOPE_HANDLE
+        peer = accounts.ignore_put(db, handle_id, int(slot), name, scope=scope,
+                                   head=head)
+        done.append(f"+{name}@{slot}")
+        log("lobby", f"  2:6 ignore: {name!r} on the ignore list at index {slot} "
+                     f"(scope {'PlayOnline ID' if scope == 2 else 'handle'}, "
+                     f"handle {peer}); not a friend request. POL_FRIEND_IGNORE_TABLE=0 "
+                     "restores the old reading")
+    return done
 
 
 def _friend_slot_map_live():
@@ -802,7 +874,7 @@ def _friend_put_renames(db, handle_id, pt, slot_map=None):
     return out
 
 
-def _friend_put_apply_flags(db, handle_id, pt, slot_map=None):
+def _friend_put_apply_flags(db, handle_id, pt, slot_map=None, skip=()):
     """Persist the ignore-state bytes every record in this write carries.
 
     IGNORE IS NOT AN OPCODE -- it is state inside the whole-list PUT, and the
@@ -820,6 +892,8 @@ def _friend_put_apply_flags(db, handle_id, pt, slot_map=None):
     start, raw = _friend_put_records(pt)
     moved = 0
     for i, rec in enumerate(raw):
+        if bytes(rec) in skip:
+            continue                      # an ignore-table row, not this friend
         row = _friend_put_row_for(db, handle_id, rec, slot_map)
         if row is None:
             continue
@@ -1094,10 +1168,24 @@ def _capture_friend_put(pt):
             # downstream reads it as a deletion of the slot it names -- which is
             # the renamed friend's own slot. Claiming them here is what stops a
             # caption from deleting the person it was meant to caption.
+            # *** IGNORE-TABLE ROWS FIRST: THEY ARE NOT FRIENDS. *** A row with
+            # head bit 0x10 belongs to the client's ignore (block) table and
+            # its +0x04 is an ignore index. Read as a friend it filed a friend
+            # REQUEST to the person being blocked, or deleted whichever friend
+            # sat at the same index. See `_friend_put_ignore_records`.
+            ignore_ops = []
+            if fits and os.environ.get("POL_FRIEND_IGNORE_TABLE", "1") == "1":
+                ignore_ops = _friend_put_ignore_records(pt, start, raw_recs)
+            ignored = {bytes(o[4]) for o in ignore_ops}
+            if ignored:
+                deletes = [r for r in deletes if bytes(r) not in ignored]
+                recs = [r for r in recs if bytes(r["raw"]) not in ignored]
             renamed = set()
             if fits and os.environ.get("POL_FRIEND_RENAME", "1") == "1":
                 for row, label, rec in _friend_put_renames(db, int(h["id"]), pt,
                                                            slot_map):
+                    if bytes(rec) in ignored:
+                        continue
                     accounts.set_friend_label(db, int(h["id"]), int(row["id"]),
                                               label)
                     renamed.add(bytes(rec))
@@ -1107,10 +1195,16 @@ def _capture_friend_put(pt):
                                  "POL_FRIEND_RENAME=0 restores the old "
                                  "read-it-as-a-delete behaviour)")
             # A record we just took as a rename is not a delete and not an add.
+            # Both lists must drop it: a label that passes the handle-name
+            # policy (one word, "Buddy") also parses as a name in `recs`, and handing
+            # it to replace_friends filed a friend REQUEST to the label (a stray
+            # pending row naming no handle).
             deletes = [r for r in deletes if bytes(r) not in renamed]
+            if renamed:
+                recs = [r for r in recs if bytes(r["raw"]) not in renamed]
             if fits and friendlist._friend_bitfield_mode():
                 deletes, extra = _friend_put_bitfield_deletes(
-                    pt, start, raw_recs, deletes, renamed)
+                    pt, start, raw_recs, deletes, renamed | ignored)
                 if extra:
                     # Deleted, so it must not also be read as an add below.
                     recs = [r for r in recs if bytes(r["raw"]) not in extra]
@@ -1166,6 +1260,17 @@ def _capture_friend_put(pt):
                                  "(record +0x04, see _FRIEND_PUT_SLOT_AT); it read "
                                  "as None, so the record failed the +0x06 == 0x0A "
                                  "live check -- dump it and re-check that constant.")
+            # The ignore table, after the friend deletes the same write carries
+            # (blocking a friend sends the friend slot freed AND the new ignore
+            # row together; `ignore_put` drops the friend row either way).
+            if ignore_ops:
+                _friend_put_apply_ignores(db, int(h["id"]), ignore_ops)
+            # A friend add takes the person OFF the ignore list: polcore refuses
+            # FriendAdd for an ignored handle, so the client has removed it.
+            for r in recs:
+                if accounts.ignore_delete_name(db, int(h["id"]), r["name"]):
+                    log("lobby", f"  2:6 friend write: {r['name']!r} added as a "
+                                 "friend, so their ignore entry is gone")
             if not recs and not fits:
                 log("lobby", f"  2:6 friend write: {len(pt)}B does not fit "
                              "0x15C + N*168 + 4 and names nobody -- ignored")
@@ -1219,7 +1324,8 @@ def _capture_friend_put(pt):
             # `_friend_put_apply_flags`.
             if fits and os.environ.get("POL_FRIEND_IGNORE_FLAGS", "1") == "1":
                 try:
-                    _friend_put_apply_flags(db, int(h["id"]), pt, slot_map)
+                    _friend_put_apply_flags(db, int(h["id"]), pt, slot_map,
+                                            skip=ignored)
                 except Exception as exc:
                     log("lobby", f"  2:6 friend write: ignore flags not stored "
                                  f"({exc!r}) -- the reply still echoes them")
@@ -1350,6 +1456,10 @@ def _capture_friend_put(pt):
                     peer = accounts.handle_by_name(db, r["name"])
                     if peer is None:
                         continue                    # not one of ours to post to
+                    if accounts.ignore_blocks(db, int(peer["id"]), int(h["id"])):
+                        log("lobby", f"  2:6 friend write: {r['name']!r} has "
+                                     f"{me!r} on their ignore list; no notice")
+                        continue
                     kind = (lobbymail.MAIL_KIND_FRIEND_REQUEST if was is None
                             else lobbymail.MAIL_KIND_FRIEND_ACCEPTED)
                     if lobbymail._mail_notice_already_there(int(peer["member_id"]), me, kind):

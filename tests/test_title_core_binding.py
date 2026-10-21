@@ -8,7 +8,7 @@ binds them with one `titles.bind_core(...)` call. A documented name that the
 call leaves out is silently None inside every title. That happened to
 `_advertise_configured`: Tetra Master's zone list then handed every client the
 raw POL_ADVERTISE address instead of the per-client one, and players outside
-the tailnet could not open a room (2026-09-28).
+the VPN could not open a room.
 
 Read statically, so the test needs no database and no running core.
 """

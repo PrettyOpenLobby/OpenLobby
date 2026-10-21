@@ -213,9 +213,9 @@ check(recs.get("Yui") is not None and (recs["Yui"] & 0xFFFFFFFF) == _want_low,
 # --- 6. THE THIRD WRITER: THE CLIENT'S OWN ROW ------------------------------ #
 #     On a local join or create the client builds its own member row itself
 #     (polcore FUN_037e8b20), copying the identity word from its HANDLE TABLE,
-#     i.e. from the 0:9 record's +0x08/+0x0C. Live 2026-10-03: Vela accepted
+#     i.e. from the 0:9 record's +0x08/+0x0C. Seen live: a member accepted
 #     an invite, the push named them by the tagged id, missed that row and
-#     appended a second Vela. So the viewer's own row must carry the 0:9 word.
+#     appended a second copy of them. So the viewer's own row must carry the 0:9 word.
 print("\n6. the viewer's own row matches the row the client builds from 0:9 ->")
 _h09 = R._handle_record(0, "Lex", 136, guid=accounts.handle_guid(HID))
 _lo, _hi = struct.unpack_from("<II", _h09, 0x08)

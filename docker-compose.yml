@@ -20,6 +20,22 @@ x-app: &app
   environment: &appenv
     POL_CONFIG: /config/server.yaml
     POL_ADVERTISE: "${POL_ADVERTISE:-}"
+    # Per-network addresses (docs/configuration.md): what an internet client
+    # and a LAN client are told to dial, when that differs from POL_ADVERTISE.
+    POL_ADVERTISE_PUBLIC: "${POL_ADVERTISE_PUBLIC:-}"
+    POL_ADVERTISE_LAN: "${POL_ADVERTISE_LAN:-}"
+    POL_ADVERTISE_LAN_CLIENTS: "${POL_ADVERTISE_LAN_CLIENTS:-}"
+    # Connection caps per process, login lockout, built-in portal pages and
+    # log rotation (docs/configuration.md). Each default here is the code's.
+    POL_MAX_CONNS: "${POL_MAX_CONNS:-256}"
+    POL_MAX_CONNS_PER_IP: "${POL_MAX_CONNS_PER_IP:-32}"
+    POL_LOGIN_LOCKOUT_FAILS: "${POL_LOGIN_LOCKOUT_FAILS:-5}"
+    POL_LOGIN_LOCKOUT_WINDOW_S: "${POL_LOGIN_LOCKOUT_WINDOW_S:-900}"
+    POL_TOKEN_ARM: "${POL_TOKEN_ARM:-1}"
+    POL_PML_FALLBACK: "${POL_PML_FALLBACK:-1}"
+    POL_GM_CALL: "${POL_GM_CALL:-0}"
+    POL_LOG_MAX_MB: "${POL_LOG_MAX_MB:-8}"
+    POL_LOG_KEEP: "${POL_LOG_KEEP:-3}"
     # PostgreSQL and Valkey, the two services below (docs/database.md).
     POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
     POL_VALKEY_URL: "valkey://valkey:6379/0"
@@ -84,6 +100,14 @@ services:
     build: ./services
     pull_policy: build
     command: dns
+    environment:
+      <<: *appenv
+      # Who may use this resolver (docs/configuration.md). Empty: loopback and
+      # the private ranges. POL_DNS_PUBLIC=1 also answers internet clients, for
+      # the redirected names only, and needs POL_ADVERTISE_PUBLIC.
+      POL_DNS_CLIENTS: "${POL_DNS_CLIENTS:-}"
+      POL_DNS_PUBLIC: "${POL_DNS_PUBLIC:-0}"
+      POL_DNS_PUBLIC_RATE: "${POL_DNS_PUBLIC_RATE:-60}"
     ports:
       # POL_DNS_BIND lets hosts whose own resolver occupies the wildcard
       # bind (WSL, systemd-resolved on an interface) pin this to one address
@@ -129,6 +153,25 @@ services:
     depends_on:
       - http
 
+  # The https the clients themselves start: the band (login relays a TLS hello
+  # it sees on a lobby port here, POL_SSL3_HOST/PORT) and the sign-up wizard
+  # (ucs relays its TLS half here, POL_UCS_SSL3_HOST/PORT). sslterm serves a
+  # chain that ends in a root the unmodified Viewer already trusts, so players
+  # install nothing (services/sslterm/main.go). To use stunnel and the revival
+  # CA instead, set POL_SSL3_HOST=ssl3web and POL_UCS_SSL3_HOST=ssl3ucs.
+  sslterm:
+    build:
+      context: ./services/sslterm
+    image: openlobby-sslterm:latest
+    restart: unless-stopped
+    environment:
+      SSLTERM_ROUTES: >-
+        0.0.0.0:51443=userctl.pol.com>http:80
+        0.0.0.0:8443=ucs.pol.com>ucs-plain:8080,md5
+    depends_on:
+      - http
+      - ucs-plain
+
   ssl3ucs:
     image: openlobby-ssl3:latest
     pull_policy: never
@@ -154,6 +197,15 @@ services:
       # grants POL_SIGNUP_CONTENTS (default: every title offered). See .env.example.
       POL_SIGNUP_MODE: "${POL_SIGNUP_MODE:-}"
       POL_SIGNUP_CONTENTS: "${POL_SIGNUP_CONTENTS:-}"
+      # Sign-up and registration-code limits (docs/configuration.md); empty
+      # means the code's default.
+      POL_SIGNUP_PER_DAY: "${POL_SIGNUP_PER_DAY:-}"
+      POL_SIGNUP_PER_IP: "${POL_SIGNUP_PER_IP:-}"
+      POL_REGCODE_LOCKOUT_FAILS: "${POL_REGCODE_LOCKOUT_FAILS:-}"
+      POL_REGCODE_LOCKOUT_WINDOW_S: "${POL_REGCODE_LOCKOUT_WINDOW_S:-}"
+      # The wizard's https goes to this terminator (see sslterm above).
+      POL_UCS_SSL3_HOST: "${POL_UCS_SSL3_HOST:-sslterm}"
+      POL_UCS_SSL3_PORT: "${POL_UCS_SSL3_PORT:-8443}"
     ports:
       - "51305:51305"
     volumes:
@@ -171,6 +223,9 @@ services:
     command: directory,lobby,world,mail
     environment:
       <<: *appenv
+      # The band's https goes to this terminator (see sslterm above).
+      POL_SSL3_HOST: "${POL_SSL3_HOST:-sslterm}"
+      POL_SSL3_PORT: "${POL_SSL3_PORT:-51443}"
       # Mail to and from the internet (services/extmail.py). Inert unless both
       # the SMTP relay and the domain are set, and then only for members
       # enabled on the admin panel. See .env.example.
@@ -283,6 +338,10 @@ services:
       # grants POL_SIGNUP_CONTENTS (default: every title offered). See .env.example.
       POL_SIGNUP_MODE: "${POL_SIGNUP_MODE:-}"
       POL_SIGNUP_CONTENTS: "${POL_SIGNUP_CONTENTS:-}"
+      POL_SIGNUP_PER_DAY: "${POL_SIGNUP_PER_DAY:-}"
+      POL_SIGNUP_PER_IP: "${POL_SIGNUP_PER_IP:-}"
+      POL_REGCODE_LOCKOUT_FAILS: "${POL_REGCODE_LOCKOUT_FAILS:-}"
+      POL_REGCODE_LOCKOUT_WINDOW_S: "${POL_REGCODE_LOCKOUT_WINDOW_S:-}"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -298,6 +357,10 @@ services:
     environment:
       <<: *appenv
       POL_EXT_MAIL_DOMAIN: "${POL_EXT_MAIL_DOMAIN:-}"
+      # Break-glass login for the panel. The normal credential is set with
+      # `admin.py --set-password` and kept in the database.
+      POL_ADMIN_USER: "${POL_ADMIN_USER:-admin}"
+      POL_ADMIN_PASSWORD: "${POL_ADMIN_PASSWORD:-}"
     ports:
       - "127.0.0.1:8090:8090"
     # The Overview's service checks dial the published ports on the host as
@@ -310,7 +373,8 @@ services:
   # The version-check server. The Viewer's FIRST connection is here (POL-1160
   # when it cannot answer). With no patch trees under mirrors/ it answers
   # "you are up to date" for the Viewer product in every region (POLP_CURRENT
-  # below); drop your own patch trees into mirrors/ to serve real updates.
+  # below); drop your own patch trees into mirrors/ to serve real updates
+  # (docs/patching.md builds one from an installed client).
   patch:
     <<: *app
     environment:

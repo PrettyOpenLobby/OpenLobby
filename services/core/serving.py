@@ -19,11 +19,41 @@ from srvcore import bind_peer, log
 _MAX_CONNS = int(os.environ.get("POL_MAX_CONNS", "256"))
 _CONNS = threading.Semaphore(_MAX_CONNS) if _MAX_CONNS > 0 else None
 
+#: One address's share of that ceiling. The global cap alone lets a single
+#: peer hold every handler thread and lock everyone else out of every port;
+#: this bounds what one address can hold at once. 0 disables it.
+_MAX_PER_IP = int(os.environ.get("POL_MAX_CONNS_PER_IP", "32"))
+_PER_IP = {}
+_PER_IP_LOCK = threading.Lock()
+
+
+def _ip_acquire(ip):
+    """Take one of `ip`'s slots; False when it already holds them all."""
+    if _MAX_PER_IP <= 0:
+        return True
+    with _PER_IP_LOCK:
+        n = _PER_IP.get(ip, 0)
+        if n >= _MAX_PER_IP:
+            return False
+        _PER_IP[ip] = n + 1
+    return True
+
+
+def _ip_release(ip):
+    if _MAX_PER_IP <= 0:
+        return
+    with _PER_IP_LOCK:
+        n = _PER_IP.get(ip, 0) - 1
+        if n > 0:
+            _PER_IP[ip] = n
+        else:
+            _PER_IP.pop(ip, None)
+
 
 def _serve_one(handler, conn, addr, port):
     # Who connected and which of our addresses they reached: every address this
     # thread hands the client comes out of _self_ip(), which reads these
-    # (srvcore.advertise_for -- a LAN console must not be sent the tailnet IP).
+    # (srvcore.advertise_for -- a LAN console must not be sent the VPN IP).
     try:
         bind_peer(addr[0], conn.getsockname()[0])
     except OSError:
@@ -37,6 +67,7 @@ def _serve_one(handler, conn, addr, port):
         except OSError:
             pass
     finally:
+        _ip_release(addr[0])
         if _CONNS is not None:
             _CONNS.release()
 
@@ -64,6 +95,17 @@ def serve(port, handler, bind="0.0.0.0"):
             log("resp", f"{addr[0]}:{addr[1]} refused on :{port} -- "
                         f"{_MAX_CONNS} handler threads already live "
                         f"(POL_MAX_CONNS)")
+            try:
+                conn.close()
+            except OSError:
+                pass
+            continue
+        if not _ip_acquire(addr[0]):
+            log("resp", f"{addr[0]}:{addr[1]} refused on :{port} -- that "
+                        f"address already holds {_MAX_PER_IP} connections "
+                        f"(POL_MAX_CONNS_PER_IP)")
+            if _CONNS is not None:
+                _CONNS.release()
             try:
                 conn.close()
             except OSError:

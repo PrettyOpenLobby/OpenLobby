@@ -10,7 +10,8 @@
     changing it would make prod restart login and authsess.
   * Status for the Overview: live session counts from the markers the game
     services publish (live_sessions.py), TCP reachability of the services,
-    the last backup (deploy/pol-backup writes data/backup-status.json) and
+    the last backup (data/backup-status.json, written by the host's backup
+    job, which is not part of this repository) and
     free disk.
 
 Stdlib plus webpush (pycryptodome), like the rest of the admin service.
@@ -137,6 +138,59 @@ def disk(data_dir):
         return {"total": u.total, "free": u.free}
     except OSError:
         return None
+
+
+# --------------------------------------------------------------------------- #
+# Server checks and fixes. A runner on the host (any program with the rights to
+# restart the stack) writes ops/status.json every few seconds:
+#   {"at": <unix time>, "checks": [{"id", "name", "state": ok|warn|bad|info,
+#    "detail", "fix": <action id or null>, "restarted": {...} or null}],
+#    "actions": {<id>: {"name", "warning"}}, "running": null or {...},
+#    "history": [...]}
+# and carries out the fixes; this side only reads that file and drops
+# ops/requests/<time>-<id>.json naming one of the actions it lists. The panel
+# never restarts anything itself. With no runner, the server checks are hidden.
+# A check whose id is a game module's key shows on that game's page.
+# --------------------------------------------------------------------------- #
+#: A status older than this means the runner is not running.
+OPS_STALE = 90.0
+_OPS_ID = re.compile(r"^[a-z0-9_-]{1,32}$")
+
+
+def ops_status(data_dir, now=None):
+    """The runner's last status, with `stale` set, or None when there is none."""
+    now = time.time() if now is None else now
+    try:
+        with open(os.path.join(data_dir, "ops", "status.json"), encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(st, dict):
+        return None
+    st["stale"] = now - float(st.get("at") or 0) > OPS_STALE
+    return st
+
+
+def ops_request(data_dir, action, by, now=None):
+    """File a fix request -> (ok, message). Only an action the runner itself
+    listed is accepted, and not while its status is stale."""
+    st = ops_status(data_dir, now)
+    if st is None or st["stale"]:
+        return False, "The server checker is not running, so it cannot do that."
+    actions = st.get("actions") or {}
+    if not isinstance(action, str) or not _OPS_ID.match(action) or action not in actions:
+        return False, "That is not a fix the server knows."
+    if st.get("running"):
+        return False, "Another fix is still running. Wait for it to finish."
+    now = time.time() if now is None else now
+    req = os.path.join(data_dir, "ops", "requests")
+    os.makedirs(req, exist_ok=True)
+    name = "%d-%s.json" % (int(now * 1000), action)
+    tmp = os.path.join(req, "." + name)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"action": action, "by": str(by)[:64], "at": now}, f)
+    os.replace(tmp, os.path.join(req, name))
+    return True, "%s requested. It usually takes under a minute." % actions[action].get("name", action)
 
 
 # --------------------------------------------------------------------------- #

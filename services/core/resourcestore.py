@@ -357,6 +357,77 @@ _RESOURCE_WRITE_PATHS = tuple(
 #: different file, and is not stored.
 _RESOURCE_WRITE_LEN = {}
 
+#: WINDOWED FILES: path prefixes a title keeps as ONE file the client reads and
+#: writes in pieces (`titles.Title.resource_windowed`; boot fills this in).
+#:
+#: Measured off FFXI on the Xbox 360 saving its macros to
+#: `U/g/0001_00.bak`:
+#:
+#:     03:02  448B, no object block              -- delete the old file
+#:     03:01  offset 0,   length 292             -- a header naming 0x137a
+#:     03:01  offset 292, length 4986 (0x137a)   -- a ZIP of mcr*.dat
+#:     03:00  offset 0,   length 292             -- the next load: header first
+#:
+#: The offset is the u32 at +0x1B8, just in front of the length `_MAIL_OBJ_OFF`
+#: already reads, in the write and in the read alike. Storing each write as
+#: the whole object kept only whichever piece came last, and serving
+#: `data[:n]` could never answer the second read.
+_RESOURCE_WINDOWED = ()
+_WINDOW_OFF = 0x1B8
+#: Far above the 5.3 KB a full set of FFXI macro books makes; a window past it
+#: is a misread frame, not a save.
+_WINDOW_MAX = 1 << 20
+
+
+def _windowed(path):
+    return bool(_RESOURCE_WINDOWED) and path.startswith(_RESOURCE_WINDOWED)
+
+
+def _window_write(pt, path, op):
+    """Splice one 03:01 window into the stored file; a 03:02 deletes it.
+
+    The delete keeps the old bytes as `.prev`: the client deletes BEFORE it
+    writes, so a save that dies between the two would otherwise leave the
+    player with nothing at all.
+    """
+    name = _resource_file(path)
+    if pt[2] == 0x02:
+        kept = _res_rename(name, name + ".prev")
+        log("lobby", f"  {op} {path[:48]!r}: deleted"
+                     + (f" (old copy kept as {name}.prev)" if kept else " (nothing stored)"))
+        return
+    if len(pt) < _MAIL_OBJ_OFF + 8:
+        log("lobby", f"  {op} {path[:48]!r}: frame {len(pt)}B carries no window; nothing stored")
+        return
+    off, n = struct.unpack_from("<II", pt, _WINDOW_OFF)
+    if _MAIL_OBJ_OFF + 8 + n != len(pt) or off + n > _WINDOW_MAX:
+        log("lobby", f"  {op} {path[:48]!r}: window off={off} len={n} does not fit the "
+                     f"{len(pt)}B frame; nothing stored")
+        return
+    data = bytes(pt[_MAIL_OBJ_OFF + 4:_MAIL_OBJ_OFF + 4 + n])
+    have = _res_read(name) or b""
+    new = have[:off].ljust(off, b"\x00") + data + have[off + n:]
+    _res_write(name, new)
+    log("lobby", f"  {op} {path[:48]!r}: stored {n}B at offset {off} "
+                 f"(file now {len(new)}B)")
+
+
+def _window_read(path, n, req_pt):
+    """The window a 03:00 asks for, `n` bytes with the trailer: the last four
+    are the signer's, so they carry no file bytes."""
+    off = struct.unpack_from("<I", req_pt, _WINDOW_OFF)[0] \
+        if len(req_pt) >= _WINDOW_OFF + 4 else 0
+    try:
+        data = _res_read(_resource_file(path)) or b""
+    except Exception as e:
+        log("lobby", f"  resource {path!r}: cannot read the store ({e!r})")
+        data = b""
+    want = max(n - 4, 0)
+    part = data[off:off + want]
+    log("lobby", f"  3:0 {path!r}: window off={off} len={want} -> {len(part)}B of a "
+                 f"{len(data)}B file" + ("" if data else " (nothing stored yet)"))
+    return part.ljust(want, b"\x00") + b"\x00" * (n - want)
+
 
 def _capture_resource_write(pt, op=None):
     """Persist a 03:02 object write, so a later 03:00 can read it back.
@@ -387,6 +458,9 @@ def _capture_resource_write(pt, op=None):
     if not path.startswith(_RESOURCE_WRITE_PATHS):
         log("lobby", f"  {op or '3:x'} write: {path[:48]!r} is not a storable prefix "
                      f"({'|'.join(_RESOURCE_WRITE_PATHS)}) -- captured, NOT stored")
+        return
+    if _windowed(path):
+        _window_write(pt, path, op or "3:x")
         return
     end = pt.find(b"\x00", paylen._FETCH_PATH_OFF)
     if end < 0:
@@ -446,6 +520,14 @@ def _capture_resource_write(pt, op=None):
                 # room-sidebar re-friend; drop it rather than spam the peer.
                 if lobbymail._mail_drop_redundant_request(db, path):
                     return
+                # A recipient who has the sender on their ignore list gets
+                # nothing: message, friend request or group invite.
+                if lobbymail._mail_drop_blocked(db, path):
+                    return
+                # A DECLINE (type 10) retires the decliner's invited row; a
+                # fresh REQUEST resets the pair's heal history. Both are
+                # still stored and delivered below.
+                lobbymail._mail_friend_notice_effects(db, path)
             finally:
                 db.close()
         except Exception as exc:
@@ -502,6 +584,8 @@ def payload_fetch(n, req_pt):
     live = titles.resource_live(path, n, req_pt)
     if live is not None:
         return live
+    if _windowed(path):
+        return _window_read(path, n, req_pt)
     blob = _resource_blob(path, n, fetchpath._fetch_subject(req_pt))
     log("lobby", f"  3:0 {path!r}: serving {len(blob)}B"
                  + ("" if blob.strip(b"\x00") else " (all zero = 'no data "
@@ -564,6 +648,9 @@ def capture_multi_write(pt):
                 copy = lobbymail._mail_readdress(db, path, row) if row else None
                 if copy is None:
                     unknown.append(f"{tid:#x}")
+                    continue
+                if lobbymail._mail_blocked_for(db, int(row["id"])):
+                    unknown.append(f"{row['handle_name']} (ignores the sender)")
                     continue
                 _resource_store(copy, data)
                 lobbymail._mail_announce(copy)

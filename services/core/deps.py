@@ -102,6 +102,10 @@ try:
 except ImportError:
     extmail = None
 try:
+    import screenshots          # pictures mailed to pics@pol.com, for the website
+except ImportError:
+    screenshots = None
+try:
     import accounts             # account DB; optional -- absent = old stateless behaviour
 except ImportError:
     accounts = None

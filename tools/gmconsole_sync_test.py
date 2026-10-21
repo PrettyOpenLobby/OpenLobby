@@ -84,7 +84,7 @@ def reset():
 
 def ticket(tid, room="#gmcall001", **extra):
     with open(os.path.join(TMP, tid + ".json"), "w", encoding="utf-8") as f:
-        json.dump(dict({"room": room, "handle": "Bluebell", "guid": 7}, **extra), f)
+        json.dump(dict({"room": room, "handle": "Marigold", "guid": 7}, **extra), f)
 
 
 def state(d):

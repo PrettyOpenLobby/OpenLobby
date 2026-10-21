@@ -28,8 +28,13 @@ TMP = tempfile.mkdtemp(prefix="admingm-")
 os.environ["POL_GMCHAT_SPOOL"] = os.path.join(TMP, "gm-chat")
 
 sys.path.insert(0, LEGACY_TOOLS)
-from fe_panel_browser import Browser, CHROME_CANDIDATES  # noqa: E402
-# fe_panel_browser puts legacy/services first; this panel's own code wins.
+try:
+    from fe_panel_browser import Browser, CHROME_CANDIDATES  # noqa: E402
+except ImportError:
+    # a headless-Chrome check for a full checkout; the helper is not in every one
+    print("SKIP: needs fe_panel_browser")
+    sys.exit(0)
+# the browser helper puts its own services directory first; this panel's code wins.
 sys.path.insert(0, HERE)
 sys.path.insert(0, SERVICES)
 
@@ -57,9 +62,9 @@ def seed():
     calls = os.path.join(TMP, "gm-calls")
     os.makedirs(calls, exist_ok=True)
     for tid, no, handle, subj, when in (
-            ("gm-20260930T051000-1", 1, "Bluebell", "Someone took my pasta",
+            ("gm-20260930T051000-1", 1, "Marigold", "Lost my linkshell pearl",
              "2026-09-30T05:10:00Z"),
-            ("gm-20260930T052000-2", 2, "Birdie", "Stuck in the lobby",
+            ("gm-20260930T052000-2", 2, "Tobin", "Stuck in the lobby",
              "2026-09-30T05:20:00Z")):
         with open(os.path.join(calls, tid + ".json"), "w", encoding="utf-8") as f:
             json.dump({"received_at": when, "request_no": no, "guid": 1000 + no,
@@ -68,12 +73,12 @@ def seed():
                        "peer": "203.0.113.9:5555",
                        "room": "#gmcall%03d" % no}, f)
     a, b = b"#gmcall001", b"#gmcall002"
-    gmchat.record(a, "in", b"UHAZEL", gmchat.encode_text("hiii"))
+    gmchat.record(a, "in", b"UMARIGOLD", gmchat.encode_text("hello there"))
     for _ in range(300):
-        gmchat.record(a, "in", b"UHAZEL", b"HRu87960930222113Hazelnut")
-    gmchat.record(a, "out", b"GM", gmchat.encode_text("did u steal my pasta"))
-    gmchat.record(a, "in", b"UHAZEL", gmchat.encode_text("totally not"))
-    gmchat.record(b, "in", b"UBIRDIE", gmchat.encode_text("hello?"))
+        gmchat.record(a, "in", b"UMARIGOLD", b"HRu87960930222113Marigold")
+    gmchat.record(a, "out", b"GM", gmchat.encode_text("which pearl was it?"))
+    gmchat.record(a, "in", b"UMARIGOLD", gmchat.encode_text("the blue one"))
+    gmchat.record(b, "in", b"UTOBIN", gmchat.encode_text("hello?"))
 
 
 def main():
@@ -118,7 +123,7 @@ def main():
             b.screenshot(os.path.join(shots, "gm-none.png"))
         chk("both requests are listed",
             b.js("[...document.querySelectorAll('.gm-item-who')].map(e=>e.innerText.trim())"),
-            ["Birdie", "Bluebell"])
+            ["Tobin", "Marigold"])
         chk("nothing is picked on arrival",
             b.js("document.querySelectorAll('.gm-item.sel').length"), 0)
         chk("so no chat shows", b.js(visible % json.dumps("#gmLog")), False)
@@ -128,22 +133,22 @@ def main():
         b.js("document.querySelector('.gm-item[data-id=\"gm-20260930T051000-1\"]').click()")
         b.pump(2.0)
         if shots:
-            b.screenshot(os.path.join(shots, "gm-bluebell.png"))
+            b.screenshot(os.path.join(shots, "gm-marigold.png"))
         text = b.js(log_text) or ""
-        chk("picking Bluebell shows her chat", b.js(visible % json.dumps("#gmLog")), True)
-        chk("including the first line under the roster chatter", "hiii" in text, True)
-        chk("and the latest", "totally not" in text, True)
+        chk("picking Marigold shows their chat", b.js(visible % json.dumps("#gmLog")), True)
+        chk("including the first line under the roster chatter", "hello there" in text, True)
+        chk("and the latest", "the blue one" in text, True)
         chk("and nobody else's", "hello?" in text, False)
         meta = b.js("document.querySelector('#gmTMeta').innerText")
         chk("the caller's IP is not shown", "203.0.113.9" in meta, False)
         chk("nor the raw issue number", "issue type" in meta, False)
         chk("player lines name the player, not the chat nick",
-            ("Bluebell" in text or "Player" in text, "UHAZEL" in text), (True, False))
+            ("Marigold" in text or "Player" in text, "UMARIGOLD" in text), (True, False))
 
         b.js("document.querySelector('.gm-item[data-id=\"gm-20260930T052000-2\"]').click()")
         b.pump(2.0)
         text = b.js(log_text) or ""
-        chk("picking Birdie switches to her chat", ("hello?" in text, "hiii" in text),
+        chk("picking Tobin switches to their chat", ("hello?" in text, "hello there" in text),
             (True, False))
         b.js("document.querySelector('.gm-item[data-id=\"gm-20260930T052000-2\"]').click()")
         b.pump(1.0)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Failed-login lockout (SE status 0xCB) and the refusal record's tail.
+"""Failed-login lockout (status 0xCD, POL-0206) and the refusal record's tail.
 
     python tests/test_login_lockout.py
 
 After POL_LOGIN_LOCKOUT_FAILS (5) passwords the NICK digest REFUSED within
-POL_LOGIN_LOCKOUT_WINDOW_S (900 s), a member's logins are refused with 0xCB --
+POL_LOGIN_LOCKOUT_WINDOW_S (900 s), a member's logins are refused with 0xCD --
 the right password too -- until the failures age out or `accounts.py unlock`.
 Only real digest refusals count: token mismatches and unproven builds never do.
 """
@@ -67,15 +67,17 @@ def login(digest, sig=PC, cred="tokenAAAAAA"):
 
 
 print("the codes")
-chk("0xCB is the lockout byte", CB, 0xCB)
+# polcore FUN_037d5820: 0xCD -> -206, "temporarily disabled due to three
+# consecutive password errors"; 0xCB -> -205 is the version text.
+chk("0xCD is the lockout byte", CB, 0xCD)
 chk("and the rest are named", (responders.REJECT_VERSION, responders.REJECT_BUSY,
-                               responders.REJECT_UNKNOWN_ERROR), (0xCC, 0xCD, 0xCE))
+                               responders.REJECT_UNKNOWN_ERROR), (0xCB, 0xCE, 0xCE))
 
 print("the lockout")
 chk("right password proves the PC build", login(GOOD), None)
 for i in range(1, 6):
     chk("wrong password #%d -> 0xCA" % i, login(WRONG), CA)
-chk("the 6th attempt, wrong -> 0xCB", login(WRONG), CB)
+chk("the 6th attempt, wrong -> the lockout byte", login(WRONG), CB)
 chk("...and the RIGHT password is refused too while locked", login(GOOD), CB)
 chk("a locked attempt adds no failure (still 5)",
     accounts.login_failures(db, mid, 900), 5)

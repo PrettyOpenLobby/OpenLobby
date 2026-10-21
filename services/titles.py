@@ -187,12 +187,22 @@ class Title:
     #: `path -> exact length` of client WRITES (3:2) this title accepts; the
     #: core stores an object at such a path only when it has that length
     resource_write_len = {}
+    #: path PREFIXES the client keeps as one file it reads and writes in
+    #: `(offset, length)` windows rather than as one object (see
+    #: resourcestore._window_write); such paths are writable too
+    resource_windowed = ()
     #: how many Content IDs one handle holds for this title. 1 for a title
     #: that issues one per account; a title that issues one per CHARACTER sets
     #: its character slots here, and the account database mints the rest when
     #: the title is granted, placed, or when the handle logs in (see
     #: accounts.ensure_content_slots, which never goes past eight a handle)
     content_slots = 1
+    #: how many Content IDs one MEMBER may hold for this title across all of
+    #: their handles. None = `content_slots` on the primary handle and no more.
+    #: Above that, accounts.ensure_overflow_slots puts the rest on handles that
+    #: hold nothing but this title, eight a handle, so the primary handle and
+    #: every other title on it are never touched. Needs `spent_content_ids`.
+    member_slots = None
     #: True = ask `idle_pushes` even on a connection that has been quiet past
     #: the freshness window. For a title whose client waits for a record in
     #: silence; the title must then pin delivery to the live session itself.
@@ -203,6 +213,13 @@ class Title:
 
     def describe(self):
         return ""
+
+    def spent_content_ids(self, conn=None):
+        """The Content IDs (ints) of this title that a character already sits
+        on, server-wide, or None when that cannot be known right now. None
+        must never be read as "nothing spent": it stops the overflow mint.
+        `conn` is the account database connection the caller is working in."""
+        return None
 
     # --- the auth band -------------------------------------------------------
     def notice(self, cls, payload, text, target, nick, srv, sess):
@@ -322,6 +339,17 @@ class Title:
         """The world identity dword for a Content ID: served at +0x0C of its
         character record and as `z_ctsid` in the profile's content block.
         None when the title has no world identity (most do not)."""
+        return None
+
+    def character_by_world(self, world):
+        """The Content ID whose world identity dword is `world`, across EVERY
+        member the title knows -- the inverse of `character_world`. None when
+        the title has no world identity or serves no such character.
+
+        This is what the 1:11 character bind query needs: a game asks which
+        handle owns a character it is looking at, and that character is
+        usually somebody else's (a friend request or POL message sent from
+        inside FFXI to the targeted player)."""
         return None
 
     def character_display_name(self, cid, content_id, handle_name):
@@ -552,6 +580,14 @@ def resource_write_len():
     return out
 
 
+def resource_windowed():
+    """Path prefixes stored as windowed files, merged across titles."""
+    out = []
+    for t in _TITLES:
+        out.extend(p for p in (t.resource_windowed or ()) if p not in out)
+    return tuple(out)
+
+
 def resource_length(path, zone=None):
     """The first title's opinion, the title whose content id is `zone` (the
     requester's title, when the core knows it) asked before the others: two
@@ -655,12 +691,42 @@ def content_slots():
     return out
 
 
+def member_slots():
+    """`{content code: Content IDs per member}` for every loaded title whose
+    member total is above its per-handle count (see Title.member_slots)."""
+    out = {}
+    for t in _TITLES:
+        n = getattr(t, "member_slots", None)
+        if t.content_code is None or n is None:
+            continue
+        if int(n) > int(getattr(t, "content_slots", 1) or 1):
+            out[int(t.content_code)] = int(n)
+    return out
+
+
+def spent_content_ids(code, conn=None):
+    """The ids of `code` a character sits on (ints), or None when unknown."""
+    t = for_code(code)
+    if t is None:
+        return None
+    return t.spent_content_ids(conn)
+
+
 def character_world(code, cid):
     """The world identity dword the title for `code` records for `cid`, or None."""
     t = for_code(code)
     if t is None:
         return None
     return t.character_world(cid)
+
+
+def character_by_world(code, world):
+    """The Content ID the title for `code` serves under world dword `world`,
+    whoever it belongs to, or None."""
+    t = for_code(code)
+    if t is None:
+        return None
+    return t.character_by_world(world)
 
 
 def character_display_name(code, cid, content_id, handle_name):

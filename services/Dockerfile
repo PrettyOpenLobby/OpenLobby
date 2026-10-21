@@ -12,6 +12,13 @@ RUN apt-get update \
     && pip install --no-cache-dir pyyaml pycryptodome pillow \
         "psycopg[binary]==3.3.6" "psycopg-pool==3.3.3" "valkey==6.1.1"
 
+# The unprivileged account the title images and the standalone services run
+# as (USER 1000 in the images built on this one). It matches the owner of the
+# /data and /logs bind mounts on a production box, so files written by one
+# stay readable by the others. This image itself stays root: the http (80),
+# dns (53) and mail (25/110) services bind privileged ports from it.
+RUN useradd --uid 1000 --user-group --create-home --shell /usr/sbin/nologin pol
+
 WORKDIR /app
 COPY . /app/
 

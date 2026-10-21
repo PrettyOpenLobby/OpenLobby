@@ -19,6 +19,7 @@ import json
 import time
 
 import accounts
+import adminmodules
 
 #: What a moderator can be allowed to do. The key is what the panel checks; the
 #: label is what the owner sees, in this order. Two things are the OWNER's alone
@@ -39,11 +40,19 @@ PERMS = {
     "audit": "See the activity log",
     "health": "See service status and backups",
     "settings": "Change GM alert and service check settings",
-    # one per game in admingames.GAMES ("games_<key>")
-    "games_fe": "Fantasy Earth tools: world builder",
-    "games_fmo": "Front Mission Online tools: lobby NPCs, story gates",
-    "games_ffxi": "Final Fantasy XI tools: federation worlds and providers",
 }
+# ...then every game module's own: "game.<key>" to see it, "game.<key>.<id>"
+# per tool and action (adminmodules.Module.perms). PERMS holds them as found
+# at start; perm_labels() is the current list, which also has a game that
+# described itself later (adminmodules.remote).
+PERMS.update(adminmodules.all_perms())
+
+
+def perm_labels():
+    """{perm: label}: the panel's own permissions, then every game module's."""
+    out = dict(PERMS)
+    out.update(adminmodules.all_perms())
+    return out
 
 
 def connect(path=None):
@@ -58,12 +67,16 @@ class ModError(ValueError):
 
 
 def clean_perms(perms):
-    got = [p for p in (perms or []) if p in PERMS]
+    known = perm_labels()
+    got = [p for p in adminmodules.expand_legacy(perms or []) if p in known]
     return sorted(set(got))
 
 
 def perms_of(row):
-    return [p for p in (row["perms"] or "").split(",") if p in PERMS]
+    """A moderator's permissions. One saved before game modules held
+    "games_<key>"; that reads as everything in that game."""
+    known = perm_labels()
+    return [p for p in adminmodules.expand_legacy((row["perms"] or "").split(",")) if p in known]
 
 
 def fingerprint(row):

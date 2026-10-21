@@ -109,6 +109,10 @@ def main():
             sorted(p for p, c in mods.items()
                    if c.call("api/credentials",
                              {"username": "x", "password": "y" * 12})[0] != 403), [])
+        chk("no moderator can see or change the Discord bot tokens",
+            sorted(p for p, c in mods.items()
+                   if c.call("api/bots")[0] != 403
+                   or c.call("api/bots", {"bot": "tm", "action": "delete"})[0] != 403), [])
         _code, sess = mods["pml"].call("api/session")
         chk("the session lists the new permission's label",
             "PML Preview" in json.dumps(sess.get("perm_labels", {})), True)

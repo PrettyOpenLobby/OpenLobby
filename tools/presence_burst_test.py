@@ -68,6 +68,7 @@ R.field_push_lines = _capture_fpl
 class FakeSession:
     alive = True
     nick = b"WATCHERNICK"
+    srv = b"pol.example"
 
     def __init__(self):
         self.sent = []
@@ -169,6 +170,56 @@ R._push_defer_retry()
 check(len(CALLS) == 1 and CALLS[0]["guid"] == GUID_ON,
       "the retry routed the burst back to its own deliverer and it landed",
       f"calls={CALLS!r}")
+
+# --------------------------------------------------------------------------- #
+print("6. HIDDEN (4:5 status 0x05): watchers see the member OFFLINE (retail)")
+R._publish_member_status(m_on, R._STATUS_INVISIBLE)
+CALLS.clear()
+R._push_deliver_presencerows(
+    {"kind": "presencerows", "member": watcher,
+     "rows": [[1, GUID_ON, h_on]], "after": 0}, db)
+check(len(CALLS) == 1 and CALLS[0].get("state") ==
+      R._PRESENCE_FIELD_STATE["offline"] and CALLS[0].get("zone") == 0,
+      "a Hidden friend is asserted offline in the burst (+0x11=1, zone=0)",
+      f"calls={CALLS!r}")
+check(R._status_push_state(R._STATUS_INVISIBLE) == "offline",
+      "the 4:5 watcher pushes Hidden as offline")
+check(R._status_push_state(R._STATUS_ONLINE) == "back"
+      and R._status_push_state(R._STATUS_AWAY) == "away",
+      "Online -> back (online), Away -> away, unchanged")
+check(R._peer_online(h_on) is False,
+      "2:3 serves the Hidden friend offline (_peer_online)")
+check(R._member_hidden(m_on) is True and R._member_hidden(m_away) is False,
+      "only the Hidden member is hidden")
+# _broadcast_presence: every push ABOUT a Hidden member goes out as offline.
+_real_watchers, _real_slot = accounts.friend_watchers, R._friend_slot
+accounts.friend_watchers = lambda _db, _mid: [(watcher, 999, h_on)]
+R._friend_slot = lambda _db, _w, _s: 1
+CALLS.clear()
+R._broadcast_presence(m_on, "online")
+states = {c.get("state") for c in CALLS if c.get("group") is None}
+check(states == {R._PRESENCE_FIELD_STATE["offline"]},
+      "a login/title 'online' push about a Hidden member is sent as offline",
+      f"states={states}")
+os.environ["POL_STATUS_HIDDEN_OFFLINE"] = "0"
+CALLS.clear()
+R._broadcast_presence(m_on, "online")
+states = {c.get("state") for c in CALLS if c.get("group") is None}
+check(states == {R._PRESENCE_FIELD_STATE["online"]},
+      "POL_STATUS_HIDDEN_OFFLINE=0: the old reading (not hidden)",
+      f"states={states}")
+check(R._status_push_state(R._STATUS_INVISIBLE) == "away",
+      "...and the 4:5 watcher pushes Hidden as away again")
+os.environ.pop("POL_STATUS_HIDDEN_OFFLINE")
+R._publish_member_status(m_on, R._STATUS_ONLINE)
+CALLS.clear()
+R._broadcast_presence(m_on, "back")
+states = {c.get("state") for c in CALLS if c.get("group") is None}
+check(states == {R._PRESENCE_FIELD_STATE["online"]},
+      "switching back to Online pushes online without a relog",
+      f"states={states}")
+check(R._peer_online(h_on) is True, "and 2:3 serves them online again")
+accounts.friend_watchers, R._friend_slot = _real_watchers, _real_slot
 
 R.field_push_lines = _real_fpl
 db.close()

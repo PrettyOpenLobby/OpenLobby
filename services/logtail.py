@@ -14,7 +14,11 @@ directory mounted READ-ONLY and it is enforced by the filesystem too.
 
     POL_LOGTAIL_TOKEN=<long random>  python logtail.py
 
-Endpoints (token via `Authorization: Bearer` or `?token=`):
+It binds 127.0.0.1 unless POL_LOGTAIL_BIND names another address (0.0.0.0
+to publish it from a container). The `?token=` query form is gone: a token in
+a URL lands in proxy logs and browser history, so only the header is read.
+
+Endpoints (token via `Authorization: Bearer`):
 
     /            list available logs with sizes and mtimes
     /<name>      tail of that log        (?bytes=N, default 64k, max 2M)
@@ -23,6 +27,7 @@ Endpoints (token via `Authorization: Bearer` or `?token=`):
 Redaction is on by default. POL_LOGTAIL_RAW=1 disables it -- for a private
 network only, since the logs carry session tokens and password hashes.
 """
+import hmac
 import html
 import os
 import re
@@ -92,9 +97,10 @@ class Handler(BaseHTTPRequestHandler):
         if not TOKEN:
             return False
         hdr = self.headers.get("Authorization", "")
-        if hdr.startswith("Bearer ") and hdr[7:].strip() == TOKEN:
-            return True
-        return qs.get("token", [""])[0] == TOKEN
+        if not hdr.startswith("Bearer "):
+            return False
+        return hmac.compare_digest(hdr[7:].strip().encode("utf-8"),
+                                   TOKEN.encode("utf-8"))
 
     # --- routing ------------------------------------------------------------
 
@@ -187,9 +193,10 @@ def main():
         sys.exit("refusing to start: POL_LOGTAIL_TOKEN is shorter than 24 chars.")
     if not os.path.isdir(LOG_DIR):
         sys.exit("no log directory at %s" % LOG_DIR)
-    print("logtail on :%d  dir=%s  redaction=%s"
-          % (PORT, LOG_DIR, "off" if RAW else "on"), flush=True)
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    bind = os.environ.get("POL_LOGTAIL_BIND", "127.0.0.1")
+    print("logtail on %s:%d  dir=%s  redaction=%s"
+          % (bind, PORT, LOG_DIR, "off" if RAW else "on"), flush=True)
+    ThreadingHTTPServer((bind, PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,10 @@ never handed to the browser, that a tool page gets a script policy with a
 nonce on its own script, that a change made through a tool is in the activity
 log, and that an unreachable or misconfigured tool is reported as such.
 
+Permissions are per tool (adminmodules): a moderator given one of a game's
+tools reaches that tool's page and endpoints and not the others'. The old
+per-game grant "games_<key>" still reads as every tool of that game.
+
 Uses a throwaway PostgreSQL database (tools/pgtest.py) and a temporary data
 directory; the panel runs as a subprocess on a loopback port.
 """
@@ -31,6 +35,14 @@ import pgtest  # noqa: E402
 
 pgtest.use_fresh_database()
 
+# A title this deployment adds without changing admingames.py; set before the
+# panel modules load, as the admin container's environment would be.
+EXTRA = json.dumps({"xg": {"title": "Extra Game", "short": "XG",
+                           "tools": [{"id": "home", "label": "Home", "path": ""},
+                                     {"id": "gates", "label": "Gates", "path": "gates"}]},
+                    "bad key": {"title": "x", "tools": []}})
+os.environ["POL_ADMIN_GAMES_EXTRA"] = EXTRA
+
 import accounts  # noqa: E402
 import adminusers  # noqa: E402
 from admin_http import Client, free_port, start_panel, stop  # noqa: E402
@@ -40,6 +52,14 @@ TOKEN = "tool-token-0123456789"
 PAGE = b"<!doctype html><title>tool</title><div id=x></div><script>var a = 1;</script>"
 bad = 0
 SEEN = []
+# A game that describes itself (adminmodules/remote.py, the OpenLobby admin
+# protocol): the panel is given its URL and token and nothing else.
+KART = {"v": 1, "key": "kart", "title": "Kart Club", "short": "Kart", "platform": "PS2 HDD",
+        "tools": [{"id": "laps", "label": "Lap times", "path": "laps"}],
+        "actions": [{"id": "banner", "label": "Banner message", "kind": "announce",
+                     "fields": [{"id": "text", "label": "Message"}]},
+                    {"id": "kick", "label": "Kick", "kind": "kick", "danger": True}],
+        "services": [{"containers": ["kart-game-1"], "ports": {"7000": "game"}}]}
 
 
 def chk(what, got, want):
@@ -66,6 +86,17 @@ class Tool(BaseHTTPRequestHandler):
                      "actor": self.headers.get("X-Devtool-Actor"), "body": body})
         if self.headers.get("X-Devtool-Token") != TOKEN:
             return self._reply(403, b'{"error": "bad or missing token"}', "application/json")
+        if self.path == "/openlobby/module.json":
+            return self._reply(200, json.dumps(KART).encode(), "application/json")
+        if self.path == "/openlobby/status.json":
+            return self._reply(200, json.dumps(
+                {"up": True, "online": 2, "players": [{"name": "Wren", "room": "Lap 3"}, "Ash"],
+                 "summary": "Grand prix tonight", "rooms_label": "races",
+                 "facts": [{"label": "laps run", "value": 41}]}).encode(), "application/json")
+        if self.path.startswith("/openlobby/actions/"):
+            ok = self.path.endswith(("/banner", "/kick"))
+            return self._reply(200, json.dumps({"ok": ok, "msg": "shown" if ok else "no"}).encode(),
+                               "application/json")
         if self.path.split("?")[0] in ("/", "/gates"):
             return self._reply(200, PAGE, "text/html; charset=utf-8")
         return self._reply(200, json.dumps({"path": self.path}).encode(), "application/json")
@@ -77,14 +108,14 @@ class Tool(BaseHTTPRequestHandler):
         self._handle(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
 
 
-def raw(c, path, body=None):
+def raw(c, path, body=None, timeout=15):
     """(status, headers, bytes, final url) with the client's cookies."""
     req = urllib.request.Request(c.url + path.lstrip("/"),
                                  data=None if body is None else json.dumps(body).encode(),
                                  method="GET" if body is None else "POST",
                                  headers={"Content-Type": "application/json"})
     try:
-        r = c.op.open(req, timeout=15)
+        r = c.op.open(req, timeout=timeout)
         return r.status, r.headers, r.read(), r.geturl()
     except urllib.error.HTTPError as e:
         return e.code, e.headers, e.read(), path
@@ -99,16 +130,28 @@ def main():
     accounts.set_admin_cred(db, OWNER, OWNER_PW)
     db.commit()
     for name, perms in (("gm_fmo", ["games_fmo"]), ("gm_fe", ["games_fe"]),
-                        ("gm_none", ["gm"])):
+                        ("gm_xg", ["games_xg"]), ("gm_none", ["gm"]),
+                        ("gm_gates", ["game.fmo.gates"]),
+                        ("gm_laps", []), ("gm_banner", [])):
         adminusers.create_mod(db, name, "pass for " + name, perms, by=OWNER)
+    # this process has not met Kart Club (the panel will ask it), so its
+    # grants go straight into the table, as the owner's form would save them
+    for name, perms in (("gm_laps", "game.kart.laps"), ("gm_banner", "game.kart.banner")):
+        db.execute("UPDATE admin_moderator SET perms = %s WHERE username = %s", (perms, name))
+    db.commit()
     db.close()
     env = {"POL_ADMIN_GAME_FMO_URL": tool_url, "POL_ADMIN_GAME_FMO_TOKEN": TOKEN,
            # FE: configured, but with the wrong token
-           "POL_ADMIN_GAME_FE_URL": tool_url, "POL_ADMIN_GAME_FE_TOKEN": "wrong"}
+           "POL_ADMIN_GAME_FE_URL": tool_url, "POL_ADMIN_GAME_FE_TOKEN": "wrong",
+           # an extra title (POL_ADMIN_GAMES_EXTRA), on the same stand-in tool
+           "POL_ADMIN_GAMES_EXTRA": EXTRA,
+           "POL_ADMIN_GAME_XG_URL": tool_url, "POL_ADMIN_GAME_XG_TOKEN": TOKEN,
+           # a game known only by its URL
+           "POL_ADMIN_GAME_KART_URL": tool_url, "POL_ADMIN_GAME_KART_TOKEN": TOKEN}
     proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=env)
     try:
         c = {}
-        for name in ("gm_fmo", "gm_fe", "gm_none"):
+        for name in ("gm_fmo", "gm_fe", "gm_xg", "gm_none", "gm_gates", "gm_laps", "gm_banner"):
             c[name] = Client(url)
             chk("%s signs in" % name, c[name].login(name, "pass for " + name), 200)
         owner = Client(url)
@@ -121,7 +164,19 @@ def main():
         chk("a moderator with no game permission is offered none",
             c["gm_none"].call("api/games")[1]["games"], [])
         chk("the owner is offered every configured game",
-            sorted(x["key"] for x in owner.call("api/games")[1]["games"]), ["fe", "fmo"])
+            sorted(x["key"] for x in owner.call("api/games")[1]["games"]), ["fe", "fmo", "kart", "xg"])
+        _code, g = c["gm_xg"].call("api/games")
+        chk("an extra title is offered to its moderator, with its tools",
+            [(x["key"], x["title"], [t["id"] for t in x["tools"]]) for x in g["games"]],
+            [("xg", "Extra Game", ["home", "gates"])])
+        chk("...whose tools' permissions the panel lists",
+            ("game.xg" in adminusers.PERMS, "game.xg.gates" in adminusers.PERMS), (True, True))
+        chk("an old per-game grant reads as every tool of that game",
+            sorted(adminusers.perms_of({"perms": "games_fmo,gm"})),
+            ["game.fmo", "game.fmo.gates", "game.fmo.npcs", "gm"])
+        st, _h, body, _u = raw(c["gm_xg"], "games/xg/gates")
+        chk("...and its page opens through the panel", (st, SEEN[-1]["path"]), (200, "/gates"))
+        chk("the FMO moderator cannot open the extra title", raw(c["gm_fmo"], "games/xg/")[0], 403)
 
         SEEN.clear()
         st, hd, body, _u = raw(c["gm_fmo"], "games/fmo/gates?t=leak&x=1")
@@ -159,6 +214,97 @@ def main():
         chk("a tool that refuses the panel's token reads as a panel fault",
             (st, b"refused" in body), (502, True))
         chk("a game the panel does not know is not found", raw(owner, "games/nope/")[0], 404)
+
+        # one tool, not the whole game
+        _code, g = c["gm_gates"].call("api/games")
+        chk("a moderator with one tool is offered just that tool",
+            [(x["key"], [t["id"] for t in x["tools"]]) for x in g["games"]], [("fmo", ["gates"])])
+        chk("...opens its page", raw(c["gm_gates"], "games/fmo/gates")[0], 200)
+        chk("...and its endpoints", raw(c["gm_gates"], "games/fmo/gates.json")[0], 200)
+        chk("...and can change through it",
+            raw(c["gm_gates"], "games/fmo/gates/edit", {"op": "byte"})[0], 200)
+        chk("...but not the game's other tool (the NPC editor at the root)",
+            (raw(c["gm_gates"], "games/fmo/")[0], raw(c["gm_gates"], "games/fmo/state")[0],
+             raw(c["gm_gates"], "games/fmo/edit", {"x": 1})[0]), (403, 403, 403))
+
+        # the game modules list
+        _code, m = owner.call("api/modules")
+        keys = [x["key"] for x in m["modules"]]
+        chk("the owner's module list has the games with tools set up",
+            all(k in keys for k in ("fe", "fmo", "xg")), True)
+        chk("...and the PlayOnline Viewer, which the panel serves itself", "viewer" in keys, True)
+        chk("...and, for the owner, what did not load (the bad extra entry)",
+            ["bad key" in x for x in m.get("problems") or []], [True])
+        _code, m = c["gm_gates"].call("api/modules")
+        chk("a moderator's module list is cut to the games they may see",
+            [x["key"] for x in m["modules"]], ["fmo"])
+        chk("...with only their tools", [t["id"] for t in m["modules"][0]["tools"]], ["gates"])
+        chk("...and no problems list", "problems" in m, False)
+
+        # a game that plugs in by its URL alone
+        _code, m = owner.call("api/modules")
+        kart = next((x for x in m["modules"] if x["key"] == "kart"), None)
+        chk("a game known only by its URL describes itself",
+            kart and (kart["title"], kart["platform"], [t["id"] for t in kart["tools"]],
+                      [a["id"] for a in kart["actions"]]),
+            ("Kart Club", "PS2 HDD", ["laps"], ["banner", "kick"]))
+        live = kart["live"] if kart else {}
+        chk("...and reports who is playing",
+            (live.get("online"), [p["name"] for p in live.get("players", [])], live.get("summary"),
+             live.get("rooms_label"), live.get("facts")),
+            (2, ["Wren", "Ash"], "Grand prix tonight", "races", [{"label": "laps run", "value": 41}]))
+        chk("...its permissions are listed",
+            all(p in owner.call("api/session")[1].get("perm_labels", {}) for p in
+                ("game.kart", "game.kart.laps", "game.kart.banner")), True)
+        st, _h, _b, _u = raw(c["gm_laps"], "games/kart/laps")
+        chk("a moderator with its tool opens the tool", st, 200)
+        SEEN.clear()
+        st, _h, body, _u = raw(c["gm_banner"], "api/modules/action",
+                               {"key": "kart", "action": "banner", "params": {"text": "Lap race at 9"}})
+        chk("a moderator with its action runs it",
+            (st, json.loads(body), SEEN[-1]["path"], SEEN[-1]["actor"], json.loads(SEEN[-1]["body"])),
+            (200, {"ok": True, "msg": "shown"}, "/openlobby/actions/banner", "gm_banner",
+             {"text": "Lap race at 9"}))
+        chk("...and it is in the activity log",
+            any("banner message in Kart Club" in json.dumps(r) for r in
+                (owner.call("api/audit")[1].get("rows") or [])), True)
+        chk("a moderator without the action cannot run it",
+            raw(c["gm_laps"], "api/modules/action", {"key": "kart", "action": "banner"})[0], 403)
+        n = len(SEEN)
+        chk("...nor reach the game's own channel through the tool proxy",
+            (raw(c["gm_laps"], "games/kart/openlobby/actions/banner", {"text": "x"})[0],
+             raw(owner, "games/kart/openlobby/module.json")[0], len(SEEN) - n), (403, 403, 0))
+        chk("an action the game does not have is not found",
+            raw(owner, "api/modules/action", {"key": "kart", "action": "nope"})[0], 404)
+        chk("the owner's Modules page says where each game came from",
+            {x["key"]: x["origin"] for x in owner.call("api/modules")[1]["found"]
+             if x["key"] in ("kart", "fmo", "xg")},
+            {"kart": "game", "fmo": "built-in", "xg": "legacy"})
+
+        # Kick and the maintenance message reach the games too, even with the
+        # PlayOnline sign-in service down (there is none in this test)
+        _code, acct = owner.call("api/account-create", {"handle": "Lumen", "password": "KartPass123"})
+        SEEN.clear()
+        st, _h, body, _u = raw(owner, "api/account-kick", {"polid": acct["polid"]})
+        got = json.loads(body)
+        kicks = [x for x in SEEN if x["path"] == "/openlobby/actions/kick"]
+        chk("an account's Kick asks every game that can kick",
+            (st, got.get("games", {}).get("kart"), len(kicks)),
+            (503, {"ok": True, "msg": "shown"}, 1))
+        chk("...with the POL ID and the account's handles",
+            json.loads(kicks[0]["body"]) if kicks else None,
+            {"polid": acct["polid"], "handles": "Lumen"})
+        _code, m = owner.call("api/maintenance")
+        chk("the maintenance form lists the games that can announce", m.get("games"),
+            {"kart": "Kart Club"})
+        SEEN.clear()
+        st, _h, body, _u = raw(owner, "api/maintenance", {"action": "message", "subject": "Down",
+                                                          "text": "Back at 10:00", "games": ["kart"]},
+                               timeout=40)
+        said = [json.loads(x["body"]) for x in SEEN if x["path"] == "/openlobby/actions/banner"]
+        chk("the maintenance message is announced in the game even when the mail cannot go",
+            (st, json.loads(body).get("games", {}).get("kart", {}).get("ok"), said),
+            (503, True, [{"text": "Down: Back at 10:00", "urgent": True}]))
     finally:
         stop(proc)
         tool.shutdown()

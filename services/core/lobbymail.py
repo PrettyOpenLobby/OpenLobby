@@ -137,10 +137,67 @@ def _mailbox(member=None):
     return out
 
 
-#: (recipient handle id, asker handle id) -> when `_friend_request_heal` last
-#: restored or minted that request. Bounds the heal to once per TTL, so a
-#: request one device keeps acknowledging is not handed back on every listing.
-_FRIEND_HEAL_DONE = {}
+def _friend_heal_state(db, hid, peer_hid):
+    """(healed_at, heals) for one (recipient, asker) pair, or (None, 0).
+
+    Kept in the `friend_request_heal` table rather than process memory: the
+    in-process dict this replaces was emptied by every restart of the login
+    container, so a request the recipient kept retiring came back after each
+    restart as well as after each TTL.
+    """
+    try:
+        row = db.execute("SELECT healed_at, heals FROM friend_request_heal"
+                         " WHERE handle_id = %s AND peer_handle = %s",
+                         (int(hid), int(peer_hid))).fetchone()
+    except Exception as exc:
+        log("lobby", f"  mail: request heal state unreadable ({exc!r})")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None, 0
+    if row is None:
+        return None, 0
+    return float(row["healed_at"]), int(row["heals"] or 0)
+
+
+def _friend_heal_note(db, hid, peer_hid, when):
+    """Record one restore or mint for the pair (persists the TTL and the count)."""
+    db.execute("INSERT INTO friend_request_heal (handle_id, peer_handle,"
+               " healed_at, heals) VALUES (%s, %s, %s, 1)"
+               " ON CONFLICT (handle_id, peer_handle) DO UPDATE SET"
+               " healed_at = EXCLUDED.healed_at,"
+               " heals = friend_request_heal.heals + 1",
+               (int(hid), int(peer_hid), float(when)))
+    db.commit()
+
+
+def _friend_heal_reset(db, hid, peer_hid):
+    """Forget the pair's heal history: the asker has sent a fresh request."""
+    try:
+        db.execute("DELETE FROM friend_request_heal WHERE handle_id = %s"
+                   " AND peer_handle = %s", (int(hid), int(peer_hid)))
+        db.commit()
+    except Exception as exc:
+        log("lobby", f"  mail: request heal reset failed ({exc!r})")
+
+
+def _friend_heal_max():
+    """How many times one request may be handed back, or None for no limit.
+
+    OURS (retail has no heal at all; it exists for the PS2-took-it-from-the-PC
+    case). Each heal follows a retire by the recipient's own client, so
+    POL_FRIEND_REQUEST_HEAL_MAX=1 stops handing back a request the recipient
+    has retired twice (the original and one restored copy). Default 0, no
+    limit: the Viewer's Decline sends its own type-10 notice (PC app.dll
+    0x4aac979, PS2 0xb1d390, both kind 0x8500), which retires the request for
+    good (`_mail_friend_notice_effects`), so a limit is only a backstop.
+    """
+    try:
+        n = int(os.environ.get("POL_FRIEND_REQUEST_HEAL_MAX") or "0")
+    except ValueError:
+        n = 0
+    return n if n > 0 else None
 
 
 def _friend_request_heal(member=None):
@@ -148,7 +205,7 @@ def _friend_request_heal(member=None):
 
     Found 2026-09-27: the mailbox is per MEMBER, and the PS2 fetches and 3:2s new
     messages ~10 s after login, so `_mail_retire` took Amara's and Birdie's
-    requests before Lex's PC ever listed them. 2:3 hides `invited` rows by
+    requests before the member's PC ever listed them. 2:3 hides `invited` rows by
     design, so nothing else shows them and the request is stranded.
 
     At listing time, for every `invited` friend row of this member whose asker
@@ -156,8 +213,13 @@ def _friend_request_heal(member=None):
     to that handle: restore the newest retired copy (`.bin.read` / `.bin.stale`
     -> `.bin`, the undo `_mail_retire` documents), else mint a fresh one the way
     the website's befriend does. Each (handle, asker) pair is acted on at most
-    once per POL_FRIEND_REQUEST_HEAL_TTL seconds (default 6 h). Returns the
-    number healed. POL_FRIEND_REQUEST_HEAL=1 turns it on (default off).
+    once per POL_FRIEND_REQUEST_HEAL_TTL seconds (default 6 h), and at most
+    POL_FRIEND_REQUEST_HEAL_MAX times (default 0, no limit) until the asker sends a fresh
+    request; both are kept in the `friend_request_heal` table, so a restart
+    does not re-arm them. A request the recipient DECLINED is never handed
+    back: the decline (a type-10 notice, `_mail_friend_notice_effects`)
+    removes the `invited` row this walks. Returns the number healed.
+    POL_FRIEND_REQUEST_HEAL=1 turns it on (default off).
     """
     if os.environ.get("POL_FRIEND_REQUEST_HEAL", "0") != "1" or accounts is None:
         return 0
@@ -196,6 +258,8 @@ def _friend_request_heal(member=None):
                     db, int(peer["id"]), r["handle_name"]))).fetchone()
             if asks is None or asks["status"] != accounts.STATUS_PENDING:
                 continue                # the asker no longer waits on this
+            if _mail_blocked_for(db, int(r["handle_id"]), int(peer["id"])):
+                continue                # the recipient ignores the asker
             want.append((int(r["handle_id"]), peer))
         if not want:
             return 0
@@ -236,8 +300,16 @@ def _friend_request_heal(member=None):
                   (hid, "name", str(peer["handle_name"])[:15])]
             if any(k in live for k in ks):
                 continue
-            done = (hid, int(peer["id"]))
-            if now - _FRIEND_HEAL_DONE.get(done, -ttl - 1) <= ttl:
+            last, heals = _friend_heal_state(db, hid, int(peer["id"]))
+            if last is not None and now - last <= ttl:
+                continue
+            cap = _friend_heal_max()
+            if cap is not None and heals >= cap:
+                log("lobby", f"  mail: request heal -- NOT restoring "
+                             f"{peer['handle_name']!r}'s request to handle {hid}: "
+                             f"handed back {heals} time(s) already and retired "
+                             "again by the recipient's own client "
+                             "(POL_FRIEND_REQUEST_HEAL_MAX)")
                 continue
             old = sorted(x for k in ks for x in retired.get(k, []))
             if old:
@@ -252,7 +324,7 @@ def _friend_request_heal(member=None):
                     log("lobby", f"  mail: request heal -- cannot restore {nm!r} "
                                  f"({why})")
                     continue
-                _FRIEND_HEAL_DONE[done] = now
+                _friend_heal_note(db, hid, int(peer["id"]), now)
                 healed += 1
                 log("lobby", f"  mail: request heal -- RESTORED "
                              f"{peer['handle_name']!r}'s friend request to handle "
@@ -263,7 +335,7 @@ def _friend_request_heal(member=None):
             if _mail_mint(peer["handle_name"], accounts.handle_guid(int(peer["id"])),
                           accounts.handle_guid(hid), friendlist._FRIEND_REQ_SUBJECT,
                           friendlist._FRIEND_REQ_BODY, kind=MAIL_KIND_FRIEND_REQUEST):
-                _FRIEND_HEAL_DONE[done] = now
+                _friend_heal_note(db, hid, int(peer["id"]), now)
                 healed += 1
                 log("lobby", f"  mail: request heal -- MINTED a friend request "
                              f"from {peer['handle_name']!r} to handle {hid} "
@@ -483,7 +555,36 @@ def _mail_address_as(db, handle_row):
         accounts.handle_guid(int(handle_row["id"]))
 
 
-def _mail_readdress(db, path, handle_row):
+def _mail_sender_as_group_member(guid):
+    """`guid` with its low 32 bits in the form the 7:12 group roster serves for
+    that handle (`friendlist._FRIEND_HID_TAG | handle id`), or `guid` as it
+    came when it is not one of our handle guids.
+
+    WHY A GROUP MESSAGE NEEDS THIS -- "Unknown User" as the sender of every
+    message that arrives through a group (messages posted in a group chat
+    while the reader was away showed up under Messages from "Unknown User"). A type-0x11 message is read in the
+    group's window, and the reader names its sender by looking the sender
+    field up in the GROUP ROSTER, not the friend list: group members need not
+    be friends. SE's roster carries each member's guid in the low 32 bits of
+    the packed word, and SE's handle guid, profile id and roster id are ONE
+    number, so the lookup cannot miss. Ours are not one number: a friend row
+    and a message carry `handle_guid` (low bits = the handle id), while the
+    roster carries the tagged profile id so that "View Profile" on a group
+    row resolves (`friendgroups._group_member_packed`). The sender field of a
+    group message therefore matched no roster row. Writing it in the roster's
+    form is the smallest change that makes the two agree; the server still
+    resolves it (`accounts.handle_by_guid` strips the tag).
+
+    The roster-lookup reading comes from the identity spaces rather than the
+    client's code. POL_GROUP_MSG_SENDER_TAG=0 restores the plain handle guid.
+    """
+    g = int(guid) & 0xFFFFFFFFFFFFFFFF
+    if accounts is None or (g & ~0xFFFFFFFF) != accounts.HANDLE_GUID_BASE:
+        return g
+    return (g & ~0xFFFFFFFF) | friendlist._FRIEND_HID_TAG | (g & 0x7FFFF)
+
+
+def _mail_readdress(db, path, handle_row, sender_tagged=False):
     """The same `O/m/` message, addressed to `handle_row`. None if the path is
     not a message record.
 
@@ -492,6 +593,10 @@ def _mail_readdress(db, path, handle_row):
     +0x08 names the reader. So each reader gets its own copy with only that
     field changed, addressed by the id they know themselves by
     (`_mail_address_as`), the same choice `_mail_normalise` makes.
+
+    `sender_tagged` also rewrites the SENDER field (+0x00) into the group
+    roster's form of the same handle -- for a group message, whose reader
+    resolves it there (`_mail_sender_as_group_member`).
     """
     prefix = lobbysearch._MAIL_PATH_PREFIX
     if not path or not path.startswith(prefix) or handle_row is None:
@@ -501,6 +606,10 @@ def _mail_readdress(db, path, handle_row):
         return None
     to = _mail_address_as(db, handle_row)
     struct.pack_into("<Q", rec, 0x08, int(to) ^ pushchannel._PUSH_GUID_MASK)
+    if sender_tagged:
+        sender = struct.unpack_from("<Q", rec, 0x00)[0] ^ pushchannel._PUSH_GUID_MASK
+        struct.pack_into("<Q", rec, 0x00, _mail_sender_as_group_member(sender)
+                         ^ pushchannel._PUSH_GUID_MASK)
     return prefix + logingate._b64encode(bytes(rec))
 
 
@@ -734,6 +843,13 @@ MAIL_KIND_GROUP_REGISTERED = 0x878A
 MAIL_KIND_GROUP_DECLINED = 0x880A      # type 0x10, the invitee said no
 MAIL_KIND_GROUP_REMOVED = 0x890A       # type 0x12, you were removed
 MAIL_KIND_GROUP_DISBANDED = 0x898A     # type 0x13, the group was disbanded
+#: Friend registration declined: wire code 10 in polcore's notification map
+#: (0x38348e0), "%s declined friend registration.", built the same way as the
+#: request (code 1 -> 0x8080) and the acceptance (code 9 -> 0x8480).
+MAIL_KIND_FRIEND_DECLINED = 0x8500
+#: The message TYPE codes inside the kind word (bits 7..11).
+MAIL_TYPE_FRIEND_REQUEST = 1
+MAIL_TYPE_FRIEND_DECLINED = 10
 
 
 def _mail_kind_type(kind):
@@ -822,6 +938,85 @@ def _mail_drop_redundant_request(db, path):
                      "POL_FRIEND_NO_REDUNDANT_REQ=0 relays it.")
         return True
     return False
+
+
+def _mail_blocked_for(db, recipient_hid, sender_hid=None):
+    """True when the recipient handle has the sender on its ignore list.
+
+    The client's own block (polcore IsBlocked 0x37e36a0) drops a blocked
+    sender's incoming notice push and refuses to send to a blocked recipient,
+    but nothing in its 3:3/3:0 path checks the list, so a message stored for
+    the blocker would still be listed and read. The server therefore does not
+    store it: a blocked member's messages, friend requests and group invites
+    never reach the blocker (OURS where retail is unknown: whether SE's server
+    also filtered is not measured). POL_FRIEND_BLOCK=0 disables it.
+    """
+    if accounts is None or recipient_hid is None:
+        return False
+    if sender_hid is None:
+        sender_hid = lobbysession._session_handle_id(db)
+    if sender_hid is None:
+        return False
+    try:
+        return accounts.ignore_blocks(db, int(recipient_hid), int(sender_hid))
+    except Exception as exc:
+        log("lobby", f"  mail: block check failed ({exc!r}); delivering")
+        return False
+
+
+def _mail_drop_blocked(db, path):
+    """True (and logged) if this 3:1 must not be stored: its recipient has the
+    sender on their ignore list. See `_mail_blocked_for`."""
+    meta = _mail_meta(path) or {}
+    recip = _mail_recipient_row(db, meta.get("recipient_guid"))
+    if recip is None or not _mail_blocked_for(db, int(recip["id"])):
+        return False
+    log("lobby", f"  3:1 write: NOT delivered to {recip['handle_name']!r} -- "
+                 f"they have the sender on their ignore list (kind "
+                 f"{int(meta.get('kind') or 0):#06x}); POL_FRIEND_BLOCK=0 "
+                 "delivers it")
+    return True
+
+
+def _mail_friend_notice_effects(db, path):
+    """Act on a client-written friend notice before it is stored.
+
+    * type 10 (Friend registration declined), written by the member who was
+      ASKED to the member who asked: the decline is the recipient's answer,
+      so the asked side's `invited` row goes (`accounts.decline_friend`) and
+      the request heal has nothing left to hand back. The notice itself is
+      still stored and delivered, which is how the asker learns of it.
+    * type 1 (a fresh request from the asker): the pair's heal history is
+      reset, so the new request is healed like a first one.
+
+    Returns a short description of what was done, or None.
+    POL_FRIEND_DECLINE_MAIL=0 disables the decline arm.
+    """
+    meta = _mail_meta(path) or {}
+    kind = int(meta.get("kind") or 0)
+    if not kind & 0x8000:
+        return None
+    ktype = _mail_kind_type(kind)
+    if ktype not in (MAIL_TYPE_FRIEND_DECLINED, MAIL_TYPE_FRIEND_REQUEST):
+        return None
+    sender_hid = lobbysession._session_handle_id(db)
+    recip = _mail_recipient_row(db, meta.get("recipient_guid"))
+    if sender_hid is None or recip is None:
+        return None
+    if ktype == MAIL_TYPE_FRIEND_REQUEST:
+        _friend_heal_reset(db, int(recip["id"]), int(sender_hid))
+        return None
+    if os.environ.get("POL_FRIEND_DECLINE_MAIL", "1") != "1":
+        return None
+    peer = accounts.friend_row_name(db, int(sender_hid), recip["handle_name"])
+    done = accounts.decline_friend(db, int(sender_hid), peer)
+    log("lobby", f"  3:1 write: friend request from {recip['handle_name']!r} "
+                 f"DECLINED by handle {sender_hid} -- "
+                 + ("the invited row is gone, so the request heal will not "
+                    "hand it back" if done else
+                    "no invited row was held for them (nothing to remove)")
+                 + "; POL_FRIEND_DECLINE_MAIL=0 disables this")
+    return "declined" if done else None
 
 
 def _mail_notice_already_there(recipient_member, sender_name, kind, window=600):
@@ -1079,7 +1274,9 @@ def _mail_normalise(path, sender_handle_id):
     directions: the sender field needs OUR guid (the reader knows its friends
     only by the ids we serve) and the recipient field -- the reader itself, the
     one drawn as "To:" -- needs the reader's OWN id, which it never got from us.
-    Both are rewritten here, each into the vocabulary of whoever reads it.
+    Both are rewritten here, each into the vocabulary of whoever reads it. The
+    sender's NAME at +0x10 is set to the sending handle's name too
+    (POL_MAIL_SENDER_NAME=0 leaves it as sent).
 
     A recipient we have never seen write anything is left addressed by our guid:
     it is no worse than what the client sent, and `_capture_self_guid` means the
@@ -1126,6 +1323,27 @@ def _mail_normalise(path, sender_handle_id):
                 log("lobby", f"  mail: sender field {had:#x} is no guid of ours -- "
                              f"rewritten to {want:#x} so the reader can name the "
                              'sender instead of "Unknown User"')
+            # THE SENDER'S NAME at +0x10, which the reader shows as "From:" and
+            # hands back as the friend's name when it accepts a request. A client
+            # fills it with whatever it calls itself, and that need not be the
+            # handle we hold (seen 2026-10-03: a friend request signed with a
+            # name that is no handle of ours). Accepting it named a handle that
+            # does not exist, so the invite was never accepted and the request
+            # heal re-delivered it every six hours. Written the way `_mail_mint`
+            # writes it.
+            if os.environ.get("POL_MAIL_SENDER_NAME", "1") == "1":
+                hrow = db.execute("SELECT handle_name FROM handle WHERE id = %s",
+                                  (int(sender_handle_id),)).fetchone()
+                if hrow is not None and hrow["handle_name"]:
+                    name = str(hrow["handle_name"]).encode("cp932", "replace")[:15]
+                    was = bytes(rec[0x10:0x20]).split(b"\x00", 1)[0]
+                    if was != name:
+                        rec[0x10:0x20] = name.ljust(16, b"\x00")
+                        changed = True
+                        log("lobby", f"  mail: sender name {was!r} is not handle "
+                                     f"{sender_handle_id}'s -- rewritten to "
+                                     f"{hrow['handle_name']!r} so an accept names "
+                                     "a handle we hold")
         # THE RECIPIENT FIELD -- the one the header draws as "To:", and the one
         # the mint path has always readdressed (`_mail_address_as`). A client
         # composes it from the address book, so it holds OUR guid; the reader

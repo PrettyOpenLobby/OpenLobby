@@ -1,16 +1,16 @@
 """A drop-in replacement for Square Enix's POLP patch service.
 
-Serves bundles produced by polarchive2.py.  Point a client's DNS at this host
-(so pt008.pol.com and the pc<id><region>.pol.com names resolve here) and it
-version-checks, pulls the patch list, and downloads every file from the local
-archive -- byte for byte what SE's box returns.
+Serves patch bundles (see docs/patching.md; tools/patch/polsynth.py builds one
+from an installed client).  Point a client's DNS at this host (so pt008.pol.com
+and the pc<id><region>.pol.com names resolve here) and it version-checks, pulls
+the patch list, and downloads every file from the local bundle.
 
 Supersedes polserver.py, which bound a single port and answered file ranges
 with cmd 2.  The live service actually splits across ports and replies cmd 4;
-see "Protocol" below.  Everything here was measured against SE's box
-(124.150.156.107) on 2026-08-11, not inferred.
+see "Protocol" below.  Everything here was measured against the retail
+patch server.
 
-Layout served (one dir per service, from polarchive2.py):
+Layout served (one dir per service):
   <root>/
     W2U-1000/ { meta.json, patchlist.raw, manifest.json,
                 blobs/<ver>/Direct/<path>.slc, blobs/<ver>/Indirect/<path>.olc }
@@ -39,7 +39,7 @@ try:
 except ImportError:                     # standalone use outside services/
     clientbuilds = None
 try:
-    from srvcore import advertise_for   # per-client download host (LAN vs tailnet)
+    from srvcore import advertise_for   # per-client download host (LAN vs VPN)
 except ImportError:                     # standalone use outside services/
     def advertise_for(default, peer_ip=None, dialed_ip=None):
         return default
@@ -247,15 +247,15 @@ class Bundle:
         self.port = int(meta.get("port", 54000))
         self.token = int(meta.get("cmd8_token", DEFAULT_TOKEN))
         # The oldest build in the tree -- the cutoff the status string compares
-        # against.  Recorded by polarchive2; derived from patch.cfg when a bundle
-        # predates that, so an old bundle still answers correctly.
+        # against.  Taken from meta.json; derived from patch.cfg when meta.json
+        # lacks it, so an older bundle still answers correctly.
         oldest = meta.get("oldest_version")
         if not oldest:
             try:
                 from polbundle import manifest
                 oldest = min(r["version"] for r in manifest(path))
             except (ImportError, FileNotFoundError, ValueError):
-                # Without the manifest reader (polbundle, not shipped here) the
+                # Without a readable manifest the
                 # catalogue rows give the oldest build, so older supported
                 # clients are still recognised instead of treating latest as
                 # the oldest.
@@ -356,7 +356,7 @@ class Server:
     def handle(self, conn, addr):
         conn.settimeout(120)
         # The download host in cmd 8 is chosen per client: a LAN console gets
-        # the LAN address it reached us on, a tailnet PC the global --advertise
+        # the LAN address it reached us on, a VPN PC the global --advertise
         # (srvcore.advertise_for). Threaded per connection, so it rides the
         # dispatch arguments, not the shared Server.
         try:

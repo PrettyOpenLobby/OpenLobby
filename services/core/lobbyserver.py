@@ -10,6 +10,32 @@ import sessioncrypt
 from .deps import issuereport, kbserve, pmlfallback
 from . import authcap, framing, lobbybind, lobbycapture, lobbyreply, lobbysession, pacing, portalauth, portalpages, tlsrelay
 
+#: Extensions answered with a real 404 when missing, never with PML bytes.
+# Audio is media too. The 360 Viewer rewrites a page's .at3 to .scd, and a missing
+# .scd answered with the empty PML page crashed it on the Dirge portal (2026-10-15).
+_MEDIA_EXT = (".png", ".ang", ".jpg", ".jpeg", ".gif", ".bmp", ".tm2", ".bgm",
+              ".pms", ".wav", ".ogg", ".slc", ".at3", ".scd", ".bgw", ".spw",
+              ".wd", ".xma")
+
+
+def _body_max():
+    """The largest POST body this door will read at all.
+
+    Content-Length used to be honoured as declared and the body read in full
+    before the report and shim-log stores applied their own caps, so a client
+    could make the handler buffer any size it named. The ceiling here is the
+    largest cap a store accepts (POL_ISSUE_MAX, POL_SHIM_LOG_MAX), or
+    POL_LOBBY_BODY_MAX when set; anything longer is refused with 413 before a
+    byte of it is read."""
+    env = os.environ.get("POL_LOBBY_BODY_MAX")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    caps = [getattr(portalpages, "_SHIM_LOG_MAX", 0),
+            getattr(issuereport, "ISSUE_MAX", 0) if issuereport else 0]
+    return max(caps + [1 << 20])
 
 
 def _serve_http_on_lobby(conn, first, peer, port):
@@ -64,6 +90,13 @@ def _serve_http_on_lobby(conn, first, peer, port):
         except ValueError:
             clen = 0
         body_in = b""
+        body_max = _body_max()
+        if clen > body_max:
+            log("lobby", f"{peer}   {method.decode('latin1')} body {clen}B "
+                         f"refused: over the {body_max}B ceiling (413, closing)")
+            conn.sendall(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n"
+                         b"Connection: close\r\n\r\n")
+            return served + 1
         if clen > 0:
             # BIG READS INTO A BYTEARRAY. This was recv(4096) + `bytes +=`, and on
             # prod each pass of this loop cost ~20 ms, so a 4 MB report bundle
@@ -81,6 +114,11 @@ def _serve_http_on_lobby(conn, first, peer, port):
                 if not more:
                     return served
                 acc += more
+                # The recv() size already keeps this at the declared length;
+                # the ceiling is checked again so a change above cannot
+                # quietly reopen the unbounded read.
+                if len(acc) > body_max + len(buf):
+                    return served
             body_in, buf = bytes(acc[:clen]), bytes(acc[clen:])
             # Shim log POSTs get their own (quieter) logging in the store; the
             # live streamer alone would otherwise put a 120-byte body preview
@@ -109,12 +147,12 @@ def _serve_http_on_lobby(conn, first, peer, port):
         # here so a capture does not have to be fetched off the machine by hand.
         # It lives on the CLIENT-FACING http path on purpose: the admin server
         # also takes POSTs, but it binds 127.0.0.1, and the machine this is most
-        # worth having from is the Steam Deck -- a Tailscale peer that cannot
+        # worth having from is the Steam Deck -- a remote peer that cannot
         # reach the loopback interface at all.
         # THE REPORT CHORD. Same door, same rationale as the log path below:
         # the admin server also takes POSTs but binds 127.0.0.1, and the machine
         # a report is most worth having from is the Steam Deck, which is a
-        # Tailscale peer that cannot reach loopback at all.
+        # remote peer that cannot reach loopback at all.
         if method == b"POST" and rel == portalpages._REPORT_PATH:
             rid = ""
             if issuereport is None:
@@ -299,6 +337,16 @@ def _serve_http_on_lobby(conn, first, peer, port):
                                  f"-> {os.path.basename(alt)}")
                     cand = alt
                     break
+        # THE SAME PAGE UNDER ANOTHER QUERY. Neither the bare path nor the
+        # exact query copy exists, but SE's page does: the query only sets
+        # variables the Viewer applies itself. See portalpages._query_variant
+        # for the order (era copies first, then SE's bare page, then any copy).
+        if not os.path.isfile(cand) and rel.lower().endswith(".pml"):
+            alt, why = portalpages._query_variant(www, roots, host, rel, uri, lang)
+            if alt and portalauth._under(www, alt):
+                log("lobby", f"{peer}   query variant ({why}): {uri} "
+                             f"-> {os.path.basename(alt)}")
+                cand = alt
         # LANGUAGE SEGMENT THE CLIENT COULD NOT RESOLVE.
         # /pcd/ paths are keyed by language: the page builds the URL itself as
         # $nwPath+$_USER_LANG+'/latestnews.pml'. The PS2 has NO $_USER_LANG (the
@@ -393,12 +441,18 @@ def _serve_http_on_lobby(conn, first, peer, port):
             # No file: the built-in page for this path (a menu, a title page
             # with Play, a data fragment). Same knob and same log phrase as the
             # :80 door in stub.py; a file under www/ has already won above.
-            body = pmlfallback.fallback_page(host, rel)
+            body = pmlfallback.fallback_page(host, rel, www=www)
             if body is not None:
                 fallback_hit = True
                 log("lobby", f"{peer}   [http] fallback page for /{rel}")
-        if body is None and (rel.lower().endswith(".pml") or
-                             b"x-playonline-pml" in hdrs.get(b"accept", b"")):
+        # A missing IMAGE (or other media) is a 404 whatever the Accept header
+        # says: the Viewer lists PML in Accept on every fetch, and PML bytes
+        # handed to an <img> drew a broken image (FFXI topic sprites, Dirge ID
+        # art) where a 404 leaves the slot empty.
+        is_media = rel.lower().endswith(_MEDIA_EXT)
+        if body is None and not is_media and (
+                rel.lower().endswith(".pml") or
+                b"x-playonline-pml" in hdrs.get(b"accept", b"")):
             body = b"<!-- -->\r\n"
             log("lobby", f"{peer}   served EMPTY PML for /{rel} "
                          "(no file under www/) -- author this page next")
@@ -410,7 +464,7 @@ def _serve_http_on_lobby(conn, first, peer, port):
             # Mutual-auth response headers (X-PlayOnline-Hello + rspauth). See
             # _portal_auth_headers -- rspauth needs POL_PORTAL_SECRET.
             extra = portalauth._portal_auth_headers(hdrs, method.decode("latin1"), uri)
-            extra += portalauth._portal_cache_headers(validators)
+            extra += portalauth._portal_cache_headers(validators, media=is_media)
             if fallback_hit:
                 # Nothing on disk to derive validators from, and a page dropped
                 # under www/ should show on the next render, not after a

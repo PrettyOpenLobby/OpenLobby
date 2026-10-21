@@ -1,26 +1,25 @@
-"""The admin panel's Games section: each title's own debugging tools, behind
-the panel's sign-in.
+"""The admin panel's proxy to each game's own tool port.
 
-The tools themselves live with their game and run inside its server process,
-because they read and change that process's live state (Fantasy Earth's world
+The tools live with their game and run inside its server process, because
+they read and change that process's live state (Fantasy Earth's world
 builder, Front Mission Online's lobby NPC editor and story gates, the FFXI
-bridge's federation worlds and providers). Each serves
-a small token-gated HTTP port of its own. The panel proxies it under
-/games/<key>/, so:
+bridge's federation worlds and its in-game notices). Each serves a small
+token-gated HTTP port of its own. The panel proxies it under /games/<key>/, so:
 
   - a moderator reaches a tool with their panel login; the tool's token stays
     on the server and never reaches a browser,
-  - which moderators may use which game's tools is a panel permission
-    ("games_<key>", see adminusers.PERMS), checked on every request,
+  - which moderators may use which tool is a panel permission, checked on
+    every request: each path belongs to one of the game's tools
+    (adminmodules.Module.tool_for), and that tool's "game.<key>.<id>",
   - every change made through a tool is in the panel's activity log.
 
-Configuration, one pair per game:
+Which games have tools, and what they are called, is the game modules'
+business (adminmodules/). Where a game's port answers:
 
-    POL_ADMIN_GAME_<KEY>_URL     where the game's tool port answers, e.g.
-                                 http://host.docker.internal:8798
+    POL_ADMIN_GAME_<KEY>_URL     e.g. http://host.docker.internal:8798
     POL_ADMIN_GAME_<KEY>_TOKEN   that port's token (the game's *_DEVTOOL_TOKEN)
 
-A game with no URL is left out of the section. A tool port that binds
+A game with no URL has no tools on this panel. A tool port that binds
 loopback cannot be reached from the admin container; bind it where the panel
 can reach it and give it a token (the tool refuses a wide bind without one).
 """
@@ -32,43 +31,41 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-#: The titles the section knows how to label. `tools` are the pages each
-#: game's port serves; `path` is relative to the port's root.
-GAMES = {
-    "fe": {"title": "Fantasy Earth", "short": "FE",
-           "tools": [{"id": "world", "label": "World builder", "path": ""}]},
-    "fmo": {"title": "Front Mission Online", "short": "FMO",
-            "tools": [{"id": "npcs", "label": "Lobby NPCs", "path": ""},
-                      {"id": "gates", "label": "Story gates", "path": "gates"}]},
-    "ffxi": {"title": "Final Fantasy XI", "short": "FFXI",
-             "tools": [{"id": "federation", "label": "Federation", "path": ""}]},
-}
+import adminmodules
 
 TIMEOUT = float(os.environ.get("POL_ADMIN_GAME_TIMEOUT", "20"))
 MAX_BODY = 1 << 20
 _KEY = re.compile(r"^[a-z0-9]{1,16}$")
 
 
-def perm_for(key):
-    return "games_" + key
-
-
 def configured():
-    """{key: (url, token)} for every game with a tool URL set."""
+    """{key: (url, token)} for every module whose tool port is set."""
     out = {}
-    for key in GAMES:
-        url = os.environ.get("POL_ADMIN_GAME_%s_URL" % key.upper(), "").strip()
-        if url:
-            out[key] = (url.rstrip("/"),
-                        os.environ.get("POL_ADMIN_GAME_%s_TOKEN" % key.upper(), "").strip())
+    for key, m in adminmodules.load().items():
+        port = m.tool_port()
+        if port and (m.tools or m.remote):
+            out[key] = port
     return out
 
 
+def title(key):
+    m = adminmodules.load().get(key)
+    return m.title if m else key
+
+
 def listing(can):
-    """The games this caller may open, for the section's menu. `can(perm)`."""
+    """The games with tools this caller may open, for the Games menu:
+    each with the tools `can(perm)` allows."""
     have = configured()
-    return [{"key": k, "title": g["title"], "short": g["short"], "tools": g["tools"]}
-            for k, g in GAMES.items() if k in have and can(perm_for(k))]
+    out = []
+    for key, m in adminmodules.enabled().items():
+        if key not in have:
+            continue
+        tools = [{"id": t.id, "label": t.label, "path": t.path}
+                 for t in m.tools if not t.panel and can(m.perm(t.id))]
+        if tools:
+            out.append({"key": key, "title": m.title, "short": m.short, "tools": tools})
+    return out
 
 
 def split(path):
@@ -97,7 +94,7 @@ def forward(key, sub, method, query, body, ctype, actor):
     -> (status, headers list, body bytes). Never raises."""
     have = configured()
     if key not in have:
-        return _error(404, "This game has no tools set up.", sub)
+        return _error(404, "This game has no tools set up.", sub, key)
     base, token = have[key]
     q = [(k, v) for k, v in urllib.parse.parse_qsl(query or "", keep_blank_values=True)
          if k != "t"]
@@ -120,10 +117,10 @@ def forward(key, sub, method, query, body, ctype, actor):
         if status == 403:
             # the tool refused our token: a configuration fault, not the caller's
             return _error(502, "The %s tools refused the panel's token."
-                          % GAMES[key]["title"], sub)
+                          % title(key), sub, key)
     except (urllib.error.URLError, OSError, ValueError):
         return _error(502, "The %s tools are not reachable right now."
-                      % GAMES[key]["title"], sub)
+                      % title(key), sub, key)
     out = [("Content-Type", rtype or "application/octet-stream"),
            ("Cache-Control", rcache or "no-store")]
     if rtype.startswith("text/html"):
@@ -133,12 +130,32 @@ def forward(key, sub, method, query, body, ctype, actor):
     return status, out, data
 
 
-def _is_page(sub):
-    return any(sub == t["path"] for g in GAMES.values() for t in g["tools"])
+def call(key, sub, payload, actor):
+    """POST a JSON action to a game's tool port on the panel's own behalf (the
+    maintenance warning queues an FFXI announcement this way).
+
+    -> (ok, message). Never raises; a game with no tools set up is (False, why)."""
+    if key not in configured():
+        return False, "%s has no tools set up on this panel." % title(key)
+    status, _headers, data = forward(key, sub, "POST", "", json.dumps(payload).encode(),
+                                     "application/json", actor)
+    try:
+        got = json.loads(data or b"{}")
+    except ValueError:
+        got = {}
+    if not isinstance(got, dict):
+        got = {}
+    msg = got.get("msg") or got.get("error") or "HTTP %d" % status
+    return bool(status == 200 and got.get("ok")), msg
 
 
-def _error(status, msg, sub):
-    if _is_page(sub):
+def _is_page(key, sub):
+    m = adminmodules.load().get(key)
+    return bool(m) and any(sub == t.path for t in m.tools if not t.panel)
+
+
+def _error(status, msg, sub, key=""):
+    if _is_page(key, sub):
         page =("<!doctype html><meta charset=utf-8><title>Unavailable</title>"
                 "<style>body{margin:0;display:grid;place-items:center;min-height:60vh;"
                 "font:15px/1.5 system-ui,sans-serif;background:#14161c;color:#9aa2b4}"

@@ -45,7 +45,7 @@ _LOBBY_LIST = {
                                     # shows a wrong name, not a hang.
     (0x00, 0x09): (0x88, 1, 15),    # 136B records, count = BYTE 0
     (0x01, 0x03): (0x68, 1, 19),    # 104B records, count = BYTE 0
-    (0x02, 0x03): (0xA8, 4, 0x40),  # 168B records, count = U32. 0x40, NOT 12:
+    (0x02, 0x03): (0xA8, 4, 0xC8),  # 168B records, count = U32. 200, NOT 12:
                                     # polcore's 2:3 reader (0x037e38c9..0x037e3a57)
                                     # takes the U32 count, then reads chunks of
                                     # min(remaining*168, 0x7e0) = up to 12 records
@@ -57,9 +57,13 @@ _LOBBY_LIST = {
                                     # dropped every friend past the 12th (a member
                                     # with 19 friends never saw 7 of them,
                                     # 2026-09-28).
-                                    # 0x40 because the push records' slot byte
-                                    # (+0x1c) and the slot maps are `< 0x40`; 200
-                                    # once those are lifted.
+                                    # 200 (0xC8): the friend table's size. The
+                                    # 2:3 validator 0x37df090 aborts the whole
+                                    # list (POL-5133) on a friend +0x08 >= 200,
+                                    # and the push slot +0x1c is a full byte
+                                    # checked < 0xC8 (0x37e50f0), so 0x40..0xC7
+                                    # are valid push slots too (static RE
+                                    # 2026-10-08).
     (0x07, 0x0C): (0x88, 1, 4),     # 136B records, count = BYTE 0, VALIDATED:
                                     # byte 0 <= 4 and bytes 1..4 each <= 0x40 or
                                     # the client fails with -5133. THE CAP IS 4,
@@ -367,8 +371,8 @@ def _friends_cap(req_pt=None):
     POL_FRIENDS_MOBILE_CAP (default 64) for a marked mobile request.
 
     Rows are served in the same `_db_friends` order with the same slot numbers
-    either way, so slot i is identical for a PC and a phone. Clamped to 0x40:
-    the presence/friend-load paths skip slots >= 0x40, and never below the
+    either way, so slot i is identical for a PC and a phone. Clamped to 200,
+    the client's friend table, and never below the
     list cap. (The PC's cap was 12 until 2026-09-28 -- a misread of polcore's
     12-record READ CHUNK as a list limit; see `_LOBBY_LIST`.)"""
     cap = _LOBBY_LIST[(0x02, 0x03)][2]
@@ -378,7 +382,7 @@ def _friends_cap(req_pt=None):
         want = int(os.environ.get("POL_FRIENDS_MOBILE_CAP", "64"), 0)
     except ValueError:
         want = 64
-    return max(cap, min(want, 0x40))
+    return max(cap, min(want, 0xC8))
 
 
 def _list_count(op1, op2, req_pt=None):
@@ -406,11 +410,15 @@ def _list_count(op1, op2, req_pt=None):
     if _list_mode(op1, op2) == "friends":
         # Count comes from the DB, so a friend added between logins appears with
         # no config change -- same contract as `handles`. `_LOBBY_LIST[..][2]`
-        # bounds it (0x40 for 2:3; the client reads any count in 12-record
-        # chunks, see the note there).
-        return min(len(friendlist._db_friends(kinds=(accounts.KIND_FRIEND,))),
-                   _friends_cap(req_pt) if (op1, op2) == (0x02, 0x03)
-                   else _LOBBY_LIST[(op1, op2)][2])
+        # bounds it (200 for 2:3; the client reads any count in 12-record
+        # chunks, see the note there). The ignore table rides behind the
+        # friends in the same reply (see `friendlist._ignore_rows`).
+        nf = min(len(friendlist._db_friends(kinds=(accounts.KIND_FRIEND,))),
+                 _friends_cap(req_pt) if (op1, op2) == (0x02, 0x03)
+                 else _LOBBY_LIST[(op1, op2)][2])
+        if (op1, op2) == (0x02, 0x03):
+            nf += len(friendlist._ignore_rows())
+        return nf
     if _list_mode(op1, op2) == "groups" and accounts is not None:
         # *** COUNT FROM THE SAME LIST THE REPLY IS BUILT FROM. ***
         #
@@ -668,6 +676,7 @@ def _list_payload(op1, op2, n, req_pt=None):
     #: later 2:6 delete indexes; see `_friend_slots_publish`.
     served_slots = []
     served_online = {}          # slot -> the online flag the row was served with
+    served_ignores = []         # (ignore index, name) served behind the friends
     # Own handles + (optionally) friend handles, so friend profiles resolve -- see
     # _handle_list_entries. Falls back to own-only when the knob is off.
     # Each handle entry is (table_slot, name, profile-fields, guid). The table_slot
@@ -745,6 +754,11 @@ def _list_payload(op1, op2, n, req_pt=None):
         # group's members into the next.
         friends = (friendlist._db_friends(kinds=(accounts.KIND_FRIEND,)) if mode == "friends"
                    else friendgroups._groups_for_list(count))
+    # THE IGNORE TABLE rides behind the friends in a 2:3 (records count-len(ign)
+    # .. count-1), each with its own ignore index at +0x08.
+    ignore_rows = (friendlist._ignore_rows()
+                   if mode == "friends" and (op1, op2) == (0x02, 0x03) else [])
+    friends_served = max(0, count - len(ignore_rows))
     # THE PER-CONTENT BLOCK, for the FRIEND rows. The 168-byte 2:3 record is the
     # same shape as the profile identity row, and SE's layout carries the 8x16
     # content block at +0x28 of both (`_IDREC_CONTENT_AT` -- the 05:04 diff that
@@ -918,6 +932,11 @@ def _list_payload(op1, op2, n, req_pt=None):
                     except Exception as exc:
                         log("lobby", f"  7:12 group push skipped ({exc!r})")
             continue
+        if mode == "friends" and ignore_rows and i >= friends_served:
+            irow = ignore_rows[i - friends_served]
+            out[base:base + rec] = friendlist._ignore_list_record(rec, irow)
+            served_ignores.append((irow[0], irow[1]))
+            continue
         if mode in ("friends", "groups"):
             g, nm, kd, fh, st, rid, lbl = friends[i]
             # BOTH unsettled flavours render as SE's captured pending word: an
@@ -1034,6 +1053,9 @@ def _list_payload(op1, op2, n, req_pt=None):
             for s, nm, _rid in served_slots) or "none")
             + " -- this is the numbering a later 2:6 delete names, and the "
               "online flag is what the row's presence byte carried")
+        if served_ignores:
+            log("lobby", "  2:3 ignore table served: " + ", ".join(
+                f"index {s}={nm!r}" for s, nm in served_ignores))
     if icon_rows:
         mid = lobbysession._session_member_id()
         if mid:

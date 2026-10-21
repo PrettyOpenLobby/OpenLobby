@@ -219,6 +219,35 @@ def _member_status(member_id):
         return 0
 
 
+def _member_hidden(member_id):
+    """True when this member chose Hidden (4:5 status 0x05) and friends must
+    see them OFFLINE.
+
+    Retail: SE pushed a state the friend's client drew as OFFLINE the moment
+    a friend went Invisible (as the retail service did), so a
+    Hidden member is offline to everyone watching them while their own session
+    stays up and keeps receiving everyone else's presence. Every place that
+    tells a WATCHER about this member asks here; nothing about the member's
+    own session changes. POL_STATUS_HIDDEN_OFFLINE=0 restores the old
+    served-as-away behaviour.
+    """
+    if os.environ.get("POL_STATUS_HIDDEN_OFFLINE", "1") != "1" or member_id is None:
+        return False
+    return _member_status(member_id) == _STATUS_INVISIBLE
+
+
+def _handle_shown_online(db, handle_id):
+    """Is this handle online AS ITS WATCHERS SEE IT: logged in and not Hidden."""
+    from .deps import accounts
+    if accounts is None or not handle_id:
+        return False
+    if not accounts.handle_online(db, int(handle_id)):
+        return False
+    row = db.execute("SELECT member_id FROM handle WHERE id = %s",
+                     (int(handle_id),)).fetchone()
+    return row is None or not _member_hidden(int(row["member_id"]))
+
+
 def _status_frame_code(state):
     """The presence code in a 4:5 body, or None if the body is too short."""
     if state is None or len(state) <= _STATUS_CODE_AT:
@@ -270,6 +299,14 @@ def payload_change_status(n, req_pt):
     echo = body[:n]
     if len(echo) < n:
         echo += b"\x00" * (n - len(echo))
+    # BYTES 0..15 ARE NOT THE CLIENT'S TO ECHO. They are the content auth value
+    # the title is keyed with (below). The PS2 and PC send zeros there, but the
+    # Xbox 360 sends 01 02 00 00 00 00 00 00 + its XUID, and echoing that back
+    # made it the 360's FFXI world key prefix, so its Blowfish key never matched
+    # the zero key the bridge commits with 0xA2 -> FFXI-3001 on every 360.
+    # Zero them; the content auth block below still mints a value
+    # for its own zones.
+    echo = b"\x00" * min(16, len(echo)) + echo[16:]
     log("lobby", f"  4:5 KChangeMyStatus: echoing {n}B of the requested state "
                  f"(was {n} zero bytes); POL_STATUS_ECHO=0 to revert")
     # DUMP THE STATE (2026-08-16, TM track). This blob is how the client says
@@ -306,6 +343,33 @@ def payload_change_status(n, req_pt):
             except (OSError, ValueError) as exc:
                 log("lobby", f"  4:5 content auth: cannot publish ({exc}) -- "
                              f"echoing zeros so the key stays one FMO can read")
+    # FILE THE HASH THE TITLE WILL PRESENT. polcore hashes the first 16 bytes
+    # of this reply with the session clock and the session key into the 52-byte
+    # credential blob every title sends first (contentauth.decode_blob). Both
+    # of those were recorded by the auth hop that sent the session token, so
+    # the hash is known here and now, for every zone, minted value or not. A
+    # title that decodes its blob and finds the hash filed knows the member;
+    # the address never enters into it.
+    if contentauth is not None:
+        _mid = lobbysession._session_get("member_id")
+        _stamp = lobbysession._session_get("stamp")
+        _skey = lobbysession._session_get("skey")
+        _zone = _zf[0] if _zf is not None else 0
+        if _mid is None or _stamp is None:
+            log("lobby", f"  4:5 credential hash NOT filed: "
+                         f"{'no member bound' if _mid is None else 'no session clock recorded'} "
+                         f"for this session (titles fall back to the address)")
+        else:
+            try:
+                _n = contentauth.file_hashes(
+                    contentauth.hash_candidates(echo[:16], int(_stamp),
+                                                bytes.fromhex(_skey or "")),
+                    _mid, lobbysession._session_sid(), _zone,
+                    lobbysession._session_get("peer_ip"))
+                log("lobby", f"  4:5 credential hash filed for member {_mid} zone "
+                             f"{_zone} ({_n} row(s); clock {int(_stamp):#010x})")
+            except (OSError, ValueError) as exc:
+                log("lobby", f"  4:5 credential hash NOT filed ({exc!r})")
     # AND ACT ON IT: +19 is "inside a title", u16 at +20 the content id
     # (1000 = the Viewer). This is the only place we learn it, and the
     # presence push in the other container reads it back via _title_zone.

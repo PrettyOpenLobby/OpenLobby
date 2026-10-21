@@ -47,7 +47,8 @@ GAMES = {
 }
 
 #: Serials 980000-999999 are the event posts'; 98xxxx Tetra Master, 99xxxx
-#: JongHoLow. A serial names `pcd/ntool/<loc>/<serial>.pml`, so it must be
+#: JongHoLow; FFXI's (ffxinews.py) have 97xxxx and FMO's (fmonews.py) 96xxxx.
+#: A serial names `pcd/ntool/<loc>/<serial>.pml`, so it must be
 #: stable for the life of a post: it is derived from the event's own start hour.
 #: Hand-written posts count up from newsgen.SERIAL_BASE and never get near.
 SERIAL_FLOOR = 980000
@@ -209,14 +210,27 @@ def item(ev):
 
 
 def items(now=None, cal=None):
-    """Every event post that should be up at `now`, soonest first."""
+    """Every event post that should be up at `now`, soonest first, then FFXI's (ffxinews.py:
+    the game's own calendar, which the FFXI bridge publishes; none without it) and FMO's
+    war phase (fmonews.py, from the City Control board's clock)."""
     if not enabled():
         return []
     cal = eventcal.load() if cal is None else cal
     evs = []
     for game in GAMES:
         evs += events(game, now, cal)
-    return [item(ev) for ev in sorted(evs, key=lambda ev: (ev["start"], ev["game"]))]
+    out = [item(ev) for ev in sorted(evs, key=lambda ev: (ev["start"], ev["game"]))]
+    try:
+        import ffxinews
+        out += ffxinews.items(now)
+    except Exception as e:                       # noqa: BLE001 -- FFXI's posts are an extra
+        print("eventnews: no FFXI posts (%r)" % e, file=sys.stderr)
+    try:
+        import fmonews
+        out += fmonews.items(now)
+    except Exception as e:                       # noqa: BLE001 -- so are FMO's (fmonews.py)
+        print("eventnews: no FMO posts (%r)" % e, file=sys.stderr)
+    return out
 
 
 def signature(now=None, cal=None):

@@ -48,3 +48,7 @@ services:
   ssl3ucs:
     image: ghcr.io/prettyopenlobby/openlobby-ssl3:${OPENLOBBY_TAG:-latest}
     pull_policy: missing
+  sslterm:
+    image: ghcr.io/prettyopenlobby/openlobby-sslterm:${OPENLOBBY_TAG:-latest}
+    pull_policy: missing
+    build: !reset null

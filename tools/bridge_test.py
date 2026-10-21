@@ -541,6 +541,62 @@ else:
           B.sweep_event_posts(at(2026, 10, 7)) == 1 and not B._event_posts(ldb)
           and len([c for c in net.calls[k10:] if c[0] == "DELETE"]) == 1)
 
+    print("FFXI's own calendar -> channel (ffxinews.py)")
+    from polcore import kv as _kv
+    ffxi_events = [
+        {"source": "campaigns", "key": "c-oct", "name": "Adventurer Campaigns",
+         "start": at(2026, 10, 10, 15), "end": at(2026, 10, 31, 15),
+         "detail": {"campaigns": ["Alter Ego Expo"]}},
+        {"source": "login", "key": "2026-10", "name": "Repeat Login Campaign",
+         "start": at(2026, 10, 10, 15), "end": at(2026, 11, 9, 14),
+         "detail": {"month": "October", "earnEnd": at(2026, 11, 2, 14)}},
+        {"source": "seasonal", "key": "harvest", "name": "Harvest Festival",
+         "start": at(2026, 10, 19, 15), "end": at(2026, 11, 1, 15),
+         "detail": {"blurb": "Trade a sweet to the townsfolk."}},
+    ]
+
+    def ffxi_at(t):
+        _kv.default().set_json("ffxi:calendar", {"at": t, "events": ffxi_events})
+        return B.scan_ffxi_posts(t)
+
+    announce("111", "role", [{"type": 3, "name": "game", "value": "ffxi"},
+                             {"type": 8, "name": "role", "value": "R11"}])
+    k13 = len(net.calls)
+    n = ffxi_at(at(2026, 10, 15))
+    posts = reminders(k13)
+    embs = posts[0][2]["embeds"] if posts else []
+    check("the first pass posts the current FFXI post: October's campaigns and Login Campaign",
+          n == 1 and len(posts) == 1
+          and [e["title"] for e in embs] == ["Adventurer Campaigns is on", "October Login Campaign is on"],
+          (n, [e.get("title") for e in embs]))
+    check("...pinging the FFXI role only",
+          posts and posts[0][2].get("content") == "<@&R11>"
+          and posts[0][2]["allowed_mentions"] == {"parse": [], "roles": ["R11"]})
+    k14 = len(net.calls)
+    check("the next pass does not repeat it", ffxi_at(at(2026, 10, 15, 1)) == 0 and not reminders(k14))
+    ffxi_at(at(2026, 10, 19, 16))
+    check("Harvest Festival gets its own post; two FFXI posts stay up",
+          len(reminders(k14)) == 1
+          and not [c for c in net.calls[k14:] if c[0] == "DELETE"]
+          and len([p for p in B._event_posts(ldb) if p.get("feed") == "ffxi"]) == 2)
+    k15 = len(net.calls)
+    ffxi_at(at(2026, 10, 29, 16))
+    gone = [c for c in net.calls[k15:] if c[0] == "DELETE"]
+    left = [p for p in B._event_posts(ldb) if p.get("feed") == "ffxi"]
+    check("a third post deletes the oldest, so the channel never holds more than two",
+          len(reminders(k15)) == 1 and len(gone) == 1 and len(left) == 2
+          and not any(p["cup"].startswith("ffxi:%d:" % at(2026, 10, 10, 15)) for p in left),
+          (gone, [p["cup"] for p in left]))
+    os.environ["POL_BRIDGE_FFXI_NEWS"] = "0"
+    k16 = len(net.calls)
+    check("POL_BRIDGE_FFXI_NEWS=0 turns them off",
+          ffxi_at(at(2026, 10, 30, 16)) == 0 and not reminders(k16))
+    os.environ.pop("POL_BRIDGE_FFXI_NEWS")
+    _kv.default().delete("ffxi:calendar")
+    check("no calendar from the FFXI bridge, no FFXI posts", B.scan_ffxi_posts(at(2026, 10, 31, 16)) == 0)
+    B._save_event_posts(ldb, [p for p in B._event_posts(ldb) if p.get("feed") != "ffxi"])
+    announce("111", "role", [{"type": 3, "name": "game", "value": "ffxi"}])
+
     print("news posts under the game's own name (the channel's webhook)")
     net.hooks = True
     B.GAME_BOTS, B._PROFILES, B._HOOK_REFUSED = {"tetra": "TMBOT"}, {}, {}

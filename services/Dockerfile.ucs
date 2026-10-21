@@ -52,5 +52,10 @@ COPY polnick.py /app/polnick.py
 # admin/gmd/gmcrypt imports all fail (caught by the CI smoke test 2026-08-23).
 COPY cast_sboxes.bin /app/cast_sboxes.bin
 
+# No privileged port here (8080, 8090, 51305), so the services run as the
+# unprivileged uid that owns the /data, /logs and /www bind mounts.
+RUN useradd --uid 1000 --user-group --create-home --shell /usr/sbin/nologin pol
+USER 1000
+
 ENTRYPOINT []
 CMD ["python", "ucscgi.py"]

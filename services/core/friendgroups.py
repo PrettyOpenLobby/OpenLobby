@@ -335,9 +335,9 @@ def _client_guid_map():
 #: handle table at `0x3bc5800 + slot*0x28`. That slot was filled from the 0:9
 #: handle record, whose +0x08/+0x0C carry the RAW `handle_guid` -- so the own
 #: row's low 44 bits are `0x800_0000004B`, not the tagged `0x20004B` this word
-#: carries for everyone else. Reported live 2026-10-03 (Vela in Bluebell's
-#: 'hoooot'): the accept push's Vela row missed the client-built "Inviting"
-#: row, APPENDED, and Vela sat in the group twice, the real self row stuck at
+#: carries for everyone else. Seen live (a member invited to a group): the
+#: accept push's own row missed the client-built "Inviting" row, APPENDED,
+#: and the member sat in the group twice, the real self row stuck at
 #: class 2 so the group stayed unusable, with "Read Message" offered on their
 #: own duplicate. `own=True` writes the raw 44 bits for the recipient's own
 #: handle in BOTH the 7:12 record and the push, so all three writers agree. The
@@ -891,10 +891,13 @@ def _group_my_status(pt):
     at the same offsets, so what is stored here is served back to this member
     in their next group list (see `_group_record`).
 
-    Stored per member row (`accounts.set_group_settings`). What the OTHER members
-    are sent when the status changes is not implemented: that needs the group
-    presence push to honour a per-group status, which it does not yet.
-    POL_GROUP_SETTINGS=0 only logs, as before.
+    Stored per member row (`accounts.set_group_settings`), and the other
+    members are told through the group-scoped presence push, which now honours
+    the per-group status (`pushspool._group_status_state`; 5 Hidden reads
+    offline, 2 Away reads away). The client sends "Change status on all lists"
+    as one 7:11 per group (polcore 0x37ea100), so nothing fans out here.
+    POL_GROUP_SETTINGS=0 only logs, as before; POL_GROUP_STATUS_PUSH=0 stores
+    without telling anyone.
     """
     if pt is None:
         return b""
@@ -919,6 +922,22 @@ def _group_my_status(pt):
                     handle_pos=hpos)
                 stored = (f"stored for {me!r}" if ok else
                           f"NOT stored: {me!r} has no member row in group {gid}")
+                # TELL THE OTHER MEMBERS. They read a member's status in a
+                # group only from the group-scoped presence push (the 7:12
+                # member record has no status field), so re-assert this
+                # member's presence; `_broadcast_presence` applies the stored
+                # per-group status. The "all lists" form arrives as one 7:11
+                # per group, so each group is told in turn.
+                if ok and os.environ.get("POL_GROUP_STATUS_PUSH", "1") == "1":
+                    mid = lobbysession._session_member_id()
+                    hid = lobbysession._session_handle_id(db)
+                    if mid and hid:
+                        try:
+                            pushspool.push_group_status(db, int(mid), int(hid),
+                                                        int(gid))
+                        except Exception as exc:
+                            log("lobby", f"  group 7:11: status push skipped "
+                                         f"({exc!r})")
             finally:
                 db.close()
         except Exception as exc:
@@ -1452,17 +1471,25 @@ def _group_message_fanout(path, data, req_pt):
                     f"else is in the group", req_pt)
                 return True
             delivered = []
+            # The sender in the ROSTER's form, so the reader can name them
+            # (see `lobbymail._mail_sender_as_group_member`).
+            tagged = os.environ.get("POL_GROUP_MSG_SENDER_TAG", "1") == "1"
             for hid in sorted(handles):
                 row = db.execute("SELECT * FROM handle WHERE id = %s",
                                  (hid,)).fetchone()
-                copy = lobbymail._mail_readdress(db, path, row)
+                copy = lobbymail._mail_readdress(db, path, row,
+                                                 sender_tagged=tagged)
                 if copy is None:
                     continue
+                if lobbymail._mail_blocked_for(db, hid):
+                    continue                # this member ignores the sender
                 resourcestore._resource_store(copy, data)
                 lobbymail._mail_announce(copy)
                 delivered.append(row["handle_name"])
             log("lobby", f"  group message to {grp['peer_name']!r} (id {gid}): "
-                         f"delivered to {delivered}")
+                         f"delivered to {delivered}"
+                         + (" (sender in the roster's tagged form)" if tagged
+                            else ""))
             return True
         finally:
             db.close()

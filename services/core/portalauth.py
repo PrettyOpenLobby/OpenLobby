@@ -144,21 +144,26 @@ def _portal_validators(path):
     return lm, etag
 
 
-def _portal_cache_headers(validators):
+def _portal_cache_headers(validators, media=False):
     """Last-Modified/ETag, plus an optional freshness lifetime.
 
     POL_PORTAL_CACHE_MAXAGE (seconds, default 0 = off) adds Cache-Control and
     Expires. With it set the client may skip the request ENTIRELY on a later
     render rather than revalidating -- the biggest available cut to render time,
     but it also means edits to www/ are not picked up until it expires, so it is
-    off by default and is a deliberate knob."""
+    off by default and is a deliberate knob.
+
+    POL_PORTAL_CACHE_MAXAGE_MEDIA, when set, replaces it for `media` (images,
+    sound, movies). Art is most of a page's files (41 of the JongHoLow page's
+    53) and almost never changes, so it can live far longer than the PML."""
     if not validators:
         return b""
     lm, etag = validators
     out = (b"Last-Modified: " + lm.encode() + b"\r\n"
            b"ETag: " + etag.encode() + b"\r\n")
+    raw = os.environ.get("POL_PORTAL_CACHE_MAXAGE_MEDIA", "") if media else ""
     try:
-        maxage = int(os.environ.get("POL_PORTAL_CACHE_MAXAGE", "0"))
+        maxage = int(raw or os.environ.get("POL_PORTAL_CACHE_MAXAGE", "0"))
     except ValueError:
         maxage = 0
     if maxage > 0:

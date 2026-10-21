@@ -32,7 +32,7 @@ def _character_names():
 def _char_display_name(content_code, content_id, handle_name="", names=None):
     """The 15-byte string at char-record +0x18: **the CHARACTER's name.**
 
-    CONFIRMED BY THE ACCOUNT HOLDER 2026-08-23 against retail: that box is the
+    CONFIRMED against retail: that box is the
     character name, and the Viewer's per-Content-ID sections under a handle read
     it out of this list. Two pieces of evidence already pointed the same way and
     neither was enough on its own:
@@ -149,7 +149,7 @@ def _char_record(rec, index, slot, pos, content_code, content_id="",
     (It held the Content ID DIGITS until 2026-08-23, on the reasoning that they
     were "the natural fit for the Content ID list UI". They are not: that list is
     what the Viewer's per-Content-ID sections under a handle render, and the
-    account holder confirmed against retail that the box is the character name.)
+    retail shows that the box is the character name.)
 
     WARNING: Tetra Master is the case that PROVED it, and the only one where the
     string is READ rather than displayed. The chain is measured, not inferred (the title module's
@@ -329,8 +329,8 @@ def _chr_put(pt):
     we cannot vouch for. Slots we never served, and handle slots we never served,
     are skipped by name.
 
-    WARNING: Static, 2026-09-11. No 1:10 frame has ever been READ -- both prod sightings
-    (2026-09-04, member 10) rotated out before anyone looked. The +0x01 -> table
+    WARNING: Static. No 1:10 frame has ever been READ -- the sightings so far
+    rotated out before anyone looked. The +0x01 -> table
     packing is taken from the PC twin's layout (`_char_record`'s docstring); the
     console's own 1:3 consumer is truncated in the decompile. The next frame is
     saved as `lobby-unknown-1-10-*.bin`... no longer -- once this arm is tabled
@@ -340,8 +340,8 @@ def _chr_put(pt):
     if pt is None:
         return b""
     body = bytes(pt[friendgroups._CHR_PUT_PAYLOAD_OFF:])
-    # KEEP THE BYTES. No 1:10 body has ever been read by a person; the two prod
-    # sightings rotated out of the generic capture. Budgeted like every other
+    # KEEP THE BYTES. No 1:10 body has ever been read by a person; the
+    # sightings so far rotated out of the generic capture. Budgeted like every other
     # capture (srvcore.save_capture), under its own name so it survives a busy
     # channel. Compare a real one against the layout above before trusting it.
     cap = save_capture("lobby-chr-put", body)
@@ -401,7 +401,17 @@ def _chr_put(pt):
                 if hslot == slot:
                     continue
                 hid, hname = handles[hslot][0], handles[hslot][1]
-                accounts.link_content_to_handle(db, hid, code, None)
+                if accounts.issues_per_character(code):
+                    # One Content ID per character, spread over the member's
+                    # handles: move THIS one. Moving the whole title would pile
+                    # every character onto one handle, past eight.
+                    if not accounts.move_content_id(db, hid, code, cid):
+                        log("lobby", f"  1:10 chlist: slot {i} content {code} ({cid}) "
+                                     f"NOT moved to handle slot {hslot} ({hname!r}): "
+                                     f"it already holds {accounts.CONTENT_IDS_PER_HANDLE}")
+                        continue
+                else:
+                    accounts.link_content_to_handle(db, hid, code, None)
                 moved += 1
                 log("lobby", f"  1:10 chlist: slot {i} content {code} ({cid}) moved "
                              f"handle slot {slot} -> {hslot} ({hname!r}), pos {hpos}")
@@ -413,6 +423,163 @@ def _chr_put(pt):
         return b""
     log("lobby", f"  1:10 chlist: applied {moved} move(s); the next 1:3 serves them")
     return b""
+
+
+#: 1:11 request body offsets (payload starts at frame +0x28).
+_BIND_REQ_OFF = 0x28
+BIND_REPLY_LEN = 48
+
+
+def _bind_resolve(content_code, chara_no):
+    """`(handle_id, handle_name)` of whoever holds the character a game calls
+    `chara_no` under title `content_code` -- any member, not only the asker --
+    or None.
+
+    The title's own map turns the number into a Content ID
+    (`titles.character_by_world`; for FFXI that is the bridge's id map, the
+    same map 1:3 serves the number FROM), and the handle is whichever one that
+    Content ID is linked to. A title with no world identity answers None here
+    and is left to `_char_bind_holder`'s own-character match."""
+    if accounts is None:
+        return None
+    try:
+        cid = titles.character_by_world(int(content_code), int(chara_no))
+    except Exception as exc:                          # noqa: BLE001
+        log("lobby", f"  1:11 bind query: title lookup failed ({exc!r})")
+        return None
+    if cid is None:
+        return None
+    db = accounts.connect()
+    try:
+        row = accounts.handle_by_content_id(db, cid)
+    finally:
+        db.close()
+    if row is None:
+        return None
+    return int(row["id"]), str(row["handle_name"])
+
+
+def _char_bind_holder(chara_no, content_code, chars, handles, resolve=None):
+    """`(handle_id, handle_name)` for a 1:11 query, or None when the character
+    is nobody's we serve.
+
+    KEY: **THE CHARACTER IN A 1:11 IS USUALLY SOMEBODY ELSE'S.** The query is
+    what FFXI sends when a player targets another character and picks "send a
+    POL message" or "add to friend list" from the in-game menu: it asks which
+    HANDLE owns that character so the message or request can be addressed.
+    An earlier version answered out of the asker's OWN character list, with
+    a "one handle holds this title, so it must be that one" guess for a number
+    it did not find -- and on a title with world ids that guess is ALWAYS the
+    asker. Say Tobin (a 360 player) targets Mira, whose handle is Arden: that
+    answered 'Tobin'; the client then wrote a 2:6 friend add naming Tobin (the
+    SELF-ADD guard dropped it) and a 3:1 "Let's be friends!" addressed to
+    Tobin's own guid, which came straight back to the sender. Every POL message
+    and friend request sent from inside FFXI did the same.
+
+    Order of resolution:
+      1. the asker's own characters, by the number 1:3 served (unchanged);
+      2. `resolve(code, number)` -- the title's map across every member;
+      3. the one-handle guess, ONLY for a title with no world identity at all
+         (there the number may be the game's own and the handle cannot be
+         another); a title that has world ids and does not know this number
+         is answered not-found, which is the truth and costs the game an
+         error code instead of a message to the wrong person.
+    """
+    hit = None
+    same_code = set()
+    world_known = False
+    for slot, _pos, code, cid, _bind in chars:
+        if int(code) != int(content_code):
+            continue
+        same_code.add(slot)
+        try:
+            cid_num = int(str(cid).strip() or 0)
+        except ValueError:
+            cid_num = 0
+        world = titles.character_world(int(code), cid_num)
+        if world is not None:
+            world_known = True
+        served = world if world is not None else cid_num & 0xFFFFFFFF
+        if served == chara_no:
+            hit = slot
+            break
+    if hit is not None and hit < len(handles):
+        return int(handles[hit][0]), handles[hit][1]
+    if resolve is not None:
+        found = resolve(int(content_code), int(chara_no))
+        if found:
+            return int(found[0]), found[1]
+    if hit is None and len(same_code) == 1 and not world_known:
+        hit = next(iter(same_code))
+        if hit < len(handles):
+            return int(handles[hit][0]), handles[hit][1]
+    return None
+
+
+def char_bind_reply(chara_no, content_code, req_slot, chars, handles, guid_of,
+                    resolve=None):
+    """The 1:11 CHARACTER BIND reply payload (48 bytes, last 4 for the signer).
+
+    Request (24 bytes, read off decrypted frames and the console's
+    setup 0x001404b8): +0x00 u64 caller id (always 0), +0x08 u32 the
+    character's number -- the same value our 1:3 record serves at +0x0C --
+    +0x0C u16 content code, +0x0E u8 the console's current handle slot.
+
+    Reply, as the pump 0x001405a0 reads it:
+        +0x00 u64  the bound handle's guid (the core XORs it with its key, the
+                   same as every other guid it is handed, so it goes out raw)
+        +0x10 15B  the bound handle's name, NUL-padded
+        +0x20 u8   found: non-zero = bound, 0 = SQ_POL_ERROR_CHARACTER_BIND_
+                   NO_HANDLE_NAME (-7186) to the game
+        +0x21 u8   handed back to the caller; nothing reading it has been
+                   found, so it echoes the request's handle slot
+    A character we do not serve gets the all-zero, not-found answer, which is
+    the truth and costs the game an error code instead of a 180 s hang.
+
+    `chars` is `_db_chars()`, `handles` is `_db_handles()`, `guid_of(hid)`
+    gives a handle's wire guid, and `resolve(code, number)` answers for a
+    character that is not one of the asker's own (see `_char_bind_holder`)."""
+    out = bytearray(BIND_REPLY_LEN)
+    holder = _char_bind_holder(chara_no, content_code, chars, handles,
+                               resolve=resolve)
+    if holder is None:
+        return bytes(out)
+    hid, name = holder
+    struct.pack_into("<Q", out, 0x00, guid_of(hid) & 0xFFFFFFFFFFFFFFFF)
+    raw = str(name).encode("cp932", "replace")[:15]
+    out[0x10:0x10 + 15] = raw.ljust(15, b"\x00")
+    out[0x20] = 1
+    out[0x21] = req_slot & 0xFF
+    return bytes(out)
+
+
+def payload_char_bind(n, req_pt):
+    """1:11 (lobby opcode table): which handle holds this character."""
+    if req_pt is None or len(req_pt) < _BIND_REQ_OFF + 0x10:
+        return bytes(BIND_REPLY_LEN)
+    body = bytes(req_pt[_BIND_REQ_OFF:_BIND_REQ_OFF + 0x18])
+    chara_no = struct.unpack_from("<I", body, 0x08)[0]
+    code = struct.unpack_from("<H", body, 0x0C)[0]
+    slot = body[0x0E]
+    try:
+        chars = handlelists._db_chars()
+        handles = handlelists._db_handles()
+    except Exception as exc:                          # noqa: BLE001
+        log("lobby", f"  1:11 bind query: lookup failed ({exc!r}); not found")
+        return bytes(BIND_REPLY_LEN)
+    guid_of = accounts.handle_guid if accounts is not None else (lambda h: 0)
+    rep = char_bind_reply(chara_no, code, slot, chars, handles, guid_of,
+                          resolve=_bind_resolve)
+    whose = ""
+    if rep[0x20]:
+        hid = struct.unpack_from("<Q", rep, 0x00)[0] & 0xFFFFFFFF
+        whose = (" (the asker's own)" if hid in {int(h[0]) for h in handles}
+                 else " (another member's character)")
+    log("lobby", f"  1:11 bind query: content {code} chara {chara_no:#010x} "
+                 f"slot {slot} -> "
+                 + (f"handle {rep[0x10:0x1f].rstrip(bytes(1)).decode('cp932', 'replace')!r}"
+                    + whose if rep[0x20] else "not found"))
+    return rep
 
 
 def payload_chr_put(n, req_pt):

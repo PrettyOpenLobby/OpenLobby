@@ -581,8 +581,7 @@ def hop_created_rooms():
           struct.unpack_from("<I", rec, 0x39)[0] == 1)
     # *** THE HEADCOUNT MOVED, AND THIS CHECK DID NOT. ***
     # It used to read the count at +0x99 and assert 1 there. Both halves of the
-    # room record's tail were re-measured live on 2026-08-19 (memory
-    # `room-record-polpro-fields`) and swapped: **+0x39 is z_npers, the headcount
+    # room record's tail were re-measured live and swapped: **+0x39 is z_npers, the headcount
     # the browser draws as `N/`**, and **+0x99 is z_chlock, the PADLOCK**. The
     # old reading was ambiguous only because SE's FOXROOM sample happened to be
     # both occupied AND keyed. So this suite went red the day the record was

@@ -964,6 +964,11 @@ try:
 except ValueError:
     HANDLE_GUID_BASE = 1 << 43
 HANDLE_GUID_MASK = (1 << 44) - 1
+#: The low-32-bit form the 7:12 group roster (and a 5:3 search hit) carries for
+#: one of our handles: `HANDLE_GUID_TAG | (handle id & 0x7FFFF)`. Must agree
+#: with `friendlist._FRIEND_HID_TAG`. Handle ids never reach 0x200000, so the
+#: two forms cannot collide.
+HANDLE_GUID_TAG = 0x200000
 
 
 def handle_guid(handle_id):
@@ -1010,8 +1015,13 @@ def handle_by_guid(conn, guid):
     guid = int(guid) & HANDLE_GUID_MASK
     if not guid or (guid & ~0xFFFFFFFF) != HANDLE_GUID_BASE:
         return None
+    low = guid & 0xFFFFFFFF
+    if (low & ~0x7FFFF) == HANDLE_GUID_TAG:
+        # The group-roster form of the same handle (a group message's sender
+        # field carries it, see `lobbymail._mail_sender_as_group_member`).
+        low &= 0x7FFFF
     return conn.execute("SELECT * FROM handle WHERE id = %s",
-                        (guid & 0xFFFFFFFF,)).fetchone()
+                        (low,)).fetchone()
 
 
 def handle_nocase():
@@ -1100,6 +1110,9 @@ def check_mail_local(local):
                 "characters.")
     if local != local.lower() or not local.isascii() or "@" in local:
         return "Mail name must use lowercase letters, numbers and symbols."
+    # The screenshot box (screenshots.py) is a service address, not a mailbox.
+    if local == (os.environ.get("POL_SCREENSHOT_BOX") or "pics").strip().lower():
+        return "That mail name is reserved."
     return None
 
 
@@ -1431,10 +1444,33 @@ def delete_handle(conn, member_id, handle_name):
     """Delete a handle and TOMBSTONE it, so the 0:8 auto-capture will not re-add it
     when the client re-volunteers its locally-cached table. If the deleted handle
     was the primary, the oldest remaining handle inherits the badge. Returns True
-    if a handle row was actually removed."""
+    if a handle row was actually removed.
+
+    Raises ValueError, and changes nothing, when a character sits on one of
+    the handle's Content IDs (`titles.spent_content_ids`): the rows go with the
+    handle (ON DELETE CASCADE), and a character whose Content ID is gone is
+    POL-0001 at select for ever. Move the character off it first."""
     row = conn.execute(
         "SELECT id, is_primary FROM handle WHERE member_id = %s AND handle_name = %s",
         (member_id, handle_name)).fetchone()
+    if row is not None and titles is not None:
+        for c in conn.execute(
+                "SELECT content_code, content_id FROM handle_content"
+                " WHERE handle_id = %s AND content_id IS NOT NULL",
+                (row["id"],)).fetchall():
+            if not issues_per_character(c["content_code"]):
+                continue
+            spent = titles.spent_content_ids(int(c["content_code"]), conn)
+            try:
+                on_it = spent is None or int(str(c["content_id"]).strip()) in spent
+            except (TypeError, ValueError):
+                continue
+            if on_it:
+                raise ValueError(
+                    f"handle {handle_name!r} holds Content ID {c['content_id']}"
+                    f" (content {c['content_code']}), which a character is on"
+                    + (" or may be on (the title cannot say)" if spent is None else "")
+                    + "; not deleted")
     conn.execute(
         "INSERT INTO deleted_handle (member_id, handle_name, deleted_at)"
         " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
@@ -2341,8 +2377,8 @@ def ensure_title_slots(conn, handle_id=None, member_id=None):
     which is what `_migrate` does so an operator does not have to remember it.
     """
     policy = title_content_slots()
-    if not policy:
-        return 0
+    # No early return on an empty policy: a title can keep one id per handle
+    # and still give a member more on title-only handles (the overflow below).
     minted = 0
     for code, want in sorted(policy.items()):
         q = "SELECT DISTINCT handle_id FROM handle_content WHERE content_code = %s"
@@ -2359,7 +2395,181 @@ def ensure_title_slots(conn, handle_id=None, member_id=None):
                 safe_slot_target(conn, int(r["handle_id"]), code, want))
     if minted:
         conn.commit()
+    # Past the primary handle's share: only for one member, which is the login
+    # path. The migration's whole-database walk leaves it to each member's next
+    # login, when it is about to matter.
+    if member_id is not None and handle_id is None:
+        for code, total in sorted(title_member_slots().items()):
+            try:
+                minted += ensure_overflow_slots(conn, int(member_id), code, total)
+            except Exception:
+                conn.rollback()
+                raise
     return minted
+
+
+def title_member_slots():
+    """`{content code: Content IDs per member}` for the loaded titles whose
+    member total is above their per-handle count (titles.Title.member_slots)."""
+    if titles is None:
+        return {}
+    return titles.member_slots()
+
+
+def issues_per_character(content_code):
+    """True for a title that issues one Content ID per character, i.e. whose
+    ids are moved one at a time and never as a whole title."""
+    code = int(content_code)
+    return code in title_content_slots() or code in title_member_slots()
+
+
+#: Handles a member can use. The client's handle switcher takes slots 0..3
+#: (core/handlelists._HANDLE_SLOTS) and the 1:3 table serves no fifth, so a
+#: Content ID on a fifth handle could never be played.
+HANDLES_PER_MEMBER = 4
+
+
+def _member_handles_served(conn, member_id):
+    """The member's handles in the order 0:9 and 1:3 serve them (primary first,
+    then oldest), as `[(id, handle_name, is_primary)]`, all of them."""
+    return [(int(r["id"]), r["handle_name"], int(r["is_primary"])) for r in conn.execute(
+        "SELECT id, handle_name, is_primary FROM handle WHERE member_id = %s"
+        " ORDER BY is_primary DESC, id ASC", (int(member_id),)).fetchall()]
+
+
+def _overflow_handle_name(conn, member_id, base):
+    """A free handle name for a member's extra character handle: the primary
+    handle's name with a number on the end (Lex -> Lex2, Lex3), cut to fit
+    HANDLE_MAX. Skips names anyone holds and names this member deleted."""
+    for n in range(2, 100):
+        sfx = str(n)
+        name = base[:HANDLE_MAX - len(sfx)] + sfx
+        if check_handle_policy(name):
+            continue
+        if conn.execute("SELECT 1 FROM handle WHERE handle_name = %s",
+                        (name,)).fetchone():
+            continue
+        if is_handle_deleted(conn, member_id, name):
+            continue
+        return name
+    return None
+
+
+def ensure_overflow_slots(conn, member_id, content_code, total):
+    """Give a member more character slots for a title than their primary handle
+    has room for, on handles that hold nothing but that title. Returns how many
+    Content IDs were minted; commits when it minted any.
+
+    THE PRIMARY HANDLE IS NEVER TOUCHED. Every other title lives there, one id
+    each, and a handle granted all of them is already at the ceiling of eight
+    (CONTENT_IDS_PER_HANDLE). The extra slots go on a second (and third) handle
+    instead, which the Viewer serves like any other: eight bound records each,
+    so nothing is ever served unbound and no handle goes past eight.
+
+    LAZY, so a player who never makes a second character never sees a second
+    handle. Nothing happens while the member still has an id with no character
+    on it. Once every id is spent, this fills an existing title-only handle
+    that has room, or creates one (named after the primary, see
+    `_overflow_handle_name`) and fills it, up to eight ids or the member's
+    `total`, whichever comes first. The new slots show up at the next login.
+
+    Refuses quietly (returns 0) when the title cannot say which ids are spent
+    (titles.spent_content_ids is None), when the member does not own the title
+    or has not placed it, or when all of their handle slots are taken.
+    Additive only, like `ensure_content_slots`: no existing row moves.
+    """
+    code = int(content_code)
+    mid = int(member_id)
+    if not conn.execute("SELECT 1 FROM content WHERE member_id = %s AND"
+                        " content_code = %s AND status = 'active'",
+                        (mid, code)).fetchone():
+        return 0
+    rows = conn.execute(
+        "SELECT hc.handle_id, hc.content_id, hc.status FROM handle_content hc"
+        " JOIN handle h ON h.id = hc.handle_id"
+        " WHERE h.member_id = %s AND hc.content_code = %s", (mid, code)).fetchall()
+    if not rows or len(rows) >= int(total):
+        return 0
+    spent = titles.spent_content_ids(code, conn) if titles is not None else None
+    if spent is None:
+        return 0
+    for r in rows:
+        if r["status"] != "active" or not r["content_id"]:
+            continue
+        try:
+            if int(str(r["content_id"]).strip()) not in spent:
+                return 0                       # a free slot is still on offer
+        except (TypeError, ValueError):
+            continue
+    handles = _member_handles_served(conn, mid)
+    served = handles[:HANDLES_PER_MEMBER]
+    want = int(total) - len(rows)
+    for hid, _name, primary in served:
+        if primary:
+            continue
+        codes = {int(x["content_code"]) for x in conn.execute(
+            "SELECT DISTINCT content_code FROM handle_content WHERE handle_id = %s",
+            (hid,)).fetchall()}
+        if codes != {code}:
+            continue
+        have = content_slot_count(conn, hid, code, active_only=False)
+        room = CONTENT_IDS_PER_HANDLE - handle_link_count(conn, hid)
+        if room <= 0:
+            continue
+        n = ensure_content_slots(conn, hid, code, have + min(room, want))
+        if n:
+            conn.commit()
+        return n
+    if len(handles) >= HANDLES_PER_MEMBER or not served:
+        return 0
+    base = next((name for _hid, name, primary in handles if primary), served[0][1])
+    name = _overflow_handle_name(conn, mid, base)
+    if name is None:
+        return 0
+    now = _now()
+    hid = conn.execute(
+        "INSERT INTO handle (member_id, handle_name, is_primary, created_at)"
+        " VALUES (%s,%s,0,%s) RETURNING id", (mid, name, now)).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO handle_content (handle_id, content_code, slot, content_id,"
+        " status, linked_at) VALUES (%s,%s,0,%s,'active',%s)",
+        (hid, code, allocate_content_id(conn), now))
+    n = 1 + ensure_content_slots(conn, hid, code,
+                                 min(CONTENT_IDS_PER_HANDLE, want))
+    conn.commit()
+    return n
+
+
+def move_content_id(conn, handle_id, content_code, content_id):
+    """Move ONE Content ID of a title to another handle of the same member.
+    Returns True when it moved.
+
+    For a title that issues one id per character (`issues_per_character`),
+    where `link_content_to_handle` would be wrong: that one moves the whole
+    title, every slot from every sibling handle, and with a member's characters
+    spread over several handles it would pile them all onto one, past eight,
+    and the ones that fall off the wire are POL-0001 at select. Refuses (False)
+    when the destination is already at CONTENT_IDS_PER_HANDLE.
+    """
+    code = int(content_code)
+    src = conn.execute(
+        f"SELECT handle_id, slot FROM handle_content WHERE content_code = %s"
+        f" AND content_id = %s AND handle_id IN ({_SIBLING_HANDLES})",
+        (code, str(content_id), int(handle_id), int(handle_id))).fetchone()
+    if src is None:
+        return False
+    if handle_link_count(conn, handle_id) >= CONTENT_IDS_PER_HANDLE:
+        return False
+    row = conn.execute(
+        "SELECT COALESCE(MAX(slot), -1) AS hi FROM handle_content"
+        " WHERE handle_id = %s AND content_code = %s",
+        (int(handle_id), code)).fetchone()
+    conn.execute(
+        "UPDATE handle_content SET handle_id = %s, slot = %s"
+        " WHERE handle_id = %s AND content_code = %s AND slot = %s",
+        (int(handle_id), int(row["hi"]) + 1, src["handle_id"], code, src["slot"]))
+    conn.commit()
+    return True
 
 
 def handle_content_list(conn, handle_id, active_only=True):
@@ -2623,11 +2833,14 @@ def clear_login_token(conn, member_id):
 #
 # The salt comes FIRST, so pw_hash (PBKDF2) cannot verify it: we keep the
 # password sealed under a server key. POL_LOGIN_PW_KEY sets the key; otherwise it
-# is generated once into a key file, POL_LOGIN_PW_KEYFILE or
+# is generated once into a key file, POL_LOGIN_PW_KEY_FILE (POL_LOGIN_PW_KEYFILE
+# is the older spelling and still read) or
 # `<POL_DATA_DIR, default /data>/login-pw.key` -- where it always lived, beside
 # the old accounts.db, so a server moved to PostgreSQL keeps unsealing the
 # passwords it sealed before. The key stays OUT of the database on purpose: a
-# copy of the database alone must not be enough to read them. Stdlib only:
+# copy of the database alone must not be enough to read them, and a backup
+# should leave the key file out of its data for the same reason, so it has to
+# be kept somewhere else on its own. Stdlib only:
 # HMAC-SHA256 in counter mode for the stream, HMAC-SHA256 tag over nonce+ct.
 
 _PW_SEAL_VER = "v1"
@@ -2637,7 +2850,8 @@ _PW_KEY_CACHE = {}
 def _pw_key_path():
     """Where the sealing key lives, or None when there is nowhere to keep one
     (no POL_LOGIN_PW_KEYFILE and no data directory: a bare test process)."""
-    path = os.environ.get("POL_LOGIN_PW_KEYFILE")
+    path = (os.environ.get("POL_LOGIN_PW_KEY_FILE")
+            or os.environ.get("POL_LOGIN_PW_KEYFILE"))
     if path:
         return path
     data = os.environ.get("POL_DATA_DIR", "/data")
@@ -3414,6 +3628,120 @@ def set_friend_flags(conn, handle_id, row_id, low=None, flag=None):
     return True
 
 
+# --------------------------------------------------------------------------- #
+# THE IGNORE (BLOCK) TABLE
+#
+# polcore keeps ignored members in a table of their own (100 entries beside
+# the friend table's 200), carried in the same 2:3 and 2:6 as the friends: a
+# row whose bitfield head has bit 0x10 set is an ignore row and its +0x08 is
+# its index in that table. Head bits 5-6 are the scope: 1 ignores that one
+# handle, 2 every handle of its PlayOnline ID (polcore's IsBlocked, 0x37e36a0).
+# A handle is a friend or ignored, never both: the client's own AddIgnore
+# deletes the friend row in the same 2:6, and FriendAdd refuses an ignored one.
+# --------------------------------------------------------------------------- #
+IGNORE_SLOTS = 100
+IGNORE_SCOPE_HANDLE = 1
+IGNORE_SCOPE_POLID = 2
+
+
+def ignore_put(conn, handle_id, slot, peer_name, scope=IGNORE_SCOPE_HANDLE,
+               head=0):
+    """Store (or replace) ignore-table entry `slot` for `handle_id`.
+
+    Also drops this handle's FRIEND row for the same person, which the client
+    has already done on its side. Returns the resolved peer handle id or None.
+    """
+    slot = int(slot)
+    if not 0 <= slot < IGNORE_SLOTS:
+        raise ValueError(f"ignore slot {slot} out of range")
+    peer = handle_by_name(conn, peer_name)
+    peer_id = int(peer["id"]) if peer is not None else None
+    conn.execute(
+        "INSERT INTO friend_ignore (handle_id, slot, peer_handle, peer_name,"
+        " scope, head, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+        " ON CONFLICT (handle_id, slot) DO UPDATE SET"
+        " peer_handle = EXCLUDED.peer_handle, peer_name = EXCLUDED.peer_name,"
+        " scope = EXCLUDED.scope, head = EXCLUDED.head",
+        (int(handle_id), slot, peer_id, str(peer_name), int(scope),
+         int(head) & 0xFFFF, _now()))
+    conn.execute("DELETE FROM friend_ignore WHERE handle_id = %s AND slot <> %s"
+                 " AND peer_name = %s", (int(handle_id), slot, str(peer_name)))
+    conn.commit()
+    names = {str(peer_name)}
+    if peer is not None:
+        names.add(friend_row_name(conn, int(handle_id), peer["handle_name"]))
+    for nm in names:
+        row = conn.execute("SELECT kind FROM friend WHERE handle_id = %s"
+                           " AND peer_name = %s", (int(handle_id), nm)).fetchone()
+        if row is not None and int(row["kind"]) == KIND_FRIEND:
+            remove_friend(conn, int(handle_id), nm, mirror=False)
+    return peer_id
+
+
+def ignore_delete_slot(conn, handle_id, slot):
+    """Remove ignore-table entry `slot`. Returns the name it held, or None."""
+    row = conn.execute("SELECT peer_name FROM friend_ignore WHERE handle_id = %s"
+                       " AND slot = %s", (int(handle_id), int(slot))).fetchone()
+    if row is None:
+        return None
+    conn.execute("DELETE FROM friend_ignore WHERE handle_id = %s AND slot = %s",
+                 (int(handle_id), int(slot)))
+    conn.commit()
+    return row["peer_name"]
+
+
+def ignore_delete_name(conn, handle_id, peer_name):
+    """Remove every ignore entry naming `peer_name` (any case). Returns count."""
+    cur = conn.execute("DELETE FROM friend_ignore WHERE handle_id = %s AND"
+                       " lower(peer_name) = lower(%s)",
+                       (int(handle_id), str(peer_name)))
+    conn.commit()
+    return getattr(cur, "rowcount", 0) or 0
+
+
+def ignore_list(conn, handle_id):
+    """This handle's ignore table, by slot."""
+    return conn.execute("SELECT * FROM friend_ignore WHERE handle_id = %s"
+                        " ORDER BY slot", (int(handle_id),)).fetchall()
+
+
+def ignore_blocks(conn, holder_handle_id, other_handle_id):
+    """True when `holder_handle_id` has `other_handle_id` on its ignore list.
+
+    Scope 1 matches that handle; scope 2 matches any handle of the same
+    member (the PlayOnline ID), as polcore's IsBlocked does. An entry whose
+    name is no handle of ours matches by name. POL_FRIEND_BLOCK=0 disables
+    every server-side block check.
+    """
+    if os.environ.get("POL_FRIEND_BLOCK", "1") != "1":
+        return False
+    if not holder_handle_id or not other_handle_id:
+        return False
+    rows = conn.execute("SELECT peer_handle, peer_name, scope FROM friend_ignore"
+                        " WHERE handle_id = %s", (int(holder_handle_id),)).fetchall()
+    if not rows:
+        return False
+    other = conn.execute("SELECT id, member_id, handle_name FROM handle"
+                         " WHERE id = %s", (int(other_handle_id),)).fetchone()
+    if other is None:
+        return False
+    for r in rows:
+        ph = r["peer_handle"]
+        if ph is None:
+            hit = handle_by_name(conn, r["peer_name"])
+            ph = int(hit["id"]) if hit is not None else None
+        if ph is None:
+            continue
+        if int(ph) == int(other["id"]):
+            return True
+        if int(r["scope"] or 0) == IGNORE_SCOPE_POLID:
+            m = conn.execute("SELECT member_id FROM handle WHERE id = %s",
+                             (int(ph),)).fetchone()
+            if m is not None and int(m["member_id"]) == int(other["member_id"]):
+                return True
+    return False
+
+
 def friend_row_by_id(conn, friend_id):
     """`(peer_name, kind)` of the friend row with this id, or None. The row's
     id alone, whoever holds it: a title that knows a POL group by its row id
@@ -3431,8 +3759,7 @@ def friend_row_by_guid(conn, handle_id, guid):
 
     **THE STABLE KEY FOR A 2:6 RECORD IS ITS GUID**, measured 2026-08-19: the
     record's +0x0C u64 is the peer's client guid and it is the one field that
-    does not move across an add, a rename, an ignore and an un-ignore (memory
-    `friend-rename-and-ignore-encoding`). The name field is the thing a rename
+    does not move across an add, a rename, an ignore and an un-ignore. The name field is the thing a rename
     overwrites and the thing a delete fills with heap, and the slot is an index
     into a list we may not have served this process -- so both are fallbacks and
     this is the primary.
@@ -5111,7 +5438,10 @@ def main(argv=None):
             if row is None:
                 raise SystemExit("no members in the database")
             mid = row["id"]
-        removed = delete_handle(conn, mid, args.handle)
+        try:
+            removed = delete_handle(conn, mid, args.handle)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
         print(f"{'deleted' if removed else 'tombstoned (was not present)'} "
               f"handle {args.handle!r} for member {mid}")
     elif args.cmd == "link-content":
@@ -5154,12 +5484,20 @@ def main(argv=None):
                     f"{args.from_handle!r} and {args.to_handle!r} belong to "
                     "different members -- refusing to move content between accounts")
             row = conn.execute("SELECT content_id FROM handle_content"
-                               " WHERE handle_id = %s AND content_code = %s",
+                               " WHERE handle_id = %s AND content_code = %s"
+                               " ORDER BY slot LIMIT 1",
                                (src["id"], args.code)).fetchone()
             if row is None:
                 raise SystemExit(f"{name} is not on handle {args.from_handle!r}")
-            # link_content_to_handle is exclusive, so this detaches the source.
-            link_content_to_handle(conn, dst["id"], args.code, row["content_id"])
+            if issues_per_character(args.code):
+                # One id per character: move that one, never the whole title
+                # (see move_content_id).
+                if not move_content_id(conn, dst["id"], args.code, row["content_id"]):
+                    raise SystemExit(f"{args.to_handle!r} already holds "
+                                     f"{CONTENT_IDS_PER_HANDLE} Content IDs")
+            else:
+                # link_content_to_handle is exclusive, so this detaches the source.
+                link_content_to_handle(conn, dst["id"], args.code, row["content_id"])
             print(f"moved {name} (Content ID {row['content_id']}) "
                   f"from {args.from_handle!r} to {args.to_handle!r}")
     elif args.cmd == "link-all":

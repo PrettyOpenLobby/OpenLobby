@@ -30,20 +30,27 @@ from . import authnode, lobbymail
 # left zero, which is consistent -- there is nowhere to go.
 REJECT_UNKNOWN_ID = 0xC9        # SE's byte for a PlayOnline ID that does not exist
 REJECT_BAD_PASSWORD = 0xCA      # SE's byte for a real ID with the wrong password
-# The rest of the family, named per Project Crystal Server's AdminData notes
-# (its reading of the client; only C9/CA have been captured from SE by us):
-REJECT_LOCKED = 0xCB            # too many failed logins (the lockout below)
-REJECT_VERSION = 0xCC           # "not working due to a version discrepancy"
-REJECT_BUSY = 0xCD              # "network is busy" -- the generic one
-REJECT_UNKNOWN_ERROR = 0xCE     # unknown error
+# The rest of the family, READ OFF THE CLIENT (2026-10-08): polcore
+# FUN_037d5820 switches on this byte and stores the login error
+#     0xC9 -> -203   0xCA -> -202   0xCB -> -205   0xCC -> -204   0xCD -> -206
+# and polerr.bin's texts for those are: 203/204 "Incorrect PlayOnline ID
+# and/or password", 202 "An unexpected problem occurred", 205 "...version
+# discrepancy...", 206 "Your account login has been temporarily disabled due
+# to three consecutive password errors". Every other byte below 0xDC is -129,
+# "Connection terminated or not available". The names here used to follow
+# Project Crystal Server's AdminData notes (CB locked, CC version, CD busy),
+# which are rotated against the client: our lockout drew the version text.
+REJECT_LOCKED = 0xCD            # POL-0206, three consecutive password errors
+REJECT_VERSION = 0xCB           # POL-0205, version discrepancy
+REJECT_BUSY = 0xCE              # POL-0129, connection not available
+REJECT_UNKNOWN_ERROR = 0xCE     # the same generic byte
 # Account refusals use accounts.login_reject_code. Successful-login notices
 # have their own setting; unproven codes are excluded from both selectable lists.
 _REJECT_WHY = {REJECT_UNKNOWN_ID: "unknown PlayOnline ID",
                REJECT_BAD_PASSWORD: "wrong password",
                REJECT_LOCKED: "locked out after failed logins",
                REJECT_VERSION: "version mismatch",
-               REJECT_BUSY: "busy",
-               REJECT_UNKNOWN_ERROR: "unknown error"}
+               REJECT_BUSY: "busy or unknown error"}
 
 # SE's own 25 bytes, with the status byte zeroed for filling in.
 #
@@ -157,7 +164,8 @@ def gate_list_stamps(db, member):
         return None
 
 
-def build_gate_record(lobby_ip, lobby_port, pad_to=192, unread=0, stamps=None):
+def build_gate_record(lobby_ip, lobby_port, pad_to=192, unread=0, stamps=None,
+                      jail=False):
     """72-byte gate/redirect record -> base64 (>=96 chars) for the 001 payload.
 
     `stamps` ({offset: unix time}, from gate_list_stamps) replaces the per-login
@@ -235,6 +243,9 @@ def build_gate_record(lobby_ip, lobby_port, pad_to=192, unread=0, stamps=None):
     #
     # Serving the real mailbox depth instead makes the badge right at boot.
     r[0x11] = max(0, min(int(unread), 0xFE))   # 0xFF is rejected by the client
+    # +0x21 is the JAIL flag: polcore 0x037db6f0 copies it to 0x0386aa8c and
+    # the Viewer opens POL_JAIL_USER_LOGIN_URL (authserv._member_jailed).
+    r[0x21] = 1 if jail else 0
     # +0x2C is the PREVIOUS-LOGIN timestamp. Read off a real SE blob captured at
     # the COM boundary on 2026-08-11, where it held 2026-08-10 06:37 -- the user's
     # actual prior login -- alongside 0x14 = this login and 0x28 = account

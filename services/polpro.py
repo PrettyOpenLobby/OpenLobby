@@ -71,7 +71,7 @@ VALUE_SEP = b"\x06"
 #: JanHouRou.pex 0x003f146c, in table order (index -> code). 103 entries, NOT
 #: 102: `PO` appears TWICE (96 and 101) and this table used to carry only the
 #: first, which left `FO` at 101 when the module says 102. Regenerated from
-#: `work/ps2/out/polpro-tags.py`; byte-identical in `TMaster.pex`.
+#: the module's own tag table; byte-identical in `TMaster.pex`.
 TAGS = (
     "RI", "MR", "MC", "RE", "CF", "WH", "ZI", "NN", "US", "DP", "MN", "MA",
     "MS", "CN", "GN", "TN", "RS", "MF", "RO", "PD", "PC", "TD", "ST", "TS",

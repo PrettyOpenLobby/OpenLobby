@@ -133,6 +133,27 @@ def main():
           "the sender or the pending invitee", repr(got))
     check(all(d == data for _p, d in STORED) and sorted(ANNOUNCED) == sorted(p for p, _d in STORED),
           "each copy carries the object and is announced")
+    # The sender field in the roster's form -- the reader of a group message
+    # resolves it against the 7:12 member table (2026-10-16 "Unknown User").
+    want = (guid["Mika"] & ~0xFFFFFFFF) | 0x200000 | (guid["Mika"] & 0x7FFFF)
+    senders = {R._mail_meta(p)["sender_guid"] for p, _d in STORED}
+    check(senders == {want},
+          "each copy names the sender the way the group roster does", repr(senders))
+    conn = accounts.connect(DB)
+    row = accounts.handle_by_guid(conn, want)
+    conn.close()
+    check(row is not None and int(row["id"]) == ids["Mika"][1],
+          "...and the server still resolves that form to the sender's handle")
+    os.environ["POL_GROUP_MSG_SENDER_TAG"] = "0"
+    STORED.clear()
+    ANNOUNCED.clear()
+    R._group_message_fanout(path, data, pt)
+    os.environ.pop("POL_GROUP_MSG_SENDER_TAG", None)
+    check({R._mail_meta(p)["sender_guid"] for p, _d in STORED} == {guid["Mika"]},
+          "POL_GROUP_MSG_SENDER_TAG=0 keeps the plain handle guid")
+    STORED.clear()
+    ANNOUNCED.clear()
+    R._group_message_fanout(path, data, pt)
     check(R._lobby_take_refusal(pt) is None, "nothing is refused")
     as_session("Mallory")
     STORED.clear()

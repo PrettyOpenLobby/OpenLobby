@@ -8,7 +8,7 @@ import secrets
 import threading
 import time
 from srvcore import _stamp, log
-from .deps import accounts, extmail
+from .deps import accounts, extmail, screenshots
 
 
 
@@ -178,7 +178,7 @@ def _mail_session_allowed(db, row, peer_ip, why):
     the mailbox owner's LIVE session.
 
     Until 2026-09-05 an unverifiable login was simply accepted, so any peer on
-    the tailnet could read any member's inbox with `USER <name>` / `PASS x`, and
+    the VPN could read any member's inbox with `USER <name>` / `PASS x`, and
     SMTP took any `MAIL FROM`. Presence is the session table
     (accounts.member_online), and a session row carries the address it was
     opened from -- so "the Viewer that is logged in as this member is the one
@@ -252,7 +252,7 @@ def _smtp_sender_allowed(sender, peer_ip):
     The envelope sender must be one of OUR members' addresses, and the peer must
     hold that member's live session -- the same rule as the POP3 fallback, for
     the same reason: a signed-in Viewer is the only thing that legitimately
-    sends PlayOnline Mail, and before this any tailnet peer could post mail as
+    sends PlayOnline Mail, and before this any VPN peer could post mail as
     anybody. A null sender (bounces) passes; the Viewer never sends one, and it
     impersonates nobody. POL_MAIL_SENDER_CHECK=0 turns the whole check off.
     """
@@ -458,8 +458,8 @@ def handle_pop3(conn, addr, port=110):
                     f.flush()
                     continue
                 msgs = _pop3_messages(user)
-                log("mail", f"{peer} POP3 APOP {user!r} digest={digest} "
-                            f"({why}): {len(msgs)} message(s)")
+                log("mail", f"{peer} POP3 APOP {user!r} ({why}): "
+                            f"{len(msgs)} message(s)")
                 f.write(b"+OK mailbox ready\r\n")
             elif cmd == "STAT":
                 live = [m for i, m in enumerate(msgs) if i + 1 not in deleted]
@@ -628,7 +628,48 @@ def _mail_aliases():
     return out
 
 
-def _smtp_deliver(rcpts, body, peer):
+def _shot_rcpt_check(mail_from):
+    """(ok, smtp reply, why) for `pics@pol.com`: only a member can keep
+    screenshots, so a sender we cannot tie to one is refused at RCPT, where the
+    Viewer shows it, rather than accepted and thrown away."""
+    db = _mail_db()
+    if db is None:
+        return False, b"451 4.3.0 try again later\r\n", "no account DB"
+    try:
+        if _smtp_sender_row(db, mail_from) is None:
+            return False, (b"550 5.7.1 screenshots can only be sent from a "
+                           b"PlayOnline account\r\n"), "sender is not a member"
+        return True, b"250 OK\r\n", "member"
+    finally:
+        db.close()
+
+
+def _deliver_screenshots(db, mail_from, body, peer):
+    """Keep the pictures in a mail to pics@pol.com and answer with a mail in
+    the sender's own box. The message itself is not filed anywhere: the
+    pictures ARE the delivery, and a copy would double what they take up."""
+    row = _smtp_sender_row(db, mail_from)
+    if row is None:                              # RCPT checked; a race only
+        log("mail", f"{peer} SMTP screenshots from {mail_from!r}: no member, dropped")
+        return
+    try:
+        result = screenshots.ingest(row["id"], bytes(body))
+    except Exception as exc:
+        log("mail", f"{peer} SMTP screenshots for member {row['id']} FAILED ({exc!r})")
+        result = {"saved": [], "again": 0, "full": False,
+                  "refused": [("this mail", "the server could not store it, "
+                               "please try again later")]}
+    kept = len(screenshots.listing(row["id"]))
+    log("mail", f"{peer} SMTP screenshots for member {row['id']}: saved "
+                f"{len(result['saved'])}, again {result['again']}, refused "
+                f"{result['refused']}, now {kept}")
+    to = row["mail_address"] or mail_from
+    raw, subject = screenshots.reply(to, result, kept, MAIL_DOMAIN)
+    accounts.deliver_mail(db, to, raw, sender=f"{screenshots.box()}@{MAIL_DOMAIN}",
+                          subject=subject)
+
+
+def _smtp_deliver(rcpts, body, peer, mail_from=""):
     """Deliver to local mailboxes. Returns (delivered, skipped-as-remote).
 
     LOCAL ONLY, on purpose: this server has no business relaying mail off-box,
@@ -648,6 +689,10 @@ def _smtp_deliver(rcpts, body, peer):
     done, remote = 0, []
     try:
         for r in rcpts:
+            if screenshots is not None and screenshots.is_address(r, MAIL_DOMAIN):
+                _deliver_screenshots(db, mail_from, body, peer)
+                done += 1
+                continue
             box = aliases.get(r.strip().lower())
             if box:
                 local = box if "@" in box else f"{box}@{MAIL_DOMAIN}"
@@ -940,6 +985,13 @@ def handle_smtp(conn, addr, port=25):
                     if ok:
                         in_rcpts.append(to)
                     f.write(reply)
+                elif screenshots is not None and screenshots.is_address(to, MAIL_DOMAIN):
+                    ok, reply, why = _shot_rcpt_check(mail_from)
+                    log("mail", f"{peer} SMTP RCPT {to!r} screenshots: "
+                                f"{'accepted' if ok else 'REFUSED'} ({why})")
+                    if ok:
+                        rcpts.append(to)
+                    f.write(reply)
                 elif _smtp_is_outside(to):
                     ok, reply, why = _ext_rcpt_check(
                         mail_from, sum(1 for r in rcpts if _smtp_is_outside(r)))
@@ -960,6 +1012,10 @@ def handle_smtp(conn, addr, port=25):
                 f.flush()
                 body = bytearray()
                 too_big = False
+                limit = _MAIL_MAX_BYTES
+                if screenshots is not None and any(
+                        screenshots.is_address(r, MAIL_DOMAIN) for r in rcpts):
+                    limit = max(limit, screenshots.mail_max_bytes())
                 while True:
                     ln = f.readline()
                     if not ln or ln.rstrip(b"\r\n") == b".":
@@ -970,12 +1026,12 @@ def handle_smtp(conn, addr, port=25):
                     # process died. Keep READING to the end of the message (so
                     # the session stays in sync and can be told what happened),
                     # but stop storing.
-                    if len(body) > _MAIL_MAX_BYTES:
+                    if len(body) > limit:
                         too_big = True
-                        del body[_MAIL_MAX_BYTES:]
+                        del body[limit:]
                 if too_big:
                     log("mail", f"{peer} SMTP message over "
-                                f"{_MAIL_MAX_BYTES // 1024} KB -- refused")
+                                f"{limit // 1024} KB -- refused")
                     rcpts, in_rcpts = [], []
                     f.write(b"552 message too large\r\n")
                     f.flush()
@@ -1009,7 +1065,7 @@ def handle_smtp(conn, addr, port=25):
                     f.write(b"550 From header does not match the sender\r\n")
                     f.flush()
                     continue
-                done, remote = _smtp_deliver(rcpts, body, peer)
+                done, remote = _smtp_deliver(rcpts, body, peer, mail_from)
                 rcpts = []
                 if remote:
                     # Only recipients that passed _ext_rcpt_check reach here.

@@ -1,11 +1,11 @@
 -- web_login: the website username of a member.
 --
--- This table belongs to the website sign-in service (regapi), which lives
--- outside this repository. Nothing in OpenLobby reads or writes it; it is
+-- This table belongs to a website sign-in service (not part of this
+-- repository). Nothing in OpenLobby reads or writes it; it is
 -- here so that the service's rows share the account database and survive the
 -- move from accounts.db (tools/db_import.py imports them with the accounts).
 --
--- The SQLite table regapi created in accounts.db was:
+-- The SQLite table that service created in accounts.db was:
 --
 --   CREATE TABLE IF NOT EXISTS web_login (
 --       username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -14,7 +14,7 @@
 --
 -- member_id is the primary key here (it was NOT NULL UNIQUE, which is the
 -- same thing), and a foreign key to member: deleting a member deletes its
--- website login. regapi deletes the row itself when it deletes an account;
+-- website login. The service deletes the row itself when it deletes an account;
 -- the cascade covers an account deleted anywhere else.
 --
 -- Case. The username was unique ignoring case (COLLATE NOCASE). Here it is

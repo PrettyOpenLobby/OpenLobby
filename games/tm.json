@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "key": "tm",
+  "kind": "game",
+  "name": "Tetra Master",
+  "order": 10,
+  "content_id": 2,
+  "platforms": ["pc", "ps2"],
+  "repo": "https://github.com/PrettyOpenLobby/HippaulMaster",
+  "checkout": "hippaulmaster",
+  "compose": ["docker-compose.yml"],
+  "compose_ghcr": ["docker-compose.ghcr.yml"],
+  "env_example": ".env.example",
+  "title": {
+    "module": "tmtitle",
+    "compose": "docker-compose.yml",
+    "image": "hippaulmaster:latest",
+    "ghcr_image": "ghcr.io/prettyopenlobby/hippaulmaster",
+    "ghcr_tag_var": "HIPPAULMASTER_TAG"
+  },
+  "images": [
+    {"name": "hippaulmaster:latest", "context": ".", "dockerfile": "Dockerfile",
+     "ghcr": "ghcr.io/prettyopenlobby/hippaulmaster", "tag_var": "HIPPAULMASTER_TAG"}
+  ],
+  "services": ["tmrank"],
+  "profiles": {"board": ["tmboard"]},
+  "env": [
+    {"name": "POL_TM_ZONE_HOST", "default": "",
+     "description": "Address a Tetra Master client dials for its zones. Empty: POL_ADVERTISE."},
+    {"name": "POL_TM_EVENT_START", "default": "-1", "description": "Event window start, unix seconds (-1 = no event)."},
+    {"name": "POL_TM_EVENT_END", "default": "-1", "description": "Event window end, unix seconds (-1 = no event)."},
+    {"name": "POL_TM_EVENT_MEMBERS", "default": "", "description": "The event board's rows, \"hexid:name:score,...\"."},
+    {"name": "POL_TM_EVENT_ZONE_MEMBERS", "default": "",
+     "description": "Members who get the tournament zone (comma list of member ids, or *). Empty: no tournaments."},
+    {"name": "POL_TM_EVENT_ZONE_NAME", "default": "Tournament Hall", "description": "The tournament zone's name."},
+    {"name": "POL_TM_EVENT_ROOM_ID", "default": "81", "description": "The tournament zone's room id."},
+    {"name": "POL_TM_EVENT_WINDOW", "default": "", "description": "A fixed daily UTC tournament window, \"HH:MM-HH:MM\"."},
+    {"name": "POL_TM_EVENT_DECK_PICK", "default": "0", "description": "The tournament's entry card picker: 1 = everyone."},
+    {"name": "POL_TM_EVENT_DECK_PICK_MEMBERS", "default": "", "description": "Members who get the card picker."},
+    {"name": "TM_RANK_AT", "default": "", "description": "\"now\" publishes the ranking lists at start as well as weekly."},
+    {"name": "POL_BOARDS_TM_URL", "default": "", "description": "Live board: the public URL Discord messages link to."},
+    {"name": "POL_BOARDS_TM_DISCORD_WEBHOOK", "default": "", "description": "Live board: webhook for the standings."},
+    {"name": "POL_BOARDS_TM_AUCTION_DISCORD_WEBHOOK", "default": "", "description": "Live board: webhook for auction listings."},
+    {"name": "HIPPAULMASTER_TAG", "default": "latest", "description": "Version of the published image (docker-compose.ghcr.yml)."}
+  ],
+  "data": [
+    {"id": "tmdata", "required": true, "build_only": false,
+     "description": "The four parameter tables (cards, prices, computer opponents, packs) and the title ladder.",
+     "source": "your Tetra Master install (the Viewer's SquareEnix/TetraMaster directory)",
+     "tool": "python tools/tmdata_build.py --client <install>",
+     "paths": ["services/tmdata/CardPri.BIN", "services/tmdata/CardPrm.BIN", "services/tmdata/CoPrm.BIN",
+               "services/tmdata/PackPrm.BIN", "services/tmdata/PlPrm.BIN"]},
+    {"id": "boardart", "required": false, "build_only": false,
+     "description": "Card and board art for the live board (--profile board).",
+     "source": "your Tetra Master install",
+     "tool": "python tools/tm_boardart_bake.py --client <install>",
+     "paths": ["services/boardart/tm/*.png"]}
+  ],
+  "volumes": [],
+  "ports": [
+    {"port": "8793", "protocol": "tcp", "service": "tmboard", "host": "127.0.0.1", "profile": "board"}
+  ],
+  "admin_module": "tm",
+  "notes": "No port of its own: the game rides the core's login and authsess processes as the tmtitle plugin. Its image is the base for the weekly tmrank job and the board."
+}

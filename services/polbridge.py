@@ -64,6 +64,11 @@ except ImportError as _e:                            # pragma: no cover
 else:
     _EVENTREMIND_ERR = None
 
+try:
+    import ffxinews             # FFXI's own calendar (the FFXI bridge publishes it)
+except ImportError:                                  # pragma: no cover
+    ffxinews = None
+
 DISCORD_API = polboards.DISCORD_API
 _UA = "DiscordBot (https://playonline.invalid/polbridge, 1) polbridge"
 
@@ -707,6 +712,79 @@ def scan_event_reminders(now=None):
         ldb.close()
 
 
+def ffxi_posts_on():
+    return (ffxinews is not None
+            and os.environ.get("POL_BRIDGE_FFXI_NEWS", "1") != "0")
+
+
+def ffxi_post_payload(post, ping_role=None, now=None):
+    """One FFXI post (ffxinews.due) as a channel post: an embed per event, shaped like the
+    cup reminders."""
+    label = _content_label({"content": ffxinews.CONTENT})
+    embeds = [{"title": e["title"], "description": e["description"],
+               "footer": {"text": "%s - event" % label},
+               "color": ANNOUNCE_COLORS["event"]} for e in ffxinews.message(post, now)]
+    payload = {"embeds": embeds[:10],
+               "allowed_mentions": {"parse": [],
+                                    "roles": [str(ping_role)] if ping_role else []}}
+    if ping_role:
+        payload["content"] = "<@&%s>" % ping_role
+    return payload
+
+
+def scan_ffxi_posts(now=None):
+    """Post FFXI's current post (ffxinews.due) into every bound announcement channel, once per
+    guild, under the FFXI bot's name. Only the newest ffxinews.discord_keep() FFXI posts stay in
+    a channel; older ones are deleted. Returns how many went out."""
+    if not ffxi_posts_on():
+        return 0
+    now = time.time() if now is None else now
+    try:
+        due = ffxinews.due(now)
+    except Exception as e:                       # noqa: BLE001
+        log("cannot work out the FFXI posts (%r)" % e)
+        return 0
+    if not due:
+        return 0
+    ldb = discordlink.connect()
+    sent = 0
+    posts = _event_posts(ldb)
+    try:
+        for row in discordlink.announce_rows(ldb):
+            roles = None
+            for p in due:
+                name = "ffxi-news:%s:%s" % (row["guild_id"], p["key"])
+                if discordlink.is_notified(ldb, name):
+                    continue
+                if roles is None:
+                    roles = discordlink.announce_roles(ldb, row["guild_id"])
+                st, data, hook = news_post(ldb, row["channel_id"],
+                                           ffxi_post_payload(p, roles.get(ffxinews.CONTENT), now),
+                                           ffxinews.CONTENT)
+                if st not in (200, 201):
+                    log("FFXI post %s to channel %s failed (%s %s)"
+                        % (p["key"], row["channel_id"], st, str(data)[:160]))
+                    break                        # try again next pass
+                discordlink.mark_notified(ldb, name, now)
+                sent += 1
+                log("FFXI post %s posted in channel %s" % (p["key"], row["channel_id"]))
+                mid = str((data or {}).get("id") or "")
+                if mid:
+                    posts.append({"guild": row["guild_id"], "channel": row["channel_id"],
+                                  "id": mid, "cup": p["key"], "feed": ffxinews.CONTENT,
+                                  "hook": hook, "end": p["end"]})
+                mine = [q for q in posts if q.get("feed") == ffxinews.CONTENT
+                        and q["guild"] == row["guild_id"]]
+                for old in mine[:-ffxinews.discord_keep()]:
+                    if _delete_event_post(ldb, old, "more than %d FFXI posts"
+                                          % ffxinews.discord_keep()):
+                        posts.remove(old)
+                _save_event_posts(ldb, posts)
+        return sent
+    finally:
+        ldb.close()
+
+
 def _event_posts(ldb):
     try:
         v = json.loads(discordlink.get_meta(ldb, EVENT_POSTS_META, "[]") or "[]")
@@ -772,6 +850,10 @@ def announce_watch():
             scan_event_reminders()
         except Exception as e:                   # noqa: BLE001 -- never die
             log("cup reminder error (%r) -- still running" % e)
+        try:
+            scan_ffxi_posts()
+        except Exception as e:                   # noqa: BLE001 -- never die
+            log("FFXI post error (%r) -- still running" % e)
         try:
             sweep_event_posts()
         except Exception as e:                   # noqa: BLE001 -- never die
@@ -1267,9 +1349,42 @@ def start_presence():
             many="players on PlayOnline")).start()
 
 
+def use_registry():
+    """The admin page's bot registry (polcore/botcreds.py) over the flags and
+    environment: the bridge's own token / app id / public key, and the game
+    bots' app ids news is posted as (GAME_BOTS: the news content key is the
+    bot's name, "tetra" for tm). A value the registry does not hold stays as
+    before. A change to any of these rows restarts the bridge."""
+    try:
+        from polcore import botcreds
+    except ImportError:
+        return None
+    try:
+        row = botcreds.get("bridge")
+    except Exception as e:                             # noqa: BLE001 no db / table yet
+        log("bot registry not readable (%s); using the environment" % type(e).__name__)
+        return None
+    for field, attr in (("token", "token"), ("app_id", "app_id"), ("public_key", "public_key")):
+        if row and row.get(field):
+            setattr(ARGS, attr, row[field])
+    if row and row.get("has_token") and not row.get("token"):
+        log("the registry's bridge token cannot be unsealed here (POL_BOT_KEY missing or "
+            "different); using the environment")
+    games = [n for n in botcreds.known() if n != "bridge"]
+    for name in games:
+        try:
+            game = botcreds.get(name)
+        except Exception:                              # noqa: BLE001
+            game = None
+        if game and game.get("app_id"):
+            GAME_BOTS["tetra" if name == "tm" else name] = game["app_id"]
+    return botcreds.watch(["bridge"] + games, label="polbridge")
+
+
 def main(argv=None):
     global ARGS
     ARGS = build_parser().parse_args(argv)
+    use_registry()
     serve(ARGS.bind, ARGS.port)
     log("interactions on http://%s:%d/discord/interactions (app %s, key %s, token %s)"
         % (ARGS.bind, ARGS.port, ARGS.app_id or "?", "set" if ARGS.public_key else "MISSING",
@@ -1284,6 +1399,11 @@ def main(argv=None):
         threading.Thread(target=watch, name="polbridge-watch", daemon=True).start()
         threading.Thread(target=gm_relay_watch, name="polbridge-gm-relay",
                          daemon=True).start()
+        import svcwatch
+        svcwatch.wire(api, logger=log)
+        if svcwatch.targets():
+            threading.Thread(target=svcwatch.watch, name="polbridge-svcwatch",
+                             daemon=True).start()
         if newsgen is not None:
             threading.Thread(target=announce_watch,
                              name="polbridge-announce", daemon=True).start()

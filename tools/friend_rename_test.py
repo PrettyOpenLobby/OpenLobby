@@ -118,7 +118,7 @@ def main():
           "the stable guid is at +0x0C",
           f"{R._friend_put_guid(rec):#018x}")
     check(R._friend_put_state_low(RENAME) == 0x21, "state low byte = 0x21 (normal)")
-    check(R._friend_put_flag(rec) == 0x00, "action flag = 0x00")
+    check(R._friend_put_flag(rec) == 0x00, "byte +0x03 = 0x00 (head byte 7; polcore never encodes it)")
 
     drec = records(DELETE)[0]
     check(R._friend_put_text(drec) is None,
@@ -133,7 +133,7 @@ def main():
           "each record has its OWN state dword, 4 bytes in front of it",
           f"{R._friend_put_state_low(IGNORE_ADD, 0):#04x}, "
           f"{R._friend_put_state_low(IGNORE_ADD, 1):#04x}")
-    check(R._friend_put_flag(two[1]) == 0x34, "record 1's action flag = 0x34 (add)")
+    check(R._friend_put_flag(two[1]) == 0x34, "record 1's byte +0x03 = 0x34 (stale buffer, not a flag)")
     check(R._friend_put_guid(two[1]) == 0x008C002C1E04BC91,
           "record 1 is Yui -- same guid as every other write for them")
     check(R._friend_put_slot(two[1]) is None,
@@ -213,21 +213,44 @@ def main():
           "writing the real name back CLEARS the rename",
           repr(have["Yui"]["label"]))
 
-    print("\nthe ignore state round-trips ->")
-    # The ignore-ADD write's FIRST record is a delete naming slot 0 -- Mirabel
-    # in our fixture -- so it is expected to go, and its going is part of the
-    # replay rather than a side effect to work around.
-    for label, pt, low, flag in (
-            ("ignore ADD", IGNORE_ADD, 0x31, 0x34),
-            ("scope -> PlayOnline id", IGNORE_SCOPE, 0x51, 0x00),
-            ("un-ignore", IGNORE_DEL, 0x21, 0x40)):
-        R._capture_friend_put(pt)
-        row = friends()["Yui"]
-        check((row["ignore_low"], row["ignore_flag"]) == (low, flag),
-              f"{label}: stored {low:#04x}/{flag:#04x}",
-              f"got {row['ignore_low']}/{row['ignore_flag']}")
-    check("Mirabel" not in friends(),
+    print("\nthe ignore table (head bit 0x10 rows are not friends) ->")
+    # polcore keeps ignored members in a table of their own and marks those
+    # rows with head bit 0x10; +0x04 is then the ignore index (static,
+    # polcore 0x37e39bc / 0x37df090). SE's ignore-ADD write is record 0 a
+    # freed friend slot (slot 0, Mirabel in our fixture) and record 1 the new
+    # ignore row for the friend being blocked.
+    target = R._friend_put_name(records(RENAME_BACK)[0])
+
+    def ignores():
+        db = accounts.connect(DB)
+        try:
+            return {r["slot"]: (r["peer_name"], r["scope"])
+                    for r in accounts.ignore_list(db, hid)}
+        finally:
+            db.close()
+
+    R._capture_friend_put(IGNORE_ADD)
+    have = friends()
+    check(ignores() == {0: (target, 1)},
+          "ignore ADD: the person is on the ignore list at index 0, scope handle",
+          repr(ignores()))
+    check(target not in have,
+          "...and is no longer a friend (polcore keeps the two apart)",
+          ", ".join(sorted(have)))
+    check("Mirabel" not in have,
           "the ignore-add write's OTHER record still deleted slot 0")
+    R._capture_friend_put(IGNORE_SCOPE)
+    check(ignores() == {0: (target, 2)},
+          "scope -> PlayOnline id: the same entry, scope 2", repr(ignores()))
+    check(target not in friends(),
+          "...and still no friend row (no request filed to the blocked person)")
+    # The capture's next write puts the person back as a friend (head 0x21,
+    # the pending bit set): FriendAdd refuses an ignored handle, so the
+    # ignore entry is gone on the client and must go here too.
+    R._capture_friend_put(IGNORE_DEL)
+    check(ignores() == {}, "a friend add of the same person clears the ignore",
+          repr(ignores()))
+    check(target in friends(), "...and they are a friend row again")
 
     print("\n  ...and the reply hands them straight back ->")
     # SE's own 2:6 reply is an ECHO of the request from 0x158 on, so the two flag
@@ -269,6 +292,45 @@ def main():
           "the delete did not touch the friend it does not name")
     check(before - after == {"Tobin"},
           "the friend the slot names is gone", f"{sorted(before)} -> {sorted(after)}")
+
+    print("\na rename to a HANDLE-SHAPED label files no request ->")
+    # The 2026-10-08 shape: a friend renamed to one word that passes the
+    # handle-name policy. The guid resolves the record to the existing row, so
+    # it is a rename; it must not ALSO reach replace_friends as an add, which
+    # wrote a pending row naming no handle.
+    label = "Buddy"
+    target = R._friend_put_name(records(RENAME_BACK)[0])
+    # The ignore replay above re-added this friend by name, which minted a
+    # fresh guid; put back the one the frames carry so the record resolves.
+    db = accounts.connect(DB)
+    try:
+        db.execute("UPDATE friend SET peer_guid = %s WHERE handle_id = %s"
+                   " AND peer_name = %s",
+                   (R._friend_put_guid(records(RENAME)[0]), hid, target))
+        db.commit()
+    finally:
+        db.close()
+    buf = bytearray(RENAME)
+    buf[0x170:0x180] = label.encode().ljust(0x10, b"\x00")
+    RENAME_WORD = bytes(buf)
+    check(R._friend_put_name(records(RENAME_WORD)[0]) == label,
+          "the label parses as a handle name (the ambiguous case)")
+    R._capture_friend_put(RENAME_WORD)
+    have = friends()
+    check(label not in have,
+          "no friend row (pending request) was written for the label",
+          ", ".join(sorted(have)))
+    got = have[target]["label"] if target in have else None
+    check(got == label, "and the renamed friend carries the label instead",
+          repr(got))
+    db = accounts.connect(DB)
+    try:
+        stray = db.execute("SELECT count(*) AS n FROM friend WHERE"
+                           " peer_handle IS NULL AND status = 'pending'"
+                           " AND peer_name = %s", (label,)).fetchone()["n"]
+    finally:
+        db.close()
+    check(int(stray) == 0, "no pending row naming no handle", str(stray))
 
     print()
     if FAILS:

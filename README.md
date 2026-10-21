@@ -6,36 +6,79 @@ Viewer (2002-2010s) talks to. With this stack running and a client pointed at
 it, an unmodified Viewer can sign up, log in, browse the portal, exchange
 mail, and manage friends and groups, with no connection to Square Enix.
 
-Game titles (Tetra Master, Janhourou, Fantasy Earth, Front Mission Online,
-FFXI bridging) are separate projects that plug into this core; this repository
-is the part every title needs.
+The games are separate repositories that plug into this core: HippaulMaster
+(Tetra Master), HippaulHoLo (Janhourou), HippaulRing (Fantasy Earth),
+HippaulFront (Front Mission Online), HippaulDirge (Dirge of Cerberus), and
+HippaulBridge, which connects FINAL FANTASY XI for people running their own
+LandSandBoat server. This repository is the part every title needs;
+`docs/games.md` explains adding titles to it.
 
 This project is a clean-room reimplementation based on protocol observation.
 It contains no Square Enix code, art, or data. You need your own legally
 obtained client and content files; see below.
 
-## Prerequisites
-
-- Docker with Compose v2
-- A PlayOnline Viewer install (US 2003-era tested most; JP works)
-- A way to point the client's DNS at your server (the stack answers DNS on
-  port 53 for the `pol.com` / `playonline.com` names, or use a hosts file)
-
 ## Quick start
 
-```
-cp .env.example .env        # set POL_ADVERTISE to your server's LAN/VPN IP
-docker compose up -d --build
-```
+You need a Linux machine (or Windows or macOS with Docker Desktop) with
+Docker and Compose v2, Python 3 for the helper tools, and your own PlayOnline
+Viewer install (the US 2003-era Viewer is the most tested; JP works). The
+stack uses port 53/udp, 80, 443, 25, 110 and a band of ports from 51200 up;
+`docs/ports.md` lists them all.
 
-All services report healthy within a minute. State (accounts, mail, logs)
-lives in named Docker volumes and survives restarts.
+1. Get the code and make a settings file:
 
-### Without building
+   ```
+   git clone https://github.com/PrettyOpenLobby/OpenLobby.git openlobby
+   cd openlobby
+   cp .env.example .env
+   ```
+
+2. In `.env`, set `POL_ADVERTISE` to the address clients will reach this
+   machine on: its LAN address, its VPN address, or its public address. Left
+   empty it is `127.0.0.1`, which only works for a Viewer on the same machine.
+
+3. Start it:
+
+   ```
+   docker compose up -d --build
+   ```
+
+   Every service reports healthy within a minute. To skip the build and pull
+   the published images instead, see "Running the published images" below.
+
+4. Give the admin panel a password, then open `http://127.0.0.1:8090` on the
+   server (or over an SSH tunnel, `docs/ports.md`):
+
+   ```
+   docker compose exec admin python admin.py --set-password
+   ```
+
+5. Point a client at the server: the hosts installer in `client/` for a PC
+   Viewer, or the DNS setting for a PlayStation 2. `docs/client.md` walks
+   through both. There are no certificates to install (`docs/client.md`,
+   "HTTPS").
+
+6. Create an account on the admin panel, or a registration code for the
+   in-client sign-up, and log in.
+
+7. If something does not work, run `python tools/doctor.py` on the server.
+
+## Documentation
+
+- `docs/client.md` - pointing a PC Viewer or a PlayStation 2 at the server
+- `docs/ports.md` - every published port, which ones players need, firewalls
+- `docs/configuration.md` - the settings in `.env`, including DNS access and
+  recipes for players on a VPN or over the internet
+- `docs/games.md` - adding the game titles
+- `docs/patching.md` - serving real patch trees built from your own client
+- `portal/README.md` - portal page edits and authored pages
+- `docs/database.md` - the database, backups, moving an existing install
+
+## Running the published images
 
 Every push to `main` publishes the images to the GitHub Container Registry
-(`ghcr.io/prettyopenlobby/openlobby` and `openlobby-ssl3`, for amd64 and
-arm64), so a server can run without a compiler or a build step:
+(`ghcr.io/prettyopenlobby/openlobby`, `openlobby-ssl3` and `openlobby-sslterm`),
+so a server can run without a compiler or a build step:
 
 ```
 cp .env.example .env
@@ -49,6 +92,9 @@ version (`latest`, a release such as `0.1.0`, or `sha-<commit>`). Needs
 Docker Compose 2.24 or newer. The title repositories have the same override
 and are applied after this one.
 
+State (accounts, mail, logs) lives in named Docker volumes and survives
+restarts and image updates either way.
+
 ## Bring your own content
 
 Two directories are read-only inputs that this repository does NOT include,
@@ -59,7 +105,8 @@ because their contents are Square Enix's:
   elsewhere).
 
 - `mirrors/` - patch trees for the Viewer and titles. Only needed if you
-  want the client's updater to work against your server.
+  want the client's updater to work against your server. `docs/patching.md`
+  explains how to build one from your own installed client.
 
 Without patch trees the patch service answers every version check with "you
 are up to date", echoing the version the client sent. A Viewer that logs in
@@ -71,60 +118,46 @@ PS2, P2U, X2U and XB2 Viewer trees you do supply.
 
 Portal pages are optional. When a `.pml` page is requested and there is no
 file for it under `www/`, the server serves a minimal built-in page instead:
-a main menu with the titles the server offers (`POL_LOBBY_CONTENT_IDS`), the
-Friend List and Log Out, and for each title a page with Play and a Content
-ID sub-page, so a player can log in, pick a title and press Play with no
-portal content at all. Real pages override the built-in ones file by file:
-a `www/wh000.pol.com/pml/main/index.pml` of your own replaces the built-in
-main menu while the title pages stay built in until you add those too.
+a main menu with the titles the server offers, the Friend List and Log Out,
+and for each title a page with Play and a Content ID sub-page, so a player
+can log in, pick a title and press Play with no portal content at all. Real
+pages override the built-in ones file by file: a
+`www/wh000.pol.com/pml/main/index.pml` of your own replaces the built-in main
+menu while the title pages stay built in until you add those too.
 `POL_PML_FALLBACK=0` turns the built-in pages off (a missing page is then an
-empty document, as before). `POL_GM_CALL=1` adds a GM Call entry to the
-built-in menu; it is off by default because the GM Call service needs a
-person on the other end.
+empty document). `POL_GM_CALL=1` adds a GM Call entry to the built-in menu;
+it is off by default because the GM Call service needs a person on the other
+end, and it is started separately with `docker compose --profile gm up -d`.
 
 ## Pointing a client at it
 
+`docs/client.md` has the full walk-through. In short:
+
 1. Make the client resolve `*.pol.com` / `*.playonline.com` to your server:
-   either set the client machine's DNS to this stack (port 53), or use an
-   interposer/hosts approach.
-2. The Viewer speaks SSL 3.0 with a 1990s trust store. The stack mints its
-   own era-appropriate CA at first start; install `pol-ca.pem` (from the
-   `pol-certs` volume) into the client's certificate store with
-   `tools/certdb.py`. Without it the client reports POL-1331.
+   on a PC, run `client/Install-PolConnect.ps1 -Server <your address>`, which
+   writes a hosts file block; on a PlayStation 2 (or a PC without the hosts
+   block), set the DNS server to this stack (port 53).
+2. Nothing to install for HTTPS. The Viewer speaks SSL 3.0 against a trust
+   store from the early 2000s, and the `sslterm` service answers it with a
+   chain that store already accepts (`docs/client.md`, "HTTPS", including
+   why that HTTPS protects nothing).
 3. Create an account in-client (the sign-up flow is served by the `ucs`
    service), or use the admin panel at `http://127.0.0.1:8090` (local only):
    it can mint registration codes for in-client sign-up, or create complete
    accounts directly (PlayOnline ID, handle, password, per-title grants) so
-   players never touch the sign-up flow at all. Set a panel password on the
-   Security tab before exposing the port beyond localhost. For a server among
-   friends, `POL_SIGNUP_ANY_CODE=1` in `.env` lets the in-client wizard accept
-   any code and grants every title the server offers.
+   players never touch the sign-up flow at all. For a server among friends,
+   `POL_SIGNUP_ANY_CODE=1` in `.env` lets the in-client wizard accept any
+   code and grants every title the server offers.
 
 ## PlayStation 2 clients
 
 Two of the titles (Janhourou, and Tetra Master's console release) are
-played from a PlayStation 2 whose hard disk carries a PlayOnline install.
-The core serves such a console the same way it serves the Viewer: the
-console asks the DNS for names under `pol.com` (its game hosts, `gi003`
-and the rest, are answered too), logs in on the same ports, and fetches
-its lobby lists and saves in the console's own layouts. What you need on
-the console side:
-
-- a PlayOnline install on a PlayStation 2 hard disk: a retail install on
-  real hardware, or an image of one under an emulator that boots from a
-  hard-disk image. There is no installer, image, or patch here, and no way
-  to make one from files this project provides;
-- the console's DNAS check defeated. Before a title starts, the install
-  compares the console's own id against the one recorded when it was
-  installed; on an emulator, or a transplanted disk, that comparison fails
-  and the title will not launch. Working around it is a change to your own
-  copy of the install and is not provided here;
-- the console's DNS pointed at this server (the emulator's or the router's
-  setting).
-
-This path was worked out on a private deployment with an emulated console;
-it has not yet been exercised against this public stack. Treat it as an
-expert route.
+played from a PlayStation 2 whose hard disk carries a PlayOnline install. The
+core serves such a console the same way it serves the Viewer. You need your
+own hard-disk install, the console's DNAS check dealt with on your own copy,
+and the console's DNS pointed at this server; `docs/client.md` explains each.
+This path has seen far less use than the PC Viewer. Treat it as an expert
+route.
 
 ## Selftests
 
@@ -136,17 +169,28 @@ runs the offline test suite. The suites that touch the database start
 throwaway PostgreSQL and Valkey containers, so they need Docker (or
 `POL_TEST_DATABASE_URL` and `POL_TEST_VALKEY_URL`) and
 `pip install "psycopg[binary]" psycopg-pool valkey`; CONTRIBUTING.md has the
-details. Every suite should pass on a clean checkout. The suites live in `tools/*_test.py` and `tests/test_*.py`;
-a new one is registered by hand in `tools/run_all.py`.
+details. Every suite should pass on a clean checkout. The suites live in
+`tools/*_test.py` and `tests/test_*.py`; a new one is registered by hand in
+`tools/run_all.py`.
 
 ## Troubleshooting
 
-- POL-1331 on login: the client does not trust the CA yet; see step 2 above.
+Start with `python tools/doctor.py` on the server; it says what to fix.
+
+- POL-1331 on login: the client does not trust the CA yet; see step 2 of
+  "Pointing a client at it".
+- POL-1160 before login: the Viewer cannot reach the patch service on port
+  54000 at the address it was given. Check `POL_ADVERTISE` and the firewall
+  (`docs/ports.md`).
 - Client connects but the portal is blank: `www/` is empty; that is expected
   until you supply portal content.
 - Login works from the server machine but not from others:
   `POL_ADVERTISE` is unset (defaults to 127.0.0.1); set it to an address the
   client can reach and restart.
+- A console or PC using the server's DNS gets no answer: its address is
+  outside `POL_DNS_CLIENTS` (`docs/configuration.md`, "DNS").
+- The admin panel answers 503: no admin credential exists yet; run
+  `docker compose exec admin python admin.py --set-password`.
 - An existing account is refused at login after an upgrade: a Viewer login
   token only binds to an account while that account is armed. A new account
   is armed when it is created; an account from an older install that has

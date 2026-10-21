@@ -59,8 +59,8 @@ import sys
 import time
 
 try:
-    # Per-client address (LAN / tailnet / internet-via-edge). See srvcore's
-    # "The address a client is told to dial next" and deploy/edge/README.md.
+    # Per-client address (LAN / VPN / internet via an edge host). See srvcore's
+    # "The address a client is told to dial next".
     from srvcore import advertise_for
 except ImportError:                     # standalone use outside services/
     def advertise_for(default, peer_ip=None, dialed_ip=None):
@@ -179,7 +179,7 @@ TICKET_STATE_PATH = os.path.join(TICKET_DIR, "gm-tickets.json")
 #:
 #: The caller is recognised by the 0x101's session dwords, which are the
 #: logged-in handle's 64-bit id: ticket #4's dwords 0x25_3953FBA4 are
-#: handle Bluebell's stored client_guid (checked on prod 2026-09-28).
+#: that handle's stored client_guid.
 #: POL_GMD_HOLD_TICKETS=0 restores the old behaviour (bit never set).
 HOLD_TICKETS = os.environ.get("POL_GMD_HOLD_TICKETS", "1") != "0"
 #: START IS PER CALLER. Flags 0x20 tells a client "YOUR reserved GM chat is

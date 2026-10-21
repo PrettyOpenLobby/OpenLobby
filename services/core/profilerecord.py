@@ -220,7 +220,7 @@ def _profile_notify_status(db, h, purpose=None):
         if lobbysession._session_member_id() == member:
             # The account's own record: SE sent status 1, zone 0 while online.
             return bytes([1, offline, 0, purp]) + bytes(4)
-        if not accounts.handle_online(db, int(h["id"])):
+        if not memberstatus._handle_shown_online(db, int(h["id"])):
             return bytes([0, offline, 0, purp]) + bytes(4)
         away = memberstatus._status_is_away(memberstatus._member_status(member))
         state = pushrecord._presence_field_state("away" if away else "online")
@@ -352,7 +352,7 @@ def _profile_identity_record(db, h, tagged=False):
         rec = friendlist._friend_list_record(
             _PROFILE_IDREC_LEN, accounts.handle_guid(hid), h["handle_name"],
             kind=accounts.KIND_FRIEND, hid=hid,
-            online=bool(accounts.handle_online(db, hid)), index=0)
+            online=bool(memberstatus._handle_shown_online(db, hid)), index=0)
         if tagged and friendlist._friend_bitfield_mode():
             # POL_FRIEND_BITFIELD: SE's search-hit head is the same u64 with the
             # low 13 bits replaced by 0x40 (no valid bit, level 2) -- Yui's

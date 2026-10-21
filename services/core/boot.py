@@ -35,7 +35,9 @@ _TITLES_LOADED = titles.load()
 paylen._FETCH_PATHLEN.update(titles.fetch_pathlen())
 resourcestore.RESOURCE_INIT.update(titles.resource_init())
 resourcestore._RESOURCE_WRITE_LEN.update(titles.resource_write_len())
+resourcestore._RESOURCE_WINDOWED = titles.resource_windowed()
 resourcestore._RESOURCE_WRITE_PATHS = resourcestore._RESOURCE_WRITE_PATHS + tuple(
-    p for p in resourcestore._RESOURCE_WRITE_LEN if not p.startswith(resourcestore._RESOURCE_WRITE_PATHS))
+    p for p in (*resourcestore._RESOURCE_WRITE_LEN, *resourcestore._RESOURCE_WINDOWED)
+    if not p.startswith(resourcestore._RESOURCE_WRITE_PATHS))
 if polpro is not None:
     polpro.EXTRA_SPEC_FILES.extend(titles.polpro_spec_files())

@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "key": "doc",
+  "kind": "game",
+  "name": "Dirge of Cerberus: Final Fantasy VII (online mode)",
+  "order": 50,
+  "content_id": 10,
+  "platforms": ["ps2"],
+  "repo": "https://github.com/PrettyOpenLobby/HippaulDirge",
+  "checkout": "hippauldirge",
+  "compose": ["docker-compose.yml", "docker-compose.title.yml"],
+  "compose_ghcr": ["docker-compose.ghcr.yml"],
+  "env_example": ".env.example",
+  "title": {
+    "module": "doctitle",
+    "compose": "docker-compose.title.yml",
+    "image": "hippauldirge-title:latest",
+    "ghcr_image": null,
+    "ghcr_tag_var": null
+  },
+  "images": [
+    {"name": "hippauldirge:latest", "context": ".", "dockerfile": "Dockerfile",
+     "ghcr": "ghcr.io/prettyopenlobby/hippauldirge", "tag_var": "HIPPAULDIRGE_TAG"},
+    {"name": "hippauldirge-title:latest", "context": ".", "dockerfile": "Dockerfile.title",
+     "ghcr": null, "tag_var": null}
+  ],
+  "services": ["doc"],
+  "profiles": {},
+  "env": [
+    {"name": "POL_DOC_PEER", "default": "", "description": "Optional allowlist of console addresses, comma-separated."},
+    {"name": "POL_DOC_PEER_RELAY", "default": "raw", "description": "Relay the other consoles' avatars: raw, wu or off."},
+    {"name": "POL_DOC_NPC_SPAWN", "default": "off", "description": "Push the lobby's NPC cast (needs tools/doc_npc_table.json)."},
+    {"name": "POL_DOC_NPC_SPAWN_ONLY", "default": "", "description": "Limit the NPC push to these NPC numbers."},
+    {"name": "POL_DOC_NPC_ARENA", "default": "off", "description": "A ring of NPCs in the arena."},
+    {"name": "POL_DOC_CHARA_NAME", "default": "Quarry", "description": "Name of the placeholder character slots."},
+    {"name": "POL_ADVERTISE_PUBLIC", "default": "", "description": "Address handed to a peer with a global address. Empty: POL_ADVERTISE."},
+    {"name": "POL_ADVERTISE_LAN", "default": "", "description": "Address handed to a private-range peer. Empty: POL_ADVERTISE."},
+    {"name": "POL_DOC_MISSION_LEDGER", "default": "on", "description": "The per-player mission ledger (on/off)."},
+    {"name": "POL_DOC_QUEST_SITUATIONS", "default": "39:3001,40:3001", "description": "QUEST:SITUATION pairs for the quest arenas."},
+    {"name": "POL_DOC_MISSION_NPC_TYPES", "default": "q39:3,3;3001:3,3,0;4,0,5,6,7,8,9,10,11,12", "description": "Enemy types per mission situation."},
+    {"name": "HIPPAULDIRGE_TAG", "default": "latest", "description": "Version of the published image (docker-compose.ghcr.yml)."}
+  ],
+  "data": [
+    {"id": "arena", "required": false, "build_only": false,
+     "description": "Mission enemy spawn nodes and the arenas' item generators.",
+     "source": "your game's installed data copied off the PlayStation 2 hard disk (the folder holding data/zone/), patch 20060124_3",
+     "tool": "python tools/doc_extract_arena.py <game data>",
+     "paths": ["tools/doc_mission_spawns.json", "tools/doc_item_generators.json"]},
+    {"id": "npctable", "required": false, "build_only": false,
+     "description": "The lobby NPC placement table, needed for POL_DOC_NPC_SPAWN=on.",
+     "source": "the lobby zone's level file of your copy",
+     "tool": "none yet (README.md, \"The lobby NPCs\")",
+     "paths": ["tools/doc_npc_table.json"]},
+    {"id": "arenatable", "required": false, "build_only": false,
+     "description": "Team base and team start positions.",
+     "source": "the arenas' level files of your copy",
+     "tool": "none yet (README.md, \"Arena data\")",
+     "paths": ["tools/doc_arena_table.json"]}
+  ],
+  "volumes": [],
+  "ports": [
+    {"port": "55040", "protocol": "udp", "service": "doc", "host": "0.0.0.0"}
+  ],
+  "admin_module": "doc",
+  "notes": "PlayStation 2, Japanese disc with the online mode. Every data file is optional; the server runs without them. The title plugin (doctitle) only fills the Viewer's profile screen."
+}

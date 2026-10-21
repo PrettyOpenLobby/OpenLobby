@@ -318,8 +318,8 @@ check("our client's seven deletes name slots 5,0,2,4,3",
 # index the friend list with heap.
 check("a record without the 0x0a live marker names nobody",
       R._friend_put_slot(rec8("5c2060ef 054bff00")), None)
-check("and a slot past the client's own 0x40 cap is heap, not a slot",
-      R._friend_put_slot(rec8("5c2060ef 7f4b0a00")), None)
+check("and a slot past the client's own 200-row table is heap, not a slot",
+      R._friend_put_slot(rec8("5c2060ef c84b0a00")), None)
 check("the delete fixture above still reads as slot 0",
       R._friend_put_slot(bytes(DEL)), 0)
 

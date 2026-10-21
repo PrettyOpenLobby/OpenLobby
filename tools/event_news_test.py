@@ -220,6 +220,48 @@ def main():
           "with no record, a store that matches the tree is taken as published",
           repr(res.get("held")))
 
+    # --- FFXI's own calendar (ffxinews.py), from what the FFXI bridge publishes --------
+    from polcore import kv as _kv
+    fnow = utc(2026, 10, 20)
+    _kv.default().set_json("ffxi:calendar", {"at": fnow, "events": [
+        {"source": "seasonal", "key": "harvest", "name": "Harvest Festival",
+         "start": utc(2026, 10, 19, 15), "end": utc(2026, 11, 1, 15),
+         "detail": {"blurb": "Trade a sweet to the townsfolk."}}]})
+    ff = [it for it in eventnews.items(fnow, CAL) if it["content"] == "ffxi"]
+    check(len(ff) == 1 and ff[0]["title"] == "Harvest Festival: Oct. 19 to Nov. 1"
+          and 970000 <= ff[0]["serial"] <= 979999,
+          "eventnews carries FFXI's post from the bridge's calendar", repr(ff))
+    eventnews.sync(WWW, fnow, CAL)
+    ticker = read("wh000.pol.com/pcd/ntool/en-US/latestnews.pml")
+    check("Harvest Festival: Oct. 19 to Nov. 1" in ticker and "Welcome back" in ticker,
+          "the ticker shows it beside the operator's posts")
+    check(ff and os.path.isfile(detail_path(ff[0]["serial"])),
+          "...with a detail page")
+    news2 = newsgen.parse_narray(read("wh000.pol.com/pcd/ntool/en-US/news2.pml"))
+    check(any(r[5].startswith("Harvest Festival") for r in news2[3]),
+          "news2.pml (FFXI) lists it under Events")
+    _kv.default().delete("ffxi:calendar")
+    res = eventnews.sync(WWW, fnow, CAL)
+    check("Harvest Festival" not in read("wh000.pol.com/pcd/ntool/en-US/latestnews.pml")
+          and ff and not os.path.isfile(detail_path(ff[0]["serial"])),
+          "with no calendar from the bridge, the post and its page go")
+
+    # --- FMO's war phase (fmonews.py), from the City Control board's clock --------------
+    fmnow = utc(2026, 10, 30)
+    _kv.default().set_json("fmo:calendar", {
+        "at": fmnow, "phase": 1, "start": utc(2026, 9, 5), "judge": utc(2026, 11, 1, 12),
+        "next": utc(2026, 11, 5), "ceasefire": False, "judged": None, "last": None,
+        "score": {"ocu": 12, "usn": 9}, "present": True, "frontline_reset": True})
+    eventnews.sync(WWW, fmnow, CAL)
+    check("Phase 1 ends Nov. 1" in read("wh000.pol.com/pcd/ntool/en-US/latestnews.pml"),
+          "the ticker shows FMO's phase ending")
+    news7 = newsgen.parse_narray(read("wh000.pol.com/pcd/ntool/en-US/news7.pml"))
+    check(any(r[5].startswith("Phase 1 ends") for r in news7[3]), "news7.pml (FMO) lists it under Events")
+    _kv.default().delete("fmo:calendar")
+    eventnews.sync(WWW, fmnow, CAL)
+    check("Phase 1 ends" not in read("wh000.pol.com/pcd/ntool/en-US/latestnews.pml"),
+          "with no clock from the board, the FMO item goes")
+
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)} check(s)")

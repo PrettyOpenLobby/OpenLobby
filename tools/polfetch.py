@@ -2,7 +2,7 @@
 
 `wh000.pol.com` is still serving in 2026 (Apache/1.3.26, `realm="POL"`,
 `algorithm="x-MD5-pol"`), so the pages the project only holds in Japanese can be
-fetched in English -- see `work/ps2/out/portal-gap-en.txt` for the target list.
+fetched in English.
 
 What this needs from you is a live session:
 

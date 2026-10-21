@@ -6,7 +6,7 @@ in EVERY build, holding the release string SE showed the user -- `1.17.04`,
 (`20061212_0`), so this is the only mapping from what a client REPORTS to what a
 human calls it, and it is what the portal's era rules are written against.
 
-    python tools/viewer_builds.py --mirrors ../archive/ps2/mirrors \
+    python tools/viewer_builds.py --mirrors mirrors \
                                   --out config/viewer-builds.tsv
 
 Regenerate it whenever a bundle is re-archived. It is committed because the
@@ -18,10 +18,10 @@ import sys
 
 
 def load_tools(mirrors):
-    """The bundle readers live with the mirrors, not here."""
-    work = os.path.abspath(os.path.join(mirrors, ".."))
-    if work not in sys.path:
-        sys.path.insert(0, work)
+    """The bundle readers (slc, polbundle) live in services/."""
+    services = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "services"))
+    if services not in sys.path:
+        sys.path.insert(0, services)
     from slc import slc_decompress
     from polbundle import manifest
     return slc_decompress, manifest
@@ -46,7 +46,7 @@ def rows_for(mirrors, bundle, slc_decompress, manifest):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mirrors", default="../archive/ps2/mirrors")
+    ap.add_argument("--mirrors", default="mirrors")
     ap.add_argument("--out", default="config/viewer-builds.tsv")
     a = ap.parse_args()
 

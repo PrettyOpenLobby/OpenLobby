@@ -86,8 +86,8 @@ chk("heal: Amara restored + Birdie minted, Ghost left",
 chk("Amara's message is back under its own name",
     (R._res_exists(live_name), R._res_exists(live_name + ".read")), (True, False))
 chk("the mailbox lists both requests", requests(), ["Amara", "Birdie"])
-lex = [p for _w, p, m in R._mailbox(LEX_MEMBER) if m["sender"] == "Birdie"][0]
-meta = R._mail_meta(lex)
+msg = [p for _w, p, m in R._mailbox(LEX_MEMBER) if m["sender"] == "Birdie"][0]
+meta = R._mail_meta(msg)
 chk("the minted one is a 0x8080 from Birdie's guid",
     (meta["kind"], meta["sender_guid"]), (R.MAIL_KIND_FRIEND_REQUEST,
                                           G(ids["Birdie"])))
@@ -101,7 +101,15 @@ R._mail_retire(adrena)
 chk("heal", R._friend_request_heal(LEX_MEMBER), 0)
 chk("Amara not listed", requests(), ["Birdie"])
 os.environ["POL_FRIEND_REQUEST_HEAL_TTL"] = "-1"
-chk("TTL expired: restored again", R._friend_request_heal(LEX_MEMBER), 1)
+chk("the heal state is in the database, not process memory",
+    R._friend_heal_state(db, ids["Lex"], ids["Amara"])[1], 1)
+os.environ["POL_FRIEND_REQUEST_HEAL_MAX"] = "1"
+chk("POL_FRIEND_REQUEST_HEAL_MAX=1, retired twice: NOT restored",
+    R._friend_request_heal(LEX_MEMBER), 0)
+chk("Amara still not listed", requests(), ["Birdie"])
+os.environ.pop("POL_FRIEND_REQUEST_HEAL_MAX")
+chk("default (no limit), TTL expired: restored again",
+    R._friend_request_heal(LEX_MEMBER), 1)
 chk("listed", requests(), ["Amara", "Birdie"])
 
 print("resolved requests are not revived")
@@ -110,6 +118,67 @@ chk("Lex accepts Amara", accounts.request_friend(db, ids["Lex"], "Amara"),
 R._mail_retire(adrena)
 chk("heal after the accept", R._friend_request_heal(LEX_MEMBER), 0)
 chk("only Birdie's is left", requests(), ["Birdie"])
+
+print("a DECLINE (type 10) from the asked member removes the invited row")
+import struct  # noqa: E402
+accounts.register_account(db, "Zora", "Passw0rdTest", contents=(1,))
+ids["Zora"] = int(db.execute("SELECT id FROM handle WHERE handle_name = %s",
+                             ("Zora",)).fetchone()["id"])
+chk("Zora asks Lex", accounts.request_friend(db, ids["Zora"], "Lex"), "requested")
+zreq = R._mail_mint("Zora", G(ids["Zora"]), G(ids["Lex"]),
+                    R._FRIEND_REQ_SUBJECT, R._FRIEND_REQ_BODY,
+                    kind=R.MAIL_KIND_FRIEND_REQUEST)
+R._mail_retire(zreq)
+os.environ["POL_FRIEND_REQUEST_HEAL_TTL"] = "21600"
+
+
+def lex_row(peer):
+    r = db.execute("SELECT status FROM friend WHERE handle_id = %s"
+                   " AND peer_name = %s", (ids["Lex"], peer)).fetchone()
+    return r["status"] if r else None
+
+
+chk("Lex holds Zora invited", lex_row("Zora"), accounts.STATUS_INVITED)
+# Lex's client writes the declined notice (kind 0x8500) to Zora, as a 3:1.
+rec = bytearray(0x48)
+struct.pack_into("<Q", rec, 0x00, G(ids["Lex"]) ^ R._PUSH_GUID_MASK)
+struct.pack_into("<Q", rec, 0x08, G(ids["Zora"]) ^ R._PUSH_GUID_MASK)
+rec[0x10:0x13] = b"Lex"
+struct.pack_into("<I", rec, 0x34, 1790000000)
+struct.pack_into("<I", rec, 0x38, 12)
+struct.pack_into("<H", rec, 0x3E, R.MAIL_KIND_FRIEND_DECLINED)
+struct.pack_into("<I", rec, 0x40, 0x100203E8)
+path = R._MAIL_PATH_PREFIX + R._b64encode(bytes(rec))
+body = b"Declined" + bytes([7, 0])
+pt = bytearray(bytes([2, 3, 1, 0])) + bytes(R._MAIL_OBJ_OFF - 4)
+pt[R._FETCH_PATH_OFF:R._FETCH_PATH_OFF + len(path) + 1] = path.encode() + bytes(1)
+pt += struct.pack("<I", len(body)) + body + bytes.fromhex("deadbeef")
+struct.pack_into("<I", pt, 4, len(pt) - 0x28)
+R._session_handle_id = lambda db=None: ids["Lex"]
+R._session_member_id = lambda: LEX_MEMBER
+R._capture_resource_write(bytes(pt), op="3:1")
+chk("Lex's invited row for Zora is gone", lex_row("Zora"), None)
+chk("Zora's own row still records that she asked",
+    db.execute("SELECT status FROM friend WHERE handle_id = %s AND peer_name"
+               " = 'Lex'", (ids["Zora"],)).fetchone()["status"],
+    accounts.STATUS_PENDING)
+chk("the heal does not hand Zora's request back", R._friend_request_heal(LEX_MEMBER), 0)
+chk("Zora's request is not listed", "Zora" in requests(), False)
+dec = [m for _w, _p, m in R._mailbox(
+    int(db.execute("SELECT member_id FROM handle WHERE id = %s",
+                   (ids["Zora"],)).fetchone()["member_id"]))
+       if m["kind"] == R.MAIL_KIND_FRIEND_DECLINED]
+chk("and the declined notice was delivered to Zora", len(dec), 1)
+
+print("a fresh request from the asker resets the pair's heal history")
+R._friend_heal_note(db, ids["Lex"], ids["Amara"], 0)
+R._session_handle_id = lambda db=None: ids["Amara"]
+again = R._mail_mint("Amara", G(ids["Amara"]), G(ids["Lex"]),
+                     R._FRIEND_REQ_SUBJECT, R._FRIEND_REQ_BODY,
+                     kind=R.MAIL_KIND_FRIEND_REQUEST)
+R._mail_friend_notice_effects(db, again)
+chk("heal state cleared", R._friend_heal_state(db, ids["Lex"], ids["Amara"]),
+    (None, 0))
 
 db.close()
 print("FAIL: %d check(s)" % bad if bad else "all ok")

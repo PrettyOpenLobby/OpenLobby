@@ -21,7 +21,7 @@ The ticker is the surface that matters -- 214 requests for
 
 ## Where the formats come from -- all transcribed, none invented
 
-`latestnews.pml` is SE's live English feed (pol-www/www-se-capture/): an
+`latestnews.pml` is SE's live English feed (as the retail portal served it): an
 `<ARRAY NAME="$LATESTNEWS">` of 8-field records plus `<define
 name="$LATESTNEWSMAX">`. Field names are SE's own, from `pml/info/in04.pml`:
 $aCONTID / $aSERIAL / $aMORE / $aLINK / $aDATE / $aSUB / $aSTAMP.
@@ -126,8 +126,11 @@ PUBLISHED = os.environ.get("POL_NEWS_PUBLISHED") or os.path.join(
 FEED_LOCALES = ["en-US", "us", "na", "en", "ja-JP"]
 
 #: ...and our substitute Information page. The client's locale probing tries
-#: several spellings and we do not know which it settles on.
-PAGE_LOCALES = ["0", "1", "en", "en-US", "eu", "jp", "na", "us", "usa"]
+#: several spellings and we do not know which it settles on. ja-JP is the one a
+#: JP-language Viewer asks for before login (`snews/ja-JP/index.pml`, without it
+#: a JP PS2 gets "Page not available"); the text is English until
+#: a Japanese copy is written.
+PAGE_LOCALES = ["0", "1", "en", "en-US", "eu", "ja-JP", "jp", "na", "us", "usa"]
 
 #: SE's $cnt_d, from inen01.pml. The id is 1-BASED: index2.pml reads
 #: `$cnt_d[$DETAILS[$ar_ci]-1]`, and news<N>.pml is named by this same id.

@@ -14,3 +14,4 @@ secrets/
 # The PML preview's font atlas, generated from your own Viewer install by
 # tools/make_pml_fonts.py; it is derived from the client's files, so it stays out.
 services/admin_web/pmlfont/
+/.games

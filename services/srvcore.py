@@ -457,13 +457,12 @@ def expand_ports(spec):
 # --------------------------------------------------------------------------- #
 # Every "now dial this" value the client is handed (the directory's redirect
 # token, the auth hops, the lobby handoff, the TM zone rows, the patch server's
-# download host) used to be ONE global address: POL_ADVERTISE, which on prod is
-# the box's Tailscale address 127.0.0.1. A PC on the tailnet reaches that. A
-# console on the LAN does not: a real PS2 on the LAN resolved ci000 to
-# the LAN address via the DNS split (POL_ADVERTISE_LAN, 2026-08-22), dialled
-# 127.0.0.1:51240, was greeted with "redirect to 127.0.0.1:51241" and sat on
-# "verifying user info" forever (prod login log, 2026-09-18 22:11:02Z). DNS had
-# learned to answer per network; nothing after DNS had.
+# download host) used to be ONE global address: POL_ADVERTISE, which on a
+# server reached over a VPN is the box's VPN address. A PC on the VPN reaches
+# that. A console on the LAN does not: a real PS2 on the LAN resolved ci000 to
+# the LAN address via the DNS split (POL_ADVERTISE_LAN), dialled it on 51240,
+# was greeted with a redirect to the VPN address and sat on "verifying user
+# info" forever. DNS had learned to answer per network; nothing after DNS had.
 #
 # So the address is now chosen per client, from what the connection itself
 # tells us. A handler thread records who connected and which of OUR addresses
@@ -472,13 +471,13 @@ def expand_ports(spec):
 #   1. POL_ADVERTISE_LAN, when set, for a peer inside POL_ADVERTISE_LAN_CLIENTS
 #      (default RFC1918) -- the same rule stub.py's resolver applies, so a box
 #      that configured the split for DNS gets it everywhere.
-#   2. otherwise, when the global address is OFF the LAN (tailnet, public) and
+#   2. otherwise, when the global address is OFF the LAN (VPN, public) and
 #      an RFC1918 peer reached us on an RFC1918 address: that address. The
 #      client just dialled it, so it can dial it again. Dev is untouched by
 #      construction -- its advertise address is itself a LAN address.
 #   3. otherwise the global address, exactly as before.
 #
-# Rule 0, ahead of all of those (2026-09-21, the edge VPS -- deploy/edge): when
+# Rule 0, ahead of all of those (an edge VPS in front of the server): when
 # POL_ADVERTISE_PUBLIC is set, a peer with a GLOBAL address gets that. The VPS
 # forwards internet players here with their own source address intact, so "the
 # peer is an internet address" is exactly "this client came through the VPS and

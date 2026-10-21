@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "key": "fmo",
+  "kind": "game",
+  "name": "Front Mission Online",
+  "order": 40,
+  "content_id": 4,
+  "platforms": ["pc", "ps2"],
+  "repo": "https://github.com/PrettyOpenLobby/HippaulFront",
+  "checkout": "hippaulfront",
+  "compose": ["docker-compose.yml", "docker-compose.title.yml"],
+  "compose_ghcr": ["docker-compose.ghcr.yml"],
+  "env_example": ".env.example",
+  "title": {
+    "module": "fmotitle",
+    "compose": "docker-compose.title.yml",
+    "image": "hippaulfront-title:latest",
+    "ghcr_image": null,
+    "ghcr_tag_var": null
+  },
+  "images": [
+    {"name": "hippaulfront:latest", "context": "services", "dockerfile": "Dockerfile",
+     "ghcr": "ghcr.io/prettyopenlobby/hippaulfront", "tag_var": "HIPPAULFRONT_TAG"},
+    {"name": "hippaulfront-title:latest", "context": ".", "dockerfile": "Dockerfile.title",
+     "ghcr": null, "tag_var": null}
+  ],
+  "services": ["fmo"],
+  "profiles": {"board": ["fmoboard"]},
+  "env": [
+    {"name": "FMO_DB", "default": "1", "description": "1 keeps the pilots in PostgreSQL, 0 in the JSON character store."},
+    {"name": "FMO_UDP_PEER_LINK", "default": "", "description": "The peer link between pilots (release default on)."},
+    {"name": "FMO_CHAR_WIRE_BASE", "default": "", "description": "Character id base the client sees (release default 0x1000)."},
+    {"name": "FMO_BATTLE_DEATH_END", "default": "", "description": "Seconds after a pilot's wanzer is destroyed until their battle ends (release default 5)."},
+    {"name": "FMO_GROUP_VOICE_TO", "default": "", "description": "Group voice routing: talkers (release default) or all."},
+    {"name": "FMO_NATION_CHANGE_TOGGLE", "default": "", "description": "Change Nations switches nation (release default 1)."},
+    {"name": "FMO_DEVTOOL_PORT", "default": "", "description": "Port of the lobby NPC editor (8798 to use the published port). Empty: off."},
+    {"name": "FMO_DEVTOOL_BIND", "default": "", "description": "Address the NPC editor binds. Empty: loopback."},
+    {"name": "FMO_DEVTOOL_TOKEN", "default": "", "description": "Token the NPC editor requires on a wider bind."},
+    {"name": "POL_BOARDS_FMO_URL", "default": "", "description": "City Control board: the public URL Discord messages link to."},
+    {"name": "POL_BOARDS_FMO_DISCORD_WEBHOOK", "default": "", "description": "City Control board: webhook for the standings."},
+    {"name": "POL_BOARDS_FMO_DISCORD_BOT_TOKEN", "default": "", "description": "City Control board: an optional Discord bot's token (a secret)."},
+    {"name": "POL_BOARDS_FMO_DISCORD_APP_ID", "default": "", "description": "City Control board: the bot's application id."},
+    {"name": "POL_BOARDS_FMO_DISCORD_PUBLIC_KEY", "default": "", "description": "City Control board: the bot's public key."},
+    {"name": "HIPPAULFRONT_TAG", "default": "latest", "description": "Version of the published game image (docker-compose.ghcr.yml)."}
+  ],
+  "data": [
+    {"id": "blowfish", "required": true, "build_only": true,
+     "description": "The cipher tables, computed from public constants. The published image carries them.",
+     "source": "none (no client needed)",
+     "tool": "python tools/gen_blowfish_tables.py",
+     "paths": ["services/fmo_blowfish_P.bin", "services/fmo_blowfish_S.bin"]},
+    {"id": "fmodata", "required": false, "build_only": false,
+     "description": "The rank ladder, the class curve and the catalogues (and the board's backdrop). The server runs without them, with gaps.",
+     "source": "your Front Mission Online install",
+     "tool": "python tools/fmodata_build.py --client <install>",
+     "paths": ["services/fmodata/fmo-ranks.tsv"]},
+    {"id": "boardart", "required": false, "build_only": false,
+     "description": "The City Control board's satellite backdrop (fmodata_build.py also bakes it).",
+     "source": "your Front Mission Online install",
+     "tool": "python tools/fmo_boardart_bake.py --client <install>",
+     "paths": ["services/boardart/fmo/backdrop.png"]}
+  ],
+  "volumes": [],
+  "ports": [
+    {"port": "61300", "protocol": "tcp", "service": "fmo", "host": "0.0.0.0"},
+    {"port": "61300", "protocol": "udp", "service": "fmo", "host": "0.0.0.0"},
+    {"port": "8798", "protocol": "tcp", "service": "fmo", "host": "127.0.0.1"},
+    {"port": "8792", "protocol": "tcp", "service": "fmoboard", "host": "127.0.0.1", "profile": "board"}
+  ],
+  "admin_module": "fmo",
+  "notes": "The title plugin (fmotitle) only fills the Viewer's profile screen. The admin panel's NPC and story-gate tools are the fmo service's devtool port (FMO_DEVTOOL_PORT), reached through POL_ADMIN_GAME_FMO_URL and _TOKEN (services/admingames.py)."
+}

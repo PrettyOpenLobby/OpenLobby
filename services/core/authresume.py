@@ -5,6 +5,29 @@ import time
 import titles                   # the title-plugin seam (services/titles.py)  # noqa: E402
 from srvcore import log
 import sessioncrypt
+
+
+def ping_token(when):
+    """The keepalive PING argument the client reads as the server's clock.
+
+    Read off the PS2 core (pol.pex, base 0x101000; the PC twin is the same
+    IRC layer): the PING handler 0x1249c0 hands its argument to 0x1248a0,
+    which takes exactly 7 characters with no `.`, decodes them with the
+    session alphabet (sessioncrypt.B64, reverse table 0x199608; four symbols
+    big-endian, the last group padded with `T`) into b0..b4, requires
+        b4 == (b0 ^ ((b1 ^ ((b2 ^ (b3 << 3)) << 3)) << 3)) & 0xff
+    and passes `b0<<24|b1<<16|b2<<8|b3 & 0x7fffffff` to 0x170cf8, which moves
+    the client's clock FORWARD to that server time (never back). Unix seconds,
+    the same clock as the SESSION greeting. Our old `POL<n>` was ignored, so
+    the client clock was never synced after login. Whether this ends the
+    6-minute JP PS2 drop is not proved."""
+    t = int(when) & 0x7FFFFFFF
+    b = t.to_bytes(4, "big")
+    b4 = (b[0] ^ ((b[1] ^ ((b[2] ^ (b[3] << 3)) << 3)) << 3)) & 0xFF
+    v1 = int.from_bytes(b[:3], "big")
+    v2 = int.from_bytes(bytes((b[3], b4, 0)), "big")
+    B = sessioncrypt.B64
+    return "".join(B[(v >> s) & 63] for v in (v1, v2) for s in (18, 12, 6, 0))[:7]
 from .deps import accounts, gmchat, issuereport
 from . import authkick, authnode, authserv, chatsession, friendroster, gamenotice, ircband, lobbysearch, lobbysession, pacing, presence, roomregistry
 
@@ -244,11 +267,15 @@ def _auth_channel_loop(conn, peer, addr, chat_sess, nick, prefix, P, S, iv,
                     continue                   # a spool poll, not a ping tick
                 last_ping = time.time()
                 ping_seq += 1
-                # Standard server-originated IRC PING (no source prefix): the
-                # client answers PONG. Format is a best guess -- SE's encrypted
-                # PING was never captured -- but the connection-hold above is the
-                # actual fix; an ignored PING still leaves the socket open.
-                ping = b"PING :POL" + str(ping_seq).encode()
+                # Server-originated IRC PING (no source prefix); the client
+                # answers PONG. Its argument is SE's: the server CLOCK, see
+                # ping_token. POL_PING_CLOCK=0 sends the old `POL<n>` counter,
+                # which the client ignores (and which turns into a 7-character
+                # token it would try to parse from n=1000 on).
+                if os.environ.get("POL_PING_CLOCK", "1") != "0":
+                    ping = b"PING :" + ping_token(time.time()).encode()
+                else:
+                    ping = b"PING :POL" + str(ping_seq).encode()
                 if not chat_sess.send([ping]):
                     log("authserv", f"{peer} keepalive send failed after "
                                     f"{ping_seq} ping(s) -- peer gone, closing")

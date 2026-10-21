@@ -285,8 +285,7 @@ def _who_here_flag(sess=None, member_id=None):
     """`H` or `G` for one row of the 352 WHO -- the member's LIVE presence.
 
     **RETAIL SERVES `G@`, NOT `H@`, WHEN THE MEMBER IS AWAY.** Measured
-    2026-08-19 off a two-member retail group-chat capture (memory
-    `group-chat-retail-decode`): Lex was AFK and SE's own 352 for them read
+    off a two-member retail group-chat capture: Lex was AFK and SE's own 352 for them read
     `... TESTNICK1 G@ :0 POL-INFO`. RFC 1459 calls the field H(ere)/G(one) and
     SE uses it exactly that way; we hardcoded `H`, so an away member showed as
     present in every room they sat in.
@@ -1206,6 +1205,13 @@ def _verb_pong(arg, nick, srv, peer_ip, sess):
     # other clients ran to #20..#233. Project-Crystal-Server answers a client
     # PONG with `PONG :<key>` (POLAuth/MessageHandler.cs), so we do the same.
     # POL_PONG_ECHO=0 restores the silent consume.
+    #
+    # The echo did NOT end the drop (a client still closed one round trip
+    # after PING #6), and the client's PONG handler
+    # (pol.pex 0x124a00) only clears its own PING-outstanding word and tries a
+    # clock parse, so the echo is harmless and changes nothing. The drop is a
+    # ~6-minute per-connection event seen on US clients too; the keepalive
+    # now carries SE's clock token (authresume.ping_token).
     if os.environ.get("POL_PONG_ECHO", "1") != "0" and arg:
         return [b"PONG :" + arg.lstrip(b":")]
     return []

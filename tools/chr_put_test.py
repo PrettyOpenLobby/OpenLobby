@@ -15,8 +15,7 @@ WHAT THIS PINS
      served -- none of them raise and none of them touch the DB.
   5. The dispatch reaches it (`_lobby_payload(1, 0x0A, ...)`).
 
-The body layout is the one read off `polpex_0014e8e0` on 2026-09-11 (memory
-ps2-lobby-1-10-is-sqprofdb-update-chlist). WARNING: No real 1:10 frame has ever been
+The body layout is the one read off `polpex_0014e8e0`. WARNING: No real 1:10 frame has ever been
 read; if a captured frame disagrees with this fixture, the fixture is the thing
 to change.
 """

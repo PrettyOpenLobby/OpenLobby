@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "key": "ffxi",
+  "kind": "game",
+  "name": "Final Fantasy XI (LandSandBoat)",
+  "order": 60,
+  "content_id": 1,
+  "platforms": ["pc", "ps2"],
+  "repo": "https://github.com/PrettyOpenLobby/HippaulBridge",
+  "checkout": "hippaulbridge",
+  "compose": ["docker-compose.yml", "docker-compose.title.yml"],
+  "compose_ghcr": ["docker-compose.ghcr.yml"],
+  "env_example": ".env.example",
+  "title": {
+    "module": "ffxititle",
+    "compose": "docker-compose.title.yml",
+    "image": "hippaulbridge-title:latest",
+    "ghcr_image": null,
+    "ghcr_tag_var": null
+  },
+  "images": [
+    {"name": "hippaulbridge:latest", "context": "lsb", "dockerfile": "Dockerfile.bridge",
+     "ghcr": "ghcr.io/prettyopenlobby/hippaulbridge", "tag_var": "HIPPAULBRIDGE_TAG"},
+    {"name": "hippaulbridge-title:latest", "context": "lsb", "dockerfile": "Dockerfile.title",
+     "ghcr": null, "tag_var": null}
+  ],
+  "services": ["db", "db-update", "db-zoneip", "connect", "search", "world", "map", "bridge"],
+  "profiles": {},
+  "env": [
+    {"name": "LSB_ADVERTISE_IP", "default": "",
+     "description": "Address FFXI clients reach this host on (zone and search address). Empty: POL_ADVERTISE, then 127.0.0.1."},
+    {"name": "LSB_DB_NAME", "default": "xidb", "description": "LandSandBoat's MariaDB database."},
+    {"name": "LSB_DB_USER", "default": "xiadmin", "description": "LandSandBoat's MariaDB user."},
+    {"name": "LSB_DB_PASSWORD", "default": "change-me", "description": "LandSandBoat's MariaDB password. Change it."},
+    {"name": "LSB_DB_ROOT_PASSWORD", "default": "change-me-root", "description": "MariaDB root password. Change it."},
+    {"name": "LSB_CLIENT_VER", "default": "30260703_1", "description": "The client version LSB expects (yyyymmdd_r)."},
+    {"name": "LSB_VER_LOCK", "default": "0", "description": "LSB's VER_LOCK: 0 accepts every build, 1 exact, 2 at least."},
+    {"name": "LSB_SERVER_NAME", "default": "Nameless", "description": "The world name, at most 15 characters."},
+    {"name": "LSB_ACCOUNT", "default": "poltest", "description": "The bridge's shared LSB account."},
+    {"name": "LSB_PASSWORD", "default": "change-me", "description": "That account's password. Change it."},
+    {"name": "FFXI_ACCT_SECRET", "default": "change-me", "description": "Seed of the per-member LSB passwords. Set once and keep."},
+    {"name": "FFXI_REQUIRE_SIGNED_IN", "default": "1", "description": "Refuse a launch no signed-in Viewer session accounts for."},
+    {"name": "FFXI_REQUIRE_SAME_ADDRESS", "default": "1", "description": "Attribute a launch only to a session from the same address."},
+    {"name": "FFXI_TOMBSTONE_DELETED", "default": "1", "description": "Rename deleted characters so their names can be reused."},
+    {"name": "BRIDGE_ADVERTISE_MAP", "default": "", "description": "Per-client world address, \"cidr=ip,...\"."},
+    {"name": "BRIDGE_IMPORT_PORT", "default": "54004", "description": "The character-import endpoint's port; 0 disables it."},
+    {"name": "POL_FFXI_CHARACTER_SLOTS", "default": "", "description": "FFXI Content IDs per handle (1 when empty)."},
+    {"name": "POL_FFXI_MEMBER_SLOTS", "default": "", "description": "FFXI characters per member in all (16 when empty)."},
+    {"name": "POL_FFXI_WORLD_ID", "default": "0x20", "description": "The world id the title plugin serves."},
+    {"name": "HIPPAULBRIDGE_TAG", "default": "latest", "description": "Version of the published bridge image (docker-compose.ghcr.yml)."}
+  ],
+  "data": [],
+  "volumes": [
+    {"name": "lsb_navmeshes", "required": true,
+     "description": "LandSandBoat's pathfinding meshes (with lsb_ximeshes about 570 MB). External, so down -v never removes it.",
+     "setup": ["docker volume create lsb_navmeshes",
+               "docker run --rm -v lsb_navmeshes:/navmeshes ghcr.io/landsandboat/ximeshes:latest"]},
+    {"name": "lsb_ximeshes", "required": true,
+     "description": "LandSandBoat's zone geometry; the map server aborts at start without it.",
+     "setup": ["docker volume create lsb_ximeshes",
+               "docker run --rm -v lsb_ximeshes:/ximeshes ghcr.io/landsandboat/ximeshes:latest"]}
+  ],
+  "ports": [
+    {"port": "54001", "protocol": "tcp", "service": "bridge", "host": "0.0.0.0"},
+    {"port": "54230", "protocol": "tcp", "service": "bridge", "host": "0.0.0.0"},
+    {"port": "54230", "protocol": "udp", "service": "bridge", "host": "0.0.0.0"},
+    {"port": "54004", "protocol": "tcp", "service": "bridge", "host": "0.0.0.0"},
+    {"port": "54002", "protocol": "tcp", "service": "search", "host": "0.0.0.0"},
+    {"port": "8088", "protocol": "tcp", "service": "world", "host": "127.0.0.1"}
+  ],
+  "admin_module": "ffxi",
+  "notes": "Needs no files from the client on the server: the world is LandSandBoat's own prebuilt image. The client must be the version LSB_CLIENT_VER names when LSB_VER_LOCK is not 0. The title plugin (ffxititle) is required: without it the world connect fails with POL-0001. FFXI must be in the core's POL_LOBBY_CONTENT_IDS for the Play button. docker-compose.lsb-test.yml (a second world) is not part of this entry."
+}

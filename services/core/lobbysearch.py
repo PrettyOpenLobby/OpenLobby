@@ -121,6 +121,12 @@ def _search_result_payload(n, pt):
     return bytes(n)
 
 
+#: The parsed calibration file and the (path, mtime, size) it was read from,
+#: as presence.py keeps its control file: a stat per fetch, the read and the
+#: parse only when the file moved.
+_SEARCH_CALIB_CACHE = {"key": None, "vals": {}}
+
+
 def _search_calib_path():
     """Where the live calibration byte count is read from, per fetch."""
     return os.environ.get(
@@ -147,8 +153,17 @@ def _search_calib():
     so nothing in this file may raise.
     """
     out = {"bytes": 0, "result": "", "friend_reply": "", "friend_paylen": 0}
+    path = _search_calib_path()
     try:
-        with open(_search_calib_path(), "r") as fh:
+        st = os.stat(path)
+    except OSError:
+        _SEARCH_CALIB_CACHE["key"] = None
+        return out
+    key = (path, st.st_mtime, st.st_size)
+    if key == _SEARCH_CALIB_CACHE["key"]:
+        return dict(_SEARCH_CALIB_CACHE["vals"])
+    try:
+        with open(path, "r") as fh:
             text = fh.read()
     except OSError:
         return out
@@ -181,6 +196,7 @@ def _search_calib():
                     out["friend_paylen"] = max(0, int(val, 0))
                 except ValueError:
                     pass
+    _SEARCH_CALIB_CACHE["key"], _SEARCH_CALIB_CACHE["vals"] = key, dict(out)
     return out
 
 

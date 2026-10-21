@@ -8,7 +8,7 @@
 	  pol-server AUTHORED PAGE, ARCHIVAL. FINAL FANTASY XIV IS a registered
 	  PlayOnline content -- id 8, `FINALFANTASY_XIV`, dated **2009/10/27** -- but
 	  only in the XBOX 360 Viewer family. Found in the mirrored patch tree
-	  X2U-1000, build 20091222_A (work/ps2/mirrors, .slc blob, decrypted with the
+	  X2U-1000, build 20091222_A (a mirrored .slc blob, decrypted with the
 	  int0 key like every other sqpolcts.bin).
 
 	  IT IS ABSENT FROM EVERY PC AND PS2 BUILD WE HOLD -- the 2003 CD, JP 1.15,

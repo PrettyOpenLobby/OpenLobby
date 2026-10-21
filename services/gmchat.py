@@ -217,10 +217,10 @@ def roster_tail(request):
     """The padding a roster record ends with, in the ASKER's own style.
 
     The Viewer ends its records with the literal `dummy`
-    (`HRu87960930222113Casdummy`) and reads the name by its length field.
+    (`HRu87960930222113Lexdummy`) and reads the name by its length field.
     Dirge of Cerberus's in-game GM chat sends none (`HRu87960930222668
-    Bluebell`) and reads the name to the end of the record, so a `dummy` in
-    our answer drew the GM as "GMdummy" there (2026-09-29). Answer each
+    Marigold`) and reads the name to the end of the record, so a `dummy` in
+    our answer drew the GM as "GMdummy" there. Answer each
     client the way it asks."""
     return b"dummy" if request.endswith(b"dummy") else b""
 
@@ -234,7 +234,7 @@ def encode_roster(chan, name=None, hid=None, gm=True, tail=b"dummy"):
     Role 1 is the GM: listed first, drawn with the phoenix, lines in red.
 
     A newcomer asks with `HR<p><hid><hexlen><name>...` (no room, see
-    `HRu87960930222309PS2Tester` in FACTS) and every member answers with one of
+    `HRu87960930222309PS2Tester`) and every member answers with one of
     these, so the GM has to answer too. The row only survives the client's next
     roster rebuild (0x4ab3754) if the GM nick is also in the room's 352 WHO,
     which `responders._gm_roster_nick` already provides.

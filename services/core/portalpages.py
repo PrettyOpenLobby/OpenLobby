@@ -330,6 +330,95 @@ def _portal_roots(www, era, lang):
     return roots
 
 
+def _query_pairs(query):
+    """`a=1&b=2` as a sorted list of (name, value); a pair with no `=` keeps
+    an empty value. Order is dropped on purpose: see `_query_variant`."""
+    out = []
+    for part in (query or "").split("&"):
+        if not part:
+            continue
+        k, _, v = part.partition("=")
+        out.append((k, v))
+    return sorted(out)
+
+
+def _decode_mirror_query(name):
+    """The query a mirror file name stands for:
+    `uppm01.pml%3Fdf%3D1%26ds%3D2` -> `df=1&ds=2` (one level of the encoding
+    the lookup above writes, `%` last)."""
+    q = name.split("%3F", 1)[1]
+    return (q.replace("%26", "&").replace("%3D", "=").replace("%3F", "?")
+             .replace("%25", "%"))
+
+
+#: SE's bare page for a URL whose exact query we do not hold, kept apart from
+#: the served roots so it never shadows a query copy we DO hold (the bare path
+#: is looked up before the query copies). `<www>/_se-bare/<lang>/<host>/<rel>`.
+SE_BARE_DIR = "_se-bare"
+
+
+def _query_variant(www, roots, host, rel, uri, lang):
+    """A page for `rel` (+ the query in `uri`) when neither the bare path nor
+    the exact query copy exists. Returns (path, why) or (None, None).
+
+    SE served ONE static file per page: the query only sets variables, and it
+    is the Viewer that applies them (pmleval.query_vars, app.dll rva
+    0x1ff98f) -- which is why SE's pages open with `<define name="$news_flg"
+    nodefvalue="0">`. The mirror holds the file once per URL the crawler
+    happened to fetch, so a request whose query differs only in ORDER, or in
+    a value, is still asking for a page we have. In order:
+
+      1. the same parameters in another order, in any root (root order);
+      2. a query copy in an ERA root, so a panel-era client keeps its era;
+      3. SE's bare page in `_se-bare/<lang>/` (the Western box's multilingual
+         list-era pages, which a panel-era client cannot run);
+      4. a query copy in the remaining roots.
+    Stages 2 and 4 prefer the copy sharing the most name=value pairs."""
+    d, _, base = rel.rpartition("/")
+    want = _query_pairs(uri.split("?", 1)[1] if "?" in uri else "")
+    prefix = base + "%3F"
+    found = []                  # (root_label, path, pairs)
+    for root, label in roots:
+        folder = os.path.normpath(os.path.join(root, host, d))
+        if not portalauth._under(root, folder) or not os.path.isdir(folder):
+            continue
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for n in names:
+            if not n.startswith(prefix) or n.endswith((".polprov", ".polmeta")):
+                continue
+            p = os.path.join(folder, n)
+            if os.path.isfile(p):
+                found.append((label, p, _query_pairs(_decode_mirror_query(n))))
+    if want:
+        for label, p, pairs in found:
+            if pairs == want:
+                return p, f"same query, other order [{label}]"
+
+    def best(cands):
+        if not cands:
+            return None
+        ws = set(want)
+        wk = {k for k, _ in want}
+        return max(cands, key=lambda c: (len(ws & set(c[2])),
+                                         -len(wk ^ {k for k, _ in c[2]})))
+    era_c = [c for c in found if c[0].startswith("_eras/")]
+    b = best(era_c)
+    if b:
+        return b[1], f"query copy [{b[0]}]"
+    if lang:
+        bare_root = os.path.join(www, SE_BARE_DIR, lang)
+        p = os.path.normpath(os.path.join(bare_root, host, rel))
+        if portalauth._under(bare_root, p) and os.path.isfile(p):
+            return p, f"SE bare page [{SE_BARE_DIR}/{lang}]"
+    b = best([c for c in found if not c[0].startswith("_eras/")])
+    if b:
+        return b[1], f"query copy [{b[0]}]"
+    return None, None
+
+
 def _portal_challenge(peer, port):
     """A 401 x-MD5-pol Digest challenge (realm POL), matching SE's Apache. Sent
     when POL_PORTAL_AUTH=1 and the request has no Authorization, so the client

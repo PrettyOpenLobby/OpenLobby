@@ -5,7 +5,7 @@ import time
 import threading
 from srvcore import log
 from .deps import accounts
-from . import handlelists, lobbymail, lobbysession, presence, profilerecord
+from . import handlelists, lobbymail, lobbysession, memberstatus, presence, profilerecord, pushrecord
 
 
 
@@ -16,11 +16,73 @@ def _peer_online(peer_handle):
     try:
         db = accounts.connect()
         try:
-            return accounts.handle_online(db, int(peer_handle))
+            # A Hidden friend (4:5 status 0x05) is served offline, as SE did.
+            return memberstatus._handle_shown_online(db, int(peer_handle))
         finally:
             db.close()
     except Exception:
         return False
+
+
+def _ignore_rows():
+    """The session handle's ignore (block) table for the 2:3 reply, by slot.
+
+    [(slot, peer_name, peer_handle, head)]. polcore carries its ignore table
+    in the same 2:3 as the friends, a row with head bit 0x10 and +0x08 = its
+    ignore index (< 100, or the whole 2:3 fails with POL-5133; validator
+    0x37df090). Without serving them a relog empties the client's block list,
+    and the client's own block checks (incoming notices, outgoing mail) read
+    only that list. POL_FRIEND_IGNORE_SERVE=0 serves friends only.
+    """
+    if accounts is None or os.environ.get("POL_FRIEND_IGNORE_SERVE", "1") != "1":
+        return []
+    try:
+        db = accounts.connect()
+        try:
+            hid = lobbysession._session_handle_id(db)
+            if not hid:
+                return []
+            return [(int(r["slot"]), r["peer_name"], r["peer_handle"],
+                     int(r["head"] or 0))
+                    for r in accounts.ignore_list(db, int(hid))
+                    if 0 <= int(r["slot"]) < accounts.IGNORE_SLOTS]
+        finally:
+            db.close()
+    except Exception as exc:
+        log("lobby", f"  2:3 ignore rows unavailable ({exc!r})")
+        return []
+
+
+def _ignore_list_record(rec_size, row):
+    """One 2:3 record for an ignore-table entry (see `_ignore_rows`).
+
+    Built like a friend row (guid at +0x10, name at +0x18) and then marked:
+    head bit 0 (present), bit 0x10 (ignore table), bits 5-6 the scope and bits
+    7-12 the handle slot, both as the client last wrote them; +0x08 the
+    ignore index. No presence: the ignore table never receives any.
+    """
+    slot, name, peer_handle, head = row
+    guid = 0
+    if peer_handle:
+        try:
+            db = accounts.connect()
+            try:
+                guid = pushrecord._push_identity_guid(db, int(peer_handle))
+            finally:
+                db.close()
+        except Exception:
+            guid = accounts.handle_guid(int(peer_handle))
+    r = bytearray(_friend_list_record(rec_size, guid, name,
+                                      kind=accounts.KIND_FRIEND,
+                                      hid=int(peer_handle or 0), status=0,
+                                      online=False, index=slot,
+                                      flags_low=(head & 0xFF) or 0x31))
+    low = struct.unpack_from("<I", r, 0)[0]
+    scope = ((head >> 5) & 3) or 1
+    low = (low & ~0x1FFF) | 0x11 | (scope << 5) | (head & 0x1F80)
+    struct.pack_into("<I", r, 0, low)
+    r[0x08] = slot & 0xFF
+    return bytes(r)
 
 
 def _friend_handle_slots():

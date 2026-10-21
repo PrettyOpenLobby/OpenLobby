@@ -201,7 +201,7 @@ r.execute("CREATE TABLE handle_content_pre_slots (handle_id INTEGER, content_cod
           " INTEGER, content_id TEXT, status TEXT, linked_at TEXT)")
 r.execute("INSERT INTO handle_content_pre_slots VALUES (1, 2, '1', 'active', 'x')")
 r.execute("INSERT INTO handle_content_pre_slots VALUES (2, 2, '2', 'active', 'x')")
-# the website sign-in service's own table (regapi, which is not in this
+# a website sign-in service's own table (the service is not part of this
 # repository), created and filled the way it does
 r.execute("CREATE TABLE IF NOT EXISTS web_login (username TEXT NOT NULL UNIQUE"
           " COLLATE NOCASE, member_id INTEGER NOT NULL UNIQUE, created_at TEXT NOT NULL)")

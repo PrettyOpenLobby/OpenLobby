@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "key": "fe",
+  "kind": "game",
+  "name": "Fantasy Earth",
+  "order": 30,
+  "content_id": 11,
+  "platforms": ["pc"],
+  "repo": "https://github.com/PrettyOpenLobby/HippaulRing",
+  "checkout": "hippaulring",
+  "compose": ["docker-compose.yml", "docker-compose.title.yml"],
+  "compose_ghcr": ["docker-compose.ghcr.yml"],
+  "env_example": ".env.example",
+  "title": {
+    "module": "fetitle",
+    "compose": "docker-compose.title.yml",
+    "image": "hippaulring-title:latest",
+    "ghcr_image": null,
+    "ghcr_tag_var": null
+  },
+  "images": [
+    {"name": "hippaulring:latest", "context": "services", "dockerfile": "Dockerfile",
+     "ghcr": "ghcr.io/prettyopenlobby/hippaulring", "tag_var": "HIPPAULRING_TAG"},
+    {"name": "hippaulring-title:latest", "context": ".", "dockerfile": "Dockerfile.title",
+     "ghcr": null, "tag_var": null}
+  ],
+  "services": ["fellb", "felobby", "feworld"],
+  "profiles": {"map": ["femap"]},
+  "env": [
+    {"name": "FE_ADVERTISE", "default": "",
+     "description": "Address Fantasy Earth clients reach this host on. Empty: POL_ADVERTISE, then 127.0.0.1."},
+    {"name": "POL_FE_WORLD", "default": "",
+     "description": "The world name in the game's world picker and on the Viewer profile. Empty: PlayOnline."},
+    {"name": "HIPPAULRING_TAG", "default": "latest", "description": "Version of the published game image (docker-compose.ghcr.yml)."}
+  ],
+  "data": [
+    {"id": "blowfish", "required": true, "build_only": true,
+     "description": "The cipher tables, computed from public constants. The published image carries them.",
+     "source": "none (no client needed)",
+     "tool": "python tools/gen_blowfish_tables.py",
+     "paths": ["services/fe_blowfish_P.bin", "services/fe_blowfish_S.bin"]},
+    {"id": "fedata", "required": true, "build_only": false,
+     "description": "Spawn tables, item and skill parameters, map geometry and minimap art.",
+     "source": "your Fantasy Earth install",
+     "tool": "python tools/fedata_build.py --client <install>",
+     "paths": ["services/fedata/fe-fet-area.tsv"]}
+  ],
+  "volumes": [],
+  "ports": [
+    {"port": "54848", "protocol": "tcp", "service": "fellb", "host": "0.0.0.0"},
+    {"port": "54849", "protocol": "tcp", "service": "felobby", "host": "0.0.0.0"},
+    {"port": "54850", "protocol": "tcp", "service": "feworld", "host": "0.0.0.0"},
+    {"port": "8797", "protocol": "tcp", "service": "femap", "host": "127.0.0.1", "profile": "map"}
+  ],
+  "admin_module": "fe",
+  "notes": "The title plugin (fetitle) only fills the Viewer's profile screen; the game plays without it. The fedata tool needs Pillow on the host. The admin panel's world builder is reached through POL_ADMIN_GAME_FE_URL and _TOKEN (services/admingames.py), which this compose file does not set."
+}

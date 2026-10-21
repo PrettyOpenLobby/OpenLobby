@@ -39,7 +39,33 @@ function toast(msg, err) {
 // left off. This is a single page, so without it every reload dropped you on
 // Codes with an empty editor, which costs a click and a search every time the
 // server restarts underneath you.
-const TABS = [...document.querySelectorAll("nav button")].map((b) => b.dataset.tab);
+// The panel is six SECTIONS in the sidebar; each shows one or more VIEWS as
+// sub-tabs. A view is a <section id="tab-X">, or a part of one (`sub`: only
+// that section's [data-sub] panels of that name show). The hash names the
+// view, as it always has: #accounts, #gmcalls, #games/fmo/gates, #pml/<file>.
+const VIEWS = [
+  { id: "overview", group: "overview" },
+  { id: "accounts", group: "players", perm: "accounts_view" },
+  { id: "codes", group: "players", perm: "codes" },
+  { id: "gmcalls", group: "inbox", perm: "gm" },
+  { id: "reports", group: "inbox", perm: "reports" },
+  { id: "issues", group: "inbox", perm: "reports" },
+  { id: "games", group: "games" },
+  // PML Preview belongs to the PlayOnline Viewer's module (Games > POL Viewer)
+  { id: "pml", group: "games", perm: "pml" },
+  { id: "news", group: "news", perm: "news_edit" },
+  { id: "security", group: "settings", sub: "account" },
+  { id: "mods", group: "settings", tab: "security", sub: "mods", perm: "owner" },
+  { id: "alerts", group: "settings", tab: "security", sub: "alerts", perm: "settings" },
+  { id: "bots", group: "settings", perm: "owner" },
+  { id: "modules", group: "settings", perm: "owner" },
+  { id: "activity", group: "settings", tab: "security", sub: "activity", perm: "audit" },
+];
+const GROUP_TITLE = { overview: "Overview", players: "Players", inbox: "Inbox",
+                      games: "Games", news: "News", settings: "Settings" };
+const TABS = VIEWS.map((v) => v.id);
+const viewOf = (id) => VIEWS.find((v) => v.id === id);
+const tabOf = (id) => (viewOf(id) || {}).tab || id;
 
 // A path is the rest of the hash. It must be encoded -- the URL-cache pages are
 // named `index.pml%3Fcnt%3D2...` and an unencoded `%3F` would decode back to a
@@ -69,39 +95,58 @@ function writeHash(tab, path) {
 // keeps a moderator from clicking into a 403.
 const isOwner = () => SESSION.role !== "mod";
 const can = (p) => isOwner() || (SESSION.perms || []).includes(p);
-const TAB_PERM = { accounts: "accounts_view", codes: "codes", reports: "reports",
-                   issues: "reports", gmcalls: "gm", news: "news_edit", pml: "pml" };
-// Games has one permission per title ("games_<key>"); any of them opens the tab.
-const canGames = () => isOwner() || (SESSION.perms || []).some((p) => p.startsWith("games_"));
-const tabAllowed = (t) => t === "games" ? canGames()
-  : !TAB_PERM[t] || (TAB_PERM[t] === "owner" ? isOwner() : can(TAB_PERM[t]));
+// Games has permissions per game and per tool ("game.<key>[.<id>]", games.js);
+// any of them opens the section.
+const tabAllowed = (t) => {
+  const v = viewOf(t);
+  if (!v) return false;
+  if (t === "games") return canSeeGames();
+  return !v.perm || (v.perm === "owner" ? isOwner() : can(v.perm));
+};
 const visibleTabs = () => TABS.filter(tabAllowed);
+const GROUPS = Object.keys(GROUP_TITLE);
+const groupViews = (g) => VIEWS.filter((v) => v.group === g && tabAllowed(v.id));
+const visibleGroups = () => GROUPS.filter((g) => groupViews(g).length);
 
 function applyRole() {
-  document.querySelectorAll("nav button").forEach((b) => { b.hidden = !tabAllowed(b.dataset.tab); });
+  document.querySelectorAll(".side .grp").forEach((b) => { b.hidden = !groupViews(b.dataset.group).length; });
+  document.querySelectorAll(".subtabs button[data-tab]").forEach((b) => { b.hidden = !tabAllowed(b.dataset.tab); });
   document.querySelectorAll("[data-owner]").forEach((el) => { el.hidden = !isOwner(); });
   document.querySelectorAll("[data-perm]").forEach((el) => { el.hidden = !can(el.dataset.perm); });
   $("#mePanel").hidden = isOwner();
-  const sec = document.querySelector('nav button[data-tab="security"]');
-  sec.textContent = isOwner() ? "Security" : "My account";
+  const sec = document.querySelector('.subtabs button[data-tab="security"]');
+  sec.textContent = isOwner() ? "Sign-in" : "My account";
 }
 
 let CUR_TAB = "";
+const LAST_IN_GROUP = {};   // the view a section returns to
 function showTab(name) {
   if (!TABS.includes(name) || !tabAllowed(name)) name = visibleTabs()[0] || "overview";
   CUR_TAB = name;
-  document.querySelectorAll("nav button").forEach(
-    (x) => x.classList.toggle("active", x.dataset.tab === name));
+  const v = viewOf(name), tab = tabOf(name);
+  LAST_IN_GROUP[v.group] = name;
+  document.querySelectorAll(".side .grp").forEach(
+    (x) => x.classList.toggle("on", x.dataset.group === v.group));
+  document.querySelectorAll(".subtabs").forEach((n) => {
+    n.hidden = n.dataset.group !== v.group;
+    n.querySelectorAll("button[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  });
+  $("#gamesList").hidden = v.group !== "games";
+  $("#pageTitle").textContent = name === "pml" ? "PlayOnline Viewer" : GROUP_TITLE[v.group];
   document.querySelectorAll(".tab").forEach(
-    (x) => x.classList.toggle("active", x.id === "tab-" + name));
+    (x) => x.classList.toggle("active", x.id === "tab-" + tab));
+  const sect = $("#tab-" + tab);
+  if (v.sub) sect.querySelectorAll("[data-sub]").forEach(
+    (el) => el.classList.toggle("subhide", el.dataset.sub !== v.sub));
   if (name !== "gmcalls") stopGmDesk();
   document.body.classList.toggle("wide", name === "pml" || name === "games");
-  if (name === "pml") setTimeout(fitStage, 0);
+  document.body.classList.remove("sideopen");
+  if (name === "pml") { setTimeout(fitStage, 0); markViewerInSide(); }
   loadTab(name);
   return name;
 }
 
-// What each tab fetches when it is opened -- and again on Refresh / R.
+// What each view fetches when it is opened -- and again on Refresh / R.
 function loadTab(name, refresh) {
   if (name === "overview") loadOverview();
   if (name === "codes") loadCodes();
@@ -111,16 +156,16 @@ function loadTab(name, refresh) {
   if (name === "gmcalls") { loadGmCalls(); startGmDesk(); renderAlertBtn(); }
   if (name === "news") loadNews();
   if (name === "games") loadGames(refresh);
+  if (name === "bots") loadBots();
+  if (name === "modules") loadModules();
   // The PML index is big and cached server-side; fetched at boot, and again
   // only when asked.
   if (name === "pml" && refresh) PML_LIST_READY = loadPmlFileList();
-  if (name === "security") {
-    loadSession(); loadSessions();
-    if (isOwner()) loadMods();
-    if (can("audit")) loadAudit();
-    if (can("settings")) loadAlerts();
-    if (can("gm")) loadGmDesk();       // populates the GM Discord link panel
-  }
+  if (name === "pml" && !GAMES_LOADED && canSeeGames()) fetchGames(false).then(markViewerInSide);
+  if (name === "security") { loadSession(); loadSessions(); if (can("gm")) loadGmDesk(); }
+  if (name === "mods") loadMods();
+  if (name === "activity") loadAudit();
+  if (name === "alerts") loadAlerts();
 }
 
 async function applyHash() {
@@ -132,67 +177,31 @@ async function applyHash() {
   openPmlFile(path);
 }
 
-document.querySelectorAll("nav button").forEach((b) => {
+function goTab(tab) {
+  // Carry the open file or game with you, so leaving and coming back -- or
+  // refreshing while away -- does not lose it.
+  const before = location.hash;
+  location.hash = "#" + tab
+    + (tab === "pml" && ACTIVE_FILE ? "/" + encPath(histEntry()) : "")
+    + (tab === "games" && GAME_TOOL ? "/" + GAME_TOOL : "");
+  // Clicking the view you are already on fires no hashchange, so apply it
+  // here -- but only then, or every click would load its data twice.
+  if (location.hash === before) applyHash();
+}
+document.querySelectorAll(".subtabs button[data-tab]").forEach((b) => { b.onclick = () => goTab(b.dataset.tab); });
+document.querySelectorAll(".side .grp").forEach((b) => {
   b.onclick = () => {
-    // Carry the open file with you, so leaving PML and coming back -- or
-    // refreshing while away -- does not lose it.
-    const tab = b.dataset.tab;
-    const before = location.hash;
-    location.hash = "#" + tab
-      + (tab === "pml" && ACTIVE_FILE ? "/" + encPath(histEntry()) : "")
-      + (tab === "games" && GAME_TOOL ? "/" + GAME_TOOL : "");
-    // Clicking the tab you are already on fires no hashchange, so apply it
-    // here -- but only then, or every tab click would load its data twice.
-    if (location.hash === before) applyHash();
+    const g = b.dataset.group;
+    const last = LAST_IN_GROUP[g];
+    goTab(last && tabAllowed(last) ? last : (groupViews(g)[0] || {}).id || "overview");
   };
 });
 window.addEventListener("hashchange", applyHash);
+$("#menuBtn").onclick = () => document.body.classList.toggle("sideopen");
+$("#scrim").onclick = () => document.body.classList.remove("sideopen");
 
-// ---- games ----
-// Each title's own tools, served by the game's server and proxied by the panel
-// under /games/<key>/. The open tool is in the hash: #games/fmo/gates.
-let GAMES = [];
-let GAME_TOOL = "";
 
-async function loadGames(refresh) {
-  try { GAMES = (await api("/api/games")).games || []; } catch (e) { GAMES = []; toast(e.message, true); }
-  const want = parseHash().path || GAME_TOOL;
-  renderGames();
-  openGameTool(want, refresh);
-}
-
-function gameToolIds() {
-  return GAMES.flatMap((g) => g.tools.map((t) => g.key + "/" + t.id));
-}
-
-function renderGames() {
-  $("#gamesEmpty").hidden = GAMES.length > 0;
-  $("#gamesFrame").hidden = GAMES.length === 0;
-  $("#gamesList").innerHTML = GAMES.map((g) => `<div class="gx-game"><h3>${esc(g.title)}</h3>`
-    + g.tools.map((t) => `<button data-tool="${esc(g.key + "/" + t.id)}"`
-      + `${GAME_TOOL === g.key + "/" + t.id ? ' class="on"' : ""}>${esc(t.label)}</button>`).join("")
-    + "</div>").join("") || '<div class="gx-empty">None</div>';
-}
-
-function openGameTool(id, reload) {
-  const ids = gameToolIds();
-  if (!ids.length) return;
-  if (!ids.includes(id)) id = ids[0];
-  const [key, tid] = id.split("/");
-  const tool = GAMES.find((g) => g.key === key).tools.find((t) => t.id === tid);
-  const src = "/games/" + key + "/" + tool.path;
-  const fr = $("#gamesFrame");
-  if (reload || fr.getAttribute("src") !== src) fr.setAttribute("src", src);
-  GAME_TOOL = id;
-  writeHash("games", id);
-  document.querySelectorAll("#gamesList button").forEach(
-    (b) => b.classList.toggle("on", b.dataset.tool === id));
-}
-
-$("#gamesList").addEventListener("click", (e) => {
-  const b = e.target.closest("button[data-tool]");
-  if (b) openGameTool(b.dataset.tool);
-});
+// ---- games: games.js ----
 
 // ---- session / credentials ----
 // The panel is OPEN when no credential is set (first run, loopback bind), so
@@ -630,23 +639,12 @@ function renderAccounts() {
       `<td>${play}</td>` +
       `<td class="clients">${clients.length ? esc(clients.join(", ")) : "never signed in"}</td>` +
       `<td><div class="account-state"><span class="kind">Refusal</span>` +
-        `<span class="pill ${r.effective_reject_code ? "used" : "open"}" title="${esc(refusal + refusalTime)}">${esc(refusal)}</span>` +
-        (can("accounts_manage") ? `<button class="ghost" data-i="${i}" data-act="refusal">Set</button>` : "") + `</div>` +
+        `<span class="pill ${r.effective_reject_code ? "used" : "open"}" title="${esc(refusal + refusalTime)}">${esc(refusal)}</span></div>` +
         `<div class="account-state"><span class="kind">Notice</span>` +
-        `<span class="pill open" title="${esc(notice + noticeDelivery)}">${esc(notice)}</span>` +
-        (can("accounts_manage") ? `<button class="ghost" data-i="${i}" data-act="notice">Set</button>` : "") + `</div></td>` +
+        `<span class="pill open" title="${esc(notice + noticeDelivery)}">${esc(notice)}</span></div></td>` +
       `<td class="muted" style="white-space:nowrap" title="${esc(r.created_at || "")}">${esc(fmtWhen(r.created_at))}</td>` +
       `<td><div class="rowacts">` +
-        `<button class="ghost" data-i="${i}" data-act="detail">Details</button>` +
-        (can("accounts_manage") ?
-          `<button class="ghost" data-i="${i}" data-act="grant" title="Grant or revoke content">Content</button>` +
-          `<button class="ghost" data-i="${i}" data-act="pw">Password</button>` +
-          `<button class="ghost" data-i="${i}" data-act="tok">Tokens</button>` +
-          `<button class="ghost" data-i="${i}" data-act="kick">Kick</button>` +
-          `<button class="${r.ext_mail ? "act" : "ghost"}" data-i="${i}" data-act="ext" ` +
-            `title="Mail to and from the internet as ${esc(outsideAddr(r))}">` +
-            `Ext mail: ${r.ext_mail ? "on" : "off"}</button>` : "") +
-        (can("accounts_delete") ? `<button class="danger" data-i="${i}" data-act="del">Delete</button>` : "") +
+        `<button class="ghost" data-i="${i}" data-act="detail">Open</button>` +
       `</div></td>` + `</tr>`;
   }).join("");
 }
@@ -1184,8 +1182,8 @@ function triPaint(pfx, kind, r, after) {
 //     ticket was KNOCKED here (gmd.KNOCK_ONLY). The duty switch is presence
 //     for the team; it no longer decides what callers see;
 //   * replies go out under the GM's own nick; authserv answers the client's
-//     roster request with the GM's `HA...:G` record so it is drawn as the GM.
-//     The nick/raw probes live under Diagnostics;
+//     roster request with the GM's `HA...:G` record so it is drawn as the GM
+//     (/api/gm-say still accepts nick and raw, but nothing sends them now);
 //   * each request has its OWN room (gmd names it #gmcallNNN from the request
 //     number and records it in the ticket). The chat shown is always the
 //     selected request's room; with nothing selected, no chat shows. Pins
@@ -3002,6 +3000,7 @@ async function loadNews() {
     bindNewsForm();
     renderNewsStatus();
     loadNewsOutputs();
+    loadMaint();
     renderNewsPreview();
   } catch (e) { toast("News: " + e.message, true); }
 }
@@ -3255,6 +3254,67 @@ $("#nwPubGo").onclick = async () => {
   finally { $("#nwPubGo").disabled = false; }
 };
 
+// The maintenance warning (maintnotice.py, core/broadcast.py).
+async function loadMaint() {
+  try {
+    const j = await api("/api/maintenance");
+    renderMaintChoices(j);
+    const shown = j.files.filter((f) => f.posted);
+    $("#maintStatus").textContent = shown.length
+      ? `Notice up on ${shown.length} of ${j.files.length} title pages: ${shown[0].subject || "(no subject)"}`
+      : `No notice up (${j.files.length} title pages can show one).`;
+  } catch (e) { $("#maintStatus").textContent = ""; }
+}
+// The title folders a notice can go on, by the names people know them by.
+const MAINT_TITLE_NAMES = { ff11: "FFXI", tetra: "Tetra Master", jan: "JongHoLow",
+                            fmo: "Front Mission Online", dc: "Dirge of Cerberus", fe: "Fantasy Earth" };
+function renderMaintChoices(j) {
+  const keep = new Set(maintTitles());
+  $("#maintTitles").innerHTML = (j.titles || []).map((t) =>
+    `<label class="chip"><input type="checkbox" value="${esc(t)}"${keep.has(t) ? " checked" : ""}>` +
+    `${esc(MAINT_TITLE_NAMES[t] || t)}</label>`).join("") || `<span class="muted">No title pages found.</span>`;
+  const games = Object.entries(j.games || {});
+  $("#maintGamesWrap").hidden = !games.length;
+  if ($("#maintGames").dataset.done !== "1" || $("#maintGames").children.length !== games.length) {
+    $("#maintGames").innerHTML = games.map(([k, title]) =>
+      `<label class="chip"><input type="checkbox" value="${esc(k)}" checked>${esc(title)}</label>`).join("");
+    $("#maintGames").dataset.done = "1";
+  }
+}
+const maintTitles = () => [...document.querySelectorAll("#maintTitles input:checked")].map((i) => i.value);
+const maintGames = () => [...document.querySelectorAll("#maintGames input:checked")].map((i) => i.value);
+$("#maintPostBtn").onclick = async () => {
+  const subject = $("#maintSubject").value.trim(), text = $("#maintText").value.trim();
+  if (!subject || !text) return toast("A notice needs a subject and a text.", true);
+  if (!confirm("Show this notice on the title pages now?")) return;
+  try {
+    const r = await post("/api/maintenance", { action: "notice", subject, text, titles: maintTitles() });
+    toast(`Notice up on ${r.written.length} title page${r.written.length === 1 ? "" : "s"}`);
+  } catch (e) { toast("Notice failed: " + e.message, true); }
+  loadMaint();
+};
+$("#maintClearBtn").onclick = async () => {
+  try {
+    const r = await post("/api/maintenance", { action: "clear", titles: maintTitles() });
+    toast(`Notice taken down from ${r.restored.length} title page${r.restored.length === 1 ? "" : "s"}`);
+  } catch (e) { toast("Take down failed: " + e.message, true); }
+  loadMaint();
+};
+$("#maintMsgBtn").onclick = async () => {
+  const subject = $("#maintSubject").value.trim().slice(0, 15), text = $("#maintText").value.trim();
+  if (!subject || !text) return toast("A message needs a subject and a text.", true);
+  if (!confirm(`Send "${subject}" to everyone online now? The subject is cut to 15 characters.`)) return;
+  try {
+    const r = await post("/api/maintenance", { action: "message", subject, text, games: maintGames() });
+    const sent = `Sent ${r.messages} message${r.messages === 1 ? "" : "s"} to ${r.members} member${r.members === 1 ? "" : "s"} online`;
+    const g = Object.entries(r.games || {});
+    const failed = g.filter(([, v]) => !v.ok);
+    if (!g.length) toast(sent);
+    else if (!failed.length) toast(`${sent}, and announced in ${g.length} game${g.length === 1 ? "" : "s"}.`);
+    else toast(`${sent}, but announcing failed in ${failed.map(([k, v]) => k + " (" + v.msg + ")").join(", ")}`, true);
+  } catch (e) { toast("Message failed: " + e.message, true); }
+};
+
 // Whether what players see is up to date.
 async function loadNewsOutputs() {
   try {
@@ -3349,9 +3409,9 @@ async function loadOverview() {
     card("codes", "Unused codes", codes ? unused : "?", `of ${C.length} total`) +
     card("gmcalls", "Open GM calls", calls ? openCalls.length : "?", duty,
          openCalls.length ? "warn" : "") +
-    card("issues", "Open issue reports", issues ? openI : "?",
+    card("issues", "Open bug reports", issues ? openI : "?",
          (newI ? `${newI} new, ` : "") + `${I.length} in total`, newI ? "warn" : "") +
-    card("reports", "Open user reports", reports ? openR : "?",
+    card("reports", "Open player reports", reports ? openR : "?",
          (newR ? `${newR} new, ` : "") + `${R.length} in total`, newR ? "warn" : "") +
     card("news", "Announcements", news && news.items ? news.items.length : "?",
          news && news.writable === false ? "publishing unavailable" : "published",
@@ -3369,8 +3429,8 @@ async function loadOverview() {
   openCalls.slice(0, 4).forEach((r) => att.push(li("gmcalls",
     `GM call from <b>${esc(r.handle || "?")}</b>: ${esc(r.subject || "(no subject)")}`,
     esc(ago(isoMs(r.received_at))))));
-  if (newI) att.push(li("issues", `${newI} new issue report${newI === 1 ? "" : "s"}`, ""));
-  if (newR) att.push(li("reports", `${newR} new user report${newR === 1 ? "" : "s"}`, ""));
+  if (newI) att.push(li("issues", `${newI} new bug report${newI === 1 ? "" : "s"}`, ""));
+  if (newR) att.push(li("reports", `${newR} new player report${newR === 1 ? "" : "s"}`, ""));
   notPlayable.slice(0, 4).forEach((r) => att.push(li("accounts",
     `<code class="mono">${esc(r.polid)}</code> has titles that cannot be played yet`,
     `${(r.unlinked || []).length} not linked`, ` data-q="${esc(r.polid)}"`)));
@@ -3381,7 +3441,19 @@ async function loadOverview() {
   setBadge("#issuesBadge", newI);
   setBadge("#reportsBadge", newR);
   loadOnline();
-  if (can("health")) loadHealth();
+  if (can("health")) { loadHealth(); loadOps(); }
+  if (can("audit")) loadRecentActivity();
+  if (canSeeGames()) fetchGames(false).then(renderOverviewGames);
+}
+
+async function loadRecentActivity() {
+  let r;
+  try { r = await api("/api/audit?limit=8"); } catch (e) { return; }
+  $("#ovActivity").innerHTML = (r.rows || []).map((a) =>
+    `<li data-go="activity"><span class="t1"><b>${esc(a.actor)}</b> ${esc(a.action)}` +
+    `${a.target ? " <span class=\"muted\">" + esc(a.target) + "</span>" : ""}${a.ok ? "" : " (refused)"}</span>` +
+    `<span class="t2">${esc(ago(a.at * 1000))}</span></li>`).join("")
+    || `<li class="empty">Nothing yet.</li>`;
 }
 
 // Anything with data-go="tab" or "tab:fieldId" navigates; data-q pre-fills the
@@ -3503,13 +3575,13 @@ document.addEventListener("keydown", (e) => {
   }
   if (document.querySelector(".modal.show")) return;
   if (e.key === "/") {
-    const f = document.querySelector(`#tab-${CUR_TAB} [data-search]`)
+    const f = document.querySelector(`#tab-${tabOf(CUR_TAB)} [data-search]`)
       || (CUR_TAB === "pml" ? $("#fSearch") : null);
     if (f) { e.preventDefault(); f.focus(); f.select(); }
   } else if (e.key === "r" || e.key === "R") {
     $("#refreshBtn").click();
-  } else if (/^[1-9]$/.test(e.key) && visibleTabs()[+e.key - 1]) {
-    location.hash = "#" + visibleTabs()[+e.key - 1];
+  } else if (/^[1-9]$/.test(e.key) && visibleGroups()[+e.key - 1]) {
+    document.querySelector(`.side .grp[data-group="${visibleGroups()[+e.key - 1]}"]`).click();
   }
 });
 
@@ -3534,8 +3606,7 @@ async function loadMods() {
   const short = { gm: "GM desk", codes: "Codes", reports: "Reports", accounts_view: "Look up accounts" };
   body.innerHTML = MODS.map((m, i) =>
     `<tr><td><b>${esc(m.username)}</b></td>` +
-    `<td>${m.perms.length ? m.perms.map((p) => `<span class="permchip" title="${esc(MOD_LABELS[p] || "")}">${esc(short[p] || p)}</span>`).join("")
-                          : `<span class="muted">nothing yet</span>`}</td>` +
+    `<td>${m.perms.length ? permChips(m.perms, short) : `<span class="muted">nothing yet</span>`}</td>` +
     `<td>${m.perms.includes("codes") ? `${m.codes_24h} / ${m.code_limit ?? "no limit"}` : `<span class="muted">-</span>`}</td>` +
     `<td>${m.disabled ? `<span class="pill used">disabled</span>` : `<span class="pill open">active</span>`}</td>` +
     `<td class="muted">${m.last_seen ? esc(ago(m.last_seen * 1000)) + ` (${m.sessions} signed in)` : "not signed in"}</td>` +
@@ -3585,14 +3656,83 @@ function openModModal(m) {
   $("#modLimit").value = m && m.code_limit !== null && m.code_limit !== undefined ? m.code_limit : "";
   $("#modPw").value = "";
   $("#modPwWrap").hidden = !!m;
-  $("#modPerms").innerHTML = Object.entries(MOD_LABELS).map(([k, label]) =>
-    `<label><input type="checkbox" value="${esc(k)}" ${m && m.perms.includes(k) ? "checked" : ""}> ${esc(label)}</label>`).join("");
+  renderModPerms(new Set(m ? m.perms : []));
   const own = new Set(((m && m.titles) || []).map(String));
   $("#modTitles").innerHTML = Object.entries(CONTENT).map(([code, name]) =>
     `<label class="chip"><input type="checkbox" value="${esc(code)}" ${own.has(code) ? "checked" : ""}> ${esc(name)}</label>`).join("");
   $("#modModal").classList.add("show");
   (m ? $("#modPerms input") : $("#modUser")).focus();
 }
+// The permissions, the panel's own first, then one row per game: the box to
+// see the game, then one per tool and action ("game.<key>[.<id>]").
+function permGroups() {
+  const core = [], games = {};
+  for (const [k, label] of Object.entries(MOD_LABELS)) {
+    const m = /^game\.([a-z0-9]+)(?:\.(.+))?$/.exec(k);
+    if (!m) { core.push([k, label]); continue; }
+    const g = games[m[1]] || (games[m[1]] = { key: m[1], title: m[1], view: null, items: [] });
+    if (!m[2]) { g.view = k; g.title = label.replace(/^See /, "").split(":")[0]; }
+    else g.items.push([k, label.split(": ").slice(1).join(": ") || m[2]]);
+  }
+  return { core, games: Object.values(games) };
+}
+
+function permChips(perms, short) {
+  const { games } = permGroups();
+  const mine = new Set(perms);
+  const core = perms.filter((p) => !p.startsWith("game."));
+  return core.map((p) => `<span class="permchip" title="${esc(MOD_LABELS[p] || "")}">${esc(short[p] || p)}</span>`).join("")
+    + games.filter((g) => mine.has(g.view) || g.items.some(([k]) => mine.has(k))).map((g) => {
+      const n = g.items.filter(([k]) => mine.has(k)).length;
+      return `<span class="permchip" title="${esc(g.items.filter(([k]) => mine.has(k)).map(([, l]) => l).join(", "))}">`
+        + `${esc(g.title)}${n ? " (" + n + ")" : ""}</span>`;
+    }).join("");
+}
+
+// Starting points; the owner adjusts the boxes after.
+const MOD_PRESETS = {
+  "GM": { core: ["gm", "accounts_view", "accounts_manage", "reports", "codes"], games: "view",
+          tools: /^(kick|announce|chars|help|gm|notices)$/ },
+  "Event host": { core: ["news_edit", "news_publish"], games: "view",
+                  tools: /^(events|bonanza|notices|announce|banner|presents)$/ },
+  "Support": { core: ["reports", "accounts_view", "gm"], games: "view", tools: /^(help|faq)$/ },
+  "Watcher": { core: ["accounts_view", "audit", "health"], games: "view", tools: null },
+};
+
+function renderModPerms(have) {
+  const { core, games } = permGroups();
+  const box = (k, label, cls) => `<label class="${cls || ""}"><input type="checkbox" value="${esc(k)}"`
+    + `${have.has(k) ? " checked" : ""}> ${esc(label)}</label>`;
+  $("#modPerms").innerHTML =
+    `<div class="perm-presets">${Object.keys(MOD_PRESETS).map((n) =>
+      `<button type="button" class="ghost sm" data-preset="${esc(n)}">${esc(n)}</button>`).join("")}`
+    + `<span class="hint">start from a role, then adjust</span></div>`
+    + `<div class="perm-h">The panel</div><div class="perm-core">${core.map(([k, l]) => box(k, l)).join("")}</div>`
+    + (games.length ? `<div class="perm-h">Games <span class="hint">(seeing a game is separate from changing anything in it)</span></div>`
+      + games.map((g) => `<div class="perm-game">${g.view ? box(g.view, g.title, "perm-view") : `<b>${esc(g.title)}</b>`}`
+        + `<div class="perm-tools">${g.items.map(([k, l]) => box(k, l, "chip")).join("")}</div></div>`).join("") : "");
+}
+
+$("#modPerms").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-preset]");
+  if (!b) return;
+  const p = MOD_PRESETS[b.dataset.preset];
+  const { games } = permGroups();
+  const want = new Set(p.core);
+  for (const g of games) {
+    if (p.games === "view" && g.view) want.add(g.view);
+    for (const [k] of g.items) if (p.tools && p.tools.test(k.split(".").pop())) want.add(k);
+  }
+  document.querySelectorAll("#modPerms input[type=checkbox]").forEach((c) => { c.checked = want.has(c.value); });
+});
+// ticking a tool also lets the moderator see that game
+$("#modPerms").addEventListener("change", (e) => {
+  const c = e.target;
+  if (!c.checked || !/^game\.[a-z0-9]+\./.test(c.value)) return;
+  const view = $(`#modPerms input[value="${c.value.split(".").slice(0, 2).join(".")}"]`);
+  if (view) view.checked = true;
+});
+
 function closeModModal() { $("#modModal").classList.remove("show"); MOD_EDIT = null; }
 $("#modAdd").onclick = () => openModModal(null);
 $("#modCancel").onclick = closeModModal;
@@ -3705,10 +3845,6 @@ function limitCodeChips() {
 async function loadOnline() {
   let r;
   try { r = await api("/api/online"); } catch (e) { return; }
-  $("#ovGames").innerHTML = (r.games || []).map((g) =>
-    `<span class="gamechip${g.fresh ? "" : " stale"}" title="${g.fresh ? "" : "No update for " + g.age + " s"}">` +
-    `<b>${g.fresh ? g.count : "?"}</b>${esc(g.label)}</span>`).join("")
-    || `<span class="muted">No game services report sessions here.</span>`;
   const list = $("#ovOnline");
   if (r.accounts === null) { list.innerHTML = ""; return; }
   list.innerHTML = r.accounts.slice(0, 12).map((a) =>
@@ -3750,6 +3886,88 @@ async function loadHealth(fresh) {
   $("#ovHealthFoot").innerHTML = (d ? `Disk: ${esc(fmtBytes(d.free))} free of ${esc(fmtBytes(d.total))}. ` : "") +
     `Checked ${esc(ago(r.checked_at * 1000))}. <a class="acct-link" id="healthRecheck">Check now</a>`;
   $("#healthRecheck").onclick = () => loadHealth(true);
+}
+
+// ---- Overview: server checks and one-click fixes ----
+// A host runner (outside the admin container, with the rights to restart
+// things) writes data/ops/status.json and picks up the fix requests the panel
+// files; adminops.ops_status / ops_request. With no runner the panel hides.
+let OPS_FAST = null;
+
+async function loadOps() {
+  let r;
+  try { r = await api("/api/ops"); } catch (e) { return; }
+  const panel = $("#opsPanel");
+  if (!r.available) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const checks = r.checks || [];
+  const bad = checks.filter((c) => c.state === "bad").length;
+  const warn = checks.filter((c) => c.state === "warn").length;
+  const sum = $("#opsSum");
+  if (r.stale) {
+    sum.className = "ops-sum bad";
+    sum.textContent = `The server checker last reported ${ago(r.at * 1000)}. ` +
+      "What is shown below may be out of date, and the fix buttons are off.";
+  } else if (r.running) {
+    const a = (r.actions || {})[r.running.action] || {};
+    sum.className = "ops-sum";
+    sum.textContent = `Running: ${a.name || r.running.action}...`;
+  } else if (bad) {
+    sum.className = "ops-sum bad";
+    sum.textContent = bad === 1 ? "1 thing is broken." : `${bad} things are broken.`;
+  } else if (warn) {
+    sum.className = "ops-sum";
+    sum.textContent = warn === 1 ? "Working, with 1 thing to look at." : `Working, with ${warn} things to look at.`;
+  } else {
+    sum.className = "ops-sum ok";
+    sum.textContent = "Everything is working.";
+  }
+  const busy = r.stale || !!r.running;
+  const order = {bad: 0, warn: 1, ok: 2, info: 3};
+  $("#opsList").innerHTML = checks.slice().sort((x, y) => order[x.state] - order[y.state]).map((c) => {
+    const dot = c.state === "info" ? "" : c.state;
+    const detail = c.at ? `${c.detail.replace(/\.$/, "")}, ${ago(c.at * 1000)}.` : c.detail;
+    const a = c.fix && (r.actions || {})[c.fix];
+    const btn = a && r.can_fix
+      ? `<button class="${c.state === "bad" ? "act" : "ghost"}" data-fix="${esc(c.fix)}"${busy ? " disabled" : ""}>${esc(a.name)}</button>`
+      : "";
+    const rs = c.restarted;
+    const when = rs ? new Date(rs.at * 1000).toLocaleString([], {month: "short", day: "numeric",
+      hour: "numeric", minute: "2-digit"}) : "";
+    const quiet = c.state === "ok" || c.state === "info";
+    const restarted = rs && !quiet
+      ? `<div class="ops-restart" title="${esc(rs.container)}">Last restart ${esc(ago(rs.at * 1000))} ` +
+        `(${esc(when)}): ${esc(rs.reason)}.</div>`
+      : "";
+    return `<li class="${esc(c.state)}${quiet ? " quiet" : ""}"><span class="dot ${esc(dot)}"></span>` +
+      `<div class="ops-text"><div class="ops-name">${esc(c.name)}</div>` +
+      `<div class="ops-detail">${esc(detail)}</div>${restarted}</div>${btn}</li>`;
+  }).join("");
+  $("#opsList").querySelectorAll("button[data-fix]").forEach((b) => {
+    b.onclick = () => runFix(b.dataset.fix, (r.actions || {})[b.dataset.fix] || {});
+  });
+  const hist = (r.history || []).slice(-3).reverse();
+  $("#opsFoot").innerHTML = `Checked ${esc(ago(r.at * 1000))}.` + (hist.length
+    ? `<div class="ops-hist">Recent fixes: ` + hist.map((h) =>
+      `<span class="${h.ok ? "" : "fail"}">${esc(h.name)} by ${esc(h.by || "?")} ` +
+      `${esc(ago(h.at * 1000))}: ${esc(h.result)}</span>`).join("<br>") + `</div>`
+    : "");
+  // Poll quickly while a fix runs, so the result shows up without a reload.
+  if (r.running && !OPS_FAST) OPS_FAST = setInterval(loadOps, 3000);
+  if (!r.running && OPS_FAST) { clearInterval(OPS_FAST); OPS_FAST = null; }
+}
+
+async function runFix(action, a) {
+  if (!confirm(`${a.name || action}?\n\n${a.warning || ""}`)) return;
+  try {
+    const res = await api("/api/ops/fix", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action})
+    });
+    toast(res.message);
+  } catch (e) { toast(e.message, true); return; }
+  if (!OPS_FAST) OPS_FAST = setInterval(loadOps, 3000);
+  loadOps();
 }
 
 // The Overview refreshes itself while it is on screen.
@@ -3815,6 +4033,9 @@ async function openAccount(polid) {
       `<button class="ghost" data-a="tok">Tokens</button>` +
       `<button class="ghost" data-a="refusal">Refusal</button>` +
       `<button class="ghost" data-a="notice">Notice</button>` +
+      (ACCT_ROW() ? `<button class="${ACCT_ROW().ext_mail ? "act" : "ghost"}" data-a="ext" ` +
+        `title="Mail to and from the internet as ${esc(outsideAddr(ACCT_ROW()))}">` +
+        `Ext mail: ${ACCT_ROW().ext_mail ? "on" : "off"}</button>` : "") +
       `<button class="ghost" data-a="kick">Kick</button>` : "") +
     (can("accounts_delete") ? `<button class="danger" data-a="del">Delete</button>` : "");
   $("#acctActions").hidden = !$("#acctActions").innerHTML;
@@ -3826,9 +4047,14 @@ $("#acctModal").onclick = (e) => { if (e.target === $("#acctModal")) closeAccoun
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("#acctModal").classList.contains("show")) closeAccount();
 });
+// The account's row in the Accounts list, for what only the list carries
+// (outside mail); null when the list has not been loaded.
+const ACCT_ROW = () => (ACCT && typeof ACCOUNTS !== "undefined"
+  ? ACCOUNTS.find((x) => x.polid === ACCT.polid) || null : null);
 $("#acctActions").onclick = (e) => {
   const b = e.target.closest("button[data-a]");
   if (!b || !ACCT) return;
+  if (b.dataset.a === "ext") { if (ACCT_ROW()) toggleExtMail(ACCT_ROW(), b); return; }
   const account = ACCT, polid = account.polid, a = b.dataset.a;
   closeAccount();
   if (a === "grant") {
@@ -3947,6 +4173,73 @@ $("#checksSave").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
+// ---- Discord bots (owner): adminbots.py ----
+// One card per bot. The token field is write-only: the server never sends a
+// token back, only whether one is stored and its last four characters.
+function botState(b) {
+  const a = b.applied || {};
+  if (b.has_token && !b.token_ok) return ["off", "Sealed under another POL_BOT_KEY"];
+  if (b.live) return ["live", "Running on this token"];
+  if (b.has_token) return ["wait", a.at ? "Restarting onto the new values" : "Waiting for its service"];
+  if (a.source === "env") return ["env", "Running on .env"];
+  return ["off", a.at ? "No token" : "Not running"];
+}
+function botCard(b) {
+  const [cls, label] = botState(b);
+  const who = b.username ? `${esc(b.username)} · app ${esc(b.app_id)}` : (b.app_id ? `app ${esc(b.app_id)}` : "not set up here");
+  const when = b.updated_at ? ` · saved ${esc(ago(b.updated_at * 1000))} by ${esc(b.updated_by || "?")}` : "";
+  return `<div class="panel" data-bot="${esc(b.bot)}">
+    <h3>${esc(b.title)} <span class="pill ${cls}">${esc(label)}</span></h3>
+    <div class="sub">${who}${when}</div>
+    <div class="sub">${b.port ? `Web page: port <b>${esc(b.port)}</b> on the server` : "Web page: through the Tetra Master board, /pol"}
+      · command <code>/${esc(b.command)}</code></div>
+    <ul class="botcheck">${(b.checklist || []).map((c) =>
+      `<li class="${esc(c.state)}"><span class="mark">${{ ok: "✓", todo: "•", warn: "!", info: "i" }[c.state] || "•"}</span>` +
+      `<span><b>${esc(c.label)}</b> ${esc(c.detail)}</span></li>`).join("")}</ul>
+    ${b.checked_at ? `<div class="hint">Discord checked ${esc(ago(b.checked_at * 1000))}</div>` : ""}
+    <label>Bot token ${b.has_token ? `<span class="muted">(saved, ends ${esc(b.token_hint || "?")})</span>` : ""}</label>
+    <input type="password" class="botToken" autocomplete="off" spellcheck="false"
+      placeholder="${b.has_token ? "Paste a new token to replace it" : "Paste the bot token"}">
+    <label>${b.bot === "bridge" ? "Interactions base address" : "Board page address"}</label>
+    <input type="text" inputmode="url" class="botUrl" value="${esc(b.url)}" spellcheck="false"
+      placeholder="${b.bot === "bridge" ? "https://tm.example.com/pol" : `https://${esc(b.bot)}.example.com`}">
+    ${b.endpoint ? `<div class="hint">Interactions endpoint: <code>${esc(b.endpoint)}</code></div>` : ""}
+    <div class="rowacts">
+      <button class="act sm" data-act="save">Save</button>
+      ${b.invite ? `<a class="ghost sm btnlink" href="${esc(b.invite)}" target="_blank" rel="noopener">Invite</a>` : ""}
+      <button class="ghost sm" data-act="endpoint" ${b.has_token && b.url ? "" : "disabled"}
+        title="Point Discord's interactions at this board (it must already be running on this token)">Set endpoint</button>
+      <button class="ghost sm" data-act="refresh" ${b.has_token ? "" : "disabled"}>Check</button>
+      <button class="ghost sm" data-act="clear" ${b.has_token ? "" : "disabled"}>Forget token</button>
+    </div>
+    <div class="hint">.env fallback: <code>${esc(b.env_prefix)}_DISCORD_BOT_TOKEN</code></div>
+  </div>`;
+}
+async function loadBots() {
+  let r;
+  try { r = await api("/api/bots"); } catch (e) { $("#botsList").innerHTML = `<div class="panel muted">${esc(e.message)}</div>`; return; }
+  $("#botsNoKey").hidden = r.can_seal;
+  $("#botsList").innerHTML = r.bots.map(botCard).join("");
+}
+$("#botsList").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const card = btn.closest("[data-bot]"), bot = card.dataset.bot, act = btn.dataset.act;
+  const body = { bot, action: act };
+  if (act === "save") {
+    body.token = card.querySelector(".botToken").value.trim();
+    body.url = card.querySelector(".botUrl").value.trim();
+  }
+  if (act === "clear" && !confirm(`Forget the ${bot} token? Its service goes back to its .env token.`)) return;
+  btn.disabled = true;
+  try {
+    const r = await post("/api/bots", body);
+    const d = r.discord;
+    toast(d ? `Saved: ${d.username || d.name} (app ${d.app_id})` : (r.detail || "Done"));
+    loadBots();
+  } catch (err) { toast(err.message, true); btn.disabled = false; }
+});
+
 // ---- phone layout: label every card-table cell with its column ----
 // Watches the tbodies rather than asking every renderer to remember.
 function labelCells(tbody) {
@@ -3993,8 +4286,37 @@ $("#installBtn").onclick = async () => {
 function renderAppState() {}
 renderAppState();
 
+// ---- theme: system, light or dark (per browser) ----
+const THEMES = ["system", "light", "dark"];
+function applyTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  $("#themeBtn").textContent = "Theme: " + t.charAt(0).toUpperCase() + t.slice(1);
+}
+$("#themeBtn").onclick = () => {
+  const cur = store.get("theme", "system");
+  const next = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length];
+  store.set("theme", next);
+  applyTheme(next);
+};
+
+// ---- the Inbox badge: GM calls waiting plus new reports and issues ----
+function syncInboxBadge() {
+  const n = ["#gmBadge", "#reportsBadge", "#issuesBadge"].reduce((sum, id) => {
+    const el = $(id);
+    return sum + (el && !el.hidden ? (parseInt(el.textContent, 10) || 0) : 0);
+  }, 0);
+  const b = $("#inboxBadge");
+  b.textContent = n > 99 ? "99+" : String(n);
+  b.hidden = !n;
+  b.classList.toggle("info", !!n && $("#gmBadge").hidden);
+}
+
 // ---- boot ----
 (async function () {
+  applyTheme(store.get("theme", "system"));
+  new MutationObserver(syncInboxBadge).observe($("#inboxSubtabs"),
+    { subtree: true, childList: true, characterData: true, attributes: true });
   await loadSession();
   applyRole();
   renderMeState();

@@ -1,0 +1,189 @@
+"""Reading a game's live status into the one shape the panel draws.
+
+A module's `live` is a callable taking the module and returning a status:
+
+    {"up":       True / False / None (unknown),
+     "online":   players on now, or None,
+     "players":  [{"name", "where", "detail"}],     at most MAX_ROWS
+     "rooms":    [{"name", "detail", "state"}],     rooms, tables, matches...
+     "rooms_label": what a room is called in this game ("tables"),
+     "summary":  one line about what is going on,
+     "facts":    [{"label", "value"}],              a few more numbers
+     "error":    why the status could not be read, or None,
+     "source":   where it came from, for the module's About box,
+     "at":       when it was read}
+
+`board(...)` builds one from a status JSON (the game's own live.json or a
+board's /state.json; the side games share one layout, see generic()) and the
+live-session markers the POL titles publish. A module passes `parse` to pick
+out what only its game has.
+"""
+import json
+import time
+import urllib.error
+import urllib.request
+
+MAX_ROWS = 200
+MAX_BYTES = 4 << 20
+TIMEOUT = 3.0
+MARKER_FRESH = 60.0
+
+
+def fetch(where):
+    """The JSON at a URL or in a file. Raises OSError/ValueError."""
+    if where.startswith(("http://", "https://")):
+        req = urllib.request.Request(where, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            data = r.read(MAX_BYTES + 1)
+    else:
+        with open(where, "rb") as f:
+            data = f.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise ValueError("status document is too large")
+    return json.loads(data)
+
+
+def marker_count(names):
+    """(players, newest stamp) summed over fresh live-session markers; players
+    is None when no marker is fresh."""
+    try:
+        import live_sessions
+    except Exception:                          # noqa: BLE001 -- no store here
+        return None, None
+    total, fresh, newest = 0, False, None
+    now = time.time()
+    for n in names:
+        d = live_sessions.read_marker(n)
+        if not d:
+            continue
+        stamp = float(d.get("stamp") or 0)
+        if 0 <= now - stamp < MARKER_FRESH:
+            fresh = True
+            total += int(d.get("count") or 0)
+            newest = max(newest or 0, stamp)
+    return (total if fresh else None), newest
+
+
+def plural(n, word, words=None):
+    """'1 player', '3 players' (`words` when the plural is not word + s)."""
+    return "%s %s" % (n, word if n == 1 else (words or word + "s"))
+
+
+def _text(v, limit=80):
+    return " ".join(str(v).split())[:limit] if v not in (None, "") else ""
+
+
+def _player(p):
+    if isinstance(p, str):
+        return {"name": _text(p), "where": "", "detail": ""}
+    if not isinstance(p, dict):
+        return None
+    name = p.get("name") or p.get("handle") or p.get("nick") or p.get("char")
+    if not name:
+        return None
+    where = (p.get("where") or p.get("zone") or p.get("place") or p.get("room")
+             or p.get("lobby") or p.get("area") or "")
+    bits = []
+    for k in ("job", "cls", "level", "clan", "game"):
+        if p.get(k) not in (None, ""):
+            bits.append(str(p[k]))
+    return {"name": _text(name, 40), "where": _text(where), "detail": _text(" ".join(bits))}
+
+
+def _room(r):
+    if not isinstance(r, dict):
+        return None
+    name = r.get("name") or r.get("title") or (("Room %s" % r["id"]) if "id" in r else "")
+    if not name:
+        return None
+    n, cap = r.get("players"), r.get("max") or r.get("capacity")
+    if isinstance(n, list):
+        n = len(n)
+    detail = []
+    if n is not None:
+        detail.append("%s%s %s" % (n, "/%s" % cap if cap else "", "player" if n == 1 and not cap else "players"))
+    for k in ("mode", "stage", "rule", "course"):
+        if r.get(k):
+            detail.append(_text(r[k], 30))
+    return {"name": _text(name, 50), "detail": ", ".join(detail),
+            "state": _text(r.get("state") or r.get("status") or "", 20)}
+
+
+def generic(doc):
+    """The fields every status JSON here agrees on: up, error, online (an int,
+    a list of players, or {"total", "players"}), players, rooms, matches."""
+    st = {"up": doc.get("up", True) if isinstance(doc, dict) else None,
+          "online": None, "players": [], "rooms": [], "rooms_label": "rooms",
+          "summary": "", "facts": [], "error": None}
+    if not isinstance(doc, dict):
+        st["error"] = "status is not a JSON object"
+        return st
+    if doc.get("error"):
+        st["error"] = _text(doc["error"], 200)
+    on = doc.get("online")
+    players = doc.get("players")
+    if isinstance(on, dict):
+        players = players or on.get("players")
+        on = on.get("total")
+    if isinstance(on, list):
+        players = players if players is not None else on
+        on = len(on)
+    if isinstance(on, bool) or not isinstance(on, (int, float)):
+        on = doc.get("count") if isinstance(doc.get("count"), int) else None
+    st["online"] = int(on) if on is not None else (len(players) if isinstance(players, list) else None)
+    st["players"] = [x for x in map(_player, players or []) if x][:MAX_ROWS] \
+        if isinstance(players, list) else []
+    rooms = doc.get("rooms")
+    if isinstance(rooms, list):
+        st["rooms"] = [x for x in map(_room, rooms) if x][:MAX_ROWS]
+    matches = doc.get("matches")
+    if isinstance(matches, list) and matches:
+        st["facts"].append({"label": "matches playing", "value": len(matches)})
+    return st
+
+
+def board(parse=None, markers=(), default="", counted=()):
+    """A `live` for MODULE: the status JSON at POL_ADMIN_GAME_<KEY>_LIVE (or
+    `default`), read with generic() then `parse(doc, status)`, and the player
+    count from `markers` when the JSON has none or cannot be read. `counted`
+    are (marker, label) pairs whose count is something other than players
+    (Tetra Master's marker counts matches); they become facts."""
+    def read(m):
+        st = _read(m)
+        for name, label in counted:
+            n, _stamp = marker_count([name])
+            if n is None:
+                continue
+            if st is None:
+                st = {"up": True, "online": None, "players": [], "rooms": [], "rooms_label": "rooms",
+                      "summary": "", "facts": [], "error": None, "source": "live-session marker"}
+            st["facts"].append({"label": label, "value": n})
+        return st
+
+    def _read(m):
+        where = m.env("LIVE") or default
+        st = None
+        if where:
+            try:
+                doc = fetch(where)
+                st = generic(doc)
+                if parse:
+                    parse(doc, st)
+                st["source"] = "status JSON"
+            except (OSError, ValueError, urllib.error.URLError) as exc:
+                st = {"up": False, "online": None, "players": [], "rooms": [],
+                      "rooms_label": "rooms", "summary": "", "facts": [],
+                      "error": "status JSON unreadable (%s)" % _text(getattr(exc, "reason", exc), 120),
+                      "source": "status JSON"}
+        if markers:
+            n, _stamp = marker_count(markers)
+            if st is None:
+                if n is None:
+                    return None
+                st = {"up": True, "online": n, "players": [], "rooms": [], "rooms_label": "rooms",
+                      "summary": "", "facts": [], "error": None, "source": "live-session marker"}
+            elif n is not None and (st["online"] is None or st.get("error")):
+                st["online"], st["up"] = n, True
+                st["source"] += " and live-session marker"
+        return st
+    return read

@@ -209,6 +209,8 @@ def _push_deliver(rec, db=None):
         return _push_deliver_mail(rec, db)      # carries its own record
     if rec.get("kind") == "handleswitch":
         return _push_deliver_handleswitch(rec)  # two presence broadcasts
+    if rec.get("kind") == "grpstatus":
+        return _push_deliver_grpstatus(rec)     # a 7:11 per-group status
     missing = [k for k in ("kind", "handle", "event") if k not in rec]
     if missing:
         log("authserv", f"push: ignoring malformed record, no {'/'.join(missing)}"
@@ -440,6 +442,67 @@ def _shared_groups(db, watcher_handle, subject_handle):
     except Exception as exc:
         log("authserv", f"presence: shared-group lookup failed ({exc!r})")
         return []
+
+
+#: 7:11 `+0x6F` as the client sends it: its status enum + 1 (polcore
+#: 0x37e9b80 accepts 0, 1, 4 and writes 1, 2, 5). 1 online, 2 away, 5 the
+#: Hidden / offline-in-this-group choice (labels inferred from the Online
+#: Status list order, not seen on screen).
+_GROUP_STATUS_AWAY = 2
+_GROUP_STATUS_HIDDEN = 5
+
+
+def _group_status_state(db, gid, subject_handle, state):
+    """The presence state group `gid` is told for `subject_handle`.
+
+    A member's per-group status (7:11 KChgMyGrpStatus, and the "Change status
+    on all lists" form, which the client sends as one 7:11 per group) narrows
+    what that group sees: Hidden there reads offline, Away reads away. It
+    never brightens: an offline or Hidden member stays offline everywhere.
+    The group-scoped record is the only carrier other members read it from
+    (the 7:12 member record has no status field; polcore's roster installer
+    0x37e9650 takes it from the push). POL_GROUP_STATUS_PUSH=0 ignores it.
+    """
+    if state == "offline" or os.environ.get("POL_GROUP_STATUS_PUSH", "1") != "1":
+        return state
+    try:
+        row = db.execute(
+            "SELECT gm.my_status FROM group_member gm JOIN handle h"
+            " ON h.handle_name = gm.member_name WHERE gm.group_id = %s"
+            " AND h.id = %s", (int(gid), int(subject_handle))).fetchone()
+    except Exception:
+        return state
+    code = int(row["my_status"] or 0) if row is not None else 0
+    if code == _GROUP_STATUS_HIDDEN:
+        return "offline"
+    if code == _GROUP_STATUS_AWAY:
+        return "away"
+    return state
+
+
+def push_group_status(db, member_id, handle_id, gid):
+    """Spool a re-assertion of `member_id`'s presence after a 7:11, so the
+    other members of the group see the new per-group status without a relog.
+    Delivered by authserv (`_push_deliver_grpstatus`)."""
+    return _push_emit({"kind": "grpstatus", "member": int(member_id),
+                       "handle": int(handle_id), "gid": int(gid)}, db)
+
+
+def _push_deliver_grpstatus(rec):
+    """Re-broadcast a member's presence on one handle after a 7:11. Runs in
+    authserv; the per-group state is applied inside `_broadcast_presence`."""
+    try:
+        member, handle = int(rec.get("member", 0)), int(rec.get("handle", 0))
+    except (TypeError, ValueError):
+        log("authserv", f"push[grpstatus]: malformed record {rec!r}")
+        return 0
+    if not member or not handle or not presence.PRESENCE.is_online(member):
+        return 0
+    state = _status_push_state(memberstatus._member_status(member))
+    n = pushrecord._broadcast_presence(member, state, only_handle=handle)
+    log("authserv", f"push[grpstatus]: member {member} group {rec.get('gid')} "
+                    f"-> {state}, {n} watcher session(s) told")
+    return n
 
 
 def _group_only_watchers(db, subject_member_id, exclude_members=()):
@@ -833,6 +896,12 @@ def _push_deliver_presencerows(rec, db=None):
                 online = accounts.member_online(db, fmember)
             except Exception:
                 pass                      # on doubt, assert offline
+            if online:
+                try:
+                    # A Hidden friend is asserted offline, like a logged-out one.
+                    online = not memberstatus._member_hidden(fmember)
+                except Exception:
+                    pass
             if online:
                 away = False
                 try:
@@ -1328,6 +1397,21 @@ def _title_zone_watcher():
         wake.clear()
 
 
+def _status_push_state(code):
+    """The presence state a 4:5 status code is pushed to friends as.
+
+    01 (and unknown) -> back, 02/03/04 -> away, 05 Hidden -> OFFLINE: SE's push
+    for an Invisible friend rendered OFFLINE at once, as the retail service did
+    (the friend row turned OFFLINE on the spot). The member's own session is
+    untouched; `_broadcast_presence` applies the same rule to every other push
+    about them. POL_STATUS_HIDDEN_OFFLINE=0 pushes Hidden as away again.
+    """
+    if code == memberstatus._STATUS_INVISIBLE and \
+            os.environ.get("POL_STATUS_HIDDEN_OFFLINE", "1") == "1":
+        return "offline"
+    return "away" if memberstatus._status_is_away(code) else "back"
+
+
 def _member_status_watcher():
     """Daemon: a 4:5 STATUS change is a presence change, so push it.
 
@@ -1338,11 +1422,13 @@ def _member_status_watcher():
     unrelated event happened to push -- which for a user who just set themselves
     Away means their friends learn about it at their next login.
 
-    Away/back rather than online/offline: the friend-list slot already models
-    away-ness (`_PRESENCE_ACTION`, `_PRESENCE_FIELD_STATE`), and "invisible" is
-    served as away too -- the one thing we must NOT do is push "offline" for it,
-    because a member who is still connected and still answering keepalives is
-    not offline, and `_peer_online` would immediately contradict us.
+    Away/back for every code but Hidden: the friend-list slot already models
+    away-ness (`_PRESENCE_ACTION`, `_PRESENCE_FIELD_STATE`). HIDDEN (0x05) is
+    pushed as OFFLINE, as the retail service did (the friend's row turned
+    OFFLINE at once). The member stays connected; every push and
+    serve about them asks `memberstatus._member_hidden`, so `_peer_online`, the
+    presence burst and the group records agree with this push.
+    POL_STATUS_HIDDEN_OFFLINE=0 restores the old served-as-away reading.
 
     WARNING: **THE PUSH ITSELF IS INFERRED, NOT CAPTURED.** SE's own presence push for a
     status change lands on the FRIEND's connection, and the 2026-08-19 capture is
@@ -1376,7 +1462,7 @@ def _member_status_watcher():
                 if not presence.PRESENCE.is_online(mid):
                     continue
                 code = now.get(member, 0)
-                state = "away" if memberstatus._status_is_away(code) else "back"
+                state = _status_push_state(code)
                 log("authserv", f"presence[status]: member={mid} "
                                 f"status={code:#04x} -> {state} -- pushing")
                 pushrecord._broadcast_presence(mid, state)

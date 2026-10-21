@@ -989,8 +989,7 @@ def _spool_gm_line(row, text):
     which authserv already announced into the room's member table on JOIN) --
     if we sent under the knocker's Discord name, the client's member-table
     resolver (app.dll chatwin+0x350) would not find a speaker for it and the
-    line would arrive intact and render as nothing (FACTS "GM CHAT, THE ROOM
-    ITSELF").
+    line would arrive intact and render as nothing.
 
     CONFIDENTIALITY. The line goes across as bare text, no `[knocker]` prefix:
     the player only ever needs to see that a GM answered (the phoenix and the

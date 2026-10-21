@@ -137,8 +137,8 @@ def _lobby_linger(conn, peer):
 #:
 #: The REAL fix is `EthApi = PCAP-Bridged` (the console's own stack over raw
 #: frames, which cannot hit this bug class at all), but that renumbers the
-#: console onto the physical LAN and takes its DNS with it -- see
-#: PS2_LAN_CANNOT_REACH_TAILNET_ADVERTISE. This is the half with no side effects.
+#: console onto the physical LAN and takes its DNS with it -- see the
+#: per-client DNS answer in stub.py. This is the half with no side effects.
 #:
 #: **THIS MUST NOT TOUCH PC USERS, AND THE PORT ALONE IS NOT ENOUGH TO GUARANTEE
 #: THAT.** 51300 vs 51304 is a clean 100% split for the VIEWER's PML fetches

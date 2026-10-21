@@ -70,8 +70,7 @@ something modern, and still logs a refusal by name.
 ## The form markup is TRANSCRIBED, not inferred
 
 It used to be a guess. It no longer is: SE's own account pages were recovered
-from the PS2 HTTP cache (`E:/ps2hdd/urlcache-1815`, `urlcache-us` -- decoded by
-work/ps2/poldcf.py), including a live `<form>`/`<formaction>` pair and the
+from the PS2 HTTP cache (the console's `urlcache` files), including a live `<form>`/`<formaction>` pair and the
 shared includes for this exact flow. See the `forms` section below for the
 recipe and the `_ART_STYLES` note for the stylesheet. Two corrections fell out
 of that:
@@ -1254,6 +1253,80 @@ def signup_over_limit(peer, now=None):
     return None
 
 
+def forwarded_peer(peer, xff):
+    """The address to count a caller against: the peer itself, or, when the
+    peer is loopback or private, the first address in its X-Forwarded-For.
+
+    Loopback and private peers are the TLS terminators and a reverse proxy
+    on the LAN, which may say who they are fronting; a remote caller's own
+    X-Forwarded-For is never read, since it would name whoever it likes.
+    An unparsable header leaves the peer as it was.
+    """
+    if xff and _countable_peer(peer) is None:
+        first = xff.split(",", 1)[0].strip()
+        try:
+            ipaddress.ip_address(first)
+            return first
+        except ValueError:
+            pass
+    return peer
+
+
+#: Refused registration codes are counted per address, the shape of the
+#: lobby's login lockout (authserv._lockout_policy): this many refusals inside
+#: the window and the address is told to come back later, until they age out.
+#: Only a countable address is counted (see _countable_peer), so the TLS
+#: route is covered only where the terminator forwards the client address.
+#: POL_REGCODE_LOCKOUT_FAILS=0 turns it off.
+REGCODE_LOCK_FAILS = int(os.environ.get("POL_REGCODE_LOCKOUT_FAILS") or "5")
+REGCODE_LOCK_WINDOW = float(os.environ.get("POL_REGCODE_LOCKOUT_WINDOW_S") or "900")
+ERR_CODE_LOCKED = ("Too many registration codes have been refused from this "
+                   "connection.\nPlease wait a while and try again.")
+
+_RC_FAILS = {}                  # countable address -> [unix time of each refusal]
+_RC_LOCK = threading.Lock()
+
+
+def _rc_recent(who, now):
+    recent = [t for t in _RC_FAILS.get(who, ()) if now - t < REGCODE_LOCK_WINDOW]
+    if recent:
+        _RC_FAILS[who] = recent
+    else:
+        _RC_FAILS.pop(who, None)
+    return recent
+
+
+def regcode_locked(peer, now=None):
+    """True when this address has had its share of refused codes."""
+    who = _countable_peer(peer)
+    if not who or REGCODE_LOCK_FAILS <= 0 or REGCODE_LOCK_WINDOW <= 0:
+        return False
+    with _RC_LOCK:
+        return len(_rc_recent(who, now or time.time())) >= REGCODE_LOCK_FAILS
+
+
+def note_regcode_failure(peer, now=None):
+    """Count one refused code against the address; says when it locks."""
+    who = _countable_peer(peer)
+    if not who or REGCODE_LOCK_FAILS <= 0:
+        return
+    now = now or time.time()
+    with _RC_LOCK:
+        recent = _rc_recent(who, now) + [now]
+        _RC_FAILS[who] = recent
+        n = len(recent)
+    if n == REGCODE_LOCK_FAILS:
+        log(f"*** {who} LOCKED OUT of registration codes: {n} refused in "
+            f"{REGCODE_LOCK_WINDOW:g}s; refused until they age out ***")
+
+
+def clear_regcode_failures(peer):
+    who = _countable_peer(peer)
+    if who:
+        with _RC_LOCK:
+            _RC_FAILS.pop(who, None)
+
+
 def note_signup(peer, now=None):
     """Record a SUCCESSFUL sign-up. Failures are not counted, so a player who
     mistypes a handle three times can still finish."""
@@ -1792,7 +1865,7 @@ def page_login(kinou, tok, ret_url, title, error=None, polid="", known=False):
 #: player was looking at the screen.
 #:
 #: UNPROVEN, which is why it starts as a probe that only LOGS. `$_HANDLEID` is a
-#: real name from the engine's own table (FACTS, read out of the PS2 `pml.pex`)
+#: real name from the engine's own table (read out of the PS2 `pml.pex`)
 #: but nothing on this server has ever exercised it.
 #:
 #: It goes LAST in the query string deliberately. An unknown variable renders as
@@ -1833,6 +1906,8 @@ def _log_ident_probe(db, q):
     verdict = ("EMPTY" if not raw
                else "VARIABLE-ERROR (wrong name)"
                if raw.startswith("(") or "Error" in raw
+               else "NOT SUBSTITUTED (the literal name came back)"
+               if raw.startswith("$")
                else "RESOLVED")
     log(f"ident probe: {IDENT_VAR} -> {raw!r}  [{verdict}]")
     if verdict != "RESOLVED":
@@ -2194,6 +2269,10 @@ def page_pwchange(tok, ret_url, sess, error=None):
 
 def page_pwchange_done(ret_url):
     inner = (_line(TOP, "Your PlayOnline password has been changed.", indent=0)
+             + _line(TOP + 2 * LINE, "If the Viewer saves your password,",
+                     indent=0)
+             + _line(TOP + 3 * LINE, "change it in its member settings too.",
+                     indent=0)
              + _bottom(("hint", "Use the new password the next time you "
                                 "log in."), indent=0))
     return _page("PlayOnline", _chrome(
@@ -2220,7 +2299,7 @@ def page_code_done(ret_url, granted):
 #: reachable and offers member-details and mail-account operations too. Telling
 #: someone their address book is "part of PlayOnline's billing service" is worse
 #: than saying nothing.
-UNAVAIL_BILLING = ("It was part of PlayOnline's billing service.",
+UNAVAIL_BILLING = ("It was part of the PlayOnline billing service.",
                    "Nothing on this server is charged for.",
                    "Content is granted by registering a registration code.")
 UNAVAIL_PROFILE = ("This server does not keep the contact details the real "
@@ -2230,6 +2309,9 @@ UNAVAIL_PROFILE = ("This server does not keep the contact details the real "
 UNAVAIL_MAIL = ("Mail account settings cannot be changed from here.",
                 "The address is issued with the account and is fixed.",
                 None)
+UNAVAIL_CANCEL = ("Membership is not cancelled from the Viewer.",
+                  "Accounts on this server are free and are never billed.",
+                  "Ask the server operator to close an account.")
 
 
 def page_kinou_unavailable(kinou, ret_url, label, reason=UNAVAIL_BILLING):
@@ -2262,6 +2344,19 @@ KINOU_UNAVAILABLE = {
     16: ("Register/Change Payment Method", UNAVAIL_BILLING),
     12: ("Content ID purchase", UNAVAIL_BILLING),
     28: ("Contract extension", UNAVAIL_BILLING),
+    # Reached from the Viewer itself, not from a menu page: the login-message
+    # (LM) dialog's buttons open these (app.dll table 0x4cf6d68, opener
+    # 0x049ff425 with ret_url=toviewer: or tologin:). 36 = LM-16 "This
+    # month's fees have been billed ... select Now", 18 = LM-08 Reactivate,
+    # 19 = LM-20..23 Proceed (unpaid fees). They 404'd, which the Viewer
+    # shows as POL-1405.
+    36: ("Monthly fee statement", UNAVAIL_BILLING),
+    18: ("Reactivate service", UNAVAIL_BILLING),
+    19: ("Pay outstanding fees", UNAVAIL_BILLING),
+    # 29 = Dirge ID page "Data Transfer Purchase" (service_code=0010);
+    # 21 = the panel-era Support guide button for cancelling membership.
+    29: ("Data Transfer Purchase", UNAVAIL_BILLING),
+    21: ("Cancel membership", UNAVAIL_CANCEL),
     # 14 (cancellation) and 15 (reactivation) used to sit here. They are the two
     # entries on this menu that need no billing to mean something: a licence is
     # granted by a registration code, so cancelling and restoring it is entirely
@@ -2673,6 +2768,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _client_ip(self):
+        """The address the limits count: the peer, or what a terminator or
+        proxy on loopback/LAN says it is fronting (forwarded_peer)."""
+        return forwarded_peer(self.client_address[0],
+                              self.headers.get("X-Forwarded-For"))
+
     def _query(self):
         parts = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
@@ -2764,12 +2865,18 @@ class Handler(BaseHTTPRequestHandler):
                 # means "you do not need one", not "whatever you type is
                 # ignored". Only an empty one walks past, and only here.
                 if code and not _signup_open():
+                    who = self._client_ip()
+                    if regcode_locked(who):
+                        log(f"step 3 code refused for {who}: locked out")
+                        return page_step3(tok, error=ERR_CODE_LOCKED)
                     db = accounts.connect()
                     try:
                         if accounts.check_regcode(db, code) is None:
+                            note_regcode_failure(who)
                             return page_step3(tok, error="That registration code is "
                                                          "not valid or has already "
                                                          "been used.")
+                        clear_regcode_failures(who)
                     finally:
                         db.close()
             return page_step4(tok)
@@ -3096,12 +3203,15 @@ class Handler(BaseHTTPRequestHandler):
                 # Authenticated above (current password verified). Step 2 shows
                 # the new-password form; step 3 commits it.
                 if step == 2:
+                    log(f"kinou=17 new-password form served to {sess['polid']}")
                     return page_pwchange(tok, ret_url, sess)
                 pw1 = q.get("pw1") or ""
                 bad = accounts.check_password_policy(pw1)
                 if bad:
+                    log(f"kinou=17 refused for {sess['polid']}: {bad}")
                     return page_pwchange(tok, ret_url, sess, error=bad)
                 if pw1 != (q.get("pw2") or ""):
+                    log(f"kinou=17 refused for {sess['polid']}: the two do not match")
                     return page_pwchange(tok, ret_url, sess,
                                          error="The two passwords do not match.")
                 accounts.set_member_password(db, sess["login"], pw1)
@@ -3111,11 +3221,17 @@ class Handler(BaseHTTPRequestHandler):
 
             # kinou 31 -- redeem a registration code.
             if step == 2:
+                log(f"kinou=31 code form served to {sess['polid']}")
                 return page_code(tok, ret_url, sess)
             code = "-".join(q[f"rc{i}"] for i in range(5) if q.get(f"rc{i}"))
             if not code:
                 return page_code(tok, ret_url, sess, error=ERR_5103)
+            who = self._client_ip()
+            if regcode_locked(who):
+                log(f"kinou=31 code refused for {sess['polid']}: {who} locked out")
+                return page_code(tok, ret_url, sess, error=ERR_CODE_LOCKED)
             if accounts.check_regcode(db, code) is None:
+                note_regcode_failure(who)
                 # Unknown, or already redeemed. SE distinguishes these (5103 vs
                 # 5534) and so do we, but only for a code that EXISTS -- saying
                 # "already used" about a code we have never issued would confirm
@@ -3127,6 +3243,7 @@ class Handler(BaseHTTPRequestHandler):
                 log(f"kinou=31 code refused for {sess['polid']} "
                     f"({'used' if row is not None else 'unknown'})")
                 return page_code(tok, ret_url, sess, error=err)
+            clear_regcode_failures(who)
             granted = accounts.redeem_regcode(db, code, sess["polid"]) or []
             for c in granted:
                 accounts.grant_content(db, sess["member_id"], c)
@@ -3186,9 +3303,10 @@ class Handler(BaseHTTPRequestHandler):
         # retried fetch of a sign-up that already succeeded must keep showing
         # the same ID rather than turn into a refusal.
         if not done:
-            why = signup_over_limit(self.client_address[0])
+            who = self._client_ip()
+            why = signup_over_limit(who)
             if why:
-                log(f"sign-up refused for {self.client_address[0]}: {why}")
+                log(f"sign-up refused for {who}: {why}")
                 return page_step4(tok, error=why)
         if done:
             log(f"step 6 re-served for {done['polid']} (account already issued)")
@@ -3237,7 +3355,7 @@ class Handler(BaseHTTPRequestHandler):
             st["account"] = {"polid": acct["polid"], "handle": acct["handle"],
                              "contents": acct["contents"], "mail": acct["mail"],
                              "pw": pw, "mail_pw": pw}
-            note_signup(self.client_address[0])
+            note_signup(self._client_ip())
             can_rdt = rdt_representable(pw, acct["mail"], acct["polid"])
             if not can_rdt:
                 # See RDT_UNREPRESENTABLE: a value here would be truncated by
@@ -3331,6 +3449,15 @@ class Handler(BaseHTTPRequestHandler):
                                         "No function requested."), 404)
                 return
             kinou = int(kinou)
+            if (kinou == KINOU_DISCORD and "property" in q and not q.get("t")):
+                # The Viewer's OWN request for 90 (built at app.dll 0x049ff425,
+                # always with area_kbn/login_pf/property and no token): the EU
+                # LM-01 "Regarding Unpaid Fees" button. Our Discord page is
+                # reached only from Member Information, with a token.
+                log(f"kinou_id=90 from the Viewer (LM dialog): not available")
+                self._send(page_kinou_unavailable(
+                    kinou, ret_url, "Regarding unpaid fees", UNAVAIL_BILLING))
+                return
             if kinou in KINOU_ACCOUNT:
                 self._send(self._account_step(kinou, q))
                 return
@@ -3350,9 +3477,12 @@ class Handler(BaseHTTPRequestHandler):
             if kinou != KINOU_REGISTER:
                 # Everything else the client might ask this CGI for. Logged
                 # above, so an unexpected kinou_id shows up as a real data point.
-                self._send(page_message(
-                    "PlayOnline",
-                    f"Function {kinou} is not available on this server."), 404)
+                # A 404 here is POL-1405 on the client with no way out; the
+                # Not Available page has an Exit. Logged above, so an
+                # unexpected kinou_id is still a data point.
+                log(f"kinou_id={kinou} is not implemented: Not Available page")
+                self._send(page_kinou_unavailable(kinou, ret_url, "This option",
+                                                  UNAVAIL_BILLING))
                 return
             # The wizard's ENTRY request carries no `step` -- app.dll asks for
             # `?kinou_id=20&ret_url=tologin:&area_kbn=&login_pf=&property=&
@@ -3522,24 +3652,71 @@ def describe_hello(b):
         return f"could not parse hello: {exc!r}"
 
 
-def _splice(a, b):
+#: How long the console's socket stays open after the upstream has finished,
+#: waiting for the console to close first. The upstream (sslterm, the portal)
+#: is local and finishes a whole wallpaper in a fraction of a second; our FIN
+#: then reaches the console before the Viewer has read the reply, and the
+#: Viewer drops the connection with the tail still unread (a 136 KB wallpaper
+#: stopped at 119 KB, the console answered with a RST, 2026-10-14). Same rule
+#: as the lobby's POL_LOBBY_LINGER.
+_PASSTHROUGH_LINGER = float(os.environ.get("POL_UCS_PASSTHROUGH_LINGER", "30"))
+
+
+#: Rate for the console side of a TLS passthrough (bytes per chunk, ms per
+#: chunk). The PS2 Viewer decrypts into a 64 KiB buffer and empties it to disk
+#: as it goes; a reply that arrives faster than it writes fills the buffer and
+#: the Viewer gives up. A wallpaper (110-205 KB) from the local terminator came
+#: in one burst and stopped at exactly 65,536 decrypted bytes every time, while
+#: greeting cards (all under 64 KiB) never could. Same numbers the portal uses
+#: for the PS2 on plain HTTP (POL_PS2_CHUNK / POL_PS2_CHUNK_DELAY_MS).
+#: POL_UCS_TLS_CHUNK=0 sends unpaced.
+_TLS_CHUNK = int(os.environ.get("POL_UCS_TLS_CHUNK", "1400"))
+_TLS_CHUNK_DELAY = float(os.environ.get("POL_UCS_TLS_CHUNK_DELAY_MS", "5")) / 1000.0
+
+
+def _pump(a, b, pace=False):
+    """Copy a -> b until a reaches end of stream or fails. With `pace`, at most
+    _TLS_CHUNK bytes per _TLS_CHUNK_DELAY. Time spent waiting for `a` earns no
+    credit: a reply that follows a pause is paced from its first byte, not let
+    through in a burst to catch up."""
+    rate = (_TLS_CHUNK / _TLS_CHUNK_DELAY) if pace and _TLS_CHUNK > 0 and _TLS_CHUNK_DELAY > 0 else 0
+    t0, sent = None, 0
     try:
         while True:
             data = a.recv(65536)
             if not data:
                 break
-            b.sendall(data)
+            if not rate:
+                b.sendall(data)
+                continue
+            for i in range(0, len(data), _TLS_CHUNK):
+                now = time.monotonic()
+                if t0 is None or t0 + sent / rate < now:
+                    t0 = now - sent / rate          # behind schedule: no banked time
+                piece = data[i:i + _TLS_CHUNK]
+                b.sendall(piece)
+                sent += len(piece)
+                due = t0 + sent / rate
+                now = time.monotonic()
+                if due > now:
+                    time.sleep(due - now)
     except OSError:
         pass
-    finally:
-        for s in (a, b):
-            try:
-                s.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
 
 
-def _passthrough(conn, upstream_host, upstream_ip, port):
+def _close_both(conn, up):
+    for s in (conn, up):
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _passthrough(conn, upstream_host, upstream_ip, port, pace=False):
     """Relay a non-TLS connection to the real content host, unchanged.
 
     51305 carries TWO different things: the portal fetches PML from
@@ -3559,8 +3736,25 @@ def _passthrough(conn, upstream_host, upstream_ip, port):
         conn.close()
         return
     log(f"passthrough -> {upstream_host}[{upstream_ip}]:{port}")
-    threading.Thread(target=_splice, args=(conn, up), daemon=True).start()
-    threading.Thread(target=_splice, args=(up, conn), daemon=True).start()
+    console_done = threading.Event()
+
+    def console_to_up():
+        _pump(conn, up)
+        console_done.set()
+        try:
+            up.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    def up_to_console():
+        _pump(up, conn, pace)
+        # The reply is all queued for the console. The console closes first;
+        # only a console that never does gets our FIN, after the linger.
+        console_done.wait(_PASSTHROUGH_LINGER)
+        _close_both(conn, up)
+
+    threading.Thread(target=console_to_up, daemon=True).start()
+    threading.Thread(target=up_to_console, daemon=True).start()
 
 
 def _resolve_passthrough(cfg, port):
@@ -3702,7 +3896,7 @@ def serve(port, plain=False):
                         log(f"{addr[0]} could not peek the hello: {exc}")
                     log(f"{addr[0]} TLS (hello {head.hex()}) -> terminator "
                         f"{ssl3_host}[{ip}]:{ssl3_port}")
-                    _passthrough(conn, ssl3_host, ip, ssl3_port)
+                    _passthrough(conn, ssl3_host, ip, ssl3_port, pace=True)
                     return
                 try:
                     tls = ctx.wrap_socket(conn, server_side=True)

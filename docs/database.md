@@ -201,6 +201,7 @@ in and play, and each key expires on its own. Key names are shown without
 | `memberstatus:<member id>` | hash `code`, `at`: the 4:5 presence status | 12 hours, plus a minute |
 | `rooms:live` | the room registry `authsess` publishes for the room browser in `login`, JSON | `POL_ROOM_RESTORE_WINDOW` (default 6 hours) after the last change |
 | `contentauth:rows` | the per-login content auth values (contentauth.py), JSON list | `POL_CONTENT_AUTH_TTL` (default 24 hours) after the last one |
+| `contentauth:h:<hex>` | one credential hash the lobby filed at 4:5: `{sid, member_id, zone, peer_ip, at}`. A title decodes the 52-byte credential blob in its first packet (`contentauth.decode_blob`) and looks the hash up here to learn the member | `POL_CONTENT_AUTH_TTL` |
 | `push:queue` | pushes the lobby queued for `authsess` to deliver, one JSON record each | when delivered |
 | `push:work` | the push `authsess` is delivering right now | when delivered |
 | `authkick:queue` | the admin panel's Kick requests for `authsess`, `{"polid", "reply", "expires"}` | when read; the panel withdraws one nobody read within 5 seconds |

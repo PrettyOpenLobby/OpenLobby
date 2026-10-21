@@ -74,6 +74,7 @@ import gmchat  # noqa: E402  -- the GM chat record language and its spool
 #: was never told. Importing it binds no socket -- `serve()` does that.
 import gmd  # noqa: E402
 import gmnotices  # noqa: E402  -- the GM notices list and its data.pml
+import maintnotice  # noqa: E402  -- forced news: the maintenance warning
 import gmduty  # noqa: E402  -- who is on duty, and Discord links
 #: The database layer's error types (the connections come from accounts and
 #: adminusers). Named so, because `db` is every connection's name below.
@@ -83,7 +84,9 @@ from polcore import db as polcore_db  # noqa: E402
 import adminusers  # noqa: E402
 #: GM-call alerts, code expiry, and the Overview's status probes.
 import adminops  # noqa: E402
+import adminbots  # noqa: E402
 import admingames  # noqa: E402  -- the Games section's tool proxy
+import adminmodules  # noqa: E402  -- one module per game (adminmodules/)
 import webpush  # noqa: E402
 
 try:
@@ -905,6 +908,30 @@ def _request_knock(ticket, action=0, wait=_KICK_WAIT):
     return json.loads(answer)
 
 
+#: The broadcast to everyone online is sent by authsess the same way
+#: (core/broadcast.py owns these key names).
+_BROADCAST_QUEUE = "broadcast:queue"
+_BROADCAST_REPLY = "broadcast:reply:"
+
+
+def _request_broadcast(subject, text, wait=15.0):
+    """Ask the running authsess to message every online member. Returns its
+    answer; raises TimeoutError, withdrawing the request, when none answered."""
+    from polcore import kv
+    reply = _BROADCAST_REPLY + secrets.token_hex(8)
+    raw = json.dumps({"reply": reply, "expires": time.time() + wait,
+                      "subject": subject, "text": text})
+    kv.push(_BROADCAST_QUEUE, raw)
+    deadline = time.monotonic() + wait
+    answer = None
+    while answer is None and time.monotonic() < deadline:
+        answer = kv.pop(reply, timeout=max(0.1, min(1.0, deadline - time.monotonic())))
+    if answer is None:
+        kv.lrem(_BROADCAST_QUEUE, raw)
+        raise TimeoutError("no auth service answered the broadcast request")
+    return json.loads(answer)
+
+
 def _db():
     return accounts.connect()
 
@@ -1019,7 +1046,7 @@ def _session_valid(s, fps):
 
 def _perms_for(s):
     if s.get("role") != "mod":
-        return sorted(adminusers.PERMS)
+        return sorted(adminusers.perm_labels())
     row = _mod_row(s.get("uid"))
     return adminusers.perms_of(row) if row else []
 
@@ -1152,6 +1179,18 @@ def _auth_required():
     return bool(ADMIN_PASSWORD) or _stored_cred() is not None
 
 
+ADMIN_BIND = os.environ.get("POL_ADMIN_BIND", "0.0.0.0")
+
+
+def _open_panel_refused():
+    """True when the panel has no credential and is not bound to loopback.
+
+    Open is the first-run state, and it is only safe while nothing off the host
+    can reach it. The bind is what decides that; the caller's address cannot,
+    because inside a container every request arrives from the bridge."""
+    return ADMIN_BIND not in ("127.0.0.1", "::1", "localhost")
+
+
 def _verify_login(user, pw):
     """Check (user, pw) against the stored credential AND the env override.
 
@@ -1235,7 +1274,7 @@ _WRITABLE_CACHE = []
 def _rand_code(groups=5, glen=4):
     # Unambiguous alphabet (no O/0/I/1/L) so a spoken/printed code is unmistakable.
     alpha = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-    return "-".join("".join(random.choice(alpha) for _ in range(glen))
+    return "-".join("".join(secrets.choice(alpha) for _ in range(glen))
                     for _ in range(groups))
 
 
@@ -1297,12 +1336,14 @@ _GET_PERMS = {
     "/api/account-footprint": ("accounts_manage", "accounts_delete"),
     "/api/online": "any", "/api/push/key": "gm",
     "/api/news": "news_edit", "/api/news/outputs": "news_edit",
-    "/api/news/preview": "news_edit", "/api/news/art": "news_edit",
+    "/api/news/art": "news_edit",
     "/api/pml-list": "pml", "/api/pml-load": "pml", "/api/pml-refs": "pml",
     "/api/pml-resolve": "pml", "/api/page": "pml",
+    "/api/maintenance": "news_edit",
     "/api/audit": "audit", "/api/health": "health", "/api/alerts": "settings",
+    "/api/ops": "health",
     # the list is cut to the caller's games; /games/<key>/ checks its own
-    "/api/games": "any",
+    "/api/games": "any", "/api/modules": "any",
 }
 #: Path prefixes, for routes that carry a path of their own. /art/ draws the
 #: pictures in both the PML preview and the news preview.
@@ -1326,14 +1367,18 @@ _POST_PERMS = {
     # dry run (the "what will change" list) is part of editing.
     "/api/news": "news_edit", "/api/news/render": "news_edit",
     "/api/news/publish": "news_edit",
+    "/api/maintenance": "news_edit",
     "/api/pml-expand": "pml",
     "/api/alerts": "settings",
+    # each action checks its own game.<key>.<id> permission
+    "/api/modules/action": "any",
 }
 
 #: What the audit log calls each change. A POST not named here is not logged
 #: (the PML preview and the random-code button change nothing).
 _AUDIT_ACTIONS = {
     "/api/credentials": "changed the owner login",
+    "/api/ops/fix": "ran a server fix",
     "/api/codes": "made a code", "/api/codes/void": "voided a code",
     "/api/sessions/revoke": "signed out a session",
     "/api/grant": "granted content", "/api/revoke": "revoked content",
@@ -1353,7 +1398,9 @@ _AUDIT_ACTIONS = {
     "/api/account-delete": "deleted an account",
     "/api/news": "saved announcements", "/api/news/publish": "published announcements",
     "/api/mods": "moderator", "/api/me/password": "changed their own password",
+    "/api/maintenance": "posted or cleared a maintenance warning",
     "/api/alerts": "changed alert settings",
+    "/api/bots": "Discord bot",
     "/api/push/subscribe": "turned on GM call alerts",
     "/api/push/unsubscribe": "turned off GM call alerts",
 }
@@ -1374,6 +1421,11 @@ def _audit(actor, role, action, target=None, detail=None, ok=True, addr=None):
             db.close()
     except Exception as exc:                   # pragma: no cover
         print(f"[admin] audit write failed: {exc}", flush=True)
+
+
+#: No panel request carries more than a few KB of JSON (a news post, a
+#: moderator row); a body past this is refused unread.
+_JSON_BODY_MAX = 1 << 20
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1405,8 +1457,17 @@ class Handler(BaseHTTPRequestHandler):
         the handler has, and a request body can only be read once."""
         if getattr(self, "_jb", None) is not None:
             return self._jb
-        n = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            n = 0
         body = {}
+        if n > _JSON_BODY_MAX:
+            # Not read at all: the connection is closed after the reply
+            # (HTTP/1.0 handler), so the unread body goes with it.
+            print(f"[admin] {self._addr()} JSON body of {n}B refused "
+                  f"(over {_JSON_BODY_MAX}B)", flush=True)
+            n = 0
         if n:
             try:
                 body = json.loads(self.rfile.read(n) or b"{}")
@@ -1458,7 +1519,7 @@ class Handler(BaseHTTPRequestHandler):
         s = self._session()
         if s:
             return s["user"], s.get("role") or "owner", s.get("perms") or []
-        return "open-panel", "owner", sorted(adminusers.PERMS)
+        return "open-panel", "owner", sorted(adminusers.perm_labels())
 
     def _is_owner(self):
         return self._caller()[1] == "owner"
@@ -1499,6 +1560,17 @@ class Handler(BaseHTTPRequestHandler):
         if self._session():
             return True
         if not _auth_required():
+            if _open_panel_refused():
+                # An OPEN panel (no credential anywhere) reachable from off
+                # the host mints accounts for whoever finds it. Every request
+                # gets 503 until a credential exists; `--set-password` from
+                # the CLI works while it is in this state.
+                self._send(503, {"error": "This panel has no admin credential "
+                                          "and is not bound to loopback. Set "
+                                          "POL_ADMIN_PASSWORD or run "
+                                          "`admin.py --set-password`, or bind "
+                                          "it to 127.0.0.1 (POL_ADMIN_BIND)."})
+                return False
             return True
         if path.startswith("/api/"):
             self._send(401, {"error": "not signed in", "auth": True})
@@ -1522,7 +1594,7 @@ class Handler(BaseHTTPRequestHandler):
             else (None, None, [])
         out["role"], out["perms"] = role, perms
         if s or not out["auth_required"]:
-            out["perm_labels"] = adminusers.PERMS
+            out["perm_labels"] = adminusers.perm_labels()
         if s and role == "mod":
             row = _mod_row(s.get("uid"))
             out["code_limit"] = row["code_limit"] if row else None
@@ -1722,7 +1794,7 @@ class Handler(BaseHTTPRequestHandler):
                 })
         finally:
             db.close()
-        self._send(200, {"mods": rows, "perm_labels": adminusers.PERMS,
+        self._send(200, {"mods": rows, "perm_labels": adminusers.perm_labels(),
                          "owner_ready": _auth_required()})
 
     def _mods_change(self):
@@ -1845,6 +1917,8 @@ class Handler(BaseHTTPRequestHandler):
             action = "moderator: %s" % (body.get("action") or "?")
         if path == "/api/news/publish" and body.get("dry_run"):
             action = "previewed a news publish"
+        if path == "/api/bots":
+            action = "Discord bot %s: %s" % (body.get("bot") or "?", body.get("action") or "save")
         resp = getattr(self, "_resp", None)
         resp = resp if isinstance(resp, dict) else {}
         target = next((body.get(k) for k in _AUDIT_TARGETS if body.get(k)), None) \
@@ -1914,6 +1988,22 @@ class Handler(BaseHTTPRequestHandler):
                         "disk": adminops.disk(_DATA), "checked_at": time.time()}
             c["at"] = time.time()
         self._send(200, c["out"])
+
+    def _ops_get(self):
+        """The host runner's checks. Only the owner sees the fixes."""
+        st = adminops.ops_status(_DATA)
+        if st is None:
+            return self._send(200, {"available": False})
+        st["available"] = True
+        st["can_fix"] = self._is_owner()
+        if not st["can_fix"]:
+            st.pop("history", None)
+        return self._send(200, st)
+
+    def _ops_fix(self):
+        body = self._json_body()
+        ok, msg = adminops.ops_request(_DATA, (body or {}).get("action"), self._caller()[0])
+        return self._send(200 if ok else 409, {"ok": ok, "message": msg} if ok else {"error": msg})
 
     def _account_detail(self):
         """Everything about one account on one screen. What a moderator sees is
@@ -2174,6 +2264,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/games":
             return self._send(200, {"games": admingames.listing(self._can)})
+        if path == "/api/modules":
+            return self._modules()
         if path == "/api/mods":
             return self._mods_list()
         if path == "/api/audit":
@@ -2182,10 +2274,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._online()
         if path == "/api/health":
             return self._health()
+        if path == "/api/ops":
+            return self._ops_get()
         if path == "/api/account-detail":
             return self._account_detail()
         if path == "/api/alerts":
             return self._alerts_get()
+        if path == "/api/bots":
+            return self._send(*adminbots.listing())
         if path == "/api/push/key":
             return self._push_key()
         if path == "/":
@@ -2234,10 +2330,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._pml_resolve_href()
         if path == "/api/news":
             return self._news_state()
+        if path == "/api/maintenance":
+            return self._maintenance_state()
         if path == "/api/news/outputs":
             return self._news_outputs()
-        if path == "/api/news/preview":
-            return self._news_preview()
         if path == "/api/news/art":
             return self._news_art()
         return self._send(404, {"error": "not found"})
@@ -2262,10 +2358,14 @@ class Handler(BaseHTTPRequestHandler):
             self._audit_post(path)
 
     def _route_post(self, path):
+        if path == "/api/ops/fix":
+            return self._ops_fix()
         if path == "/api/mods":
             return self._mods_change()
         if path == "/api/alerts":
             return self._alerts_post()
+        if path == "/api/bots":
+            return self._send(*adminbots.change(self._json_body(), self._caller()[0]))
         if path == "/api/push/subscribe":
             return self._push_subscribe()
         if path == "/api/push/unsubscribe":
@@ -2322,26 +2422,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._account_delete()
         if path == "/api/news":
             return self._news_save()
+        if path == "/api/maintenance":
+            return self._maintenance_post()
         if path == "/api/news/publish":
             return self._news_publish()
         if path == "/api/news/render":
             return self._news_render()
+        if path == "/api/modules/action":
+            return self._module_action()
         return self._send(404, {"error": "not found"})
 
     # -- games ---------------------------------------------------------------- #
     def _game_tool(self, method):
         """/games/<key>/<path>: a game's own tool page or endpoint, proxied
-        (admingames.forward). Permission is per game; a change is audited."""
+        (admingames.forward). Each path belongs to one of the game's tools and
+        needs that tool's permission; a change is audited."""
         raw, _, query = self.path.partition("?")
         parts = admingames.split(raw)
-        if parts is None or parts[0] not in admingames.GAMES:
+        mod = adminmodules.load().get(parts[0]) if parts else None
+        if mod is None:
             return self._send(404, {"error": "not found"})
         key, sub = parts
         if raw == "/games/" + key:
             # the tool pages address their endpoints relative to this folder
             return self._send(301, "", "text/plain",
                               headers=[("Location", raw + "/" + ("?" + query if query else ""))])
-        if not self._can(admingames.perm_for(key)):
+        # /openlobby/ on a game's port is the panel's own channel (its status
+        # and its actions, each with a permission of its own): never proxied
+        tool = None if sub.startswith("openlobby") else mod.tool_for(sub)
+        if tool is None or not self._can(mod.perm(tool.id)):
             return self._send(403, {"error": "You don't have permission to do that.",
                                     "forbidden": True})
         body, ctype = None, None
@@ -2367,8 +2476,53 @@ class Handler(BaseHTTPRequestHandler):
             detail.update({k: v for k, v in req.items()
                            if k not in _AUDIT_SECRET and isinstance(v, (str, int, float, bool))
                            and len(str(v)) <= 120})
-            _audit(user, role, "used the %s tools" % admingames.GAMES[key]["title"],
+            _audit(user, role, "used the %s tools" % mod.title,
                    target=key, detail=detail, ok=status < 400, addr=self._addr())
+
+    def _module_action(self):
+        """{"key", "action", "params": {...}}: run one of a game module's
+        actions (adminmodules.Action) if the caller holds its permission."""
+        body = self._json_body()
+        key, aid = str(body.get("key") or ""), str(body.get("action") or "")
+        mod = adminmodules.get(key)
+        act = mod.action(aid) if mod else None
+        if act is None or act.id != aid:
+            return self._send(404, {"error": "That game has no such action."})
+        if not self._can(mod.perm(act.id)):
+            return self._send(403, {"error": "You don't have permission to do that.",
+                                    "forbidden": True})
+        params = body.get("params") if isinstance(body.get("params"), dict) else {}
+        params = {k: v for k, v in params.items()
+                  if isinstance(k, str) and isinstance(v, (str, int, float, bool))
+                  and len(str(v)) <= 2000}
+        user, role, _p = self._caller()
+        try:
+            ok, msg = act.run(mod, params, user)
+        except Exception as exc:                   # noqa: BLE001 -- the game's fault, reported
+            ok, msg = False, "failed: %s" % exc.__class__.__name__
+        _audit(user, role, "%s in %s" % (act.label.lower(), mod.title), target=key,
+               detail={k: v for k, v in params.items() if k not in _AUDIT_SECRET
+                       and len(str(v)) <= 120}, ok=ok, addr=self._addr())
+        self._send(200 if ok else 502, {"ok": ok, "msg": msg})
+
+    def _modules(self):
+        """/api/modules: the game modules this caller may see, each with its
+        live status (adminmodules.live). ?fresh=1 skips the status cache."""
+        user, role, _p = self._caller()
+        mods = adminmodules.listing(self._can)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        fresh = q.get("fresh", [""])[0] == "1"
+        keys = [m["key"] for m in mods]
+        live = adminmodules.live_all(keys) if not fresh else {
+            k: adminmodules.live(k, fresh=True) for k in keys}
+        for m in mods:
+            m["live"] = live.get(m["key"])
+            m["can_view"] = self._can("game." + m["key"])
+        out = {"modules": mods}
+        if role == "owner":
+            out["problems"] = adminmodules.problems()
+            out["found"] = adminmodules.found()
+        self._send(200, out)
 
     # -- static / art -------------------------------------------------------- #
     def _file(self, fs_path):
@@ -4071,22 +4225,47 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not db.execute("SELECT 1 FROM polid WHERE polid = %s", (pol,)).fetchone():
                 return self._send(404, {"error": f"no such PlayOnline ID: {pol}"})
+            handles = [r["handle_name"] for r in db.execute(
+                "SELECT h.handle_name FROM handle h JOIN member m ON m.id = h.member_id"
+                " WHERE m.polid = %s ORDER BY h.id", (pol,)).fetchall()]
         except Exception as exc:
             return self._send(500, {"error": str(exc)})
         finally:
             db.close()
+        # The games are told whatever PlayOnline says: a player can be in a
+        # game with its own sign-in while the lobby has no channel for them.
         try:
             result = _request_kick(pol)
         except Exception as exc:      # no answer, or the live-state store is down
-            return self._send(503, {"error": f"auth service unavailable: {exc}"})
+            result = {"ok": False, "error": f"auth service unavailable: {exc}", "down": True}
+        games = self._kick_in_games(pol, handles)
         if not result.get("ok"):
-            return self._send(404 if result.get("error", "").startswith("no such") else 503,
-                              {"error": result.get("error", "kick failed")})
+            err = result.get("error", "kick failed")
+            return self._send(404 if err.startswith("no such") else 503,
+                              {"error": err, "games": games})
         who = (self._session() or {}).get("user") or "open-panel"
         kicked = result["kicked"]
         print(f"[admin] {who} kicked {kicked} live channel(s) for {pol!r}",
               flush=True)
-        self._send(200, {"ok": True, "polid": pol, "kicked": kicked})
+        self._send(200, {"ok": True, "polid": pol, "kicked": kicked, "games": games})
+
+    def _kick_in_games(self, pol, handles):
+        """The same player out of every game whose module can kick (an action
+        of kind "kick", given {"polid", "handles"}); a game with its own
+        sign-in keeps the player otherwise. -> {key: {"ok", "msg"}}."""
+        user, role, _p = self._caller()
+        out = {}
+        for key, m in adminmodules.enabled().items():
+            act = m.action("kick")
+            if act is None or act.kind != "kick":
+                continue
+            try:
+                ok, msg = act.run(m, {"polid": pol, "handles": ",".join(handles)}, user)
+            except Exception as exc:               # noqa: BLE001 -- reported beside the kick
+                ok, msg = False, "failed: %s" % exc.__class__.__name__
+            _audit(user, role, "kicked in %s" % m.title, target=pol, ok=ok, addr=self._addr())
+            out[key] = {"ok": ok, "msg": msg}
+        return out
 
     def _account_delete(self):
         """Erase an account. The POL ID must be repeated in the body.
@@ -4392,30 +4571,6 @@ class Handler(BaseHTTPRequestHandler):
             "pending": self._news_pending(items),
         })
 
-    def _news_preview(self):
-        """The exact text that would be written to one output path."""
-        from urllib.parse import urlsplit, parse_qs
-        rel = (parse_qs(urlsplit(self.path).query).get("path") or [""])[0]
-        rel = rel.replace("\\", "/").strip().lstrip("/")
-        try:
-            items = newsgen.load()
-            files = newsgen.outputs(items, WWW_ROOT)
-        except newsgen.NewsError as exc:
-            return self._send(400, {"error": str(exc)})
-        if rel not in files:
-            return self._send(404, {"error": "not an output of this store"})
-        self._send(200, files[rel], "text/plain; charset=utf-8")
-
-    #: The pages a player sees the news on, as SE wrote them. Each reads the
-    #: files newsgen writes, so rendering them with those files swapped in
-    #: shows a publish before it happens.
-    _NEWS_VIEWS = {
-        "ticker": "wh000.pol.com/pml/main/index.pml",       # the main menu ticker
-        "info": "wh000.pol.com/pml/info/index.pml",         # the Information section
-        "story": "wh000.pol.com/pml/info/index2.pml",       # one story's page
-        "snews": "info.playonline.com/snews/en-US/index.pml",   # our Information page
-    }
-
     def _news_render(self):
         """Render a news page from UNSAVED announcements: {items, view, serial,
         cnt} -> {text, path}. Nothing is written; the files a publish would
@@ -4543,6 +4698,116 @@ class Handler(BaseHTTPRequestHandler):
                   flush=True)
         res["ok"] = True
         self._send(200, res)
+
+    # -- the maintenance warning ------------------------------------------------ #
+    def _maintenance_state(self):
+        """Which forced-news files carry a notice now (maintnotice.status)."""
+        try:
+            files = maintnotice.status(WWW_ROOT)
+        except OSError as exc:
+            return self._send(500, {"error": str(exc)})
+        # the title folders that have a notice page (ff11, tetra, jan...), for
+        # the form's choices; the same rule maintnotice.anews_files uses
+        titles = set()
+        for f in files:
+            rel = f["file"].split(maintnotice.SFTP_REL.replace(os.sep, "/") + "/", 1)[-1].split("/")
+            if len(rel) > 1:
+                lang = re.fullmatch(r"[a-z]{2}-[A-Z]{2}", rel[0])
+                titles.add(rel[1] if lang and len(rel) > 2 else rel[0])
+        self._send(200, {"ok": True, "files": files,
+                         "posted": sum(1 for f in files if f["posted"]),
+                         "titles": sorted(titles), "games": self._announceable()})
+
+    def _maintenance_post(self):
+        """Warn players before maintenance, the retail way.
+
+        {"action": "notice", "subject", "text", "titles": [..]} writes the
+        forced news every title page shows before Play (maintnotice.post);
+        {"action": "clear", "titles": [..]} takes it down;
+        {"action": "message", "subject", "text"} mails every member who is
+        online now (core/broadcast.py, through authsess); "games": [keys]
+        also sends it into each of those games that can announce
+        (_maintenance_games); the old "ffxi": true means ["ffxi"].
+        `titles` are the sftp directory names (ff11, tetra, jan, fmo, dc,
+        fe); empty = all."""
+        if not self._can("news_publish"):
+            return self._send(403, {"error": "You don't have permission to "
+                                             "warn players.", "forbidden": True})
+        body = self._json_body()
+        action = body.get("action")
+        titles = [t for t in (body.get("titles") or []) if isinstance(t, str)]
+        if action in ("notice", "clear") and not _www_writable():
+            return self._send(409, {"error": f"{WWW_ROOT} is mounted read-only"})
+        try:
+            if action == "notice":
+                with _NEWS_LOCK:
+                    done = maintnotice.post(WWW_ROOT, body.get("subject"),
+                                            body.get("text"), titles)
+                print(f"[admin] maintenance notice posted to {len(done)} file(s)",
+                      flush=True)
+                return self._send(200, {"ok": True, "written": done})
+            if action == "clear":
+                with _NEWS_LOCK:
+                    done = maintnotice.clear(WWW_ROOT, titles)
+                return self._send(200, {"ok": True, "restored": done})
+            if action == "message":
+                # the mail and each game's announcement are separate: one
+                # failing does not hold back the others
+                games = [g for g in (body.get("games") or []) if isinstance(g, str)]
+                if body.get("ffxi") and "ffxi" not in games:
+                    games.append("ffxi")
+                try:
+                    res = _request_broadcast(body.get("subject"), body.get("text"))
+                except TimeoutError as exc:
+                    res = {"ok": False, "error": f"auth service unavailable: {exc}", "down": True}
+                said = self._maintenance_games(games, body.get("subject"), body.get("text"))                     if games else {}
+                if not res.get("ok"):
+                    return self._send(503 if res.get("down") else 400,
+                                      {"error": res.get("error", "failed"), "games": said})
+                if said:
+                    res["games"] = said
+                    if "ffxi" in said:
+                        res["ffxi"] = said["ffxi"]
+                return self._send(200, res)
+        except ValueError as exc:
+            return self._send(400, {"error": str(exc)})
+        except TimeoutError as exc:
+            return self._send(503, {"error": f"auth service unavailable: {exc}"})
+        except OSError as exc:
+            return self._send(500, {"error": f"write failed: {exc}"})
+        return self._send(400, {"error": "action must be notice, clear or message"})
+
+    def _announceable(self):
+        """{key: title} of the enabled games that can announce in game."""
+        return {k: m.title for k, m in adminmodules.enabled().items() if m.action("announce")}
+
+    def _maintenance_games(self, keys, subject, text):
+        """Send the maintenance message into each game's own chat (its module's
+        "announce" action; FFXI queues it through the bridge's Notices). A
+        player inside a game does not see POL mail until they leave it.
+
+        -> {key: {"ok", "msg"}}; the mail has already gone, so a failure here
+        is reported beside it and never undoes it."""
+        # One line, "Subject: text"; a game's chat log has no line breaks.
+        line = ": ".join(p for p in (" ".join(str(s or "").split()) for s in (subject, text)) if p)
+        if len(line) > 440:
+            line = line[:437].rsplit(" ", 1)[0] + "..."
+        user, role, _p = self._caller()
+        out = {}
+        for key in keys:
+            m = adminmodules.get(key)
+            act = m.action("announce") if m else None
+            if act is None:
+                out[key] = {"ok": False, "msg": "This game cannot announce from the panel."}
+                continue
+            try:
+                ok, msg = act.run(m, {"text": line, "urgent": True}, user)
+            except Exception as exc:               # noqa: BLE001 -- report it beside the mail
+                ok, msg = False, "failed: %r" % exc
+            _audit(user, role, "announced maintenance in %s" % m.title, target=key,
+                   detail={"text": line[:120]}, ok=ok, addr=self._addr())
+            out[key] = {"ok": ok, "msg": msg}
+        return out
 
     # -- live page proxy ----------------------------------------------------- #
     def _live_page(self):
@@ -4764,8 +5029,8 @@ def main():
     if _cli(sys.argv[1:]):
         return
     port = int(os.environ.get("POL_ADMIN_PORT", "8090"))
-    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"[admin] listening on {port}; db="
+    srv = ThreadingHTTPServer((ADMIN_BIND, port), Handler)
+    print(f"[admin] listening on {ADMIN_BIND}:{port}; db="
           f"{polcore_db.database_url().rsplit('@', 1)[-1]} art={ART_ROOT} cgi={CGI}",
           flush=True)
     # Say plainly whether anything is guarding a panel that mints accounts --
@@ -4780,6 +5045,12 @@ def main():
         print(f"[admin] auth: POL_ADMIN_PASSWORD only, user={ADMIN_USER!r} -- "
               "set a password in the Security tab to make it changeable",
               flush=True)
+    elif _open_panel_refused():
+        print(f"[admin] auth: NONE while bound to {ADMIN_BIND}, which is "
+              "reachable off the host: every request is answered 503 until "
+              "a credential exists "
+              "(POL_ADMIN_PASSWORD, or `admin.py --set-password`) or "
+              "POL_ADMIN_BIND=127.0.0.1", flush=True)
     else:
         print("[admin] auth: OPEN (no credential set) -- safe only while bound "
               "to loopback", flush=True)

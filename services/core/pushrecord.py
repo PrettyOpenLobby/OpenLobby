@@ -141,9 +141,15 @@ def _b64encode_exact(data):
 #: either capture, so the value a TITLE writes here is not in this material -- but
 #: this is the field to watch, not a new one to find.
 #:
-#: POL_PRESENCE_STATE_MAP="online=1,away=2,offline=3" re-orders it live if the
+#: POL_PRESENCE_STATE_MAP="online=2,away=3,offline=1" re-orders it live if the
 #: reading is still wrong; `_PRESENCE_STATES` names every state the callers use.
-_PRESENCE_FIELD_STATE = {"online": 3, "back": 3, "away": 2, "offline": 1}
+#: CORRECTED 2026-10-09: the client stores `(+0x11 - 1) & 7` as the friend's
+#: status (polcore FUN_037decb0), and the status values are the 4:5
+#: KChangeMyStatus codes: 1 online, 2 away, 3 busy, 4 away message. So ONLINE
+#: is +0x11 = 2 and AWAY is 3. With online = 3 every online friend showed as
+#: away, in the Viewer's own friend list and in JongHoLow (red icon), and an
+#: away friend as online. Offline stays 1 (status 0), as read above.
+_PRESENCE_FIELD_STATE = {"online": 2, "back": 2, "away": 3, "offline": 1}
 
 
 def _presence_zone(member_id, state):
@@ -541,6 +547,19 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None,
         return 0
     if state not in presence._PRESENCE_STATES:
         return 0
+    # A HIDDEN SUBJECT IS OFFLINE TO EVERY WATCHER (as the retail service did:
+    # SE's push for an Invisible friend rendered OFFLINE). This is the one place every
+    # login, title-zone and status push about the subject goes through, so the
+    # rule holds for all of them; the subject's own session is not touched.
+    if state != "offline":
+        try:
+            if memberstatus._member_hidden(subject_member_id):
+                log("authserv", f"presence: member {subject_member_id} is Hidden "
+                                f"(4:5 status 0x05) -- {state} pushed as offline "
+                                "(POL_STATUS_HIDDEN_OFFLINE=0 serves it as away)")
+                state = "offline"
+        except Exception:
+            pass
     dry = mode == "log"
     sent = 0
     try:
@@ -637,10 +656,15 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None,
                         lines = list(lines or [])
                         for g in pushspool._shared_groups(db, watcher_handle,
                                                 subject_handle):
+                            # The member's 7:11 status for THIS group.
+                            gs = _presence_field_state(
+                                pushspool._group_status_state(
+                                    db, g, subject_handle, state))
                             lines += field_push_lines(
-                                ts.nick, guid, slot, state=field_state,
-                                zone=field_zone, group=g,
-                                seq=next(pushspool._ROW_PUSH_SEQ))
+                                ts.nick, guid, slot, state=gs,
+                                zone=(field_zone if gs == field_state else
+                                      _presence_zone(subject_member_id, gs)),
+                                group=g, seq=next(pushspool._ROW_PUSH_SEQ))
                         lines += field_push_lines(
                             ts.nick, guid, slot, state=field_state,
                             zone=field_zone, character=field_char,
@@ -680,10 +704,14 @@ def _broadcast_presence(subject_member_id, state, subject_name=None, seq=None,
                 if not targets:
                     continue
                 guid = _push_identity_guid(db, subject_handle)
+                gs = _presence_field_state(pushspool._group_status_state(
+                    db, gid, subject_handle, state))
+                gz = g_zone if gs == g_state else _presence_zone(
+                    subject_member_id, gs)
                 for ts in targets:
                     try:
                         lines = field_push_lines(
-                            ts.nick, guid, 0, state=g_state, zone=g_zone,
+                            ts.nick, guid, 0, state=gs, zone=gz,
                             group=gid, seq=next(pushspool._ROW_PUSH_SEQ))
                     except Exception as exc:
                         log("authserv", f"presence: group record failed "

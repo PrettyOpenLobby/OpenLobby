@@ -225,6 +225,8 @@ SUITES = [
     ("friend_rename", [sys.executable, "friend_rename_test.py"], TOOLS, {}),
     ("presence",      [sys.executable, "presence_test.py"],   TOOLS, {}),
     ("presence_burst", [sys.executable, "presence_burst_test.py"], TOOLS, {}),
+    # kv.subscribe re-subscribes after the server closes the connection (a Valkey restart).
+    ("kv_subscribe",    [sys.executable, "kv_subscribe_test.py"], TOOLS, {}),
     ("presence_grace", [sys.executable, "presence_grace_test.py"], TOOLS, {}),
     ("presence_push_identity", [sys.executable, "presence_push_identity_test.py"],
                       TOOLS, {}),
@@ -294,11 +296,17 @@ SUITES = [
     ("mailident",     [sys.executable, "mailident_test.py"], TOOLS, {}),
     ("mail_auth",     [sys.executable, "mail_auth_test.py"], TOOLS, {}),
     ("extmail",       [sys.executable, "extmail_test.py"], TOOLS, {}),
+    ("screenshots",   [sys.executable, "screenshot_mail_test.py"], TOOLS, {}),
     # Group channels and group requests are for the group's members.
     ("group_gate",    [sys.executable, "group_gate_test.py"], TOOLS, {}),
     # What the lobby refuses (7:1, 7:2, 7:3, invites) and who hears about
     # a disband, a removal or a decline.
     ("group_refusal", [sys.executable, "group_refusal_test.py"], TOOLS, {}),
+    # One group from 7:1 to 7:2 through the real handlers: invite, accept,
+    # chat between two members on #XXL, 7:11, leave, disband.
+    ("group_lifecycle", [sys.executable, "group_lifecycle_test.py"], TOOLS, {}),
+    # Blocking: the ignore table in 2:6/2:3, the mail filters, the 200 cap.
+    ("friend_block", [sys.executable, "friend_block_test.py"], TOOLS, {}),
     # Who receives a group message, a 3:4 multi-target send and a group
     # member's presence, and what a handle switch tells them.
     ("social_delivery", [sys.executable, "social_delivery_test.py"], TOOLS, {}),
@@ -311,6 +319,10 @@ SUITES = [
     ("event_news",    [sys.executable, "event_news_test.py"], TOOLS, {}),
     # The same cups as Discord reminders (polbridge posts what this says is due).
     ("eventremind",   [sys.executable, "eventremind.py", "--selftest"], SERVICES, {}),
+    # FFXI's own calendar (the FFXI bridge publishes it) as Viewer items and Discord posts.
+    ("ffxinews",      [sys.executable, "ffxinews.py", "--selftest"], SERVICES, {}),
+    # FMO's war phase (the City Control board publishes the clock) as a Viewer item.
+    ("fmonews",       [sys.executable, "fmonews.py", "--selftest"], SERVICES, {}),
     # The Viewer password, checked through the NICK digest, and the arm gate on
     # binding a login token (trust-on-first-use).
     ("login_digest",  [sys.executable, "login_digest_test.py"], TOOLS, {}),
@@ -326,8 +338,20 @@ SUITES = [
     ("auth_rsa",       [sys.executable, "test_auth_rsa.py"], TESTS, {}),
     ("auth_kill_dup",  [sys.executable, "test_auth_kill_dup.py"], TESTS, {}),
     ("login_lockout",  [sys.executable, "test_login_lockout.py"], TESTS, {}),
+    # A jailed account logs in with the gate record's jail flag, not refused.
+    ("login_jail",     [sys.executable, "test_login_jail.py"], TESTS, {}),
+    # A new client signature binds only with a password proof, unless the
+    # account holds no password copy to prove against.
+    ("login_new_client_gate", [sys.executable, "test_login_new_client_gate.py"], TESTS, {}),
+    # The keepalive PING carries the server clock in the client's own encoding.
+    ("ping_clock",     [sys.executable, "test_ping_clock.py"], TESTS, {}),
+    # The maintenance warning: forced news written and restored, and the
+    # message to every online member.
+    ("maintenance_warning", [sys.executable, "test_maintenance_warning.py"], TESTS, {}),
     ("gate_list_stamps", [sys.executable, "test_gate_list_stamps.py"], TESTS, {}),
     ("lobby_split_frame", [sys.executable, "test_lobby_split_frame.py"], TESTS, {}),
+    # 1:11, the character bind query a game sends: 48 bytes, signed.
+    ("lobby_char_bind", [sys.executable, "test_lobby_char_bind.py"], TESTS, {}),
     ("ps2_pacing",     [sys.executable, "test_ps2_pacing.py"], TESTS, {}),
     ("handle_nocase",  [sys.executable, "test_handle_nocase.py"], TESTS, {}),
     ("handle_store_layout", [sys.executable, "test_handle_store_layout.py"], TESTS, {}),
@@ -347,6 +371,15 @@ SUITES = [
     ("admin_triage",  [sys.executable, "admin_triage_test.py"], TOOLS, {}),
     # Each moderator permission opens its own endpoints and no others.
     ("admin_perms",   [sys.executable, "admin_perms_test.py"], TOOLS, {}),
+    # Game modules: loading, per-tool routing and permissions, status readers.
+    ("admin_modules", [sys.executable, "admin_modules_test.py"], TOOLS, {}),
+    # The game side of the admin protocol (olport.py) against the panel's reader.
+    ("olport",        [sys.executable, "olport_test.py"], TOOLS, {}),
+    # Self-host tools: the setup checker, the games launcher and its catalog,
+    # and the patch publisher's revert guard.
+    ("doctor",        [sys.executable, "doctor_test.py"], TOOLS, {}),
+    ("stack",         [sys.executable, "stack_test.py"], TOOLS, {}),
+    ("polpublish",    [sys.executable, os.path.join("patch", "polpublish_test.py")], TOOLS, {}),
     # A GM Call ticket keeps the raw 0x102 body beside the decoded fields.
     ("gmd_ticket_raw", [sys.executable, "test_gmd_ticket_raw.py"], TESTS, {}),
     # A title's character in the friend-status record's 0x08 field.
