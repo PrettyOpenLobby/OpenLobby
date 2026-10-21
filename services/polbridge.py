@@ -1349,6 +1349,20 @@ def start_presence():
             many="players on PlayOnline")).start()
 
 
+def _report_applied(row):
+    """Say what the bridge runs on, for the admin page's Discord bots card
+    (Valkey botcreds:applied:bridge; the boards write the same per bot). The
+    card reads "Not running" without it. Never raises: no Valkey, no report."""
+    source = "registry" if row and row.get("token") else ("env" if ARGS.token else "")
+    try:
+        from polcore import kv
+        kv.set_json("botcreds:applied:bridge", {
+            "source": source, "at": time.time(), "app_id": (ARGS.app_id or "").strip(),
+            "row_at": float((row or {}).get("updated_at") or 0)})
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
 def use_registry():
     """The admin page's bot registry (polcore/botcreds.py) over the flags and
     environment: the bridge's own token / app id / public key, and the game
@@ -1363,6 +1377,7 @@ def use_registry():
         row = botcreds.get("bridge")
     except Exception as e:                             # noqa: BLE001 no db / table yet
         log("bot registry not readable (%s); using the environment" % type(e).__name__)
+        _report_applied(None)
         return None
     for field, attr in (("token", "token"), ("app_id", "app_id"), ("public_key", "public_key")):
         if row and row.get(field):
@@ -1370,6 +1385,7 @@ def use_registry():
     if row and row.get("has_token") and not row.get("token"):
         log("the registry's bridge token cannot be unsealed here (POL_BOT_KEY missing or "
             "different); using the environment")
+    _report_applied(row)
     games = [n for n in botcreds.known() if n != "bridge"]
     for name in games:
         try:
