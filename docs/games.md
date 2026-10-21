@@ -49,6 +49,8 @@ python tools/stack.py add fe --yes         ... and run it
 python tools/stack.py enable tm,jan        record games to run (any number, comma or space separated)
 python tools/stack.py disable jan
 python tools/stack.py check                checkouts, data files and volumes of the enabled games
+python tools/stack.py check --json --all   the same for every game in the catalog, as JSON
+python tools/stack.py ps                   which games have running containers (--json too)
 python tools/stack.py compose up -d --build
 python tools/stack.py compose --dry-run up -d --build
 python tools/stack.py compose --ghcr up -d
@@ -83,6 +85,22 @@ stays in the database and volumes.
 `stack.py check` exits non-zero when an enabled game is missing its
 checkout, a compose file, a required data file or a required volume, and
 warns about optional data and missing `.env` files.
+
+## Deploying games from the admin panel
+
+The admin panel can run these steps for you: install a game, enable or
+disable it, pull updates and restart it, each with a button. The panel does
+not hold the Docker socket itself. It asks a separate service, the
+deployer, which runs `stack.py` with a fixed set of arguments and keeps a
+log of each job. The deployer is off unless you start its profile:
+
+```
+docker compose --profile deployer up -d deployer
+```
+
+It needs `POL_DEPLOYER_TOKEN` and `POL_DEPLOY_ROOT` in `.env` first, and
+access to the Docker socket makes it as powerful as root on the host.
+docs/deployer.md explains the setup, what each action runs, and the risk.
 
 ## The image chain
 

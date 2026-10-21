@@ -71,7 +71,8 @@ chk("a panel page keeps its own permission and adds none",
     (mods["viewer"].perm("pml"), "game.viewer.pml" in perms), ("pml", False))
 chk("the old per-game grant expands to the whole game",
     sorted(M.expand_legacy(["games_fmo", "gm", "games_nope"])),
-    ["game.fmo", "game.fmo.gates", "game.fmo.npcs", "games_nope", "gm"])
+    ["game.fmo", "game.fmo.coliseum", "game.fmo.gates", "game.fmo.npcs", "game.fmo.war",
+     "games_nope", "gm"])
 chk("one tool is enough to see the game",
     M.can_see("fmo", lambda p: p == "game.fmo.gates"), True)
 chk("the Viewer is seen through the PML permission",
@@ -127,7 +128,7 @@ mods = reload(POL_ADMIN_GAMES_EXTRA=json.dumps(
      "Bad Key": {"title": "x", "tools": [{"id": "a", "label": "A"}]}}))
 chk("an entry becomes a tools-only module", (mods["kart"].title, mods["kart"].tools[0].id),
     ("Kart Club", "home"))
-chk("...and cannot replace a built-in", [t.id for t in mods["fmo"].tools], ["npcs", "gates"])
+chk("...and cannot replace a built-in", [t.id for t in mods["fmo"].tools], ["npcs", "gates", "coliseum", "war"])
 chk("...and one that does not fit is reported", any("Bad Key" in p for p in M.problems()), True)
 
 print("live status")

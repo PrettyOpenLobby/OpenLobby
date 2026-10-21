@@ -95,7 +95,7 @@ def _parse(doc, st):
 
 MODULE = Module(
     "jan", "JongHoLow", platform="PlayOnline: PS2", content_ids=[3],
-    markers=["authsess-jan"],
+    markers=["authsess-jan"], self_described=True,   # its board's janadmin.py speaks the protocol
     actions=[
         Action("notice", "GM notice", _notice, kind="announce",
                fields=[{"id": "text", "label": "Message", "type": "text"}],

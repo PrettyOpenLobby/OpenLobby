@@ -22,7 +22,7 @@
   ],
   "services": ["postgres", "valkey", "dns", "http", "ssl3web", "ssl3ucs", "sslterm", "ucs", "login",
                "authsess", "authrelay", "ucs-plain", "admin", "patch"],
-  "profiles": {"gm": ["gmd"]},
+  "profiles": {"gm": ["gmd"], "deployer": ["deployer"]},
   "env": [
     {"name": "POL_ADVERTISE", "default": "127.0.0.1",
      "description": "The address clients reach this host on (LAN, VPN or public IP). Every game falls back to it."},

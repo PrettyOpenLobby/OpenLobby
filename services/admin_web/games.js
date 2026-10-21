@@ -316,3 +316,128 @@ async function loadModules() {
   $("#modulesProblems").hidden = !probs.length;
   $("#modulesProblemList").innerHTML = probs.map((p) => `<li>${esc(p)}</li>`).join("");
 }
+
+// ---- Settings > Install games (owner): the deployer (admindeploy.py) ----
+// The deployer runs one job at a time and keeps its jobs, so a panel that was
+// restarted finds a running job in the list and follows it again.
+let DEPLOY = null, DEPLOY_JOB = null, DEPLOY_OFFSET = 0, DEPLOY_TIMER = null;
+const JOB_DONE = new Set(["ok", "failed", "needs_data"]);
+const JOB_WORD = { queued: "Waiting", running: "Running", ok: "Done", failed: "Failed",
+                   needs_data: "Needs client data" };
+
+async function probeDeploy() {
+  if (!isOwner()) return;
+  try { DEPLOY = await api("/api/deploy"); } catch (e) { DEPLOY = null; }
+  $("#deployTab").hidden = !(DEPLOY && DEPLOY.available);
+}
+
+function deployState(g) {
+  if (!g.installed) return ["off", "Not installed", ["install"]];
+  if (!g.enabled) return ["off", "Installed, off", ["enable", "update", "check"]];
+  if (g.running === false) return ["bad", "On, not running", ["restart", "update", "disable", "check"]];
+  return ["good", g.running ? "Running" : "On", ["restart", "update", "disable", "check"]];
+}
+const ACT_WORD = { install: "Install", enable: "Turn on", disable: "Turn off", update: "Update",
+                   restart: "Restart", check: "Check" };
+
+function renderDeploy() {
+  const d = DEPLOY || {};
+  $("#deployOff").hidden = !!d.available;
+  $("#deployPanel").hidden = !d.available;
+  $("#deployJobsPanel").hidden = !d.available;
+  if (!d.available) {
+    $("#deployWhy").textContent = "No deployer is answering (" + (d.why || "not set up") + "). It is an "
+      + "opt-in service: see docs/deployer.md to run it, then set POL_DEPLOYER_URL and POL_DEPLOYER_TOKEN "
+      + "for the admin service.";
+    return;
+  }
+  const busy = (d.jobs || []).some((j) => !JOB_DONE.has(j.state));
+  const rows = [{ key: "core", name: "OpenLobby (this server)", installed: true, enabled: true,
+                  running: (d.core || {}).running, missing: [], admin_env: [], core: true }]
+    .concat(d.games || []);
+  $("#deployBody").innerHTML = rows.map((g) => {
+    const [cls, word, acts] = g.core ? ["good", "Running", ["update", "restart", "check"]] : deployState(g);
+    const needs = (g.missing || []).map((m) => `<div><span class="mono">${esc(m.path)}</span>`
+      + `${m.hint ? ` <span class="muted">${esc(m.hint)}</span>` : ""}</div>`).join("")
+      + (g.installed && g.enabled && (g.admin_env || []).length
+        ? `<div class="muted">For its admin page set ${(g.admin_env || []).map((e) => `<span class="mono">${esc(e)}</span>`).join(" and ")}.</div>` : "")
+      + (g.notes ? `<div class="muted">${esc(g.notes)}</div>` : "");
+    return `<tr><td class="strong">${esc(g.name || g.key)}<div class="muted mono">${esc(g.key)}</div></td>`
+      + `<td><span class="pill ${cls === "good" ? "live" : cls === "bad" ? "off" : "env"}">${esc(word)}</span></td>`
+      + `<td>${needs || '<span class="muted">-</span>'}</td>`
+      + `<td><div class="deploy-acts">${acts.map((a) => `<button class="${a === "disable" ? "danger" : "ghost"} sm" `
+        + `data-deploy="${esc(a)}" data-game="${esc(g.key)}"${busy ? " disabled" : ""}>${esc(ACT_WORD[a])}</button>`).join("")}</div></td></tr>`;
+  }).join("");
+  $("#deployJobs").innerHTML = (d.jobs || []).map((j) =>
+    `<li data-job="${esc(j.id)}"><span class="t1">${esc(ACT_WORD[j.action] || j.action)} ${esc(j.game)}: `
+    + `${esc(JOB_WORD[j.state] || j.state)}${j.summary ? " - " + esc(j.summary) : ""}</span>`
+    + `<span class="t2">${j.started ? esc(ago(j.started * 1000)) : ""}</span></li>`).join("")
+    || '<li class="empty">No jobs yet.</li>';
+}
+
+async function loadDeploy() {
+  await probeDeploy();
+  renderDeploy();
+  if (!DEPLOY || !DEPLOY.available) return;
+  const live = (DEPLOY.jobs || []).find((j) => !JOB_DONE.has(j.state));
+  if (live && live.id !== DEPLOY_JOB) followJob(live.id);
+  else if (!live && !DEPLOY_JOB && (DEPLOY.jobs || [])[0]) showJob(DEPLOY.jobs[0].id);
+}
+
+async function showJob(id) {
+  let j;
+  try { j = await api("/api/deploy/job?id=" + encodeURIComponent(id)); } catch (e) { return; }
+  DEPLOY_JOB = id;
+  $("#deployJobPanel").hidden = false;
+  $("#deployJobTitle").textContent = `${ACT_WORD[j.action] || j.action} ${j.game}`;
+  $("#deployJobState").textContent = JOB_WORD[j.state] || j.state;
+  $("#deployJobSummary").textContent = j.summary || "";
+  $("#deployLog").textContent = j.log || "";
+  DEPLOY_OFFSET = j.log_size || (j.log || "").length;
+  return j;
+}
+
+async function followJob(id) {
+  stopDeployPoll();
+  const j = await showJob(id);
+  if (!j || JOB_DONE.has(j.state)) return;
+  DEPLOY_TIMER = setInterval(async () => {
+    if (CUR_TAB !== "deploy") return;
+    let r;
+    try { r = await api(`/api/deploy/log?id=${encodeURIComponent(id)}&offset=${DEPLOY_OFFSET}`); }
+    catch (e) { return; }                   // the deployer or the panel restarting: keep trying
+    if (r.text) {
+      const pre = $("#deployLog");
+      pre.textContent += r.text;
+      DEPLOY_OFFSET += new TextEncoder().encode(r.text).length;
+      pre.scrollTop = pre.scrollHeight;
+    }
+    if (JOB_DONE.has(r.state)) {
+      stopDeployPoll();
+      await showJob(id);
+      await probeDeploy();
+      renderDeploy();
+    }
+  }, 1500);
+}
+
+function stopDeployPoll() { clearInterval(DEPLOY_TIMER); DEPLOY_TIMER = null; }
+
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-deploy]");
+  if (b) {
+    const act = b.dataset.deploy, game = b.dataset.game;
+    const what = `${ACT_WORD[act]} ${game === "core" ? "OpenLobby" : game}`;
+    if (act !== "check" && !confirm(`${what}?\n\nThis changes what runs on the server.`)) return;
+    try {
+      const r = await api("/api/deploy/action", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                    body: JSON.stringify({ action: act, game }) });
+      toast(`${what}: started`);
+      await probeDeploy(); renderDeploy();
+      followJob(r.job);
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const li = e.target.closest("#deployJobs [data-job]");
+  if (li) followJob(li.dataset.job);
+});

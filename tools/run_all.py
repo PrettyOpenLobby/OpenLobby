@@ -375,10 +375,13 @@ SUITES = [
     ("admin_modules", [sys.executable, "admin_modules_test.py"], TOOLS, {}),
     # The game side of the admin protocol (olport.py) against the panel's reader.
     ("olport",        [sys.executable, "olport_test.py"], TOOLS, {}),
+    # Installing games through the deployer, owner only (admindeploy.py).
+    ("admin_deploy",  [sys.executable, "admin_deploy_test.py"], TOOLS, {}),
     # Self-host tools: the setup checker, the games launcher and its catalog,
     # and the patch publisher's revert guard.
     ("doctor",        [sys.executable, "doctor_test.py"], TOOLS, {}),
     ("stack",         [sys.executable, "stack_test.py"], TOOLS, {}),
+    ("deployer",      [sys.executable, "deployer_test.py"], TOOLS, {}),
     ("polpublish",    [sys.executable, os.path.join("patch", "polpublish_test.py")], TOOLS, {}),
     # A GM Call ticket keeps the raw 0x102 body beside the decoded fields.
     ("gmd_ticket_raw", [sys.executable, "test_gmd_ticket_raw.py"], TESTS, {}),

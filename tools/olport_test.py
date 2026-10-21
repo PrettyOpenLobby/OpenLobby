@@ -146,6 +146,14 @@ M.load(reload=True)
 chk("the game is not listed, and the reason is", (
     "kart" in M.load(), any("kart" in p for p in M.problems())), (False, True))
 
+print("the copy the services import")
+CRLF, LF = bytes((13, 10)), bytes((10,))
+with open(os.path.join(HERE, "olport.py"), "rb") as f1:
+    published = f1.read().replace(CRLF, LF)
+with open(os.path.join(HERE, os.pardir, "services", "olport.py"), "rb") as f2:
+    imported = f2.read().replace(CRLF, LF)
+chk("services/olport.py is tools/olport.py, byte for byte", published == imported, True)
+
 port.stop()
 print("all checks passed" if not bad else "%d check(s) FAILED" % bad)
 sys.exit(1 if bad else 0)

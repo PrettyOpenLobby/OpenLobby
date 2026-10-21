@@ -239,6 +239,52 @@ def check_env_and_state():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def check_report_and_ps(catalog):
+    """check --json and ps --json as data, against a scratch parent dir with
+    one game checked out and nothing else."""
+    tmp = tempfile.mkdtemp(prefix="stacktest-")
+    try:
+        root = os.path.join(tmp, "openlobby")
+        os.makedirs(root)
+        fe = catalog["fe"]
+        d = os.path.join(tmp, fe["checkout"])
+        for f in fe["compose"]:
+            os.makedirs(os.path.dirname(os.path.join(d, f)) or d, exist_ok=True)
+            open(os.path.join(d, f), "w").close()
+        r = stack.check_report(catalog, ["tm", "fe"], ["fe"], root=root, parent=tmp, docker="")
+        tm, feg = r["games"]
+        ok(tm["installed"] is False and tm["data_ok"] is None and tm["missing"] == [],
+           "check_report: a game with no checkout has data_ok None")
+        ok(feg["installed"] and feg["enabled"] and feg["data_ok"] is False,
+           "check_report: fe without its data is not data_ok")
+        paths = [m["path"] for m in feg["missing"]]
+        ok("../hippaulring/services/fedata/fe-fet-area.tsv" in paths,
+           "check_report: missing names the path from openlobby (%s)" % paths)
+        ok(all(m["hint"] and "required" in m for m in feg["missing"]), "check_report: hints")
+        ok(r["ok"] is False, "check_report: not ok while required data is missing")
+        ok(feg["ports"] == fe["ports"] and feg["admin_module"] == "fe", "check_report: catalog fields")
+        rows_text = [t for _, t in stack.check(catalog, ["fe"], root=root, parent=tmp, docker="")]
+        ok(any("fedata missing" in t for t in rows_text), "check(): rows unchanged in shape")
+        for p in fe["data"][0]["paths"] + fe["data"][1]["paths"]:
+            os.makedirs(os.path.dirname(os.path.join(d, p)), exist_ok=True)
+            open(os.path.join(d, p), "w").close()
+        r = stack.check_report(catalog, ["fe"], ["fe"], root=root, parent=tmp, docker="")
+        ok(r["games"][0]["data_ok"] is True and r["ok"], "check_report: data present is ok")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    lines = ('{"Service":"login","State":"running"}\n{"Service":"fellb","State":"exited"}\n'
+             '{"Service":"tmboard","State":"running"}\n')
+    rows = stack.parse_ps(lines)
+    ok(len(rows) == 3 and stack.parse_ps("[" + lines.strip().replace("\n", ",") + "]") == rows
+       and stack.parse_ps("") == [], "parse_ps: lines, array and empty")
+    p = stack.ps_report(catalog, rows)
+    ok(p["core"]["running"] is True, "ps_report: core running")
+    ok(p["games"]["fe"]["running"] is False and p["games"]["fe"]["services"] == {"fellb": "exited"},
+       "ps_report: fe exited")
+    ok(p["games"]["tm"]["running"] is True, "ps_report: a profile service counts")
+    ok(p["games"]["jan"] == {"running": False, "services": {}}, "ps_report: no containers")
+
+
 def check_docker(catalog, root, parent):
     docker = shutil.which("docker")
     if not docker or subprocess.run([docker, "info"], stdout=subprocess.DEVNULL,
@@ -282,6 +328,7 @@ def main():
     check_catalog(catalog, root, parent)
     check_plan(catalog, root, parent)
     check_env_and_state()
+    check_report_and_ps(catalog)
     check_docker(catalog, root, parent)
     print("stack_test: %d failed, %d skipped" % (len(FAILS), len(SKIPS)))
     return 1 if FAILS else 0

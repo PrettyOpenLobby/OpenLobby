@@ -87,6 +87,7 @@ import adminops  # noqa: E402
 import adminbots  # noqa: E402
 import admingames  # noqa: E402  -- the Games section's tool proxy
 import adminmodules  # noqa: E402  -- one module per game (adminmodules/)
+import admindeploy  # noqa: E402  -- installing games through the deployer (owner only)
 import webpush  # noqa: E402
 
 try:
@@ -2266,6 +2267,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"games": admingames.listing(self._can)})
         if path == "/api/modules":
             return self._modules()
+        # the deployer (admindeploy.py): owner only, so not in the permission tables
+        if path == "/api/deploy":
+            return self._send(*admindeploy.overview())
+        if path in ("/api/deploy/job", "/api/deploy/log"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            jid = q.get("id", [""])[0]
+            if path == "/api/deploy/job":
+                return self._send(*admindeploy.job(jid))
+            return self._send(*admindeploy.log(jid, q.get("offset", ["0"])[0]))
         if path == "/api/mods":
             return self._mods_list()
         if path == "/api/audit":
@@ -2430,6 +2440,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._news_render()
         if path == "/api/modules/action":
             return self._module_action()
+        if path == "/api/deploy/action":
+            body = self._json_body()
+            act, game = body.get("action"), body.get("game")
+            status, out = admindeploy.action(act, game)
+            user, role, _p = self._caller()
+            _audit(user, role, "asked the deployer to %s %s" % (act, game), target=str(game)[:32],
+                   detail={"job": out.get("job")}, ok=status == 202, addr=self._addr())
+            return self._send(status, out)
         return self._send(404, {"error": "not found"})
 
     # -- games ---------------------------------------------------------------- #

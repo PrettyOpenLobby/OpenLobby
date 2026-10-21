@@ -54,6 +54,7 @@ volumes:
   pol-logs:
   pol-certs:
   pol-pgdata:
+  pol-deployer:
 
 services:
   # The database. Accounts, friends, mail and saves live here; back up the
@@ -361,6 +362,10 @@ services:
       # `admin.py --set-password` and kept in the database.
       POL_ADMIN_USER: "${POL_ADMIN_USER:-admin}"
       POL_ADMIN_PASSWORD: "${POL_ADMIN_PASSWORD:-}"
+      # The deployer (docs/deployer.md), which runs the panel's game actions.
+      # Without the deployer profile started, the panel says it is not there.
+      POL_DEPLOYER_URL: "${POL_DEPLOYER_URL:-http://deployer:8099}"
+      POL_DEPLOYER_TOKEN: "${POL_DEPLOYER_TOKEN:-}"
     ports:
       - "127.0.0.1:8090:8090"
     # The Overview's service checks dial the published ports on the host as
@@ -401,3 +406,44 @@ services:
       - pol-logs:/logs
       - ${POL_MIRRORS:-./mirrors}:/mirrors:ro
     healthcheck: *pyhc
+
+  # Installs, enables, updates and restarts games for the admin panel by
+  # running tools/stack.py (docs/deployer.md). Opt-in, never started by a
+  # plain `up`:
+  #
+  #   docker compose --profile deployer up -d deployer
+  #
+  # It holds the Docker socket, which is root on this host. So it publishes
+  # no port (only containers on this network reach it, as deployer:8099),
+  # refuses to start without POL_DEPLOYER_TOKEN, and runs nothing but
+  # stack.py with fixed arguments. POL_DEPLOY_ROOT, the directory holding
+  # this checkout and the game checkouts, is mounted at the same path inside
+  # so the paths in the game compose files mean the same to the daemon; the
+  # bind is never created when the directory is missing or the variable is
+  # unset. Commands it runs leave this profile out, so it never recreates
+  # itself.
+  deployer:
+    profiles: ["deployer"]
+    build: ./services/deployer
+    image: openlobby-deployer:latest
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      POL_DEPLOYER_TOKEN: "${POL_DEPLOYER_TOKEN:-}"
+      POL_DEPLOYER_BIND: "${POL_DEPLOYER_BIND:-0.0.0.0:8099}"
+      POL_DEPLOY_ROOT: "${POL_DEPLOY_ROOT:-}"
+      POL_DEPLOY_CORE: "${POL_DEPLOY_CORE:-}"
+      POL_DEPLOY_GHCR: "${POL_DEPLOY_GHCR:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: "${POL_DEPLOY_ROOT:-/POL_DEPLOY_ROOT-is-not-set}"
+        target: "${POL_DEPLOY_ROOT:-/POL_DEPLOY_ROOT-is-not-set}"
+        bind:
+          create_host_path: false
+      - pol-deployer:/deployer
+    healthcheck:
+      test: ["CMD", "python", "/app/deployer.py", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

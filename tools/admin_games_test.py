@@ -159,8 +159,8 @@ def main():
 
         _code, g = c["gm_fmo"].call("api/games")
         chk("the FMO moderator is offered FMO only", [x["key"] for x in g["games"]], ["fmo"])
-        chk("...with both of its tools",
-            [t["id"] for t in g["games"][0]["tools"]], ["npcs", "gates"])
+        chk("...with all of its tools",
+            [t["id"] for t in g["games"][0]["tools"]], ["npcs", "gates", "coliseum", "war"])
         chk("a moderator with no game permission is offered none",
             c["gm_none"].call("api/games")[1]["games"], [])
         chk("the owner is offered every configured game",
@@ -173,7 +173,7 @@ def main():
             ("game.xg" in adminusers.PERMS, "game.xg.gates" in adminusers.PERMS), (True, True))
         chk("an old per-game grant reads as every tool of that game",
             sorted(adminusers.perms_of({"perms": "games_fmo,gm"})),
-            ["game.fmo", "game.fmo.gates", "game.fmo.npcs", "gm"])
+            ["game.fmo", "game.fmo.coliseum", "game.fmo.gates", "game.fmo.npcs", "game.fmo.war", "gm"])
         st, _h, body, _u = raw(c["gm_xg"], "games/xg/gates")
         chk("...and its page opens through the panel", (st, SEEN[-1]["path"]), (200, "/gates"))
         chk("the FMO moderator cannot open the extra title", raw(c["gm_fmo"], "games/xg/")[0], 403)

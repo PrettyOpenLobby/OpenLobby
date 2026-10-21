@@ -1,0 +1,208 @@
+"""OpenLobby admin port: drop this one file into a game server, and an
+OpenLobby admin panel can show the game and run its actions.
+
+The panel side is docs/admin-modules.md ("The game describes itself"). This
+file is the game side: a small HTTP server, standard library only (Python
+3.8+), that answers
+
+    GET  /openlobby/module.json     what the game is
+    GET  /openlobby/status.json     who is playing now
+    POST /openlobby/actions/<id>    run one action
+
+and, if the game has them, its own tool pages under any other path.
+
+    import olport
+
+    port = olport.AdminPort("kart", "Kart Club", platform="PS2 HDD",
+                            token=os.environ["KART_ADMIN_TOKEN"], bind="0.0.0.0", port=8820)
+
+    @port.status
+    def status():
+        return {"online": len(players), "players": [{"name": p.name, "room": p.room} for p in players]}
+
+    @port.action("banner", "Banner message", kind="announce",
+                 fields=[{"id": "text", "label": "Message"}])
+    def banner(params, actor):
+        lobby.show_banner(params.get("text", ""))
+        return True, "Shown in every lobby."
+
+    port.start()          # a daemon thread; port.stop() ends it
+
+An action gets the posted fields (strings) and the name of the panel user who
+asked, and returns (ok, message). One that raises answers {"ok": false} with
+the exception's type, never its text. A kind of "announce" is used by the
+panel's maintenance warning, "kick" by an account's Kick (sent {"polid",
+"handles"}).
+
+The token is checked on every request (X-Devtool-Token). Bound anywhere but
+loopback, the port refuses to start without one.
+"""
+import hmac
+import json
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PREFIX = "/openlobby/"
+MAX_BODY = 1 << 20
+_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_KEY = re.compile(r"^[a-z0-9]{1,16}$")
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
+class AdminPort:
+    def __init__(self, key, title, short="", platform="", about="", token="",
+                 bind="127.0.0.1", port=0, content_ids=(), services=()):
+        if not _KEY.match(key or ""):
+            raise ValueError("key must be 1-16 of a-z and 0-9")
+        if bind not in LOOPBACK and not token:
+            raise ValueError("a port bound to %s needs a token" % bind)
+        self.key, self.title, self.short = key, title, short
+        self.platform, self.about = platform, about
+        self.token, self.bind, self.port = token or "", bind, int(port)
+        self.content_ids = list(content_ids)
+        #: [{"name", "containers": [...], "ports": {"7000": "game"}, "warning"}]
+        self.services = list(services)
+        self._status = None
+        self._actions = {}          # id -> (meta, fn)
+        self._tools = []            # (meta, fn), in order
+        self._srv = None
+
+    # -- what the game offers ------------------------------------------------ #
+    def status(self, fn):
+        """Decorator: `fn()` returns the status document (docs/admin-modules.md)."""
+        self._status = fn
+        return fn
+
+    def action(self, id, label, kind="", fields=(), about="", danger=False):
+        """Decorator: `fn(params, actor)` -> (ok, message)."""
+        if not _ID.match(id):
+            raise ValueError("action id %r does not fit" % id)
+
+        def wrap(fn):
+            self._actions[id] = ({"id": id, "label": label, "kind": kind, "about": about,
+                                  "danger": bool(danger), "fields": list(fields)}, fn)
+            return fn
+        return wrap
+
+    def tool(self, id, label, path, about=""):
+        """Decorator: a page of the game's own, served at /<path> and below.
+        `fn(method, subpath, query, body, actor)` -> (status, content_type, bytes)."""
+        if not _ID.match(id) or path.startswith("openlobby") or ".." in path:
+            raise ValueError("tool %r / %r does not fit" % (id, path))
+
+        def wrap(fn):
+            self._tools.append(({"id": id, "label": label, "path": path, "about": about}, fn))
+            return fn
+        return wrap
+
+    def manifest(self):
+        return {"v": 1, "key": self.key, "title": self.title, "short": self.short,
+                "platform": self.platform, "about": self.about,
+                "content_ids": self.content_ids, "services": self.services,
+                "tools": [m for m, _fn in self._tools],
+                "actions": [m for m, _fn in self._actions.values()]}
+
+    # -- running ------------------------------------------------------------- #
+    def start(self):
+        """Listen on (bind, port) in a daemon thread. -> (host, port)."""
+        port = self
+
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "olport"
+
+            def log_message(self, *a):
+                pass
+
+            def _send(self, status, body, ctype="application/json; charset=utf-8"):
+                if not isinstance(body, (bytes, bytearray)):
+                    body = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _allowed(self):
+                got = self.headers.get("X-Devtool-Token", "")
+                if port.token and not hmac.compare_digest(got.encode(), port.token.encode()):
+                    self._send(403, {"error": "bad or missing token"})
+                    return False
+                return True
+
+            def _body(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > MAX_BODY:
+                    raise ValueError("too large")
+                return self.rfile.read(n) if n else b""
+
+            def _actor(self):
+                return (self.headers.get("X-Devtool-Actor") or "")[:64]
+
+            def do_GET(self):
+                self._route("GET")
+
+            def do_POST(self):
+                self._route("POST")
+
+            def _route(self, method):
+                if not self._allowed():
+                    return
+                path, _, query = self.path.partition("?")
+                try:
+                    body = self._body() if method == "POST" else b""
+                except ValueError:
+                    return self._send(413, {"error": "too large"})
+                if path == PREFIX + "module.json" and method == "GET":
+                    return self._send(200, port.manifest())
+                if path == PREFIX + "status.json" and method == "GET":
+                    if port._status is None:
+                        return self._send(200, {"up": True})
+                    try:
+                        return self._send(200, port._status())
+                    except Exception as exc:            # noqa: BLE001 -- say what kind, not what
+                        return self._send(200, {"up": None,
+                                                "error": "status failed: %s" % exc.__class__.__name__})
+                if path.startswith(PREFIX + "actions/") and method == "POST":
+                    hit = port._actions.get(path[len(PREFIX + "actions/"):])
+                    if hit is None:
+                        return self._send(404, {"ok": False, "msg": "no such action"})
+                    try:
+                        params = json.loads(body or b"{}")
+                    except ValueError:
+                        return self._send(400, {"ok": False, "msg": "the body is not JSON"})
+                    params = {str(k): v for k, v in params.items()} if isinstance(params, dict) else {}
+                    try:
+                        ok, msg = hit[1](params, self._actor())
+                    except Exception as exc:            # noqa: BLE001
+                        ok, msg = False, "failed: %s" % exc.__class__.__name__
+                    return self._send(200, {"ok": bool(ok), "msg": str(msg)[:500]})
+                if path.startswith(PREFIX):
+                    return self._send(404, {"error": "not found"})
+                sub = path.lstrip("/")
+                best = None
+                for meta, fn in port._tools:
+                    p = meta["path"]
+                    if p == "" or sub == p or sub.startswith(p + "/") or sub.startswith(p + "."):
+                        if best is None or len(p) > len(best[0]["path"]):
+                            best = (meta, fn)
+                if best is None:
+                    return self._send(404, {"error": "not found"})
+                try:
+                    status, ctype, data = best[1](method, sub, query, body, self._actor())
+                except Exception as exc:                # noqa: BLE001
+                    return self._send(500, {"error": "tool failed: %s" % exc.__class__.__name__})
+                return self._send(status, data, ctype)
+
+        self._srv = ThreadingHTTPServer((self.bind, self.port), Handler)
+        self._srv.daemon_threads = True
+        threading.Thread(target=self._srv.serve_forever, daemon=True,
+                         name="olport-%s" % self.key).start()
+        return self._srv.server_address[:2]
+
+    def stop(self):
+        if self._srv is not None:
+            self._srv.shutdown()
+            self._srv.server_close()
+            self._srv = None

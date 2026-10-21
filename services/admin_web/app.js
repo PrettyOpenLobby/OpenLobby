@@ -59,6 +59,7 @@ const VIEWS = [
   { id: "alerts", group: "settings", tab: "security", sub: "alerts", perm: "settings" },
   { id: "bots", group: "settings", perm: "owner" },
   { id: "modules", group: "settings", perm: "owner" },
+  { id: "deploy", group: "settings", perm: "owner" },
   { id: "activity", group: "settings", tab: "security", sub: "activity", perm: "audit" },
 ];
 const GROUP_TITLE = { overview: "Overview", players: "Players", inbox: "Inbox",
@@ -158,6 +159,8 @@ function loadTab(name, refresh) {
   if (name === "games") loadGames(refresh);
   if (name === "bots") loadBots();
   if (name === "modules") loadModules();
+  if (name === "deploy") loadDeploy();
+  if (name !== "deploy") stopDeployPoll();
   // The PML index is big and cached server-side; fetched at boot, and again
   // only when asked.
   if (name === "pml" && refresh) PML_LIST_READY = loadPmlFileList();
@@ -4319,6 +4322,7 @@ function syncInboxBadge() {
     { subtree: true, childList: true, characterData: true, attributes: true });
   await loadSession();
   applyRole();
+  probeDeploy();            // shows Settings > Install games when a deployer answers
   renderMeState();
   loadGmCallsBadge();       // after the session: a moderator without GM gets no call
   await loadContentNames();

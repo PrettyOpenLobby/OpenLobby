@@ -597,6 +597,10 @@
     .stat.warn .num { color: var(--warn); }
     .stat.good .num { color: var(--good); }
     .feed { list-style: none; margin: 0; padding: 0; }
+    .deploy-log { font: 12.5px/1.5 ui-monospace, Consolas, monospace; background: var(--panel2);
+      border-radius: 8px; padding: 10px 12px; max-height: 420px; overflow: auto; white-space: pre-wrap;
+      margin: 0; color: var(--muted); }
+    .deploy-acts { display: flex; flex-wrap: wrap; gap: 6px; }
     .perm-edit { display: flex; flex-direction: column; gap: 8px; }
     .perm-edit label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
     .perm-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -973,7 +977,7 @@
         <button data-tab="issues">Bug reports<span class="navbadge info" id="issuesBadge" hidden></span></button>
       </nav>
       <nav class="subtabs" data-group="settings" aria-label="Settings" hidden>
-        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts">Alerts and checks</button><button data-tab="bots">Discord bots</button><button data-tab="modules">Modules</button><button data-tab="activity">Activity log</button>
+        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts">Alerts and checks</button><button data-tab="bots">Discord bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="activity">Activity log</button>
       </nav>
   <main>
     <!-- OVERVIEW -->
@@ -1555,6 +1559,29 @@
           says what is still to do; <b>Check</b> asks Discord again.</div>
       </div>
       <div class="botgrid" id="botsList"></div>
+    </section>
+
+    <section id="tab-deploy" class="tab">
+      <div class="panel" id="deployOff" hidden>
+        <h2>Install games</h2>
+        <p class="hint" id="deployWhy"></p>
+      </div>
+      <div class="panel" id="deployPanel" hidden>
+        <h2>Games this server can run</h2>
+        <p class="hint">The deployer (a separate service, the only one that touches Docker) installs,
+          turns on and updates games from OpenLobby's catalog. One job runs at a time.</p>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>State</th>
+          <th>Needs</th><th></th></tr></thead><tbody id="deployBody"></tbody></table></div>
+      </div>
+      <div class="panel" id="deployJobPanel" hidden>
+        <h2>Job <span class="mono" id="deployJobTitle"></span> <span class="pill" id="deployJobState"></span></h2>
+        <p class="hint" id="deployJobSummary"></p>
+        <pre class="deploy-log" id="deployLog"></pre>
+      </div>
+      <div class="panel" id="deployJobsPanel" hidden>
+        <h2>Recent jobs</h2>
+        <ul class="feed" id="deployJobs"></ul>
+      </div>
     </section>
 
     <section id="tab-modules" class="tab">

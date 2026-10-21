@@ -12,7 +12,7 @@ def _parse(doc, st):
 
 MODULE = Module(
     "tm", "Tetra Master", platform="PlayOnline: PC and PS2", content_ids=[2],
-    markers=["tm"],
+    markers=["tm"], self_described=True,   # its board's tmadmin.py speaks the admin protocol
     services=[Service(["{core}-tmrank-1", "{core}-board-master-1|{core}-tmboard-1"], name="Rankings and board",
                       warning="Rankings and the board pause for a few seconds. Matches go on.")],
     live=sources.board(_parse, counted=[("tm", "matches")]),

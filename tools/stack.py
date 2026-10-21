@@ -14,6 +14,8 @@ chain the title plugins need. docs/games.md explains the design.
     python tools/stack.py enable tm,jan          record the games to run
     python tools/stack.py disable jan
     python tools/stack.py check                  checkouts and data present
+    python tools/stack.py check --json --all     the same for every game, as JSON
+    python tools/stack.py ps [--json]            which games have running containers
     python tools/stack.py compose up -d --build  run docker compose
     python tools/stack.py compose --dry-run up -d --build   print, run nothing
 
@@ -311,53 +313,135 @@ def show(step):
 
 # ------------------------------------------------------------------ check
 
+def check_game(g, ghcr=False, root=ROOT, parent=PARENT, docker=None):
+    """(rows, missing) for one game. rows are (level, text) as check()
+    returns them; missing lists what the game still needs, one entry per
+    absent path or volume: {"id", "path", "hint", "required", "source",
+    "tool"}.
+    A path is relative to the OpenLobby checkout (../<checkout>/...)."""
+    rows, missing = [], []
+    k = g["key"]
+    d = checkout_of(g, root, parent)
+    if not os.path.isdir(d):
+        return [("fail", "%s: no checkout at %s (stack.py add %s)" % (k, d, k))], missing
+    rel = "../" + g["checkout"]
+    rows.append(("ok", "%s: checkout %s" % (k, d)))
+    for f in g["compose"] + (g["compose_ghcr"] if ghcr else []):
+        if not os.path.isfile(os.path.join(d, f)):
+            rows.append(("fail", "%s: %s is missing from the checkout" % (k, f)))
+    if g.get("env_example") and os.path.isfile(os.path.join(d, g["env_example"])) \
+            and not os.path.isfile(os.path.join(d, ".env")):
+        rows.append(("warn", "%s: no .env (copy %s if you want to change a setting)"
+                     % (k, g["env_example"])))
+    for item in g["data"]:
+        if ghcr and item.get("build_only"):
+            continue
+        if not item["paths"]:
+            continue
+        absent = [p for p in item["paths"] if not glob.glob(os.path.join(d, p))]
+        if not absent:
+            rows.append(("ok", "%s: %s present" % (k, item["id"])))
+            continue
+        level = "fail" if item["required"] else "warn"
+        rows.append((level, "%s: %s missing (%s); run in %s: %s"
+                     % (k, item["id"], ", ".join(absent), d, item["tool"])))
+        if item["source"].startswith("none"):
+            how = "Make them with: %s (run in %s)" % (item["tool"], rel)
+        else:
+            how = "From %s: %s (run in %s)" % (item["source"], item["tool"], rel)
+        for p in absent:
+            missing.append({"id": item["id"], "path": rel + "/" + p,
+                            "hint": "%s %s" % (item["description"], how),
+                            "required": bool(item["required"]),
+                            "source": item["source"], "tool": item["tool"]})
+    for vol in g.get("volumes", []):
+        if not docker:
+            rows.append(("warn", "%s: volume %s not checked (no docker on PATH)"
+                         % (k, vol["name"])))
+            continue
+        r = subprocess.run([docker, "volume", "inspect", vol["name"]],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            rows.append(("ok", "%s: volume %s present" % (k, vol["name"])))
+        else:
+            level = "fail" if vol.get("required") else "warn"
+            setup = " && ".join(vol["setup"])
+            rows.append((level, "%s: volume %s missing; create it with: %s"
+                         % (k, vol["name"], setup)))
+            missing.append({"id": vol["name"], "path": "volume " + vol["name"],
+                            "hint": "%s Create it with: %s" % (vol.get("description", ""), setup),
+                            "required": bool(vol.get("required")), "source": "docker volume",
+                            "tool": setup})
+    return rows, missing
+
+
 def check(catalog, keys, ghcr=False, root=ROOT, parent=PARENT, docker=None):
     """[(level, text)] for the enabled games; level is ok, warn or fail."""
     out = []
     if docker is None:
         docker = shutil.which("docker")
     for k in keys:
-        g = catalog[k]
-        d = checkout_of(g, root, parent)
-        if not os.path.isdir(d):
-            out.append(("fail", "%s: no checkout at %s (stack.py add %s)" % (k, d, k)))
-            continue
-        out.append(("ok", "%s: checkout %s" % (k, d)))
-        for f in g["compose"] + (g["compose_ghcr"] if ghcr else []):
-            if not os.path.isfile(os.path.join(d, f)):
-                out.append(("fail", "%s: %s is missing from the checkout" % (k, f)))
-        if g.get("env_example") and os.path.isfile(os.path.join(d, g["env_example"])) \
-                and not os.path.isfile(os.path.join(d, ".env")):
-            out.append(("warn", "%s: no .env (copy %s if you want to change a setting)"
-                        % (k, g["env_example"])))
-        for item in g["data"]:
-            if ghcr and item.get("build_only"):
-                continue
-            if not item["paths"]:
-                continue
-            missing = [p for p in item["paths"] if not glob.glob(os.path.join(d, p))]
-            if not missing:
-                out.append(("ok", "%s: %s present" % (k, item["id"])))
-            else:
-                level = "fail" if item["required"] else "warn"
-                out.append((level, "%s: %s missing (%s); run in %s: %s"
-                            % (k, item["id"], ", ".join(missing), d, item["tool"])))
-        for vol in g.get("volumes", []):
-            if not docker:
-                out.append(("warn", "%s: volume %s not checked (no docker on PATH)"
-                            % (k, vol["name"])))
-                continue
-            r = subprocess.run([docker, "volume", "inspect", vol["name"]],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if r.returncode == 0:
-                out.append(("ok", "%s: volume %s present" % (k, vol["name"])))
-            else:
-                level = "fail" if vol.get("required") else "warn"
-                out.append((level, "%s: volume %s missing; create it with: %s"
-                            % (k, vol["name"], " && ".join(vol["setup"]))))
+        out += check_game(catalog[k], ghcr, root, parent, docker)[0]
     for w in env_warnings(env_files(catalog, keys, root, parent)):
         out.append(("warn", w))
     return out
+
+
+def check_report(catalog, keys, on, ghcr=False, root=ROOT, parent=PARENT, docker=None):
+    """check() as data, for `check --json`: one entry per game in `keys`.
+    data_ok is None for a game with no checkout, else whether nothing it
+    requires is missing. ok is false when an installed game lacks required
+    data or an enabled game has no checkout."""
+    if docker is None:
+        docker = shutil.which("docker")
+    games = []
+    for k in keys:
+        g = catalog[k]
+        installed = os.path.isdir(checkout_of(g, root, parent))
+        rows, missing = check_game(g, ghcr, root, parent, docker)
+        games.append({
+            "key": k, "name": g["name"], "admin_module": g.get("admin_module"),
+            "installed": installed, "enabled": k in on,
+            "data_ok": (not any(level == "fail" for level, _ in rows)) if installed else None,
+            "missing": missing,
+            "rows": [[level, text] for level, text in rows],
+            "ports": g.get("ports", []), "services": g.get("services", []),
+            "notes": g.get("notes", ""),
+        })
+    present = [k for k in on if os.path.isdir(checkout_of(catalog[k], root, parent))]
+    return {"ok": all(x["data_ok"] is not False for x in games)
+                  and all(x["installed"] for x in games if x["enabled"]),
+            "ghcr": ghcr, "games": games,
+            "warnings": env_warnings(env_files(catalog, present, root, parent))}
+
+
+def parse_ps(text):
+    """`docker compose ps --format json` output: one JSON object per line
+    (current Compose) or one JSON array (older releases)."""
+    text = text.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        return json.loads(text)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def ps_report(catalog, rows):
+    """{service: state} from compose ps rows, and per game and for the core
+    whether any of its services (profiles included) has a running
+    container."""
+    states = {}
+    for r in rows:
+        svc = r.get("Service")
+        if svc and states.get(svc) != "running":
+            states[svc] = r.get("State", "")
+    games = {}
+    for key, e in catalog.items():
+        svcs = list(e.get("services", [])) + [s for ss in e.get("profiles", {}).values() for s in ss]
+        mine = {s: states[s] for s in svcs if s in states}
+        games[key] = {"running": any(v == "running" for v in mine.values()), "services": mine}
+    core = games.pop("core")
+    return {"ok": True, "services": states, "core": core, "games": games}
 
 
 # -------------------------------------------------------------- commands
@@ -430,13 +514,60 @@ def cmd_disable(catalog, args):
 
 def cmd_check(catalog, args):
     ghcr = "--ghcr" in args
-    keys = enabled(catalog)
+    as_json = "--json" in args
+    named = [a for a in args if a not in ("--ghcr", "--json", "--all")]
+    on = enabled(catalog)
+    if "--all" in args:
+        keys = [g["key"] for g in games_of(catalog)]
+    elif named:
+        keys = ordered(parse_keys(named, catalog), catalog)
+    else:
+        keys = on
+    if as_json:
+        report = check_report(catalog, keys, on, ghcr=ghcr)
+        print(json.dumps(report, indent=1))
+        return 0 if report["ok"] else 1
     if not keys:
         print("no games enabled (python tools/stack.py enable <key>); the core runs alone")
     rows = check(catalog, keys, ghcr=ghcr)
     for level, text in rows:
         print("%-4s %s" % (level.upper(), text))
     return 1 if any(level == "fail" for level, _ in rows) else 0
+
+
+def cmd_ps(catalog, args):
+    ghcr = "--ghcr" in args
+    as_json = "--json" in args
+    keys = [k for k in enabled(catalog) if os.path.isdir(checkout_of(catalog[k]))]
+    error = report = None
+    if not shutil.which("docker"):
+        error = "docker is not on PATH"
+    else:
+        p = plan(catalog, keys, ["ps", "--all", "--format", "json"], ghcr=ghcr,
+                 environ=dict(os.environ), prebuild=False)
+        step = p["steps"][-1]
+        env = dict(os.environ)
+        env.update(step["env"])
+        r = subprocess.run(step["argv"], env=env, capture_output=True, text=True)
+        if r.returncode != 0:
+            error = (r.stderr.strip().splitlines() or ["docker compose ps failed"])[-1]
+        else:
+            try:
+                report = ps_report(catalog, parse_ps(r.stdout))
+            except ValueError as exc:
+                error = "cannot read the docker compose ps output: %s" % exc
+    if error:
+        if as_json:
+            print(json.dumps({"ok": False, "error": error}))
+            return 1
+        raise StackError(error)
+    if as_json:
+        print(json.dumps(report, indent=1))
+        return 0
+    for key, g in [("core", report["core"])] + list(report["games"].items()):
+        states = " ".join("%s=%s" % kv for kv in sorted(g["services"].items()))
+        print("%-5s %-8s %s" % (key, "running" if g["running"] else "-", states))
+    return 0
 
 
 def cmd_compose(catalog, args):
@@ -475,7 +606,8 @@ def cmd_compose(catalog, args):
 
 
 COMMANDS = {"list": cmd_list, "add": cmd_add, "enable": cmd_enable,
-            "disable": cmd_disable, "check": cmd_check, "compose": cmd_compose}
+            "disable": cmd_disable, "check": cmd_check, "ps": cmd_ps,
+            "compose": cmd_compose}
 
 
 def main(argv=None):
