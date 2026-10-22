@@ -57,7 +57,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import accounts  # noqa: E402
 import contentlist  # noqa: E402  -- the shared content-id title table
 import newsgen    # noqa: E402  -- announcements store + every news PML we write
-import admincalendar  # noqa: E402  -- Calendar: what the games have scheduled, and our own entries
+import admincalendar  # noqa: E402
+import adminhelp  # noqa: E402  -- the Inbox's Game help (players' help requests in the games)
+import adminplayers  # noqa: E402  -- one account across every game  -- Calendar: what the games have scheduled, and our own entries
 import eventnews  # noqa: E402  -- the event calendar's posts (newsgen adds them)
 import pmleval    # noqa: E402  -- template evaluator for the preview
 import pmlrefs    # noqa: E402  -- which pages reference which files
@@ -1333,6 +1335,8 @@ _GET_PERMS = {
     "/api/gm-players": "gm", "/api/face-sheet": "gm",
     "/api/codes": "codes", "/api/calendar": "calendar",
     "/api/logs": "any",              # checked per group in _logs (owner, or the game's serverlogs)
+    "/api/help": "any", "/api/help/thread": "any",   # per game in adminhelp (its help permission)
+    "/api/account-games": "accounts_view",
     "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
     "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
     "/api/account-clients": "accounts_manage",
@@ -1354,6 +1358,7 @@ _GET_PREFIX_PERMS = {"/art/": ("pml", "news_edit")}
 _POST_PERMS = {
     "/api/sessions/revoke": "any", "/api/me/password": "any", "/api/calendar": "calendar_edit",
     "/api/logs": "any",
+    "/api/help": "any",
     "/api/codes": "codes", "/api/codes/random": "codes",
     "/api/gm-control": "gm", "/api/gm-say": "gm", "/api/gm-ticket": "gm",
     "/api/gm-notices": "gm", "/api/gm-discord": "gm",
@@ -2004,6 +2009,25 @@ class Handler(BaseHTTPRequestHandler):
             st.pop("history", None)
         return self._send(200, st)
 
+    def _account_games(self):
+        """What each game knows of one account (adminplayers.py), for the account window."""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        who = (q.get("polid") or [""])[0].strip()
+        db = _db()
+        try:
+            mem = _member_row(db, who)
+            if mem is None:
+                return self._send(404, {"error": "No such account."})
+            pol = mem["polid"]
+            members = db.execute("SELECT id FROM member WHERE polid=%s ORDER BY id", (pol,)).fetchall()
+            handles = [h["handle_name"] for m in members for h in db.execute(
+                "SELECT handle_name FROM handle WHERE member_id=%s ORDER BY id", (m["id"],))]
+        finally:
+            db.close()
+        return self._send(*adminplayers.lookup({"polid": pol, "handles": handles,
+                                                "members": [str(m["id"]) for m in members]},
+                                               self._can, self._is_owner()))
+
     def _logs(self, method):
         """A service group's recent logs, read by the host runner (pol-ops). The
         owner sees any group; a moderator a game's, with its serverlogs permission,
@@ -2307,8 +2331,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(*admindeploy.browse(q.get("path", [""])[0]))
         if path == "/api/deploy/uploads":
             return self._send(*admindeploy.uploads())
+        if path == "/api/deploy/patches":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            return self._send(*admindeploy.patches(q.get("recheck", [""])[0] == "1"))
         if path == "/api/logs":
             return self._logs("GET")
+        if path in ("/api/help", "/api/help/thread"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            owner = self._is_owner()
+            if path == "/api/help":
+                return self._send(*adminhelp.listing(self._can, owner, q.get("open", ["1"])[0] != "0"))
+            return self._send(*adminhelp.thread(q.get("game", [""])[0], q.get("id", [""])[0], self._can, owner))
+        if path == "/api/account-games":
+            return self._account_games()
         if path == "/api/calendar":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             _u, role, _p = self._caller()
@@ -2495,6 +2530,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(status, out)
         if path == "/api/logs":
             return self._logs("POST")
+        if path == "/api/help":
+            body = self._json_body()
+            user, role, _p = self._caller()
+            status, out = adminhelp.act(body, user, self._can, role == "owner")
+            _audit(user, role, "game help: %s %s request %s" % (body.get("action"), body.get("game"), body.get("id")),
+                   target=str(body.get("id") or "")[:40], ok=status == 200, addr=self._addr())
+            return self._send(status, out)
         if path == "/api/calendar":
             body = self._json_body()
             user, role, _p = self._caller()
@@ -2508,6 +2550,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(status, out)
         if path == "/api/deploy/upload":
             return self._deploy_upload()
+        if path == "/api/deploy/patch":
+            body = self._json_body()
+            status, out = admindeploy.patch_action(body)
+            user, role, _p = self._caller()
+            what = {"patch_import": "imported a patch bundle", "patch_build": "built a patch bundle",
+                    "patch_rollback": "rolled a patch bundle back", "patch_remove": "removed a patch bundle",
+                    "patch_check": "checked the patch bundles"}.get(body.get("action"), "patch action")
+            _audit(user, role, what, target=("%s-%s" % (body.get("region"), body.get("product")))[:16]
+                   if body.get("region") else None,
+                   detail=dict({k: body.get(k) for k in ("to", "version", "source") if body.get(k)}, job=out.get("job")),
+                   ok=status == 202, addr=self._addr())
+            return self._send(status, out)
         if path == "/api/deploy/upload/delete":
             body = self._json_body()
             status, out = admindeploy.delete_upload(body.get("upload"))

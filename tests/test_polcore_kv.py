@@ -227,6 +227,22 @@ for t in cs:
     t.join()
 chk("500 jobs, each popped exactly once", sorted(map(int, popped)) == list(range(500)), True)
 
+print("in-process ttl never exceeds what was set")
+# A coarse clock (16 ms ticks on Windows) often reads the same value at set and
+# at ttl, and (now + ttl) - now is then not always exactly ttl. Pin the clock
+# to readings where it is not, instead of waiting for one to come along.
+_real_clock = time.monotonic
+over = []
+try:
+    for tick in range(96000000, 96000200):
+        time.monotonic = lambda now=tick / 1000: now
+        m.set("day", "x", ttl=86400)
+        if m.ttl("day") != 86400:
+            over.append((tick, m.ttl("day")))
+finally:
+    time.monotonic = _real_clock
+chk("a key set for a day reads a day left, whatever the clock says", over, [])
+
 print("default() follows POL_VALKEY_URL")
 os.environ.pop("POL_VALKEY_URL", None)
 kv.reset()

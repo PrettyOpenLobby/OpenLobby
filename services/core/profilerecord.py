@@ -175,8 +175,11 @@ _IDREC_CONTENT_MAX = 8
 #:
 #: The status block, read with Crystal's field names and checked on those four:
 #:     +0 login flag     1 online (or self), 0 offline
-#:     +1 status         the presence push's +0x11 value: 3 online, 2 away,
+#:     +1 status         the presence push's +0x11 value: 2 online, 3 away,
 #:                       1 offline -- and 1 on the account's own record
+#:                       (see _PRESENCE_FIELD_STATE; the client stores +0x11 - 1
+#:                       as the 4:5 status code, so SE's 01 03 sample above
+#:                       decodes as away)
 #:     +2 active character bits (0 in every sample; left 0)
 #:     +3 purpose        the subject's z_purp. The two offline members carry
 #:                       purpose 4 and 5 in their field 17 and 04/05 here; Crystal

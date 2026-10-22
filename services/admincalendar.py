@@ -73,8 +73,8 @@ def gather(conn, lo, hi, can, owner):
                 m = futs[f]
                 try:
                     entries += f.result()
-                except Exception as exc:          # noqa: BLE001 -- a game down is a note, not an error
-                    problems.append("%s: its calendar did not answer (%s)" % (m.title, exc.__class__.__name__))
+                except Exception:          # noqa: BLE001 -- a game down is a note, not an error
+                    problems.append("%s: its calendar is not answering right now" % m.title)
             for f in pending:
                 problems.append("%s: its calendar took too long" % futs[f].title)
     for r in _own(conn):

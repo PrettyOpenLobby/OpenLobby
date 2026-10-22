@@ -295,8 +295,9 @@ def main():
             json.loads(kicks[0]["body"]) if kicks else None,
             {"polid": acct["polid"], "handles": "Lumen"})
         _code, m = owner.call("api/maintenance")
+        # FE is configured here (its token is wrong) and has a System message action
         chk("the maintenance form lists the games that can announce", m.get("games"),
-            {"kart": "Kart Club"})
+            {"fe": "Fantasy Earth", "kart": "Kart Club"})
         SEEN.clear()
         st, _h, body, _u = raw(owner, "api/maintenance", {"action": "message", "subject": "Down",
                                                           "text": "Back at 10:00", "games": ["kart"]},

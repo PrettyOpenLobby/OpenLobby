@@ -189,7 +189,13 @@ class MemoryKV(_Base):
             if not self._live(k):
                 return -2
             dl = self._exp.get(k)
-            return -1 if dl is None else max(0, math.ceil(dl - time.monotonic()))
+            if dl is None:
+                return -1
+            # Whole milliseconds first, the way PTTL counts. Rounding up the
+            # raw float would let the error in (now + ttl) - now report a key
+            # set for 86400 s as having 86401 s left.
+            ms = int((dl - time.monotonic()) * 1000)
+            return max(0, math.ceil(ms / 1000))
 
     def incr(self, key, amount=1):
         k = self._k(key)

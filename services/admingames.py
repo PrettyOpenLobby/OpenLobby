@@ -130,6 +130,19 @@ def forward(key, sub, method, query, body, ctype, actor):
     return status, out, data
 
 
+def get_json(key, sub, query, actor):
+    """GET a game tool's JSON on the panel's own behalf -> (status, dict). Never raises:
+    a game that is not set up or not answering is a status of 404 or 502 and {"error"}."""
+    if key not in configured():
+        return 404, {"error": "%s has no tools set up on this panel." % title(key)}
+    status, _headers, data = forward(key, sub, "GET", query, b"", None, actor)
+    try:
+        got = json.loads(data or b"{}")
+    except ValueError:
+        got = {}
+    return status, got if isinstance(got, dict) else {}
+
+
 def call(key, sub, payload, actor):
     """POST a JSON action to a game's tool port on the panel's own behalf (the
     maintenance warning queues an FFXI announcement this way).

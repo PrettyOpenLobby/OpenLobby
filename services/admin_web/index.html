@@ -601,6 +601,25 @@
       border-radius: 8px; padding: 10px 12px; max-height: 420px; overflow: auto; white-space: pre-wrap;
       margin: 0; color: var(--muted); }
     .deploy-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+    .gh-split { display: grid; grid-template-columns: minmax(260px, 2fr) 3fr; gap: 16px; align-items: start; }
+    .gh-list li { cursor: pointer; border-radius: 8px; padding-left: 8px; padding-right: 8px; }
+    .gh-list li.on { background: var(--panel2); }
+    .gh-list .dot { margin-right: 6px; }
+    .gh-thread h3 { margin: 0 0 2px; }
+    .gh-msgs { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; margin: 10px 0; }
+    .gh-msg { background: var(--panel2); border-radius: 10px; padding: 8px 12px; max-width: 88%; }
+    .gh-msg.staff { align-self: flex-end; background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+    .gh-meta { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+    .gh-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .gh-answer { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+    .gh-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+    .gh-acts .grow { flex: 1; }
+    .ag-game { margin-bottom: 10px; }
+    .ag-game .dot { margin-right: 6px; }
+    .ag-facts { font-size: 12px; color: var(--muted); margin: -2px 0 4px; }
+    .gh-split > * { min-width: 0; }
+    .gh-answer textarea { width: 100%; box-sizing: border-box; }
+    @media (max-width: 760px) { .gh-split { grid-template-columns: 1fr; } .gh-list li { flex-wrap: wrap; } .gh-list .t2 { width: 100%; } }
     .lg-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
     .lg-tools .grow { flex: 1; }
     .lg-tools input { min-width: 200px; }
@@ -726,6 +745,11 @@
     .imp-list li.match .t1::after { content: " - looks right"; color: var(--good); font-weight: 600; }
     .imp-crumb { display: flex; align-items: center; gap: 8px; }
     .imp-missing { margin-top: 12px; color: var(--bad); font-size: 13px; }
+    .imp-build { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 12px; margin-top: 12px; }
+    .imp-build label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin: 0; }
+    .imp-build .chip { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+    @media (max-width: 640px) { .imp-build { grid-template-columns: 1fr 1fr; } }
+    .patch-why { font-size: 12px; color: var(--muted); max-width: 320px; }
     .perm-edit { display: flex; flex-direction: column; gap: 8px; }
     .perm-edit label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
     .perm-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -810,6 +834,10 @@
       text-align: left; background: none; border: 0; border-radius: 7px; color: var(--muted);
       padding: 0 10px; cursor: pointer; font: inherit; }
     .gx-item:hover, .gx-item.on { color: var(--text); background: var(--panel2); }
+    .gx-group { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+      opacity: .8; padding: 10px 10px 2px; }
+    .gx-grouphead { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+      margin: 18px 0 8px; font-weight: 600; }
     .gx-item .n { margin-left: auto; font-size: 12px; color: var(--muted); }
     .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block;
       background: var(--good); }
@@ -886,6 +914,8 @@
     .pv { display: grid; grid-template-columns: 300px minmax(0, 1fr) auto; gap: 16px;
       align-items: start; }
     .pv .panel { margin-bottom: 12px; }
+    .pml-head { margin-bottom: 16px; display: flex; flex-direction: column; gap: 14px; }
+    .pml-head:empty { display: none; }
     .pv-side { padding: 12px; position: sticky; top: 70px; max-height: calc(100vh - 90px);
       display: flex; flex-direction: column; gap: 8px; }
     .pv-side input[type=search] { background: var(--panel2); color: var(--text);
@@ -1101,6 +1131,7 @@
         <button data-tab="gmcalls">GM calls<span class="navbadge" id="gmBadge" hidden></span></button>
         <button data-tab="reports">Player reports<span class="navbadge info" id="reportsBadge" hidden></span></button>
         <button data-tab="issues">Bug reports<span class="navbadge info" id="issuesBadge" hidden></span></button>
+        <button data-tab="gamehelp">Game help</button>
       </nav>
       <nav class="subtabs" data-group="settings" aria-label="Settings" hidden>
         <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts">Alerts and checks</button><button data-tab="bots">Discord bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="activity">Activity log</button>
@@ -1314,6 +1345,24 @@
          Report User dialog (a player accusing a player, by SMTP); this one is a
          tester telling us the software broke, filed by the shim's report chord
          with both halves of the logs attached. -->
+    <section id="tab-gamehelp" class="tab">
+      <div class="panel">
+        <h2>Game help</h2>
+        <p class="hint">Players' help requests from inside the games, answered here. Each game needs
+          its own help permission.</p>
+        <div class="toolbar">
+          <div class="seg" id="ghFilter"><button data-f="open" class="on">Open</button><button data-f="all">All</button></div>
+          <span class="count" id="ghCount"></span>
+        </div>
+        <p class="hint" id="ghProblems" hidden></p>
+        <p class="hint" id="ghNone" hidden>No game here has a help desk the panel can read yet.</p>
+        <div class="gh-split">
+          <ul class="feed gh-list" id="ghList"></ul>
+          <div class="gh-thread" id="ghThread"><p class="muted">Pick a request.</p></div>
+        </div>
+      </div>
+    </section>
+
     <section id="tab-issues" class="tab">
       <div class="panel">
         <h2>Issue reports</h2>
@@ -1576,6 +1625,8 @@
 
     <!-- PML PREVIEW -->
     <section id="tab-pml" class="tab">
+      <!-- the PlayOnline Viewer's heading and tabs, as on its other pages (games.js markViewerInSide) -->
+      <div class="pml-head" id="pmlHead"></div>
       <div class="pv">
         <!-- page browser -->
         <aside class="pv-side panel">
@@ -1715,6 +1766,20 @@
           turns on and updates games from OpenLobby's catalog. One job runs at a time.</p>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>State</th>
           <th>Needs</th><th></th></tr></thead><tbody id="deployBody"></tbody></table></div>
+      </div>
+      <div class="panel" id="patchPanel" hidden>
+        <h2>Patch bundles</h2>
+        <p class="hint">What the patch service hands each title's client: its versions, whether the
+          service has loaded the latest, and the last self-check. A .polpatch holds Square Enix's files;
+          it is for your own servers, and there is no way to download one from here.</p>
+        <div class="toolbar">
+          <button class="act sm" id="patchImport">Import a .polpatch</button>
+          <button class="ghost sm" id="patchBuild">Build from an install</button>
+          <button class="ghost sm" id="patchCheck">Check them all</button>
+          <span class="count" id="patchNote"></span>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Title</th><th>Versions</th><th>Served</th>
+          <th>Self-check</th><th>Size</th><th></th></tr></thead><tbody id="patchBody"></tbody></table></div>
       </div>
       <div class="panel" id="deployJobPanel" hidden>
         <h2>Job <span class="mono" id="deployJobTitle"></span> <span class="pill" id="deployJobState"></span></h2>
@@ -1882,7 +1947,7 @@
   <!-- Settings > Install games: hand the deployer a game client (games.js, "Import from client"). -->
   <div class="modal" id="impModal">
     <div class="card wide">
-      <h3>Import <span id="impWhat"></span></h3>
+      <h3><span id="impVerb">Import</span> <span id="impWhat"></span></h3>
       <p id="impHint"></p>
       <div class="imp-tabs"><button data-imp="upload" class="active">Upload an archive</button><button data-imp="browse" id="impBrowseTab">A folder on the server</button></div>
       <div id="impUpload">
@@ -1896,6 +1961,13 @@
       <div id="impBrowse" hidden>
         <div class="imp-crumb"><button class="ghost sm" id="impUp">Up</button> <span class="mono" id="impPath"></span></div>
         <ul class="feed imp-list" id="impDirs"></ul>
+      </div>
+      <div class="imp-build" id="impBuild" hidden>
+        <label>Region<input type="text" id="impRegion" maxlength="3" placeholder="W2U" autocomplete="off"></label>
+        <label>Product<input type="text" id="impProduct" maxlength="4" placeholder="0002" autocomplete="off"></label>
+        <label>Version<input type="text" id="impVersion" maxlength="10" placeholder="read from the install" autocomplete="off"></label>
+        <label>Other regions<input type="text" id="impAliases" placeholder="e.g. W20" autocomplete="off"></label>
+        <label class="chip"><input type="checkbox" id="impWalk"> Every file in the folder, not the install's file list</label>
       </div>
       <div class="imp-missing" id="impMissing" hidden></div>
       <div class="foot">
@@ -2099,6 +2171,7 @@
   <script src="/static/pmlrt.js"></script>
   <script src="/static/games.js"></script>
   <script src="/static/calendar.js"></script>
+  <script src="/static/helpdesk.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

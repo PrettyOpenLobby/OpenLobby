@@ -8,6 +8,10 @@ file is the game side: a small HTTP server, standard library only (Python
     GET  /openlobby/module.json     what the game is
     GET  /openlobby/status.json     who is playing now
     GET  /openlobby/calendar.json   what is scheduled (optional; ?from=&to= unix seconds)
+    GET  /openlobby/help.json       players' help requests (optional; with help/thread.json,
+                                    POST help/reply and help/close)
+    GET  /openlobby/player.json     what the game knows of one account (optional;
+                                    ?polid=&handles=&members=)
     POST /openlobby/actions/<id>    run one action
 
 and, if the game has them, its own tool pages under any other path.
@@ -39,6 +43,16 @@ A game with a schedule can show it in the panel's calendar:
 Entries touching [lo, hi) in unix seconds; "times" ([[start, end], ...]) may list the
 sessions inside a long one.
 
+Players' help requests go to the panel's Inbox with port.help_desk(list, thread, reply,
+close): list(open_only) -> [{"id", "subject", "who", "at", "closed", "waiting", "count"}],
+thread(id) -> {"id", "subject", "closed", "who": {"name", "online"}, "messages":
+[{"from": "player" or "staff", "subject", "text", "at"}]} (None when there is no such id),
+reply(id, text, close, actor) and close(id, actor) -> (ok, message).
+
+The account window asks every game about one player with @port.player: fn(who) gets
+{"polid", "handles": [...], "members": [...]} and returns {"characters": [{"name", "detail",
+"online", "facts": [{"label", "value"}]}], "note"}, or None for a player the game never saw.
+
 An action gets the posted fields (strings) and the name of the panel user who
 asked, and returns (ok, message). One that raises answers {"ok": false} with
 the exception's type, never its text. A kind of "announce" is used by the
@@ -53,6 +67,7 @@ import json
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote_plus as unquote
 
 PREFIX = "/openlobby/"
 MAX_BODY = 1 << 20
@@ -76,6 +91,8 @@ class AdminPort:
         self.services = list(services)
         self._status = None
         self._calendar = None
+        self._help = None
+        self._player = None
         self._actions = {}          # id -> (meta, fn)
         self._tools = []            # (meta, fn), in order
         self._srv = None
@@ -89,6 +106,15 @@ class AdminPort:
     def calendar(self, fn):
         """Decorator: `fn(lo, hi)` returns the entries touching [lo, hi) (unix seconds)."""
         self._calendar = fn
+        return fn
+
+    def help_desk(self, list, thread, reply, close):
+        """Players' help requests (see above)."""
+        self._help = (list, thread, reply, close)
+
+    def player(self, fn):
+        """Decorator: `fn(who)` -> what the game knows of one account, or None."""
+        self._player = fn
         return fn
 
     def action(self, id, label, kind="", fields=(), about="", danger=False):
@@ -118,6 +144,7 @@ class AdminPort:
                 "platform": self.platform, "about": self.about,
                 "content_ids": self.content_ids, "services": self.services,
                 "calendar": self._calendar is not None,
+                "help": self._help is not None, "player": self._player is not None,
                 "tools": [m for m, _fn in self._tools],
                 "actions": [m for m, _fn in self._actions.values()]}
 
@@ -161,6 +188,30 @@ class AdminPort:
             def do_GET(self):
                 self._route("GET")
 
+            def _help_route(self, sub, method, q, body):
+                lst, thread, reply, close = port._help
+                try:
+                    if sub == "help.json" and method == "GET":
+                        return self._send(200, {"threads": list(lst(q.get("open") == "1") or [])})
+                    if sub == "help/thread.json" and method == "GET":
+                        t = thread(unquote(q.get("id", "")))
+                        return self._send(200, t) if t else self._send(404, {"error": "no such request"})
+                    if sub in ("help/reply", "help/close") and method == "POST":
+                        try:
+                            p = json.loads(body or b"{}")
+                        except ValueError:
+                            return self._send(400, {"ok": False, "msg": "the body is not JSON"})
+                        p = p if isinstance(p, dict) else {}
+                        tid = str(p.get("id") or "")
+                        if sub == "help/reply":
+                            ok, msg = reply(tid, str(p.get("text") or ""), bool(p.get("close")), self._actor())
+                        else:
+                            ok, msg = close(tid, self._actor())
+                        return self._send(200, {"ok": bool(ok), "msg": str(msg)[:500]})
+                except Exception as exc:                # noqa: BLE001 -- say what kind, not what
+                    return self._send(500, {"ok": False, "msg": "failed: %s" % exc.__class__.__name__})
+                return self._send(404, {"error": "not found"})
+
             def do_POST(self):
                 self._route("POST")
 
@@ -172,6 +223,7 @@ class AdminPort:
                     body = self._body() if method == "POST" else b""
                 except ValueError:
                     return self._send(413, {"error": "too large"})
+                q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
                 if path == PREFIX + "module.json" and method == "GET":
                     return self._send(200, port.manifest())
                 if path == PREFIX + "status.json" and method == "GET":
@@ -183,7 +235,6 @@ class AdminPort:
                         return self._send(200, {"up": None,
                                                 "error": "status failed: %s" % exc.__class__.__name__})
                 if path == PREFIX + "calendar.json" and method == "GET" and port._calendar is not None:
-                    q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
                     try:
                         lo, hi = int(q.get("from", "0")), int(q.get("to", "0"))
                     except ValueError:
@@ -192,6 +243,17 @@ class AdminPort:
                         return self._send(200, {"events": list(port._calendar(lo, hi) or [])})
                     except Exception as exc:            # noqa: BLE001
                         return self._send(500, {"error": "calendar failed: %s" % exc.__class__.__name__})
+                if path.startswith(PREFIX + "help") and port._help is not None:
+                    return self._help_route(path[len(PREFIX):], method, q, body)
+                if path == PREFIX + "player.json" and method == "GET" and port._player is not None:
+                    who = {"polid": unquote(q.get("polid", "")),
+                           # the panel encodes the commas too (urlencode), so unquote first
+                           "handles": [h for h in unquote(q.get("handles", "")).split(",") if h],
+                           "members": [x for x in unquote(q.get("members", "")).split(",") if x]}
+                    try:
+                        return self._send(200, port._player(who) or {})
+                    except Exception as exc:            # noqa: BLE001
+                        return self._send(500, {"error": "player failed: %s" % exc.__class__.__name__})
                 if path.startswith(PREFIX + "actions/") and method == "POST":
                     hit = port._actions.get(path[len(PREFIX + "actions/"):])
                     if hit is None:

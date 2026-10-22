@@ -9,7 +9,9 @@ owned by the right tool, that permissions come out per game, tool and action
 module folder is read and its mistakes reported rather than fatal, that
 POL_ADMIN_MODULES picks what a server shows, that the status readers turn the
 games' JSON into the panel's shape, and that "{core}" in container names
-becomes the deployment's compose project. No database, no network.
+becomes the deployment's compose project, and that FFXI's account window lookup asks the
+bridge's Characters tool by member id. No database; the one network call is to a stand-in on
+loopback.
 """
 import json
 import os
@@ -196,6 +198,59 @@ if os.path.isdir(HOLO):
     gmnotice.clear()
 else:
     print("  (HippaulHoLo is not beside this checkout; skipped)")
+
+print("FFXI in the account window")
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+ASKED = []
+
+
+class _Chars(BaseHTTPRequestHandler):
+    """The bridge's Characters tool, as far as /chars/player.json goes."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        ASKED.append((self.path, self.headers.get("X-Devtool-Token")))
+        members = self.path.partition("members=")[2]
+        doc = {"characters": [{"name": "Arbor", "detail": "BLU 67/RDM 33, Port Jeuno", "online": False,
+                               "facts": [{"label": "main job", "value": "BLU 67"}]}], "note": ""}             if "7" in members.replace("%2C", ",").split(",") else {}
+        body = json.dumps(doc).encode()
+        self.send_response(503 if members == "9" else 200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), _Chars)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+mods = reload(POL_ADMIN_MODULES="ffxi", POL_ADMIN_GAME_FFXI_URL="http://127.0.0.1:%d" % srv.server_address[1],
+              POL_ADMIN_GAME_FFXI_TOKEN="ffxi-tok")
+ffxi = mods["ffxi"]
+got = ffxi.player(ffxi, {"polid": "ABCD1234", "handles": ["Arbor"], "members": ["3", "7"]})
+chk("the account's characters come from the Characters tool",
+    [c["name"] for c in (got or {}).get("characters", [])], ["Arbor"])
+chk("...asked by member id alone, with the panel's token",
+    ASKED[-1], ("/chars/player.json?members=3%2C7", "ffxi-tok"))
+chk("an account whose members have no characters is nothing",
+    ffxi.player(ffxi, {"polid": "ABCD1234", "handles": ["Birch"], "members": ["3"]}), None)
+n = len(ASKED)
+chk("an account with no members is nothing, without asking",
+    (ffxi.player(ffxi, {"polid": "", "handles": ["Arbor"], "members": []}), len(ASKED)), (None, n))
+chk("a member id that is not a number is not sent",
+    (ffxi.player(ffxi, {"polid": "", "handles": [], "members": ["x1"]}), len(ASKED)), (None, n))
+try:
+    ffxi.player(ffxi, {"polid": "", "handles": [], "members": ["9"]})
+    chk("a tool that cannot read its database is a game not answering", "answered", "raised")
+except RuntimeError:
+    chk("a tool that cannot read its database is a game not answering", "raised", "raised")
+srv.shutdown()
+mods = reload(POL_ADMIN_MODULES="ffxi")
+chk("without the bridge's tools set up there is nothing to ask",
+    mods["ffxi"].player(mods["ffxi"], {"polid": "", "handles": [], "members": ["7"]}), None)
 
 print("all checks passed" if not bad else "%d check(s) FAILED" % bad)
 sys.exit(1 if bad else 0)

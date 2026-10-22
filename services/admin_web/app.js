@@ -50,6 +50,8 @@ const VIEWS = [
   { id: "gmcalls", group: "inbox", perm: "gm" },
   { id: "reports", group: "inbox", perm: "reports" },
   { id: "issues", group: "inbox", perm: "reports" },
+  // each game's help desk has its own permission (helpdesk.js canGameHelp)
+  { id: "gamehelp", group: "inbox", perm: "gamehelp" },
   { id: "games", group: "games" },
   // PML Preview belongs to the PlayOnline Viewer's module (Games > POL Viewer)
   { id: "pml", group: "games", perm: "pml" },
@@ -103,6 +105,7 @@ const tabAllowed = (t) => {
   const v = viewOf(t);
   if (!v) return false;
   if (t === "games") return canSeeGames();
+  if (t === "gamehelp") return canGameHelp();
   return !v.perm || (v.perm === "owner" ? isOwner() : can(v.perm));
 };
 const visibleTabs = () => TABS.filter(tabAllowed);
@@ -158,6 +161,7 @@ function loadTab(name, refresh) {
   if (name === "gmcalls") { loadGmCalls(); startGmDesk(); renderAlertBtn(); }
   if (name === "news") loadNews();
   if (name === "calendar") loadCalendar();
+  if (name === "gamehelp") loadGameHelp();
   if (name === "games") loadGames(refresh);
   if (name === "bots") loadBots();
   if (name === "modules") loadModules();
@@ -4031,8 +4035,10 @@ async function openAccount(polid) {
     r.activity.length ? r.activity.map((a) => kv(`${esc(a.actor)}: ${esc(a.action)}${a.ok ? "" : " (refused)"}`,
                                                   esc(ago(a.at * 1000)))).join("")
                       : none("No changes recorded."));
+  html += `<div class="acct-sec" id="acctGames"><h4>In the games</h4><div class="none">Asking the games...</div></div>`;
   html += `</div>`;
   $("#acctBody").innerHTML = html;
+  loadAccountGames(r.polid);
   $("#acctActions").innerHTML = (can("accounts_manage")
     ? `<button class="ghost" data-a="grant">Content</button><button class="ghost" data-a="pw">Password</button>` +
       `<button class="ghost" data-a="tok">Tokens</button>` +

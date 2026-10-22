@@ -95,6 +95,20 @@ def core_project():
     return os.environ.get("POL_ADMIN_CORE_PROJECT", "").strip() or "openlobby"
 
 
+class HelpDesk:
+    """Players' help requests from inside a game, answered from the Inbox
+    (adminhelp.py has the shapes). Each function takes the module first:
+
+        list(m, open_only) -> [thread row]       thread(m, id) -> thread
+        reply(m, id, text, close, actor) -> (ok, message)
+        close(m, id, actor) -> (ok, message)
+
+    thread() raises LookupError for an id that is not there."""
+
+    def __init__(self, list, thread, reply, close):
+        self.list, self.thread, self.reply, self.close = list, thread, reply, close
+
+
 class Service:
     """Containers and ports that run together; one restart button. A container
     name may say "{core}" for the core stack's compose project, and may be
@@ -115,7 +129,8 @@ class Service:
 class Module:
     def __init__(self, key, title, short="", platform="", kind="game",
                  tools=(), services=None, live=None, actions=(), content_ids=(),
-                 about="", markers=(), present=None, self_described=False, calendar=None):
+                 about="", markers=(), present=None, self_described=False, calendar=None,
+                 help=None, player=None):
         self.key, self.title, self.short = key, title, short or title
         self.platform, self.kind, self.about = platform, kind, about
         self.tools = list(tools)
@@ -123,6 +138,10 @@ class Module:
         self.live = live
         #: fn(module, lo, hi) -> what the game has scheduled (sources.eventcal and friends)
         self.calendar = calendar
+        #: HelpDesk: players' help requests, in the Inbox (adminhelp.py)
+        self.help = help
+        #: fn(module, who) -> what the game knows of one PlayOnline account (adminplayers.py)
+        self.player = player
         self.actions = list(actions)
         self.content_ids = list(content_ids)
         #: live-session markers (live_sessions.py) that mean this game runs here
@@ -177,6 +196,8 @@ class Module:
                 out[self.perm(t.id)] = "%s: %s" % (self.title, t.label)
         for a in self.actions:
             out.setdefault(self.perm(a.id), "%s: %s" % (self.title, a.label))
+        if self.help is not None:
+            out.setdefault(self.perm("help"), "%s: answer players' help requests" % self.title)
         if self.services:
             out[self.perm("serverlogs")] = "%s: its server logs (players' addresses hidden)" % self.title
         return out
@@ -319,6 +340,8 @@ def _remotes(out):
             mod.services = file_mod.services
             mod.markers = file_mod.markers
             mod.calendar = mod.calendar or file_mod.calendar
+            mod.help = mod.help or file_mod.help
+            mod.player = mod.player or file_mod.player
         _accept(mod, "the game at %s" % url, out, "game")
 
 

@@ -182,10 +182,9 @@ def find_matches(top, catalog):
     return out
 
 
-def browse(root, rel, catalog, cap=BROWSE_CAP, describe=None):
+def browse(root, rel, catalog, cap=BROWSE_CAP):
     """The answer of GET /api/browse. Raises PathError (400) or
-    FileNotFoundError (404). describe(path), when given, is what a file
-    ending in .polpatch carries as "polpatch"."""
+    FileNotFoundError (404)."""
     real, rel = resolve_under(root, rel)
     if not os.path.isdir(real):
         raise FileNotFoundError(rel)
@@ -203,10 +202,7 @@ def browse(root, rel, catalog, cap=BROWSE_CAP, describe=None):
             if os.path.isdir(target):
                 dirs.append(x.name)
             elif os.path.isfile(target):
-                entry = {"name": x.name, "size": os.path.getsize(target)}
-                if describe and x.name.lower().endswith(".polpatch"):
-                    entry["polpatch"] = describe(target)
-                files.append(entry)
+                files.append({"name": x.name, "size": os.path.getsize(target)})
             else:
                 continue
         except OSError:
@@ -527,10 +523,5 @@ def _unlink(p):
 
 
 def public_upload(m):
-    """An upload as the API shows it. "kind" is "polpatch" for a .polpatch
-    kept whole (with "polpatch", what its manifest says), else "archive"."""
-    out = {k: m.get(k) for k in ("id", "name", "created", "last_import", "size", "files",
-                                 "matches")}
-    out["kind"] = m.get("kind") or "archive"
-    out["polpatch"] = m.get("polpatch") if out["kind"] == "polpatch" else None
-    return out
+    return {k: m.get(k) for k in ("id", "name", "created", "last_import", "size", "files",
+                                  "matches")}

@@ -72,23 +72,39 @@ function serviceCount(g) {
 }
 
 // ---- the sidebar's list of games (under Games) ----
+// The PlayOnline Viewer first (it is the platform, not a title), then the games by where
+// they run, each group alphabetical. The group is read from the module's platform.
+const GAME_GROUPS = [["viewer", ""], ["pol", "PlayOnline"], ["ps2", "PlayStation 2"], ["other", "Other"]];
+function gameGroup(g) {
+  const p = String(g.platform || "").toLowerCase();
+  if (g.key === "viewer" || p === "playonline platform") return "viewer";
+  if (p.startsWith("playonline")) return "pol";
+  if (p.startsWith("ps2") || p.includes("playstation 2")) return "ps2";
+  return "other";
+}
+function groupedGames() {
+  const name = (g) => String(g.short || g.title || g.key).toLowerCase();
+  return GAME_GROUPS.map(([id, label]) => [label, GAMES.filter((g) => gameGroup(g) === id)
+    .sort((a, b) => name(a).localeCompare(name(b)))]).filter(([, gs]) => gs.length);
+}
+
 function renderGamesSide() {
   const cur = CUR_TAB === "pml" ? "viewer" : CUR_TAB === "games" ? (GAME_TOOL || "").split("/")[0] : null;
   $("#gamesList").innerHTML =
     `<button class="gx-item${cur === "" ? " on" : ""}" data-game="">All games</button>`
-    + GAMES.map((g) => {
+    + groupedGames().map(([label, gs]) => (label ? `<div class="gx-group">${esc(label)}</div>` : "") + gs.map((g) => {
       const st = gameState(g);
       const on = g.live && typeof g.live.online === "number" ? g.live.online : "";
       return `<button class="gx-item${cur === g.key ? " on" : ""}" data-game="${esc(g.key)}">`
         + `<span class="dot ${st.cls}" aria-hidden="true"></span>${esc(g.short || g.title)}`
         + `<span class="n">${esc(on)}</span></button>`;
-    }).join("");
+    }).join("")).join("");
 }
 
 // ---- every game ----
 function renderGameGrid() {
   const total = GAMES.reduce((n, g) => n + (g.live && typeof g.live.online === "number" ? g.live.online : 0), 0);
-  const cards = GAMES.map((g) => {
+  const card = (g) => {
     const st = gameState(g), live = g.live || {};
     const rooms = Array.isArray(live.rooms) ? live.rooms.length : null;
     const svc = serviceCount(g);
@@ -104,11 +120,13 @@ function renderGameGrid() {
       + `<span class="gx-line">${esc(line)}</span>`
       + (chips ? `<span class="gx-chips">${chips}</span>` : "")
       + `</button>`;
-  }).join("");
+  };
+  const cards = groupedGames().map(([label, gs]) => (label ? `<h3 class="gx-grouphead">${esc(label)}</h3>` : "")
+    + `<div class="gx-grid">${gs.map(card).join("")}</div>`).join("");
   $("#gamesMain").innerHTML =
     `<div class="gx-top"><h2 class="gx-title">Games</h2>`
     + `<span class="muted">${GAMES.length} on this server, ${total} players online</span></div>`
-    + (cards ? `<div class="gx-grid">${cards}</div>`
+    + (cards ? cards
       : `<div class="panel muted">No games are set up on this server yet. See docs/admin-modules.md.</div>`);
 }
 
@@ -297,7 +315,12 @@ function openGameTool(id, reload) {
 // The PML preview is the Viewer's page; the sidebar marks the Viewer while it
 // is open.
 function markViewerInSide() {
-  if (GAMES_LOADED) renderGamesSide();
+  if (!GAMES_LOADED) return;
+  renderGamesSide();
+  // PML Preview is drawn by the panel, outside #gamesMain; it still gets the Viewer's
+  // heading and tabs, so the Viewer's other pages are one click away
+  const g = GAMES.find((x) => x.tools.some((t) => t.panel && t.id === "pml"));
+  $("#pmlHead").innerHTML = g && CUR_TAB === "pml" ? gameHeader(g) + gameTabs(g, "pml") : "";
 }
 
 function wireGames() {
@@ -453,9 +476,85 @@ function jobWhen(j) {
   return isNaN(ms) ? "" : ago(ms);
 }
 
+// ---- Install games > Patch bundles (the deployer's patch actions) ----
+let PATCHES = null;
+const PATCH_WORD = { patch_import: "Import bundle", patch_build: "Build bundle", patch_rollback: "Roll back",
+                     patch_remove: "Remove bundle", patch_check: "Check bundles" };
+Object.assign(ACT_WORD, PATCH_WORD);
+
+async function loadPatches(recheck) {
+  if (!DEPLOY || !DEPLOY.available) { $("#patchPanel").hidden = true; return; }
+  let r;
+  try { r = await api("/api/deploy/patches" + (recheck ? "?recheck=1" : "")); }
+  catch (e) {
+    $("#patchPanel").hidden = false;
+    $("#patchBody").innerHTML = `<tr><td colspan="6" class="muted">${esc(e.message)}</td></tr>`;
+    return;
+  }
+  PATCHES = r;
+  $("#patchPanel").hidden = false;
+  if (recheck && r.job) followJob(r.job);
+  const busy = ((DEPLOY || {}).jobs || []).some((j) => !JOB_DONE.has(j.state));
+  ["#patchImport", "#patchBuild", "#patchCheck"].forEach((s) => { $(s).disabled = busy; });
+  $("#patchNote").textContent = (r.bundles || []).length ? `${r.bundles.length} bundle${r.bundles.length === 1 ? "" : "s"}` : "";
+  $("#patchBody").innerHTML = (r.bundles || []).map((b) => {
+    const key = `${b.region}-${b.product}`;
+    const sc = b.selfcheck === "ok" ? '<span class="pill live">OK</span>' : b.selfcheck === "failed" ? '<span class="pill off">Failed</span>'
+      : '<span class="pill env">Not run</span>';
+    const older = (b.versions || []).slice(0, -1);
+    return `<tr><td class="strong">${esc(b.title || key)}<div class="muted mono">${esc(key)}${(b.aliases || []).length ? " (also " + esc(b.aliases.join(", ")) + ")" : ""}</div>`
+      + `${b.error ? `<div class="patch-why">${esc(b.error)}</div>` : ""}</td>`
+      + `<td><span class="mono">${esc(b.latest || "-")}</span><div class="muted">${esc((b.versions || []).length)} version${(b.versions || []).length === 1 ? "" : "s"}</div></td>`
+      + `<td>${b.served ? '<span class="pill live">Yes</span>' : '<span class="pill off">No</span>'}</td>`
+      + `<td>${sc}${b.selfcheck_at ? `<div class="muted">${esc(jobWhen({ started: b.selfcheck_at }))}</div>` : ""}`
+      + `${b.selfcheck_why ? `<div class="patch-why">${esc(b.selfcheck_why)}</div>` : ""}</td>`
+      + `<td>${esc(impBytes(b.size))}</td>`
+      + `<td><div class="deploy-acts">${older.length ? `<select data-rollto="${esc(key)}"><option value="">Roll back to...</option>`
+        + older.slice().reverse().map((v) => `<option>${esc(v)}</option>`).join("") + `</select>` : ""}`
+      + `<button class="danger sm" data-patchrm="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div></td></tr>`;
+  }).join("") || '<tr><td colspan="6" class="muted">No bundles in the mirrors folder yet.</td></tr>';
+}
+
+async function patchAct(body, sure) {
+  if (sure === false) return;
+  try {
+    const r = await api("/api/deploy/patch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    toast(`${PATCH_WORD[body.action]}: started`);
+    await probeDeploy(); renderDeploy();
+    followJob(r.job);
+  } catch (e) { toast(e.message, true); }
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#patchImport")) return openPatchDialog("patch_import");
+  if (e.target.closest("#patchBuild")) return openPatchDialog("patch_build");
+  if (e.target.closest("#patchCheck")) return loadPatches(true);
+  const rm = e.target.closest("[data-patchrm]");
+  if (rm) {
+    const b = (PATCHES.bundles || []).find((x) => `${x.region}-${x.product}` === rm.dataset.patchrm);
+    const name = b.title || rm.dataset.patchrm;
+    const typed = prompt(`Remove ${name} from the patch service? Its files go to the deployer's trash folder, `
+      + `and clients can no longer update it. Type ${rm.dataset.patchrm} to confirm.`);
+    return patchAct({ action: "patch_remove", region: b.region, product: b.product }, typed === rm.dataset.patchrm ? true : (typed !== null && toast("Not removed: that did not match.", true), false));
+  }
+});
+document.addEventListener("change", (e) => {
+  const sel = e.target.closest("[data-rollto]");
+  if (!sel || !sel.value) return;
+  const b = (PATCHES.bundles || []).find((x) => `${x.region}-${x.product}` === sel.dataset.rollto);
+  const to = sel.value;
+  sel.value = "";
+  const gone = (b.versions || []).slice((b.versions || []).indexOf(to) + 1);
+  patchAct({ action: "patch_rollback", region: b.region, product: b.product, to },
+    confirm(`Roll ${b.title || sel.dataset.rollto} back to ${to}?\n\nThis takes out ${gone.length === 1 ? "version" : "versions"} `
+      + `${gone.join(", ")}. Clients on ${gone.length === 1 ? "it" : "them"} are told to update to ${to}. `
+      + `The files go to the deployer's trash folder.`));
+});
+
 async function loadDeploy() {
   await probeDeploy();
   renderDeploy();
+  loadPatches();
   if (!DEPLOY || !DEPLOY.available) return;
   const live = (DEPLOY.jobs || []).find((j) => !JOB_DONE.has(j.state));
   if (live && live.id !== DEPLOY_JOB) followJob(live.id);
@@ -470,6 +569,12 @@ async function showJob(id) {
   $("#deployJobTitle").textContent = `${ACT_WORD[j.action] || j.action} ${j.game}`;
   $("#deployJobState").textContent = JOB_WORD[j.state] || j.state;
   $("#deployJobSummary").textContent = j.summary || "";
+  // new client data reaches a game that is already on only when it is turned on again
+  const jg = ((DEPLOY || {}).games || []).find((g) => g.key === j.game);
+  if (j.action === "import" && j.state === "ok" && jg && jg.enabled) {
+    $("#deployJobSummary").insertAdjacentHTML("beforeend", ` <span>${esc(jg.name || jg.key)} is on: turn it on again to use the new data.</span>`
+      + ` <button class="act sm" data-deploy="enable" data-game="${esc(jg.key)}">Turn on again</button>`);
+  }
   $("#deployLog").textContent = j.log || "";
   DEPLOY_OFFSET = j.log_size || (j.log || "").length;
   return j;
@@ -497,6 +602,7 @@ async function followJob(id) {
       await showJob(id);
       await probeDeploy();
       renderDeploy();
+      if (String(j.action || "").startsWith("patch_") || PATCHES) loadPatches();
     }
   }, 1500);
 }
@@ -515,7 +621,11 @@ function impBytes(n) {
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return (i ? n.toFixed(1) : n) + " " + u[i];
 }
-const impMatches = (ms) => (ms || []).some((m) => m.game === IMP.game && m.item === IMP.item);
+const impMatch = (ms) => (ms || []).find((m) => m.game === IMP.game && m.item === IMP.item);
+const impPatchMode = () => IMP && (IMP.mode === "patch_import" || IMP.mode === "patch_build");
+const impMatches = (ms) => !!impMatch(ms);
+// an upload's match may name the folder inside it that holds the item (its "subdir")
+const impUploadSource = (id, ms) => { const m = impMatch(ms); return m && m.subdir ? { upload: id, subdir: m.subdir } : { upload: id }; };
 
 function impChoose(src, words) {
   IMP.source = src;
@@ -539,9 +649,13 @@ async function impUploads() {
   let r;
   try { r = await api("/api/deploy/uploads"); } catch (e) { $("#impUploads").innerHTML = `<li class="empty">${esc(e.message)}</li>`; return; }
   $("#impUploads").innerHTML = (r.uploads || []).map((u) => {
-    const key = JSON.stringify({ upload: u.id });
-    return `<li data-key="${esc(key)}" data-upload="${esc(u.id)}" data-name="${esc(u.name)}" class="${impMatches(u.matches) ? "match" : ""}">`
-      + `<span class="t1">${esc(u.name || u.id)}</span><span class="t2">${esc(impBytes(u.size))}, ${esc(u.files)} files`
+    if (IMP.mode === "patch_import" && u.kind !== "polpatch") return "";
+    if (IMP.mode === "patch_build" && u.kind === "polpatch") return "";
+    const sub = (impMatch(u.matches) || {}).subdir || "";
+    const fits = IMP.mode === "patch_import" ? u.kind === "polpatch" : impMatches(u.matches);
+    const what = u.polpatch && !u.polpatch.error ? ` ${u.polpatch.title || ""} ${u.polpatch.region}-${u.polpatch.product}, ${(u.polpatch.versions || []).join(", ")}` : "";
+    return `<li data-key="${esc(JSON.stringify(impUploadSource(u.id, u.matches)))}" data-upload="${esc(u.id)}" data-sub="${esc(sub)}" data-name="${esc(u.name)}" class="${fits ? "match" : ""}">`
+      + `<span class="t1">${esc(u.name || u.id)}${what ? `<span class="muted">${esc(what)}</span>` : ""}</span><span class="t2">${esc(impBytes(u.size))}, ${esc(u.files)} files`
       + ` <button class="ghost sm" data-imp-del="${esc(u.id)}">Remove</button></span></li>`;
   }).join("") || '<li class="empty">No uploads yet.</li>';
 }
@@ -555,17 +669,44 @@ async function impBrowse(path) {
   $("#impPath").textContent = "/" + IMP.path;
   $("#impUp").disabled = r.parent === null || r.parent === undefined;
   const here = JSON.stringify({ path: IMP.path });
-  $("#impDirs").innerHTML = `<li data-key="${esc(here)}" data-use="${esc(IMP.path)}" class="${impMatches(r.matches) ? "match" : ""}">`
-      + `<span class="t1">Use this folder</span><span class="t2">${(r.files || []).length === 1 ? "1 file" : esc((r.files || []).length) + " files"} here</span></li>`
+  $("#impDirs").innerHTML = (IMP.mode === "patch_import" ? "" : `<li data-key="${esc(here)}" data-use="${esc(IMP.path)}" class="${impMatches(r.matches) ? "match" : ""}">`
+      + `<span class="t1">Use this folder</span><span class="t2">${(r.files || []).length === 1 ? "1 file" : esc((r.files || []).length) + " files"} here</span></li>`)
     + (r.dirs || []).map((d) => `<li data-dir="${esc((IMP.path ? IMP.path + "/" : "") + d)}"><span class="t1">${esc(d)}/</span></li>`).join("")
+    + (IMP.mode === "patch_import" ? (r.files || []).filter((f) => /\.polpatch$/i.test(f.name)).map((f) => {
+        const rel = (IMP.path ? IMP.path + "/" : "") + f.name, pp = f.polpatch || {};
+        return `<li data-key="${esc(JSON.stringify({ path: rel }))}" data-usefile="${esc(rel)}" class="${pp.error ? "" : "match"}">`
+          + `<span class="t1">${esc(f.name)}<span class="muted"> ${esc(pp.error || ((pp.title || "") + " " + (pp.versions || []).join(", ")))}</span></span>`
+          + `<span class="t2">${esc(impBytes(f.size))}</span></li>`;
+      }).join("") : "")
     + (r.truncated ? '<li class="empty">More folders than shown.</li>' : "");
-  if (impMatches(r.matches)) impChoose({ path: IMP.path }, "/" + IMP.path);
+  if (!impPatchMode() && impMatches(r.matches)) impChoose({ path: IMP.path }, "/" + IMP.path);
+}
+
+// the same dialog imports a .polpatch or builds one from an install
+async function openPatchDialog(mode) {
+  IMP = { mode, game: null, item: null, path: "", source: null };
+  $("#impVerb").textContent = mode === "patch_import" ? "Import" : "Build";
+  $("#impWhat").textContent = mode === "patch_import" ? "a patch bundle (.polpatch)" : "a patch bundle from a client install";
+  $("#impHint").textContent = mode === "patch_import"
+    ? "Upload a .polpatch, or pick one in the clients folder. It is checked in full before anything changes."
+    : "Upload an archive of the install, or pick its folder. The region and product say which title it is.";
+  $("#impBuild").hidden = mode !== "patch_build";
+  $("#impProgress").hidden = true;
+  $("#impGo").textContent = mode === "patch_import" ? "Import" : "Build and import";
+  $("#impModal").classList.add("show");
+  impTab("upload");
+  let canBrowse = true;
+  try { await api("/api/deploy/browse?path="); } catch (e) { canBrowse = false; }
+  $("#impBrowseTab").hidden = !canBrowse;
 }
 
 async function openImport(game, item) {
   const g = ((DEPLOY || {}).games || []).find((x) => x.key === game) || {};
   const m = (g.missing || []).find((x) => x.item === item && x.import) || {};
-  IMP = { game, item, path: "", source: null };
+  IMP = { mode: "data", game, item, path: "", source: null };
+  $("#impBuild").hidden = true;
+  $("#impVerb").textContent = "Import";
+  $("#impGo").textContent = "Import";
   $("#impWhat").textContent = `${g.name || game}: ${item}`;
   $("#impHint").textContent = (m.import || {}).hint ? `Point it at ${m.import.hint}.` : "";
   $("#impProgress").hidden = true;
@@ -598,7 +739,7 @@ function impSend(file) {
     if (x.status !== 201) { $("#impPct").textContent = j.error || "The upload failed (" + x.status + ")."; return; }
     $("#impPct").textContent = `Uploaded: ${j.files} files.` + (impMatches(j.matches) ? " It looks right." : "");
     await impUploads();
-    impChoose({ upload: j.upload }, file.name);
+    impChoose(impUploadSource(j.upload, j.matches), file.name);
   };
   x.onerror = () => { $("#impPct").textContent = "The upload stopped. Check the connection and try again."; };
   x.send(file);
@@ -607,18 +748,29 @@ function impSend(file) {
 async function impGo() {
   if (!IMP || !IMP.source) return;
   $("#impGo").disabled = true;
-  const r = await fetch("/api/deploy/action", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "import", game: IMP.game, item: IMP.item, source: IMP.source }) });
+  let r;
+  if (impPatchMode()) {
+    const body = { action: IMP.mode, source: IMP.source };
+    if (IMP.mode === "patch_build") {
+      Object.assign(body, { region: $("#impRegion").value.trim().toUpperCase(), product: $("#impProduct").value.trim(),
+        version: $("#impVersion").value.trim(), walk: $("#impWalk").checked,
+        aliases: $("#impAliases").value.toUpperCase().split(/[\s,]+/).filter(Boolean) });
+    }
+    r = await fetch("/api/deploy/patch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } else {
+    r = await fetch("/api/deploy/action", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "import", game: IMP.game, item: IMP.item, source: IMP.source }) });
+  }
   let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ }
   if (r.status !== 202) {
-    const miss = (j.missing || []).map((m) => `<div><span class="mono">${esc(m.path)}</span>${m.hint ? ` <span class="muted">${esc(m.hint)}</span>` : ""}</div>`).join("");
+    const miss = (j.problems || []).map((p) => `<div>${esc(p)}</div>`).join("") + (j.missing || []).map((m) => `<div><span class="mono">${esc(m.path)}</span>${m.hint ? ` <span class="muted">${esc(m.hint)}</span>` : ""}</div>`).join("");
     $("#impMissing").innerHTML = esc(j.error || "The deployer refused the import.") + miss;
     $("#impMissing").hidden = false;
     $("#impGo").disabled = false;
     return;
   }
   $("#impModal").classList.remove("show");
-  toast(`Import ${IMP.item}: started`);
+  toast(impPatchMode() ? "Started" : `Import ${IMP.item}: started`);
   await probeDeploy(); renderDeploy();
   followJob(j.job);
 }
@@ -640,8 +792,10 @@ document.addEventListener("click", async (e) => {
     return impUploads();
   }
   const li = e.target.closest(".imp-list li");
-  if (li && li.dataset.upload) return impChoose({ upload: li.dataset.upload }, li.dataset.name || li.dataset.upload);
+  if (li && li.dataset.upload) return impChoose(li.dataset.sub ? { upload: li.dataset.upload, subdir: li.dataset.sub }
+                                                                : { upload: li.dataset.upload }, li.dataset.name || li.dataset.upload);
   if (li && li.dataset.use !== undefined) return impChoose({ path: li.dataset.use }, "/" + li.dataset.use);
+  if (li && li.dataset.usefile) return impChoose({ path: li.dataset.usefile }, "/" + li.dataset.usefile);
   if (li && li.dataset.dir) return impBrowse(li.dataset.dir);
   if (e.target.closest("#impUp")) return impBrowse(IMP.parent || "");
   if (e.target.closest("#impCancel") || e.target.id === "impModal") return $("#impModal").classList.remove("show");

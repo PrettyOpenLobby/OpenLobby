@@ -167,11 +167,13 @@ chk("handle: only 0x250..0x258 moved",
     [i for i in range(600) if on_handle[i] != off_handle[i]
      and not (0x250 <= i < 0x258)], [])
 chk("handle, offline member", on_handle[0x250:0x258].hex(), "0001000400000000")
+# +1 is the presence push +0x11 value, and the client stores (+0x11 - 1) as
+# the 4:5 status code (1 online, 2 away), so online is 2 and away is 3.
 online["on"] = True
 chk("handle, online in the Viewer", handle(their_h)[0x250:0x258].hex(),
-    "01030004e8030000")
+    "01020004e8030000")
 status["code"] = R._STATUS_AWAY
-chk("handle, away", handle(their_h)[0x250:0x258].hex(), "01020004e8030000")
+chk("handle, away", handle(their_h)[0x250:0x258].hex(), "01030004e8030000")
 status["code"] = 0
 chk("handle, own profile (SE: 01 01 00 00, zone 0)",
     handle(my_h)[0x250:0x258].hex(), "0101000000000000")

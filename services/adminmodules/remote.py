@@ -25,9 +25,10 @@ and reported on the panel's Modules page.
 """
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
-from adminmodules import Action, Module, Service, Tool, sources
+from adminmodules import Action, HelpDesk, Module, Service, Tool, sources
 
 PREFIX = "openlobby/"
 TIMEOUT = 4.0
@@ -100,6 +101,54 @@ def _calendar(m, lo, hi):
     return out
 
 
+def _post(m, path, body, actor):
+    url, token = m.tool_port()
+    req = urllib.request.Request(url + "/" + PREFIX + path, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Devtool-Token": token or "",
+                                          "X-Devtool-Actor": str(actor or "")[:64]})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            doc = json.loads(r.read(sources.MAX_BYTES))
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            return False, "The game refused the panel's token."
+        try:
+            doc = json.loads(e.read(4096))
+        except ValueError:
+            doc = {}
+        return False, _str((doc or {}).get("msg") or (doc or {}).get("error"), 300) or "The game answered HTTP %d." % e.code
+    return bool(doc.get("ok")), _str(doc.get("msg"), 300)
+
+
+def _help_list(m, open_only):
+    url, token = m.tool_port()
+    doc = _get(url, token, PREFIX + "help.json" + ("?open=1" if open_only else ""))
+    return [t for t in (doc.get("threads") if isinstance(doc, dict) else None) or [] if isinstance(t, dict)]
+
+
+def _help_thread(m, tid):
+    url, token = m.tool_port()
+    try:
+        return _get(url, token, PREFIX + "help/thread.json?id=" + urllib.parse.quote(str(tid)))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise LookupError("That request is gone.")
+        raise
+
+
+HELP = HelpDesk(_help_list, _help_thread,
+                lambda m, tid, text, close, actor: _post(m, "help/reply", {"id": tid, "text": text, "close": close}, actor),
+                lambda m, tid, actor: _post(m, "help/close", {"id": tid}, actor))
+
+
+def _player(m, who):
+    url, token = m.tool_port()
+    q = urllib.parse.urlencode({"polid": who.get("polid") or "", "handles": ",".join(who.get("handles") or []),
+                                "members": ",".join(str(x) for x in who.get("members") or [])})
+    doc = _get(url, token, PREFIX + "player.json?" + q)
+    return doc if isinstance(doc, dict) else None
+
+
 def build(key, url, token):
     """A Module for the game at `url`. Raises OSError/ValueError when the game
     does not answer or its description does not fit."""
@@ -142,5 +191,9 @@ def build(key, url, token):
                services=services or None, live=_live, content_ids=ids)
     if doc.get("calendar"):
         m.calendar = _calendar
+    if doc.get("help"):
+        m.help = HELP
+    if doc.get("player"):
+        m.player = _player
     m.remote = True
     return m

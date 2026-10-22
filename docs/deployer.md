@@ -20,12 +20,10 @@ service is built around that:
   empty token the service logs why and exits instead of starting.
 - It runs nothing but `tools/stack.py` (and `git` for an update), with
   argument lists it builds itself from a fixed set of actions and the game
-  keys in `games/*.json`, the client data tools the catalog names for
-  the `import` action, and OpenLobby's own `.polpatch` toolkit for the
-  patch actions. Nothing from a request reaches a command line except a
-  key that matched the catalog, a region, product or version code of a
-  fixed shape, and the path of a folder or file the deployer checked
-  itself (see "Importing client data" and "Patch bundles").
+  keys in `games/*.json`, and the client data tools the catalog names for
+  the `import` action. Nothing from a request reaches a command line
+  except a key that matched the catalog and, for an import, the path of a
+  folder the deployer checked itself (see "Importing client data").
 - The admin container never gets the socket. It holds the token and asks.
 
 Anyone who has the token, or who can run code in a container on that
@@ -253,115 +251,6 @@ whichever is later, when the deployer starts and whenever the uploads are
 listed or a new one arrives. An upload an import is reading is kept until
 the job ends.
 
-## Patch bundles
-
-The patch service (`patch` in the core) serves the bundles in its mirrors
-folder, `POL_MIRRORS` (default `./mirrors`). The deployer can put bundles
-there for you from `.polpatch` files (docs/polpatch.md), roll a bundle back
-to an earlier version, and take one out, then restart `patch`, which reads
-its bundles only when it starts. These actions do not depend on the game
-catalog.
-
-A `.polpatch` holds Square Enix's client files. It is for your own servers,
-and the deployer has no way to hand one back out: there is no download.
-
-The deployer mounts the same host folder as the patch service, read-write,
-at `/mirrors` (`POL_DEPLOY_MIRRORS` inside the container). Both mounts are
-written `${POL_MIRRORS:-./mirrors}` in `docker-compose.yml`, so they cannot
-point at different folders. Like the patch service's own mount, the
-deployer's creates the folder when it is missing.
-
-There are three ways to give it a bundle:
-
-- Upload the `.polpatch` (`POST /api/uploads`). An upload whose name ends in
-  `.polpatch`, or a ZIP with `polpatch.json` at its top, is kept whole as one
-  file, not unpacked.
-- Put the `.polpatch` in your `POL_DEPLOY_CLIENTS` folder and pick it in the
-  folder browser.
-- Build one on the server from a client install, uploaded as an archive or
-  in the clients folder (`patch_build`). This runs `polpatch.py build-full`
-  and then imports the result.
-
-What each patch action runs:
-
-| Action | What it does |
-| --- | --- |
-| patch_import | the full `.polpatch` check, `polpatch.py apply` into the mirrors folder, `compose --no-prebuild restart patch`, then `polselfcheck.py` against the restarted service |
-| patch_build | `build-full` into a scratch file in the `pol-deployer` volume, then everything `patch_import` does |
-| patch_rollback | takes out every version after the one you name (see below), restarts `patch` and runs the self-check |
-| patch_remove | moves the bundle's folder out of the mirrors folder into the trash folder (below) and restarts `patch` |
-| patch_check | the self-check of every bundle against the running patch service |
-
-`polpublish.py --revert` is never used: it removes every version published
-since the first publish at once.
-
-### Checks
-
-A `.polpatch` is checked twice. When it is uploaded, the deployer reads its
-`polpatch.json` and runs the quick check (`polpatch.py verify --quick`):
-every file's size and SHA-256, the archive's names and the bundle's
-structure, without unpacking the blobs. That keeps the upload request short
-for a large title. The import job then runs the full check, which also
-unpacks every blob and compares it with `patch.cfg`, against the bundle it
-would be applied onto, so an update whose `base_version` is not the
-server's latest version is refused there with a sentence. `apply` hashes
-every file once more as it unpacks, stages the result beside the bundles
-and moves it into place in one step. A file that fails any of this changes
-nothing in the mirrors folder.
-
-After an import or a roll back, and when you ask with
-`GET /api/patches?recheck=1`, the deployer runs `polselfcheck.py` against
-the patch service the way a client would talk to it: the version check, the
-patch list (it must decompress to the bundle's `patch.cfg`), and every
-file's blob, checked against the sizes and checksums in that list. The
-result is kept with the versions it was run against, so a bundle that has
-changed since shows no result. `POLP_CONSOLE_LIST_CAP` and `POLP_SLIM_LIST`
-change the list the patch service sends for the bundles they name, on
-purpose, and the self-check of those bundles fails while they are set.
-
-### Rolling back
-
-A roll back to version `to` removes exactly the versions after it, oldest
-first, the same list `GET /api/patches` shows after `to` in `versions`. It
-is refused when `to` is not one of the bundle's versions or is already the
-latest. The job log names the versions it removes.
-
-The bundle's list files (`patch.cfg`, `patchlist.raw`, `meta.json`) are
-taken from a copy `apply` kept in `mirrors/.polpatch-backup/` (the one made
-before the first removed version was added) when that copy holds exactly
-the rows that stay. Otherwise they are rebuilt from the current ones with the removed
-rows taken out, and `latest_version` set to `to`. The current list files
-are copied to `.polpatch-backup/` first. The removed versions' blobs go to
-the trash folder.
-
-### The trash folder
-
-Nothing is deleted from the mirrors folder. `patch_remove` and
-`patch_rollback` move what they take out to `patch-trash/` in the
-`pol-deployer` volume, in a folder named after the time and the bundle, and
-the job log gives its full path. Empty it yourself when you no longer need
-it, for example with `docker compose --profile deployer exec deployer ls
-/deployer/patch-trash` to look and `rm -r` to remove.
-
-### Who runs what
-
-The steps that read a `.polpatch` or a client install (the quick and the
-full check, and `build-full`) run as the user that owns the OpenLobby
-checkout, with the same rules as an import tool (see "How an import is
-kept apart from the socket"): never root, never a user that can use the
-Docker socket, and a bare environment.
-
-`polpatch.py apply` and the self-check run as the owner of the mirrors
-folder, with the same bare environment, so the files written there belong
-to that user. Apply only runs on a file that has just passed the full
-check. If root owns the mirrors folder (Docker creates it as root when it
-is missing), they run as root. The list files a roll back writes are given
-to the bundle folder's owner.
-
-In this process the deployer only reads a `.polpatch`'s ZIP directory and
-its `polpatch.json`, with the toolkit's size limits, for the upload answer
-and the folder browser.
-
 ## Jobs and logs
 
 One action runs at a time. Each is a job with an id, kept with its output
@@ -381,7 +270,7 @@ JSON in and out, except the raw log. Every endpoint, `/api/health`
 included, needs the bearer token and answers 401 without it. Errors carry
 an `error` sentence.
 
-`GET /api/health` answers `{"ok": true, "version": "3.0", "busy": false}`;
+`GET /api/health` answers `{"ok": true, "version": "2.0", "busy": false}`;
 `busy` is true while a job runs.
 
 `GET /api/games` lists every game in the catalog:
@@ -437,8 +326,7 @@ UTC; `started` and `ended` are null until they happen. `exit` is the exit
 code of the command that ended the job. `missing` is `[{"path", "hint",
 "item"}]` (with `import` as in `/api/games`) for a `needs_data` job, the
 required items only, and empty otherwise. An import job also has `item`
-and `source`, as they were asked for; patch jobs are described under
-"Patch bundles" below.
+and `source`, as they were asked for.
 
 `GET /api/jobs/<id>` is the same object plus `log`, the last 64 KB of the
 log, and `log_size`, the number of bytes the job has written in all.
@@ -515,104 +403,6 @@ folder lacks when it is not the right one:
      "missing": [{"path": "DATA/dat.pak", "hint": "your Fantasy Earth install folder, ..."}]}
 ```
 
-A client data import from an upload that is a `.polpatch` is a 400.
-
-### Patch bundles
-
-Every upload, in the 201 answer and in `GET /api/uploads`, also has `kind`,
-`"archive"` or `"polpatch"`, and `polpatch`, which is null for an archive.
-For a `.polpatch` upload it is what the manifest says:
-
-```
-201 {"upload": "20261021T120000-1a2b3c", "id": "20261021T120000-1a2b3c",
-     "name": "W2U-0002-20030429_0.polpatch", "created": "2026-10-21T12:00:00Z",
-     "last_import": null, "size": 52428800, "files": 412, "matches": [],
-     "kind": "polpatch",
-     "polpatch": {"region": "W2U", "product": "0002", "kind": "full",
-                  "versions": ["20030429_0"],
-                  "title": "Tetra Master (Windows, North America and Europe)"}}
-```
-
-`size` is the size of the file and `files` the number of files in its
-bundle. A `.polpatch` whose manifest cannot be read or that fails the quick
-check is refused with 400 `{"error", "problems"}` (`problems`: up to ten
-sentences) and leaves nothing behind. The 409 answer means the check could
-not be started safely (see "Who runs what").
-
-In `GET /api/browse`, an entry of `files` whose name ends in `.polpatch`
-also has `polpatch`, the same five fields read from its manifest only, or
-`{"error": "<sentence>"}` when the manifest cannot be read.
-
-`GET /api/patches` lists the bundles in the mirrors folder:
-
-```
-{"bundles": [{"region": "W2U", "product": "0002",
-              "title": "Tetra Master (Windows, North America and Europe)",
-              "aliases": [], "versions": ["20030429_0", "20040714_0"],
-              "latest": "20040714_0", "served": true,
-              "selfcheck": "ok", "selfcheck_at": "2026-10-21T12:03:10Z",
-              "selfcheck_why": null, "size": 52690944}]}
-```
-
-- `versions` runs oldest to newest, and `latest` is its last entry.
-- `served`: the running patch service answers a version check for this
-  bundle with the bundle's own latest version, so it has loaded it.
-- `selfcheck` is `"ok"`, `"failed"` or null (never run on these versions),
-  `selfcheck_at` when it ran (UTC), and `selfcheck_why` one sentence when it
-  failed, else null.
-- `size` is the bundle folder's size in bytes.
-- A bundle whose list files cannot be read also has `error`.
-
-With `?recheck=1` the answer is 202 and adds `"job"`: a `patch_check` job
-that runs the self-check of every bundle. Follow it like any job and ask
-for the list again when it ends. While another job runs it is 409 with the
-list, the running job's id as `job`, and `error`. Without `POL_DEPLOY_MIRRORS`
-the endpoint answers 409 `{"error"}`.
-
-`POST /api/actions` takes the patch actions, without `game`:
-
-```
-{"action": "patch_import", "source": {"upload": "<id>"}}
-{"action": "patch_import", "source": {"path": "updates/W2U-0002-20040714_0.polpatch"}}
-{"action": "patch_build", "region": "W2U", "product": "0002",
- "source": {"path": "TetraMaster"}}
-{"action": "patch_build", "region": "W2U", "product": "0002",
- "source": {"upload": "<id>", "subdir": "TetraMaster"},
- "version": "20030429_0", "walk": false, "aliases": ["W20"]}
-{"action": "patch_rollback", "region": "W2U", "product": "0002", "to": "20030429_0"}
-{"action": "patch_remove", "region": "W2U", "product": "0002"}
-{"action": "patch_check"}
-```
-
-`patch_build` takes three optional fields. `version` is the version to
-build (default `auto`, read from the install's `patch.ver`). With `walk`
-true it takes every file in the folder instead of the list in `file.txt`,
-which an install normally has. `aliases` are other region codes the bundle
-answers for.
-
-They answer 202 `{"job"}`, or before any job starts:
-
-- 400 for a `region` that is not `[A-Z0-9]{3}`, a `product` that is not
-  `[0-9]{4}`, a `to` or `version` that is not `[0-9]{8}_[0-9A-Za-z]`, a
-  `patch_build` for a region or product the patch service does not know, a
-  source that is not one of the shapes above or leads outside its folder, a
-  `path` that is not a `.polpatch` file (import) or not a folder (build), an
-  upload of the wrong kind, a `.polpatch` whose manifest cannot be read, and
-  a `to` that is not one of the bundle's versions or is its latest;
-- 404 when there is no bundle for that region and product (roll back,
-  remove);
-- 409 while another job runs, when `POL_DEPLOY_MIRRORS` is unset, when a
-  `path` source is used while browsing is off, or when the core checkout has
-  no `tools/patch` toolkit.
-
-A patch job has `"game": null` and, as far as they apply, `region`,
-`product`, `source`, `to`, and `removes` (the versions a roll back takes
-out, oldest first). It ends `ok`, or `failed` with a sentence: a refused
-`.polpatch`, a failed restart, or a self-check that failed after the
-bundle was installed, which the summary says. Paths in a summary are
-written from the folder they are in (`mirrors/`, `clients/`,
-`deployer-volume/`); the log has them in full.
-
 ## Settings
 
 | Variable | Default | Meaning |
@@ -623,8 +413,6 @@ written from the folder they are in (`mirrors/`, `clients/`,
 | `POL_DEPLOY_GHCR` | empty | `1`: actions use the published images. |
 | `POL_DEPLOY_CLIENTS` | empty | Absolute host path of a folder of client installs to browse for imports, mounted read-only. Empty: uploads only. |
 | `POL_DEPLOY_UPLOAD_MAX` | `8G` | The most an uploaded archive may be, and may unpack to (`K`, `M`, `G` suffixes, powers of 1024). |
-| `POL_MIRRORS` | `./mirrors` | The patch service's mirrors folder, which the deployer mounts as well for the patch actions. |
-| `POL_DEPLOY_MIRRORS` | `/mirrors` | Set in `docker-compose.yml`: where that folder is inside the deployer's container. Empty: the patch actions are off. |
 | `POL_DEPLOYER_BIND` | `0.0.0.0:8099` | Address inside the container. Change `POL_DEPLOYER_URL` with it. |
 | `POL_DEPLOYER_URL` | `http://deployer:8099` | Where the admin service finds the deployer. |
 
@@ -635,11 +423,8 @@ of the stack and adds git from Debian, and the official static builds of
 the docker CLI, the compose plugin and buildx, each pinned by version and
 checksum in `services/deployer/fetch_docker.py`, and pinned Pillow, numpy,
 fontTools and brotli for the import tools. The server is
-`services/deployer/deployer.py` with `clientdata.py` (archives, paths and
-uploads), `patches.py` (bundles, self-check results, roll backs) and
-`patchtool.py` (the `.polpatch` steps that run unprivileged) beside it,
-standard library only. The `.polpatch` toolkit comes from the OpenLobby
-checkout's `tools/patch`. It runs as root inside its
+`services/deployer/deployer.py` with `clientdata.py` beside it (archives,
+paths and uploads), standard library only. It runs as root inside its
 container: it needs the socket, whose group id differs from host to host,
 and it has to start git and the import tools as the checkout's owner.
 
@@ -650,6 +435,4 @@ would hand a request's folder to the Docker daemon.
 
 `python tools/deployer_test.py` tests it offline, with a stand-in for
 `stack.py` and for an import tool, and needs only Python and git. It
-builds its malicious archives itself. For the patch actions it builds a
-small bundle in three versions with the toolkit, and its stand-in
-`stack.py` restarts a real patch server on loopback ports.
+builds its malicious archives itself.

@@ -97,6 +97,16 @@ class Deployer(BaseHTTPRequestHandler):
                                      "dirs": [] if rel else ["Kart Club"], "files": [{"name": "data.bin", "size": 4}],
                                      "matches": [{"game": "kart", "item": "disc", "label": "Kart Club: disc data"}]
                                      if rel == "Kart Club" else []})
+        if self.path.startswith("/api/patches"):
+            SEEN.append(("PATCHES", self.path))
+            listing = {"bundles": [{"region": "KC1", "product": "0007", "title": "Kart Club (test)", "aliases": [],
+                                    "versions": ["20030429_0", "20040714_0"], "latest": "20040714_0",
+                                    "served": True, "selfcheck": "failed", "selfcheck_at": "2026-10-21T12:03:10Z",
+                                    "selfcheck_why": "The list the service sends is trimmed on purpose.",
+                                    "size": 5000}]}
+            if self.path.endswith("recheck=1"):
+                return self._reply(202, dict(listing, job="j9"))
+            return self._reply(200, listing)
         if self.path == "/api/uploads":
             return self._reply(200, {"uploads": [{"id": "u1", "name": "kart.zip", "created": "2026-10-21T22:00:00Z",
                                                   "last_import": None, "size": 9, "files": 1, "matches": []}]})
@@ -138,6 +148,10 @@ class Deployer(BaseHTTPRequestHandler):
         SEEN.append(("BODY", body))
         if STATE["busy"]:
             return self._reply(409, {"job": "j2"})
+        if str(body.get("action", "")).startswith("patch_"):
+            if body.get("action") in ("patch_rollback", "patch_remove") and body.get("product") != "0007":
+                return self._reply(404, {})
+            return self._reply(202, {"job": "j8"})
         if body.get("game") not in ("kart", "core"):
             return self._reply(400, {})
         if body.get("action") == "import" and (body.get("source") or {}).get("subdir") == "wrong":
@@ -257,6 +271,46 @@ def main():
             [400, 400, 400, 400, 400])
         chk("...not one of them", [s for s in SEEN[n:] if s[0] == "BODY"], [])
         chk("deleting an upload", owner.call("api/deploy/upload/delete", {"upload": "u1"}), (200, {"ok": True}))
+
+        print("patch bundles")
+        code, p = owner.call("api/deploy/patches")
+        chk("the bundles, with their versions and self-check",
+            (code, [(b["region"], b["latest"], b["selfcheck"]) for b in p.get("bundles", [])]),
+            (200, [("KC1", "20040714_0", "failed")]))
+        code, p = owner.call("api/deploy/patches?recheck=1")
+        chk("checking them all starts a job", (code, p.get("job")), (200, "j9"))
+        chk("a moderator cannot see or touch them",
+            (gm.call("api/deploy/patches")[0], gm.call("api/deploy/patch", {"action": "patch_check"})[0]), (403, 403))
+        n = len(SEEN)
+        code, out = owner.call("api/deploy/patch", {"action": "patch_rollback", "region": "KC1", "product": "0007",
+                                                   "to": "20030429_0"})
+        chk("a roll back reaches the deployer as the docs say",
+            (code, out.get("job"), [s[1] for s in SEEN[n:] if s[0] == "BODY"]),
+            (202, "j8", [{"action": "patch_rollback", "region": "KC1", "product": "0007", "to": "20030429_0"}]))
+        n = len(SEEN)
+        code, out = owner.call("api/deploy/patch", {"action": "patch_build", "region": "KC1", "product": "0007",
+                                                   "source": {"upload": "u2", "subdir": "Kart Club"},
+                                                   "version": "", "walk": True, "aliases": ["KC2"]})
+        chk("a build: an empty version stays the deployer's 'auto', the rest goes through",
+            (code, [s[1] for s in SEEN[n:] if s[0] == "BODY"]),
+            (202, [{"action": "patch_build", "region": "KC1", "product": "0007",
+                    "source": {"upload": "u2", "subdir": "Kart Club"}, "walk": True, "aliases": ["KC2"]}]))
+        chk("removing a bundle that is not there is a 404 with a sentence",
+            (lambda r: (r[0], bool(r[1].get("error"))))(owner.call("api/deploy/patch", {
+                "action": "patch_remove", "region": "KC1", "product": "0001"})), (404, True))
+        n = len(SEEN)
+        chk("bad regions, products, versions and sources never reach the deployer",
+            [owner.call("api/deploy/patch", x)[0] for x in (
+                {"action": "patch_remove", "region": "kc1", "product": "0007"},
+                {"action": "patch_remove", "region": "KC1", "product": "7"},
+                {"action": "patch_rollback", "region": "KC1", "product": "0007", "to": "latest"},
+                {"action": "patch_import", "source": {"path": "../x.polpatch"}},
+                {"action": "patch_build", "region": "KC1", "product": "0007", "source": {"path": "a"}, "aliases": ["../"]},
+                {"action": "patch_wipe"})],
+            [400] * 6)
+        chk("...not one of them", [s for s in SEEN[n:] if s[0] == "BODY"], [])
+        rows = owner.call("api/audit")[1].get("rows") or []
+        chk("patch actions are in the activity log", any("rolled a patch bundle back" in json.dumps(r) for r in rows), True)
     finally:
         stop(proc)
     for name, extra in (("a wrong token", {"POL_DEPLOYER_TOKEN": "wrong"}),
