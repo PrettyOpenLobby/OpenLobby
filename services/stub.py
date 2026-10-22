@@ -78,6 +78,11 @@ _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate",
 # shared helpers
 # --------------------------------------------------------------------------- #
 def load_config():
+    # No config file is a resolver or web server for other installs' names only
+    # (docs/installs.md), started by a game's setup with nothing of OpenLobby's around.
+    if not os.path.exists(CONFIG_PATH):
+        log("stub", f"no {CONFIG_PATH}: serving only names other installs add")
+        return {}
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         if yaml is not None:
             return yaml.safe_load(f)
