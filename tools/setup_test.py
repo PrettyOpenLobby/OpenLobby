@@ -433,6 +433,27 @@ class SetupShTest(unittest.TestCase):
         out = self.run_sh("--reach", "lan", expect=1)
         self.assertIn("--yes", out)
 
+    def test_admin_user_on_a_new_env_only(self):
+        self.run_sh("--yes", "--reach", "lan", "--admin-user", "host", "--no-start")
+        _, env = self.env()
+        self.assertEqual(env["POL_ADMIN_USER"], "host")
+        self.run_sh("--yes", "--admin-user", "other", "--no-start")
+        _, env = self.env()
+        self.assertEqual(env["POL_ADMIN_USER"], "host")
+        out = self.run_sh("--yes", "--admin-user", "two words", expect=2)
+        self.assertIn("--admin-user", out)
+
+    def test_checkout_runs_without_git(self):
+        # an OpenLobby unpacked from the GitHub zip (the setup program does that
+        # when git is missing): only bash's own tools and the stand-ins on PATH
+        os.remove(os.path.join(self.bin, "git"))
+        path = self.bin + os.pathsep + os.path.dirname(BASH)
+        if shutil.which("git", path=path):
+            self.skipTest("git sits beside bash here")
+        self.run_sh("--yes", "--reach", "lan", "--no-start", extra_env={"PATH": path})
+        _, env = self.env()
+        self.assertEqual(env["POL_ADVERTISE"], LAN)
+
     def test_help(self):
         out = self.run_sh("--help")
         self.assertIn("--dry-run", out)
@@ -546,6 +567,10 @@ class SetupPs1Test(unittest.TestCase):
         self.assertEqual(b["POL_ADVERTISE"], PUBLIC)
         self.assertEqual(b["POL_DNS_BIND"], "127.0.0.1")
         self.assertEqual(b["POL_DB_PASSWORD"], a["POL_DB_PASSWORD"])
+
+    def test_admin_user(self):
+        self.run_ps("-Yes", "-Reach", "lan", "-AdminUser", "host", "-NoStart")
+        self.assertEqual(self.env()["POL_ADMIN_USER"], "host")
 
 
 if __name__ == "__main__":

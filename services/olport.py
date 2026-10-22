@@ -48,7 +48,9 @@ Entries touching [lo, hi) in unix seconds; "times" ([[start, end], ...]) may lis
 sessions inside a long one.
 
 Players' help requests go to the panel's Inbox with port.help_desk(list, thread, reply,
-close): list(open_only) -> [{"id", "subject", "who", "at", "closed", "waiting", "count"}],
+close): list(open_only) -> [{"id", "subject", "who", "at", "closed", "waiting", "count"}]
+(optional "player": the login's id, as @port.players answers it, and "last": the newest
+message's unix seconds),
 thread(id) -> {"id", "subject", "closed", "who": {"name", "online"}, "messages":
 [{"from": "player" or "staff", "subject", "text", "at"}]} (None when there is no such id),
 reply(id, text, close, actor) and close(id, actor) -> (ok, message).

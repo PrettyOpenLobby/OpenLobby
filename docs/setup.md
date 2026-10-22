@@ -4,7 +4,45 @@ Two scripts do the first-run setup: `setup.sh` on Linux and `setup.ps1` on
 Windows with Docker Desktop. They ask a few questions, write `.env`, start
 the stack, give the admin panel a password and print what to tell your
 players. This page describes what they do, how to run them without
-questions, and the same setup by hand.
+questions, and the same setup by hand. The setup program below runs them for
+you.
+
+## The setup program
+
+OpenLobby Setup is one program to download and run, for Windows, Linux and
+macOS, from the releases page:
+https://github.com/PrettyOpenLobby/OpenLobby/releases (`OpenLobby-Setup.exe`,
+`OpenLobby-Setup-linux-x86_64`, `OpenLobby-Setup-mac.zip`). It needs Docker
+and nothing else: Docker Desktop on Windows and macOS, Docker Engine on Linux.
+It never installs, starts or stops Docker itself; when Docker is missing or not
+running it says so and gives the download link.
+
+The first run asks where to install (default `openlobby-server` in your home
+folder), who will play, the address players connect to and a user name for the
+admin panel. Then it gets OpenLobby (with git when it is installed, otherwise
+the GitHub zip of `main`), makes the shared Docker network `openlobby` when it
+is missing, and runs the checkout's own `setup.ps1` or `setup.sh` without
+questions, with the published images. It shows one line per step, waits for
+the admin panel and ends with the panel's address and password (shown once),
+the players' instructions (also saved as `What to tell players.txt` in the
+install folder) and the ports to open. The script runs on its own with its
+output in the install folder's `logs`, so closing the window does not stop it;
+the next run shows how it went.
+
+Every later run starts with the server's state and address, then offers
+Update, Change settings, Stop (or Start), Show what to tell players, Start
+over and Uninstall. Uninstall removes the containers and keeps the data unless
+you ask (and type `delete`); Start over keeps a copy of the old `.env` in
+`backups`. Neither removes the `openlobby` network, and when another install's
+game server is on this machine, this install's `dns` and `http` services stay,
+since that game uses them (`docs/installs.md`). Game servers it finds there
+are named, with how to pair them with the panel; it does not change them.
+
+`--yes`, `--dir`, `--address`, `--admin-user`, `--dry-run` and `--update`,
+`--change-settings`, `--stop`, `--start`, `--uninstall` (with `--delete-data`)
+run it without the menu; `--help` lists them. From a checkout, `python
+setup/openlobby_setup.py` is the same program; `python setup/build.py` builds
+it with PyInstaller, and `python tools/setup_app_test.py` tests it offline.
 
 ## Linux
 
@@ -134,6 +172,7 @@ curl -fsSL https://raw.githubusercontent.com/PrettyOpenLobby/OpenLobby/main/setu
 | `--deployer`, `--no-deployer` | `OPENLOBBY_DEPLOYER=yes\|no` | Run the deployer. Default: yes on a new `.env`. |
 | `--clients DIR\|none` | `OPENLOBBY_CLIENTS` | The client installs folder, or none. |
 | `--change-address` | | Redo the address questions on an existing `.env`. `--reach` and `--address` imply it. |
+| `--admin-user NAME` | `OPENLOBBY_ADMIN_USER` | The admin panel's user name on a new `.env`. Default: `admin`. |
 | `--install-docker` | `OPENLOBBY_INSTALL_DOCKER=1` | With `--yes`, allow the Docker and git install commands. Without it, `--yes` prints them and stops. |
 | `--no-start` | | Write `.env` and stop. |
 
@@ -168,7 +207,7 @@ It follows the same steps with these differences:
   so Windows shows a UAC prompt for it.
 
 Its options are `-Yes`, `-DryRun`, `-Dir`, `-Repo`, `-Reach`, `-Address`,
-`-PublicAddress`, `-LookupPublic`, `-Ps2`, `-NoPs2`, `-Images`,
+`-PublicAddress`, `-LookupPublic`, `-Ps2`, `-NoPs2`, `-Images`, `-AdminUser`,
 `-ChangeAddress`, `-InstallTools`, `-InstallClient`, `-NoClient` and
 `-NoStart`, with the meanings above.
 

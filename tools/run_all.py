@@ -390,6 +390,8 @@ SUITES = [
     ("admin_corelite", [sys.executable, "admin_corelite_test.py"], TOOLS, {}),
     # People: one human across PlayOnline and the games (links, merges, notes, permissions).
     ("admin_people",  [sys.executable, "admin_people_test.py"], TOOLS, {}),
+    # The Inbox: GM calls, reports and every game's help desk in one list, with permissions.
+    ("admin_inbox",   [sys.executable, "admin_inbox_test.py"], TOOLS, {}),
     # Games added by hand in Settings > Modules, and paired through their setup program.
     ("admin_pair",    [sys.executable, "admin_pair_test.py"], TOOLS, {}),
     # Self-host tools: the setup checker, the games launcher and its catalog,
@@ -398,6 +400,8 @@ SUITES = [
     ("stack",         [sys.executable, "stack_test.py"], TOOLS, {}),
     ("deployer",      [sys.executable, "deployer_test.py"], TOOLS, {}),
     ("setup",         [sys.executable, "setup_test.py"], TOOLS, {}),
+    # The setup program (setup/openlobby_setup.py), with stand-ins for docker, git and the scripts.
+    ("setup_app",     [sys.executable, "setup_app_test.py"], TOOLS, {}),
     ("polpatch",      [sys.executable, os.path.join("patch", "polpatch_test.py")], TOOLS, {}),
     ("polpublish",    [sys.executable, os.path.join("patch", "polpublish_test.py")], TOOLS, {}),
     # A GM Call ticket keeps the raw 0x102 body beside the decoded fields.

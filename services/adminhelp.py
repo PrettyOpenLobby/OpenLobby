@@ -4,7 +4,9 @@ A game module may have a help desk (adminmodules.HelpDesk: a module file's own f
 game's /openlobby/help endpoints through adminmodules.remote). Every desk answers in one shape:
 
     thread list   [{"id", "subject", "who", "at", "closed", "waiting", "count", "category"}]
-                  "waiting": the player wrote last; "at": unix seconds of the first message
+                  "waiting": the player wrote last; "at": unix seconds of the first message;
+                  optional "player": the login's id (what players.json calls "id"), and
+                  "last": unix seconds of the newest message (the Inbox sorts by it)
     one thread    {"id", "subject", "closed", "who": {"name", "online"},
                    "messages": [{"from": "player"|"staff", "subject", "text", "at"}]}
     reply/close   (ok, message)
@@ -34,7 +36,8 @@ def _row(m, t):
     return {"game": m.key, "game_title": m.title, "id": _str(t.get("id"), 40),
             "subject": _str(t.get("subject"), 120) or "(no subject)", "who": _str(t.get("who"), 60),
             "at": t.get("at"), "closed": bool(t.get("closed")), "waiting": bool(t.get("waiting")),
-            "count": t.get("count"), "category": _str(t.get("category"), 60)}
+            "count": t.get("count"), "category": _str(t.get("category"), 60),
+            "player": _str(t.get("player"), 128)}
 
 
 def listing(can, owner, open_only=True):

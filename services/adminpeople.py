@@ -416,9 +416,13 @@ def page(db, person, can, owner):
             "core": _core()}
 
 
-def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX):
+def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX, dupes_only=False):
     """The People list: persons and PlayOnline accounts matching `q` (a person's name, a
-    POL ID or handle, any linked login's name or key), online ones first."""
+    POL ID or handle, any linked login's name or key), online ones first. Each row says
+    who it may be the same person as ("maybe", from duplicates()); `dupes_only` lists only
+    those people."""
+    if dupes_only:
+        return _dupe_rows(db, duplicates(db), see_pol, limit)
     q = _clean(q, 64)
     pat = _like(q)
     core = _core()
@@ -541,7 +545,76 @@ def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX):
     if online_only:
         out = [r for r in out if r["online"]]
     out.sort(key=lambda r: (r["online"] is not True, -(_ts(r["last_seen"]) or 0), -(r["id"] or 0)))
+    out = out[:limit]
+    dup = duplicates(db)
+    for r in out:
+        r["maybe"] = dup.get(r["id"], []) if r["id"] else []
+    return out
+
+
+def _dupe_rows(db, dup, see_pol, limit):
+    if not dup:
+        return []
+    mods = systems()
+    rows = {}
+    for r in db.execute("SELECT person_id, system, key, how FROM person_link WHERE person_id = ANY(%s)"
+                        " ORDER BY (system = %s) DESC, at, id", (list(dup), POL)):
+        rows.setdefault(r["person_id"], []).append(r)
+    out = []
+    for r in db.execute("SELECT id, name, created_at FROM person WHERE id = ANY(%s) ORDER BY lower(name), id",
+                        (list(dup),)):
+        ln = rows.get(r["id"], [])
+        pol = next((x["key"] for x in ln if x["system"] == POL), None)
+        acc, seen = [], set()
+        for x in ln:
+            if x["system"] in seen:
+                continue
+            seen.add(x["system"])
+            acc.append({"system": x["system"], "title": system_title(x["system"], mods),
+                        "staff": x["how"] == "staff"})
+        out.append({"id": r["id"], "polid": pol if see_pol else None, "pol": bool(pol), "name": r["name"],
+                    "handles": [], "accounts": acc, "online": None, "last_seen": None,
+                    "created_at": r["created_at"], "maybe": dup[r["id"]]})
     return out[:limit]
+
+
+def duplicates(db):
+    """People who may be one person: the same name, or the same Discord name, on two people.
+    -> {person id: [{"id", "name", "why", "pol"}]}, each the others in the same group."""
+    groups = []
+    for r in db.execute("SELECT array_agg(id ORDER BY id) AS ids FROM person WHERE merged_into IS NULL"
+                        " GROUP BY lower(name) HAVING count(*) > 1"):
+        groups.append((list(r["ids"]), "same name"))
+    by_dname = {}
+    for r in db.execute("SELECT l.person_id, lower(l.name) AS n FROM person_link l JOIN person p ON p.id = l.person_id"
+                        " WHERE l.system = %s AND p.merged_into IS NULL AND l.name <> l.key", (DISCORD,)):
+        by_dname.setdefault(r["n"], set()).add(r["person_id"])
+    if _core():
+        try:
+            for r in db.execute(
+                    "SELECT l.person_id, lower(d.discord_name) AS n FROM discord_link d"
+                    " JOIN member m ON m.id = d.member_id"
+                    " JOIN person_link l ON l.system = %s AND l.key = m.polid"
+                    " JOIN person p ON p.id = l.person_id"
+                    " WHERE p.merged_into IS NULL AND coalesce(d.discord_name, '') <> ''", (POL,)):
+                by_dname.setdefault(r["n"], set()).add(r["person_id"])
+        except Exception:                   # noqa: BLE001 -- no discord_link table
+            db.rollback()
+    groups += [(sorted(ids), "same Discord name") for n, ids in by_dname.items() if n and len(ids) > 1]
+    if not groups:
+        return {}
+    every = sorted({i for ids, _w in groups for i in ids})
+    info = {r["id"]: r for r in db.execute(
+        "SELECT p.id, p.name, EXISTS (SELECT 1 FROM person_link l WHERE l.person_id = p.id AND l.system = %s)"
+        " AS pol FROM person p WHERE p.id = ANY(%s)", (POL, every))}
+    out = {}
+    for ids, why in groups:
+        for i in ids:
+            for j in ids:
+                if i != j and j in info and not any(x["id"] == j for x in out.get(i, [])):
+                    out.setdefault(i, []).append({"id": j, "name": info[j]["name"], "why": why,
+                                                  "pol": bool(info[j]["pol"])})
+    return out
 
 
 def _ts(iso):

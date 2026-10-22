@@ -35,6 +35,8 @@ param(
     [switch]$NoPs2,
     [ValidateSet('', 'published', 'build')]
     [string]$Images = '',
+    [ValidatePattern('^[A-Za-z0-9._-]*$')]
+    [string]$AdminUser = '',
     [switch]$ChangeAddress,
     [switch]$InstallTools,
     [switch]$InstallClient,
@@ -68,6 +70,7 @@ Options:
   -LookupPublic     ask an outside service for the public address
   -Ps2 / -NoPs2     whether PlayStation 2 consoles will play
   -Images published|build   published images (default) or a local build
+  -AdminUser NAME   the admin panel's user name on a new .env (default: admin)
   -ChangeAddress    on an existing .env, redo the address questions
   -InstallTools     with -Yes, allow installing git and Docker Desktop
   -InstallClient / -NoClient  run (or skip) the hosts installer for this PC
@@ -218,7 +221,8 @@ Say "Checkout: $Checkout"
 Step 'Checking git and Docker Desktop'
 $haveWinget = Have 'winget'
 $missing = @()
-if (-not (Have 'git')) { $missing += 'git' }
+# git is needed only to clone; a checkout unpacked from a download runs without it
+if ($NeedClone -and -not (Have 'git')) { $missing += 'git' }
 if (-not (Have 'docker')) { $missing += 'docker' }
 if ($missing.Count -gt 0) {
     $cmds = @()
@@ -248,7 +252,7 @@ if ($missing.Count -gt 0) {
     Say 'git is installed; open a new PowerShell window so it is on PATH, then run this script again.'
     exit 0
 }
-Say ('git: ' + (git --version))
+if (Have 'git') { Say ('git: ' + (git --version)) }
 Say ('docker: ' + (docker --version))
 
 $null = docker compose version 2>$null
@@ -464,6 +468,8 @@ if ($NewEnv) {
 } else {
     $Published = ((Get-EnvValue $lines 'COMPOSE_FILE') -like '*ghcr*')
 }
+# The admin panel's user name: on a new .env only (a stored credential keeps its own)
+if ($NewEnv -and $AdminUser) { Set-EnvValue $lines 'POL_ADMIN_USER' $AdminUser }
 
 $genDb = $false
 if ($NewEnv -and -not (Get-EnvValue $lines 'POL_DB_PASSWORD')) {

@@ -29,6 +29,57 @@ function toast(msg, err) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
 }
 
+// ---- a question in the panel's own dialog, in place of the browser's confirm and prompt ----
+//     await uiAsk({ title, text, ok, danger, fields: [{ id, label, value, rows, required }] })
+// answers null for Cancel, else true (no fields) or { id: typed text }.
+function uiAsk(o) {
+  let m = $("#askModal");
+  if (!m) {
+    m = document.createElement("div");
+    m.className = "modal"; m.id = "askModal";
+    m.innerHTML = `<div class="card" role="dialog" aria-modal="true" aria-labelledby="askTitle"><h3 id="askTitle"></h3>`
+      + `<p id="askText"></p><div id="askFields"></div><p class="hint pp-err" id="askErr" hidden></p>`
+      + `<div class="foot"><button class="ghost" id="askNo">Cancel</button><button class="act" id="askYes">OK</button></div></div>`;
+    document.body.appendChild(m);
+  }
+  const fields = o.fields || [];
+  $("#askTitle").textContent = o.title || "";
+  $("#askText").textContent = o.text || "";
+  $("#askText").hidden = !o.text;
+  $("#askErr").hidden = true;
+  $("#askFields").innerHTML = fields.map((f, i) => `<label for="askF${i}">${esc(f.label)}</label>`
+    + (f.rows ? `<textarea id="askF${i}" rows="${f.rows}" maxlength="${f.max || 2000}"></textarea>`
+      : `<input type="text" id="askF${i}" autocomplete="off" spellcheck="false" maxlength="${f.max || 200}">`)).join("");
+  fields.forEach((f, i) => { $("#askF" + i).value = f.value || ""; });
+  const yes = $("#askYes"), no = $("#askNo");
+  yes.textContent = o.ok || "OK";
+  yes.className = o.danger ? "danger solid" : "act";
+  m.classList.add("show");
+  setTimeout(() => (fields.length ? $("#askF0") : yes).focus(), 0);
+  return new Promise((done) => {
+    const finish = (v) => { m.classList.remove("show"); m.onclick = yes.onclick = no.onclick = m.onkeydown = null; done(v); };
+    yes.onclick = () => {
+      const out = {};
+      for (let i = 0; i < fields.length; i++) {
+        const v = $("#askF" + i).value.trim();
+        if (fields[i].required && !v) {
+          $("#askErr").textContent = fields[i].required === true ? `${fields[i].label}: write something first.` : fields[i].required;
+          $("#askErr").hidden = false;
+          return $("#askF" + i).focus();
+        }
+        out[fields[i].id] = v;
+      }
+      finish(fields.length ? out : true);
+    };
+    no.onclick = () => finish(null);
+    m.onclick = (e) => { if (e.target === m) finish(null); };
+    m.onkeydown = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); finish(null); }
+      if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); yes.onclick(); }
+    };
+  });
+}
+
 // ---- tabs, and where you were ----
 // The open tab -- and on the PML tab, the open file -- live in the URL hash:
 //
@@ -50,6 +101,8 @@ const VIEWS = [
   { id: "people", group: "players", perm: "people" },
   { id: "accounts", group: "players", perm: "accounts_view", pol: true },
   { id: "codes", group: "players", perm: "codes", pol: true },
+  // every source below in one list (inbox.js); each source keeps its own permission
+  { id: "inbox", group: "inbox" },
   { id: "gmcalls", group: "inbox", perm: "gm", pol: true },
   { id: "reports", group: "inbox", perm: "reports", pol: true },
   { id: "issues", group: "inbox", perm: "reports", pol: true },
@@ -120,6 +173,7 @@ const tabAllowed = (t) => {
   if (v.lite) return coreOff() && canAnnounce();
   if (t === "games") return canSeeGames();
   if (t === "gamehelp") return canGameHelp();
+  if (t === "inbox") return can("gm") || can("reports") || canGameHelp();
   return !v.perm || (v.perm === "owner" ? isOwner() : can(v.perm));
 };
 const visibleTabs = () => TABS.filter(tabAllowed);
@@ -190,6 +244,7 @@ function loadTab(name, refresh) {
   if (name === "maint") loadMaint();
   if (name === "calendar") loadCalendar();
   if (name === "gamehelp") loadGameHelp();
+  if (name === "inbox") loadInbox();
   if (name === "games") loadGames(refresh);
   if (name === "bots") loadBots();
   if (name === "modules") loadModules();

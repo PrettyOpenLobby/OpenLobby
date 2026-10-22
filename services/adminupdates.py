@@ -17,7 +17,9 @@ overview() puts together, for each key, the first of:
 
 Settings for the panel's own check:
 
-    POL_ADMIN_UPDATE_REPO    the repository, owner/name (default PrettyOpenLobby/OpenLobby)
+    POL_ADMIN_UPDATE_REPO    the repository, owner/name (default PrettyOpenLobby/OpenLobby);
+                             "off" for a server that updates itself some other way, which
+                             leaves the core out of the list
     POL_ADMIN_UPDATE_BRANCH  its branch (default main)
     POL_ADMIN_UPDATE_HOW     the sentence on how to update (default: run docker compose pull and
                              docker compose up -d)
@@ -213,7 +215,8 @@ def overview(refresh=False):
                 items.append(it)
             checked_at = updatecheck.to_iso(body.get("checked_at"))
             checking = body.get("checking") is True
-    if "core" not in keys and not _core_off():
+    if ("core" not in keys and not _core_off()
+            and os.environ.get("POL_ADMIN_UPDATE_REPO", "").strip().lower() != "off"):
         items.insert(0, self_check(refresh))
         keys.add("core")
         if not from_deployer:

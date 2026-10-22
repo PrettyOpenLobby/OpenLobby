@@ -241,6 +241,11 @@ os.environ["POL_ADMIN_GITHUB_API"] = GH_URL
 os.environ["POL_ADMIN_UPDATE_HOW"] = "Run ./update.sh on the host."
 core = items(U.overview(refresh=True))["core"]
 chk("POL_ADMIN_UPDATE_HOW", (core["update"], core["how"]), ("available", "Run ./update.sh on the host."))
+os.environ["POL_ADMIN_UPDATE_REPO"] = "off"
+n = len(GH["calls"])
+chk("POL_ADMIN_UPDATE_REPO=off: no core, and GitHub is not asked",
+    ("core" in items(U.overview(refresh=True)), len(GH["calls"])), (False, n))
+os.environ.pop("POL_ADMIN_UPDATE_REPO")
 
 print("with a deployer")
 os.environ["POL_DEPLOYER_URL"] = DEP_URL

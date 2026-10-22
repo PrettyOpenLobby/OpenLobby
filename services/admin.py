@@ -59,6 +59,7 @@ import contentlist  # noqa: E402  -- the shared content-id title table
 import newsgen    # noqa: E402  -- announcements store + every news PML we write
 import admincalendar  # noqa: E402
 import adminhelp  # noqa: E402  -- the Inbox's Game help (players' help requests in the games)
+import admininbox  # noqa: E402  -- the Inbox: every source's threads in one list
 import adminpeople  # noqa: E402  -- People: one human across PlayOnline and the games
 import adminplayers  # noqa: E402  -- one account across every game  -- Calendar: what the games have scheduled, and our own entries
 import eventnews  # noqa: E402  -- the event calendar's posts (newsgen adds them)
@@ -1343,6 +1344,7 @@ _GET_PERMS = {
     "/api/codes": "codes", "/api/calendar": "calendar",
     "/api/logs": "any",              # checked per group in _logs (owner, or the game's serverlogs)
     "/api/help": "any", "/api/help/thread": "any",   # per game in adminhelp (its help permission)
+    "/api/inbox": "any",             # per source in _inbox (gm, reports, each game's help)
     "/api/account-games": "accounts_view",
     "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
     "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
@@ -1523,6 +1525,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def _send_stream(self, code, headers, reader):
+        """Copy an open answer to the browser in pieces, then close it. Without a length
+        the end of the answer is the end of the connection (this is an HTTP/1.0 handler)."""
+        self._status = code
+        try:
+            self.send_response(code)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command != "HEAD":
+                while True:
+                    piece = reader.read(65536)
+                    if not piece:
+                        break
+                    self.wfile.write(piece)
+        except (OSError, ValueError):
+            pass                                # the browser or the game went away mid-copy
+        finally:
+            reader.close()
+            self.close_connection = True
 
     def _json_body(self):
         """The request's JSON body. Cached: the audit hook reads it again after
@@ -2411,6 +2434,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._person_get()
         if path == "/api/person/games":
             return self._person_games()
+        if path == "/api/inbox":
+            return self._inbox()
         if path == "/api/people/logins":
             return self._people_logins()
         # the deployer (admindeploy.py): owner only, so not in the permission tables
@@ -2789,8 +2814,16 @@ class Handler(BaseHTTPRequestHandler):
             body = self.rfile.read(n) if n else b""
             ctype = self.headers.get("Content-Type")
         user, role, _p = self._caller()
-        status, headers, data = admingames.forward(key, sub, method, query, body,
-                                                   ctype, user)
+        if method == "GET":
+            # a download (a player's save, a transfer file) is passed on as it comes,
+            # never held whole in the panel
+            status, headers, data, reader = admingames.open_stream(key, sub, method, query,
+                                                                    None, None, user)
+            if reader is not None:
+                return self._send_stream(status, headers, reader)
+        else:
+            status, headers, data = admingames.forward(key, sub, method, query, body,
+                                                       ctype, user)
         if method == "POST":
             try:
                 req = json.loads(body or b"{}")
@@ -2859,7 +2892,8 @@ class Handler(BaseHTTPRequestHandler):
         q = self._query()
         db = _db()
         try:
-            rows = adminpeople.search(db, q.get("q", ""), q.get("f") == "online", see_pol=self._see_pol())
+            rows = adminpeople.search(db, q.get("q", ""), q.get("f") == "online", see_pol=self._see_pol(),
+                                      dupes_only=q.get("f") == "dupes")
         finally:
             db.close()
         self._send(200, {"people": rows, "core": not CORE_OFF, "see_pol": self._see_pol()})
@@ -2877,6 +2911,40 @@ class Handler(BaseHTTPRequestHandler):
         doc["can_link"] = self._can("people_link")
         doc["can_force"] = self._is_owner()
         self._send(200, doc)
+
+    def _inbox(self):
+        """GET ?source=&game=&state=&person=&offset=&limit=: every thread the caller may
+        read, from every source, newest first (admininbox.py). Each source keeps its own
+        permission: GM calls "gm", reports and bug reports "reports", each game's help desk
+        its help permission. A source that fails or is slow is named in "problems"."""
+        q = self._query()
+        owner = self._is_owner()
+        state = q.get("state") if q.get("state") in admininbox.STATES else "waiting"
+        fetchers, sources = [], []
+        if not CORE_OFF:
+            if self._can("gm"):
+                sources.append({"key": "gm", "title": "GM calls"})
+                fetchers.append(("GM calls", lambda: [admininbox.gm_row(r) for r in self._gm_calls_rows()
+                                                      if isinstance(r, dict)]))
+            if self._can("reports"):
+                sources.append({"key": "report", "title": "Player reports"})
+                fetchers.append(("Player reports", lambda: [admininbox.report_row(r) for r in self._reports_rows_full()]))
+                if issuereport is not None:
+                    sources.append({"key": "issue", "title": "Bug reports"})
+                    fetchers.append(("Bug reports", lambda: [admininbox.issue_row(r) for r in self._with_triage(
+                        "issues", [r for r in issuereport.list_reports() if isinstance(r, dict)])]))
+        desks = admininbox.help_fetchers(self._can, owner, state in ("waiting", "open", "answered"))
+        if desks:
+            sources.append({"key": "help", "title": "Game help"})
+        rows, problems = admininbox.gather(fetchers + desks)
+        db = _db()
+        try:
+            status, out = admininbox.build(rows, problems, q, db, self._can, owner, self._caller()[0], sources)
+        finally:
+            db.close()
+        if status == 200:
+            out["can_link"] = self._can("people_link")
+        self._send(status, out)
 
     def _person_games(self):
         """GET ?id=: what each game knows of the person, asked with ALL their logins
@@ -3212,6 +3280,10 @@ class Handler(BaseHTTPRequestHandler):
     # filed here as parsed JSON -- see `_archive_report` in responders.py for the
     # form's wire format. This reads the files; nothing here parses mail.
     def _reports_list(self):
+        self._send(200, self._reports_rows_full())
+
+    def _reports_rows_full(self):
+        """Every Report User report, as /api/reports lists it (the Inbox reads it too)."""
         out = []
         try:
             names = sorted(os.listdir(REPORT_DIR), reverse=True)
@@ -3245,7 +3317,7 @@ class Handler(BaseHTTPRequestHandler):
             r["polid"] = polid.get(mid)
             r["gm_calls"] = [t for t, m in tic_mid.items() if mid and m == mid]
             r["replies"] = self._report_replies(r["id"])
-        self._send(200, self._with_triage("reports", out))
+        return self._with_triage("reports", out)
 
     # -- tester issue reports ------------------------------------------------ #
     #
@@ -3560,6 +3632,10 @@ class Handler(BaseHTTPRequestHandler):
         return st if isinstance(st, dict) else {}
 
     def _gm_calls_list(self):
+        self._send(200, self._gm_calls_rows())
+
+    def _gm_calls_rows(self):
+        """Every GM call, as /api/gm-calls lists it (the Inbox reads it too)."""
         out = []
         try:
             names = sorted(os.listdir(GM_CALL_DIR), reverse=True)
@@ -3614,7 +3690,7 @@ class Handler(BaseHTTPRequestHandler):
             mid = tic_mid.get(rec["id"])
             rec["polid"] = polid.get(mid)
             rec["reports"] = [r for r, m in rep_mid.items() if mid and m == mid]
-        self._send(200, out)
+        return out
 
     def _gm_notices_save(self):
         """Save the GM notices and publish them: the Viewer's GM Call > Next

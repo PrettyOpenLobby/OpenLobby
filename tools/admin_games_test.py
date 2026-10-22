@@ -50,6 +50,7 @@ from admin_http import Client, free_port, start_panel, stop  # noqa: E402
 OWNER, OWNER_PW = "op", "correct horse 1"
 TOKEN = "tool-token-0123456789"
 PAGE = b"<!doctype html><title>tool</title><div id=x></div><script>var a = 1;</script>"
+SAVE_PIECE = bytes(range(256)) * 256          # 64 KiB; the save is 32 of them, 2 MB
 bad = 0
 SEEN = []
 # A game that describes itself (adminmodules/remote.py, the OpenLobby admin
@@ -97,6 +98,17 @@ class Tool(BaseHTTPRequestHandler):
             ok = self.path.endswith(("/banner", "/kick"))
             return self._reply(200, json.dumps({"ok": ok, "msg": "shown" if ok else "no"}).encode(),
                                "application/json")
+        if self.path == "/gates/save.bin":
+            # a download bigger than POL_ADMIN_GAME_MAX_REPLY_MB below, with no length
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="Wren.sav"')
+            self.end_headers()
+            for _ in range(32):
+                self.wfile.write(SAVE_PIECE)
+            return
+        if self.path == "/gates/big.json":
+            return self._reply(200, b'{"x": "' + b"a" * (2 << 20) + b'"}', "application/json")
         if self.path.split("?")[0] in ("/", "/gates"):
             return self._reply(200, PAGE, "text/html; charset=utf-8")
         return self._reply(200, json.dumps({"path": self.path}).encode(), "application/json")
@@ -147,7 +159,9 @@ def main():
            "POL_ADMIN_GAMES_EXTRA": EXTRA,
            "POL_ADMIN_GAME_XG_URL": tool_url, "POL_ADMIN_GAME_XG_TOKEN": TOKEN,
            # a game known only by its URL
-           "POL_ADMIN_GAME_KART_URL": tool_url, "POL_ADMIN_GAME_KART_TOKEN": TOKEN}
+           "POL_ADMIN_GAME_KART_URL": tool_url, "POL_ADMIN_GAME_KART_TOKEN": TOKEN,
+           # small, so a 2 MB answer shows which kind is passed on and which refused
+           "POL_ADMIN_GAME_MAX_REPLY_MB": "1"}
     proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=env)
     try:
         c = {}
@@ -209,6 +223,18 @@ def main():
         rows = audit.get("rows") or audit.get("entries") or audit.get("audit") or []
         hit = [r for r in rows if "Front Mission Online" in json.dumps(r)]
         chk("the edit is in the activity log", len(hit) >= 1, True)
+
+        st, hd, body, _u = raw(c["gm_fmo"], "games/fmo/gates/save.bin")
+        chk("a download larger than the reply limit is passed on whole",
+            (st, len(body), body == SAVE_PIECE * 32), (200, 32 * len(SAVE_PIECE), True))
+        chk("...with its type and file name",
+            (hd.get("Content-Type"), hd.get("Content-Disposition")),
+            ("application/octet-stream", 'attachment; filename="Wren.sav"'))
+        st, _h, body, _u = raw(c["gm_fmo"], "games/fmo/gates/big.json")
+        chk("JSON over the limit is still refused, never cut short",
+            (st, b"more than 1 MB" in body), (502, True))
+        st, _h, body, _u = raw(c["gm_fmo"], "games/fmo/gates")
+        chk("pages still come whole, with their nonce", (st, b"<script nonce=" in body), (200, True))
 
         st, _h, body, _u = raw(c["gm_fe"], "games/fe/")
         chk("a tool that refuses the panel's token reads as a panel fault",

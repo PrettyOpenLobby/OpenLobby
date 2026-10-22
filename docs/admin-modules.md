@@ -146,6 +146,27 @@ you answer here, to anyone with the game's permission.
 A game that does not answer within a few seconds is named on the Calendar and
 the rest still shows.
 
+### GET /openlobby/help.json?open=1
+
+Optional, for players' help requests from inside the game: say `"help": true`
+in module.json (olport does when you use `port.help_desk`). The requests show
+in the panel's Inbox beside the GM calls and reports, to anyone with the
+game's help permission, newest activity first.
+
+```json
+{"threads": [{"id": "7", "subject": "Stuck in the pit lane", "who": "Wren", "player": "1042",
+              "at": 1793000000, "last": 1793003000, "closed": false, "waiting": true, "count": 2}]}
+```
+
+`open=1` asks for the open ones only. `waiting` means the player wrote last.
+`at` is the first message and `last` the newest, in unix seconds; `last` is
+optional. `player` is optional too: the login's id, the same `id` the player
+search answers. With it the Inbox finds the person a request is from even when
+two players share a name; without it the Inbox matches `who` against the
+logins linked on the People pages. `help/thread.json?id=` answers one request
+with its messages, and POST `help/reply` and `help/close` answer and close it
+(see olport.py for the shapes).
+
 ### GET /openlobby/players.json?q=&lt;text&gt;&limit=&lt;n&gt;
 
 Optional, for the player picker: say `"players": true` in module.json (olport

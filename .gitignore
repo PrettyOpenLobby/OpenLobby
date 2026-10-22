@@ -15,3 +15,7 @@ secrets/
 # tools/make_pml_fonts.py; it is derived from the client's files, so it stays out.
 services/admin_web/pmlfont/
 /.games
+
+# What setup/build.py makes (PyInstaller work files and the setup program).
+/build/
+/dist/

@@ -91,13 +91,11 @@ def _csp(nonce):
             "form-action 'self'; frame-ancestors 'self'" % nonce)
 
 
-def forward(key, sub, method, query, body, ctype, actor):
-    """Proxy one request to a game's tool port.
-
-    -> (status, headers list, body bytes). Never raises."""
+def _request(key, sub, method, query, body, ctype, actor):
+    """The urllib request for one tool call, or None for a game with no tools set up."""
     have = configured()
     if key not in have:
-        return _error(404, "This game has no tools set up.", sub, key)
+        return None
     base, token = have[key]
     q = [(k, v) for k, v in urllib.parse.parse_qsl(query or "", keep_blank_values=True)
          if k != "t"]
@@ -108,32 +106,88 @@ def forward(key, sub, method, query, body, ctype, actor):
         headers["X-Devtool-Token"] = token
     if ctype:
         headers["Content-Type"] = ctype
-    req = urllib.request.Request(url, data=body if method == "POST" else None,
-                                 headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            status, rtype, rcache, data = (r.status, r.headers.get("Content-Type", ""),
-                                           r.headers.get("Cache-Control", ""), r.read(MAX_REPLY + 1))
-        if len(data) > MAX_REPLY:
-            return _error(502, "The %s tools answered with more than %d MB, more than the panel passes on."
-                          % (title(key), MAX_REPLY >> 20), sub, key)
-    except urllib.error.HTTPError as e:
-        status, rtype, rcache = e.code, e.headers.get("Content-Type", ""), ""
-        data = e.read(MAX_BODY)
-        if status == 403:
-            # the tool refused our token: a configuration fault, not the caller's
-            return _error(502, "The %s tools refused the panel's token."
-                          % title(key), sub, key)
-    except (urllib.error.URLError, OSError, ValueError):
-        return _error(502, "The %s tools are not reachable right now."
-                      % title(key), sub, key)
+    return urllib.request.Request(url, data=body if method == "POST" else None,
+                                  headers=headers, method=method)
+
+
+def _headers(rtype, rcache, rname):
     out = [("Content-Type", rtype or "application/octet-stream"),
            ("Cache-Control", rcache or "no-store")]
+    if rname:
+        out.append(("Content-Disposition", rname))
+    return out
+
+
+def _whole(rtype):
+    """Pages and JSON are read whole (a page's scripts get the panel's nonce); anything
+    else is a download that open_stream() passes on as it comes."""
+    t = (rtype or "").split(";", 1)[0].strip().lower()
+    return t.startswith("text/") or t in ("application/json", "") or t.endswith("+json")
+
+
+def _open(key, sub, method, query, body, ctype, actor):
+    """-> (the game's open answer, None), or (None, a finished error reply)."""
+    req = _request(key, sub, method, query, body, ctype, actor)
+    if req is None:
+        return None, _error(404, "This game has no tools set up.", sub, key)
+    try:
+        return urllib.request.urlopen(req, timeout=TIMEOUT), None
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            # the tool refused our token: a configuration fault, not the caller's
+            e.close()
+            return None, _error(502, "The %s tools refused the panel's token." % title(key), sub, key)
+        return e, None
+    except (urllib.error.URLError, OSError, ValueError):
+        return None, _error(502, "The %s tools are not reachable right now." % title(key), sub, key)
+
+
+def _finish(key, sub, r):
+    """Read an open answer whole -> (status, headers list, body bytes)."""
+    with r:
+        status, rtype = r.status, r.headers.get("Content-Type", "")
+        error = status >= 400
+        out = _headers(rtype, "" if error else r.headers.get("Cache-Control", ""),
+                       "" if error else r.headers.get("Content-Disposition", ""))
+        try:
+            data = r.read(MAX_BODY if error else MAX_REPLY + 1)
+        except (OSError, ValueError):
+            return _error(502, "The %s tools are not reachable right now." % title(key), sub, key)
+    if len(data) > MAX_REPLY:
+        return _error(502, "The %s tools answered with more than %d MB, more than the panel passes on."
+                      % (title(key), MAX_REPLY >> 20), sub, key)
     if rtype.startswith("text/html"):
         nonce = secrets.token_urlsafe(16)
         data = re.sub(rb"<script(?=[\s>])", ('<script nonce="%s"' % nonce).encode(), data)
         out.append(("Content-Security-Policy", _csp(nonce)))
     return status, out, data
+
+
+def open_stream(key, sub, method, query, body, ctype, actor):
+    """Like forward(), but a download is not read here.
+
+    -> (status, headers list, body bytes, None) for a page, JSON or error, or
+    (status, headers list, None, reader) for a successful download: the caller copies
+    reader.read() out in pieces and closes it. Never raises."""
+    r, err = _open(key, sub, method, query, body, ctype, actor)
+    if r is None:
+        return err + (None,)
+    rtype = r.headers.get("Content-Type", "")
+    if r.status >= 400 or _whole(rtype):
+        return _finish(key, sub, r) + (None,)
+    out = _headers(rtype, r.headers.get("Cache-Control", ""),
+                   r.headers.get("Content-Disposition", ""))
+    if (r.headers.get("Content-Length") or "").isdigit():
+        out.append(("Content-Length", r.headers["Content-Length"]))
+    return r.status, out, None, r
+
+
+def forward(key, sub, method, query, body, ctype, actor):
+    """Proxy one request to a game's tool port.
+
+    -> (status, headers list, body bytes). Never raises."""
+    r, err = _open(key, sub, method, query, body, ctype, actor)
+    return err if r is None else _finish(key, sub, r)
 
 
 def get_json(key, sub, query, actor):

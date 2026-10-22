@@ -29,40 +29,53 @@ async function loadGameHelp() {
 async function showGameHelp(game, id, quiet) {
   GH.cur = { game, id };
   document.querySelectorAll("#ghList li[data-gh]").forEach((li) => li.classList.toggle("on", li.dataset.gh === `${game}|${id}`));
-  const box = $("#ghThread");
+  return renderHelpThread($("#ghThread"), game, id, quiet, loadGameHelp);
+}
+
+// One help request with its answer box, drawn into `box` (Game help, and the Inbox's
+// reading pane). `after` runs once an answer or a close went through.
+const HELP_AFTER = new WeakMap();
+async function renderHelpThread(box, game, id, quiet, after, head) {
+  box.dataset.game = game; box.dataset.id = id;
+  HELP_AFTER.set(box, after);
   if (!quiet) box.innerHTML = '<p class="muted">Loading...</p>';
   let t;
   try { t = await api(`/api/help/thread?game=${encodeURIComponent(game)}&id=${encodeURIComponent(id)}`); }
-  catch (e) { box.innerHTML = `<p class="muted">${esc(e.message)}</p>`; return; }
-  const draft = $("#ghText") ? $("#ghText").value : "";
+  catch (e) { box.innerHTML = `<p class="muted">${esc(e.message)}</p>`; return null; }
+  if (box.dataset.game !== game || box.dataset.id !== id) return null;   // another one was opened meanwhile
+  const old = box.querySelector(".gh-reply");
+  const draft = old ? old.value : "";
   box.innerHTML = `<h3>${esc(t.subject || "(no subject)")}</h3>`
-    + `<p class="muted">${esc(t.who.name || "?")} in ${esc(t.game_title)}`
-    + `${t.who.online === true ? ", online now" : t.who.online === false ? ", not online" : ""}${t.closed ? ". Closed." : ""}</p>`
+    + (head ? head(t) : `<p class="muted">${esc(t.who.name || "?")} in ${esc(t.game_title)}`
+      + `${t.who.online === true ? ", online now" : t.who.online === false ? ", not online" : ""}${t.closed ? ". Closed." : ""}</p>`)
     + `<div class="gh-msgs">${t.messages.map((m) => `<div class="gh-msg ${m.from}">`
       + `<div class="gh-meta">${m.from === "staff" ? "Staff" : esc(t.who.name || "Player")}${m.at ? ", " + esc(ago(m.at * 1000)) : ""}</div>`
       + `${m.subject && m.subject !== t.subject ? `<div class="strong">${esc(m.subject)}</div>` : ""}<div class="gh-text">${esc(m.text)}</div></div>`).join("")}</div>`
-    + `<label class="gh-answer">Answer<textarea id="ghText" rows="4" maxlength="4000"></textarea></label>`
-    + `<div class="gh-acts"><label class="chip"><input type="checkbox" id="ghClose"> Close it after</label>`
-    + `<span class="grow"></span>${t.closed ? "" : '<button class="ghost" id="ghCloseOnly">Close without answering</button>'}`
-    + `<button class="act" id="ghSend">Send answer</button></div>`;
-  $("#ghText").value = draft;
+    + `<label class="gh-answer">Answer (goes to the player in ${esc(t.game_title)})<textarea class="gh-reply" rows="4" maxlength="4000"></textarea></label>`
+    + `<div class="gh-acts"><label class="chip"><input type="checkbox" class="gh-close"> Close it after</label>`
+    + `<span class="grow"></span>${t.closed ? "" : '<button class="ghost" data-gh-act="close">Close without answering</button>'}`
+    + `<button class="act" data-gh-act="reply">Send answer</button></div>`;
+  box.querySelector(".gh-reply").value = draft;
   const msgs = box.querySelector(".gh-msgs");
   msgs.scrollTop = msgs.scrollHeight;
+  return t;
 }
 
-async function gameHelpAct(action) {
-  if (!GH.cur) return;
-  const body = { game: GH.cur.game, id: GH.cur.id, action };
-  if (action === "reply") { body.text = $("#ghText").value; body.close = $("#ghClose").checked; }
+async function gameHelpAct(box, action) {
+  const body = { game: box.dataset.game, id: box.dataset.id, action };
+  if (!body.game) return;
+  const text = box.querySelector(".gh-reply");
+  if (action === "reply") { body.text = text.value; body.close = box.querySelector(".gh-close").checked; }
   try {
-    const r = await api("/api/help", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const r = await post("/api/help", body);
     toast(r.msg || "Done");
-    if (action === "reply") $("#ghText").value = "";
+    if (action === "reply") text.value = "";
   } catch (e) { return toast(e.message, true); }
-  loadGameHelp();
+  const after = HELP_AFTER.get(box);
+  if (after) after();
 }
 
-document.addEventListener("click", (e) => {
+document.addEventListener("click", async (e) => {
   const li = e.target.closest("#ghList li[data-gh]");
   if (li) { const [g, ...rest] = li.dataset.gh.split("|"); return showGameHelp(g, rest.join("|")); }
   const f = e.target.closest("#ghFilter [data-f]");
@@ -71,8 +84,13 @@ document.addEventListener("click", (e) => {
     document.querySelectorAll("#ghFilter [data-f]").forEach((b) => b.classList.toggle("on", b === f));
     return loadGameHelp();
   }
-  if (e.target.closest("#ghSend")) return gameHelpAct("reply");
-  if (e.target.closest("#ghCloseOnly") && confirm("Close this request without an answer?")) return gameHelpAct("close");
+  const act = e.target.closest("[data-gh-act]");
+  if (!act) return;
+  const box = act.closest("[data-game]");
+  if (!box) return;
+  if (act.dataset.ghAct === "reply") return gameHelpAct(box, "reply");
+  if (await uiAsk({ title: "Close this request?", text: "It closes without an answer. The player sees it as closed.",
+                    ok: "Close it" })) return gameHelpAct(box, "close");
 });
 
 // ---- the account window: what each game knows of this player ----

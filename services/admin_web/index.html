@@ -619,6 +619,41 @@
     .ag-facts { font-size: 12px; color: var(--muted); margin: -2px 0 4px; }
     .gh-split > * { min-width: 0; }
     .gh-answer textarea { width: 100%; box-sizing: border-box; }
+    /* the Inbox (inbox.js) */
+    .ib { display: flex; flex-direction: column; gap: 12px; }
+    .ib-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .ib-bar select { width: auto; min-width: 0; }
+    .ib-bar .seg { flex-wrap: wrap; }
+    .ib-who { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2); border-radius: 999px;
+      padding: 4px 6px 4px 11px; font-size: 13px; }
+    .ib-who button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 5px; font-size: 15px; }
+    .ib-split { display: grid; grid-template-columns: minmax(260px, 2fr) 3fr; gap: 16px; align-items: start; }
+    .ib-split > * { min-width: 0; }
+    .ib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+    .ib-list li.ib-row { border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; cursor: pointer; }
+    .ib-list li.ib-row:hover { background: var(--panel2); }
+    .ib-list li.ib-row.on { background: var(--panel2); box-shadow: inset 0 0 0 1px var(--accent); }
+    .ib-list li.empty { color: var(--muted); padding: 10px 12px; }
+    .ib-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .ib-top b { overflow-wrap: anywhere; }
+    .ib-st { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .ib-st.waiting { color: var(--warn); }
+    .ib-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .ib-meta a, .ib-pane a { color: var(--accent); }
+    .ib-link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-size: 12px;
+      cursor: pointer; text-decoration: underline; }
+    .ib-pager { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-top: 8px;
+      color: var(--muted); font-size: 13px; }
+    .ib-pager:empty { display: none; }
+    .ib-pane { background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
+      display: flex; flex-direction: column; gap: 10px; }
+    .ib-pane h3 { margin: 0; font-size: 17px; }
+    .ib-pane .gh-msg { background: var(--panel); }
+    .ib-pane .gh-msgs { margin: 0; }
+    .ib-pane .gh-answer textarea { width: 100%; box-sizing: border-box; }
+    .ib-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pp-inbox .ib-row { padding: 8px 10px; }
+    @media (max-width: 760px) { .ib-split { grid-template-columns: 1fr; } .ib-pane.idle { display: none; } }
     @media (max-width: 760px) { .gh-split { grid-template-columns: 1fr; } .gh-list li { flex-wrap: wrap; } .gh-list .t2 { width: 100%; } }
     .lg-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
     .lg-tools .grow { flex: 1; }
@@ -1169,6 +1204,8 @@
     .pp-sub { color: var(--muted); font-size: 12px; }
     #tab-people a { color: var(--accent); }
     #tab-people a.pp-name { color: var(--text); }
+    #tab-people .pp-maybe { color: var(--warn); }
+    #tab-people .pp-maybe a { color: var(--warn); text-decoration: underline; }
     .pp-table td { font-size: 14px; padding: 10px; }
     body.pp-core-off .pp-core { display: none; }
     .pp-crumb { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
@@ -1252,6 +1289,7 @@
         <button data-tab="people">People</button><button data-tab="accounts">PlayOnline accounts</button><button data-tab="codes">Registration codes</button>
       </nav>
       <nav class="subtabs" data-group="inbox" id="inboxSubtabs" aria-label="Inbox" hidden>
+        <button data-tab="inbox">All</button>
         <button data-tab="gmcalls">GM calls<span class="navbadge" id="gmBadge" hidden></span></button>
         <button data-tab="reports">Player reports<span class="navbadge info" id="reportsBadge" hidden></span></button>
         <button data-tab="issues">Bug reports<span class="navbadge info" id="issuesBadge" hidden></span></button>
@@ -1310,7 +1348,7 @@
           <div class="toolbar">
             <div class="grow"><label for="ppSearch" class="sr">Search people</label>
               <input type="search" id="ppSearch" data-search placeholder="Search any name, ID or login in any game"></div>
-            <div class="seg" id="ppFilter"><button data-f="all" class="on">All</button><button data-f="online">Online</button></div>
+            <div class="seg" id="ppFilter"><button data-f="all" class="on">All</button><button data-f="online">Online</button><button data-f="dupes">Possible duplicates</button></div>
             <span class="count" id="ppCount"></span>
             <button class="act sm" id="ppNew" data-perm="people_link">New person</button>
           </div>
@@ -1437,6 +1475,28 @@
     </section>
 
     <!-- ABUSE REPORTS -->
+    <!-- INBOX: every source in one list (inbox.js) -->
+    <section id="tab-inbox" class="tab">
+      <div class="panel ib">
+        <div class="ib-bar">
+          <label for="ibSource" class="sr">Where from</label>
+          <select id="ibSource"></select>
+          <div class="seg" id="ibState" aria-label="State"><button data-s="waiting" class="on">Waiting on us</button><button data-s="open">Open</button><button data-s="answered">Answered</button><button data-s="closed">Closed</button><button data-s="all">All</button></div>
+          <label for="ibGame" class="sr">Game</label>
+          <select id="ibGame"><option value="">Any game</option></select>
+          <span id="ibWho"></span>
+        </div>
+        <p class="hint" id="ibProblems" hidden></p>
+        <div class="ib-split">
+          <div class="ib-left">
+            <ul class="ib-list" id="ibList" aria-label="Cases"></ul>
+            <div class="ib-pager" id="ibPager"></div>
+          </div>
+          <section class="ib-pane idle" id="ibPane" aria-live="polite"><p class="muted">Pick a case.</p></section>
+        </div>
+      </div>
+    </section>
+
     <section id="tab-reports" class="tab">
       <div class="panel">
         <h2>User reports</h2>
@@ -2403,5 +2463,6 @@
   <script src="/static/helpdesk.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/people.js"></script>
+  <script src="/static/inbox.js"></script>
 </body>
 </html>

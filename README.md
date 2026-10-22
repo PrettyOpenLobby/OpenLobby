@@ -25,7 +25,14 @@ Viewer install (the US 2003-era Viewer is the most tested; JP works). The
 stack uses port 53/udp, 80, 443, 25, 110 and a band of ports from 51200 up;
 `docs/ports.md` lists them all.
 
-On Linux, run the setup script:
+The easiest way is OpenLobby Setup, one program for Windows, Linux and
+macOS: download it from
+https://github.com/PrettyOpenLobby/OpenLobby/releases and run it. It checks
+Docker, asks a few questions, gets OpenLobby and starts it, and on later runs
+offers update, change settings, stop and uninstall (`docs/setup.md`, "The
+setup program").
+
+Or, on Linux, run the setup script:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/PrettyOpenLobby/OpenLobby/main/setup.sh | bash

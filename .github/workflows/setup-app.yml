@@ -1,0 +1,113 @@
+name: setup-app
+# Builds the OpenLobby Setup program (setup/openlobby_setup.py) for Windows,
+# Linux and macOS on pushes to main, pull requests and version tags; a tag
+# vX.Y.Z also attaches the three programs to GitHub release vX.Y.Z, which
+# hosts download (docs/setup.md, "The setup program"). The program fetches
+# OpenLobby itself, so it carries no copy of the repository.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYINSTALLER: pyinstaller==6.11.1
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: setup program tests
+        run: python tools/setup_app_test.py
+      - name: build
+        run: |
+          set -eu
+          python -m pip install --disable-pip-version-check "$PYINSTALLER"
+          python setup/build.py --version "${GITHUB_REF_NAME}"
+          ./dist/OpenLobby-Setup.exe --help < /dev/null
+          (cd dist && sha256sum OpenLobby-Setup.exe > OpenLobby-Setup.exe.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup-windows
+          path: dist/OpenLobby-Setup.exe*
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: setup program tests
+        run: python tools/setup_app_test.py
+      - name: build (glibc 2.31, so it runs on most current distributions)
+        run: |
+          set -eu
+          docker run --rm -v "${PWD}:/src" -w /src -e GITHUB_REF_NAME python:3.12-bullseye sh -c '
+            python -m pip install --disable-pip-version-check --root-user-action=ignore -q '"$PYINSTALLER"' &&
+            python setup/build.py --version "$GITHUB_REF_NAME"'
+          sudo chown -R "$(id -u):$(id -g)" dist build
+          ./dist/OpenLobby-Setup-linux-x86_64 --help < /dev/null
+          (cd dist && sha256sum OpenLobby-Setup-linux-x86_64 > OpenLobby-Setup-linux-x86_64.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup-linux
+          path: dist/OpenLobby-Setup-linux-x86_64*
+
+  macos:
+    # Apple silicon; on an Intel Mac, run python3 setup/openlobby_setup.py instead
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build
+        run: |
+          set -eu
+          python -m pip install --disable-pip-version-check "$PYINSTALLER"
+          python setup/build.py --version "${GITHUB_REF_NAME}"
+          ./dist/OpenLobby-Setup --help < /dev/null
+          # a zip keeps the program's "can run" flag through the download
+          (cd dist && ditto -c -k OpenLobby-Setup OpenLobby-Setup-mac.zip \
+             && shasum -a 256 OpenLobby-Setup-mac.zip > OpenLobby-Setup-mac.zip.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup-mac
+          path: dist/OpenLobby-Setup-mac.zip*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: setup-*
+          merge-multiple: true
+          path: dist
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          # the release may exist already (made by hand with notes): add to it
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "OpenLobby $GITHUB_REF_NAME" --generate-notes dist/*
+          fi

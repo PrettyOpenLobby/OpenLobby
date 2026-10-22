@@ -36,6 +36,7 @@ local CLIENTS="${OPENLOBBY_CLIENTS:-}"
 local DEPLOYER="${OPENLOBBY_DEPLOYER:-}"
 local LOOKUP="${OPENLOBBY_LOOKUP_PUBLIC:-}"
 local INSTALL_OK="${OPENLOBBY_INSTALL_DOCKER:-}"
+local ADMIN_USER_OPT="${OPENLOBBY_ADMIN_USER:-}"
 local START=1
 local CHANGE_ADDRESS=""
 
@@ -67,6 +68,8 @@ panel's password. Running it again keeps the existing .env.
                         run the deployer, which lets the admin panel install
                         games (default: on)
   --clients DIR|none    folder of your own client installs for the deployer
+  --admin-user NAME     the admin panel's user name on a new .env
+                        (default: admin)
   --change-address      on an existing .env, redo the address questions
   --install-docker      with --yes, allow installing Docker and git
   --no-start            write .env and stop there
@@ -76,7 +79,7 @@ Every option can also be given as an environment variable: OPENLOBBY_YES=1,
 OPENLOBBY_DIR, OPENLOBBY_REPO, OPENLOBBY_REACH, OPENLOBBY_ADDRESS,
 OPENLOBBY_PUBLIC_ADDRESS, OPENLOBBY_LOOKUP_PUBLIC=1, OPENLOBBY_PS2=yes|no,
 OPENLOBBY_IMAGES, OPENLOBBY_DEPLOYER=yes|no, OPENLOBBY_CLIENTS,
-OPENLOBBY_INSTALL_DOCKER=1. Options win over the environment.
+OPENLOBBY_INSTALL_DOCKER=1, OPENLOBBY_ADMIN_USER. Options win over the environment.
 EOF
 }
 
@@ -103,6 +106,8 @@ while [ $# -gt 0 ]; do
         --no-deployer) DEPLOYER=no ;;
         --clients) CLIENTS="${2:-}"; shift ;;
         --clients=*) CLIENTS="${1#*=}" ;;
+        --admin-user) ADMIN_USER_OPT="${2:-}"; shift ;;
+        --admin-user=*) ADMIN_USER_OPT="${1#*=}" ;;
         --change-address) CHANGE_ADDRESS=1 ;;
         --install-docker) INSTALL_OK=1 ;;
         --no-start) START="" ;;
@@ -115,6 +120,10 @@ done
 case "$REACH" in ""|lan|vpn|internet) ;; *) echo "setup.sh: --reach is lan, vpn or internet" >&2; return 2 ;; esac
 case "$IMAGES" in ""|published|build) ;; *) echo "setup.sh: --images is published or build" >&2; return 2 ;; esac
 case "$PS2" in ""|yes|no|1|0) ;; *) echo "setup.sh: OPENLOBBY_PS2 is yes or no" >&2; return 2 ;; esac
+case "$ADMIN_USER_OPT" in
+    "") ;;
+    *[!A-Za-z0-9._-]*) echo "setup.sh: --admin-user takes letters, digits, dot, dash and underscore" >&2; return 2 ;;
+esac
 [ "$PS2" = 1 ] && PS2=yes
 [ "$PS2" = 0 ] && PS2=no
 case "$DEPLOYER" in 1) DEPLOYER=yes ;; 0) DEPLOYER=no ;; esac
@@ -307,10 +316,11 @@ case "$OS_ID" in
 esac
 
 local missing_git="" missing_docker="" missing_compose=""
-command -v git >/dev/null 2>&1 || missing_git=1
+# git is needed only to clone; a checkout unpacked from a download runs without it
+if [ -n "$NEED_CLONE" ]; then command -v git >/dev/null 2>&1 || missing_git=1; fi
 command -v docker >/dev/null 2>&1 || missing_docker=1
 if [ -z "$missing_docker" ] && ! docker compose version >/dev/null 2>&1; then missing_compose=1; fi
-[ -z "$missing_git" ] && say "git: $(git --version 2>/dev/null)"
+command -v git >/dev/null 2>&1 && say "git: $(git --version 2>/dev/null)"
 [ -z "$missing_docker" ] && say "docker: $(docker --version 2>/dev/null)"
 [ -z "$missing_docker" ] && [ -z "$missing_compose" ] && say "compose: $(docker compose version --short 2>/dev/null)"
 
@@ -650,6 +660,10 @@ if [ -n "$NEW_ENV" ]; then
     fi
 else
     case "$(env_get COMPOSE_FILE "$WORK")" in *ghcr*) PUBLISHED=1 ;; esac
+fi
+# The admin panel's user name: on a new .env only (a stored credential keeps its own)
+if [ -n "$NEW_ENV" ] && [ -n "$ADMIN_USER_OPT" ]; then
+    env_set "$WORK" POL_ADMIN_USER "$ADMIN_USER_OPT"
 fi
 
 # Database password: only on a new .env, and never for a database that

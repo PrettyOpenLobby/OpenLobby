@@ -37,13 +37,21 @@ async function loadPeopleList() {
   PP.rows = r.people || [];
   const core = r.core !== false;
   document.body.classList.toggle("pp-core-off", !core);
-  $("#ppFilter").hidden = !core;
+  $("#ppFilter").querySelector('[data-f="online"]').hidden = !core;
   $("#ppHint").textContent = core ? "* linked by staff, not yet proven by the player. A person without a "
     + "PlayOnline account is normal: they only play a game that signs in on its own." : "";
   $("#ppCount").textContent = PP.rows.length >= 100 ? "the first 100" : PP.rows.length ? `${PP.rows.length}` : "";
   $("#ppBody").innerHTML = PP.rows.map((p) => {
     const href = p.id ? `#people/${p.id}` : `#people/pol/${encodeURIComponent(p.polid || "")}`;
-    const sub = p.pol ? (p.polid ? esc(p.polid) : "PlayOnline account") : (core ? "no PlayOnline account" : "");
+    let sub = p.pol ? (p.polid ? esc(p.polid) : "PlayOnline account") : (core ? "no PlayOnline account" : "");
+    const maybe = (p.maybe || []).map((o) => {
+      // the one without a PlayOnline account goes into the one with it; else the newer into the older
+      const into = can("people_link") && p.id && !(p.pol && o.pol) && ((!p.pol && o.pol) || (!p.pol && !o.pol && p.id > o.id));
+      return `May be <a href="#people/${o.id}">${esc(o.name)}</a>: ${esc(o.why)}`
+        + (into ? ` <button type="button" class="pp-mini" data-merge-from="${p.id}" data-merge-into="${o.id}"`
+          + ` data-from-name="${esc(p.name)}" data-into-name="${esc(o.name)}">Merge into ${esc(o.name)}...</button>` : "");
+    });
+    if (maybe.length) sub = (sub ? sub + "<br>" : "") + `<span class="pp-maybe">${maybe.join("<br>")}</span>`;
     const accts = p.accounts.map((a) => esc(a.title) + (a.staff && core ? "*" : "")).join(", ") || "-";
     return `<tr><td data-label="Person"><a class="pp-name" href="${href}">${esc(p.name)}</a>`
       + (sub ? `<div class="pp-sub">${sub}</div>` : "") + `</td>`
@@ -51,8 +59,22 @@ async function loadPeopleList() {
       + `<td data-label="Playing now" class="pp-core">${p.online ? '<span class="dot ok" aria-hidden="true"></span> PlayOnline' : '<span class="muted">-</span>'}</td>`
       + `<td data-label="Last seen" class="muted pp-core">${esc(ppSeen(p))}</td>`
       + `<td data-label=""><a href="${href}">Open</a></td></tr>`;
-  }).join("") || `<tr><td colspan="5" class="muted">${q ? "Nobody matches." : core ? "No people yet." : "No people yet. Add one with New person, or link a login to them."}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">${PP.filter === "dupes" ? "No two people look alike." : q ? "Nobody matches." : core ? "No people yet." : "No people yet. Add one with New person, or link a login to them."}</td></tr>`;
 }
+
+$("#ppBody").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-merge-from]");
+  if (!b) return;
+  const from = b.dataset.fromName, into = b.dataset.intoName;
+  if (!await uiAsk({ title: `Merge ${from} into ${into}?`, ok: "Merge",
+                     text: `${from}'s linked logins and notes move to ${into}, and ${from}'s page leads to ${into} from now on. `
+                       + "Only merge them if you know they are the same person." })) return;
+  try {
+    await post("/api/person", { action: "merge", id: +b.dataset.mergeInto, other: +b.dataset.mergeFrom });
+    toast(`Merged ${from} into ${into}`);
+    loadPeopleList();
+  } catch (err) { toast(err.message, true); }
+});
 
 $("#ppSearch").addEventListener("input", () => { clearTimeout(PP.timer); PP.timer = setTimeout(loadPeopleList, 250); });
 $("#ppFilter").addEventListener("click", (e) => {
@@ -63,8 +85,10 @@ $("#ppFilter").addEventListener("click", (e) => {
   loadPeopleList();
 });
 $("#ppNew").onclick = async () => {
-  const name = (prompt("The new person's name, as staff will know them:") || "").trim();
-  if (!name) return;
+  const got = await uiAsk({ title: "New person", ok: "Add the person",
+                            fields: [{ id: "name", label: "Their name, as staff will know them", max: 80, required: true }] });
+  if (!got) return;
+  const name = got.name;
   try {
     const r = await post("/api/person", { action: "create", name });
     location.hash = "#people/" + r.id;
@@ -123,7 +147,7 @@ function renderPerson() {
       <div class="pp-title"><h2>${esc(p.name)}</h2><div class="muted">${status}</div></div>
       <div class="pp-grow"></div>
       ${p.polid && can("accounts_view") ? `<button class="ghost" id="ppAcct">PlayOnline account</button>` : ""}
-      ${p.can_link ? `<button class="ghost" id="ppMergeBtn">Merge</button><button class="ghost" id="ppNoteBtn">Add a note</button>
+      ${p.can_link ? `<button class="ghost" id="ppRenameBtn">Rename</button><button class="ghost" id="ppMergeBtn">Merge</button><button class="ghost" id="ppNoteBtn">Add a note</button>
       <button class="act" id="ppLinkBtn">Link an account</button>` : ""}
     </div>
     <div class="panel"><h2>Linked accounts</h2><div class="pp-cards">${cards}</div></div>
@@ -135,6 +159,8 @@ function renderPerson() {
         <div class="hint">Each game's own permission still applies. Every action is in the activity log.</div>
       </div>
     </div>
+    ${tabAllowed("inbox") ? `<div class="panel pp-inbox"><h2>Inbox<a class="h2act" href="#inbox/person/${p.id}">All their cases</a></h2>
+      <ul class="ib-list" id="ppInbox"><li class="empty">Reading the Inbox...</li></ul></div>` : ""}
     <div class="panel"><div class="pp-histh"><h2>History</h2>
       <div class="seg" id="ppHistF"><button data-f="all">All</button><button data-f="people">Links</button>${p.pol && p.polid ? '<button data-f="account">Account</button>' : ""}<button data-f="note">Notes</button></div></div>
       <div id="ppHist"></div></div>
@@ -142,6 +168,22 @@ function renderPerson() {
       <textarea id="ppNoteText" rows="3" maxlength="2000" placeholder="Only staff see notes."></textarea>
       <div class="pp-foot"><button class="act" id="ppNoteSave">Save the note</button></div></div>` : ""}`;
   renderHistory();
+  if (tabAllowed("inbox")) loadPersonInbox(p.id);
+}
+
+// The person's cases from every source the moderator may read (admininbox.py).
+async function loadPersonInbox(id) {
+  let r;
+  try { r = await api(`/api/inbox?person=${encodeURIComponent(id)}&state=all&limit=10`); }
+  catch (e) { if ($("#ppInbox")) $("#ppInbox").innerHTML = `<li class="empty">${esc(e.message)}</li>`; return; }
+  const box = $("#ppInbox");
+  if (!box || !PP.cur || PP.cur.id !== id) return;
+  PP.inbox = r.threads || [];
+  // on their own page, their name needs no link to it
+  box.innerHTML = (ibRows(PP.inbox.map((t) => Object.assign({}, t, { person: null })), false)
+    + (r.total > PP.inbox.length ? `<li class="empty"><a href="#inbox/person/${id}">${r.total - PP.inbox.length} older</a></li>` : "")
+    + ((r.problems || []).length ? `<li class="empty">${esc(r.problems.join(". "))}.</li>` : ""))
+    || `<li class="empty">No cases from ${esc(PP.cur.name)}.</li>`;
 }
 
 function renderHistory() {
@@ -185,6 +227,20 @@ $("#ppPageView").addEventListener("click", async (e) => {
   if (t.closest("#ppAcct")) return openAccount(PP.cur.polid);
   if (t.closest("#ppLinkBtn")) return openLinkDialog();
   if (t.closest("#ppMergeBtn")) return openMergeDialog();
+  const ib = t.closest("#ppInbox li[data-ib]");
+  if (ib && !t.closest("a")) {
+    Object.assign(IB, { source: "all", state: "all", game: "", offset: 0, cur: ib.dataset.ib });
+    location.hash = "#inbox/person/" + PP.cur.id;
+    return;
+  }
+  if (t.closest("#ppRenameBtn")) {
+    const got = await uiAsk({ title: `Rename ${PP.cur.name}`, ok: "Rename", text: "The name staff know them by. The old name stays in the history.",
+                              fields: [{ id: "name", label: "Name", value: PP.cur.name, max: 80, required: true }] });
+    if (!got || got.name === PP.cur.name) return;
+    try { await personPost({ action: "rename", name: got.name }); toast("Renamed"); openPerson({ id: PP.cur.id }); }
+    catch (err) { toast(err.message, true); }
+    return;
+  }
   if (t.closest("#ppNoteBtn")) { const n = $("#ppNoteText"); n.scrollIntoView({ block: "center" }); return n.focus(); }
   const hf = t.closest("#ppHistF button[data-f]");
   if (hf) { PP.histF = hf.dataset.f; return renderHistory(); }
@@ -197,8 +253,11 @@ $("#ppPageView").addEventListener("click", async (e) => {
   }
   const un = t.closest("button[data-unlink]");
   if (un) {
-    const why = (prompt(`Unlink ${un.dataset.what} from ${PP.cur.name}? Say why (kept in the history):`) || "").trim();
-    if (!why) return;
+    const got = await uiAsk({ title: `Unlink ${un.dataset.what}?`, ok: "Unlink", danger: true,
+                              text: `It stops being ${PP.cur.name}'s. The link and your reason stay in the history.`,
+                              fields: [{ id: "why", label: "Why", rows: 2, max: 300, required: "Say why you are unlinking it." }] });
+    if (!got) return;
+    const why = got.why;
     try { await personPost({ action: "unlink", link: +un.dataset.unlink, why }); toast("Unlinked"); openPerson({ id: PP.cur.id }); }
     catch (err) { toast(err.message, true); }
     return;
@@ -207,12 +266,12 @@ $("#ppPageView").addEventListener("click", async (e) => {
   if (ab) {
     const a = PP.cur.actions[+ab.dataset.act];
     const params = Object.assign({}, a.params);
-    for (const f of a.ask || []) {          // what the page cannot fill in: the moderator types it
-      const v = prompt(`${a.label} in ${a.title}, ${PP.cur.name}: ${f.label}`, f.default || "");
-      if (v === null) return;
-      params[f.id] = v;
-    }
-    if (!(a.ask || []).length && !confirm(`${a.label} in ${a.title}: ${PP.cur.name}?`)) return;
+    // what the page cannot fill in, the moderator types
+    const got = await uiAsk({ title: `${a.label} in ${a.title}`, ok: a.label, danger: a.kind === "ban" || a.danger,
+                              text: `For ${PP.cur.name}.`,
+                              fields: (a.ask || []).map((f) => ({ id: f.id, label: f.label, value: f.default || "" })) });
+    if (!got) return;
+    if (got !== true) Object.assign(params, got);
     try {
       const r = await post("/api/modules/action", { key: a.game, action: a.id, params });
       toast(r.msg || "Done");
@@ -224,6 +283,8 @@ $("#ppPageView").addEventListener("click", async (e) => {
 function openLinkDialog() {
   const p = PP.cur;
   PP.link = { target: null, picked: null, pk: null };
+  $("#ppLinkGames").hidden = $("#ppLinkGames").previousElementSibling.hidden = false;
+  $("#ppLinkWhoLabel").hidden = false;
   $("#ppLinkTitle").textContent = `Link an account to ${p.name}`;
   $("#ppLinkAbout").textContent = p.core !== false
     ? 'Find their account in a game and link it. It shows as "Linked by staff" until the player proves it on the website.'
@@ -288,6 +349,7 @@ function linkChoice() {
 }
 
 function linkWarn() {
+  if (PP.link && PP.link.mode === "login") return loginLinkWarn();
   const c = linkChoice(), p = PP.cur, t = PP.link && PP.link.target;
   const go = $("#ppLinkGo"), warn = $("#ppLinkWarn");
   if (!c) {
@@ -322,7 +384,86 @@ $("#ppLinkCancel").onclick = () => $("#ppLinkModal").classList.remove("show");
 $("#ppLinkModal").addEventListener("click", (e) => {
   if (e.target === $("#ppLinkModal") || e.target.closest("#ppLinkOther")) $("#ppLinkModal").classList.remove("show");
 });
+// The same dialog the other way round, from the Inbox: a game login that is nobody's yet, linked
+// to a person picked here (or to a new person). lg: {system, game, key, name, title, search}.
+function openLoginLinkDialog(lg, after) {
+  PP.link = { mode: "login", lg, after, login: lg.key ? { key: lg.key, name: lg.name || lg.key } : null, person: null };
+  $("#ppLinkTitle").textContent = `Link ${lg.name || lg.key} to a person`;
+  $("#ppLinkAbout").textContent = `${lg.name || lg.key} asked for help in ${lg.title || "a game"}, and nobody here has that login yet. `
+    + "Pick the person it belongs to. It shows as \"Linked by staff\" on their page.";
+  $("#ppLinkGames").hidden = $("#ppLinkGames").previousElementSibling.hidden = true;
+  $("#ppLinkWhy").value = "";
+  $("#ppLinkErr").hidden = true;
+  $("#ppLinkWhoWrap").hidden = false;
+  $("#ppLinkWhoLabel").textContent = "The person";
+  const box = $("#ppLinkWho");
+  box.innerHTML = "";
+  if (!lg.key && lg.search) {
+    // a help desk names the player, not always their login's id: find the login in the game
+    const lab = document.createElement("label");
+    lab.textContent = `Their ${lg.title} account`;
+    lab.htmlFor = "ppLinkLoginQ";
+    const pk = makePicker({
+      id: "ppLinkLoginQ", placeholder: `Search ${lg.title} by name or id`,
+      search: (q) => api(`/api/people/logins?game=${encodeURIComponent(lg.game)}&q=${encodeURIComponent(q)}`)
+        .then((r) => (r.players || []).map((x) => Object.assign({}, x, {
+          detail: [x.detail, x.person ? `Already linked to ${x.person.name}` : ""].filter(Boolean).join(". ") }))),
+      onpick: (row) => { PP.link.login = { key: row.id, name: row.label }; linkWarn(); },
+    });
+    pk.box.value = lg.name || "";
+    pk.box.addEventListener("input", () => { PP.link.login = null; linkWarn(); });
+    box.append(lab, pk.el);
+    $("#ppLinkWhoLabel").hidden = true;
+    const lab2 = document.createElement("label");
+    lab2.textContent = "The person";
+    lab2.htmlFor = "ppLinkPersonQ";
+    box.append(lab2);
+  } else {
+    if (!lg.key) PP.link.login = { key: lg.name, name: lg.name };
+    $("#ppLinkWhoLabel").hidden = false;
+  }
+  const ppk = makePicker({
+    id: "ppLinkPersonQ", placeholder: "Search people by name, ID or login",
+    search: (q) => api(`/api/people?q=${encodeURIComponent(q)}`).then((r) => [{ id: "new:", label: `A new person named ${lg.name || lg.key}`,
+      detail: "Made now, with this login", online: null }].concat((r.people || []).slice(0, 19).map((x) => ({
+        id: x.id ? "id:" + x.id : "pol:" + x.polid, label: x.name, online: x.online === null ? null : !!x.online,
+        detail: [x.polid || "", x.accounts.map((a) => a.title).join(", ")].filter(Boolean).join(". ") })))),
+    onpick: (row) => { PP.link.person = row; linkWarn(); },
+  });
+  ppk.box.addEventListener("input", () => { PP.link.person = null; linkWarn(); });
+  box.append(ppk.el);
+  linkWarn();
+  $("#ppLinkModal").classList.add("show");
+}
+
+function loginLinkWarn() {
+  const L = PP.link, go = $("#ppLinkGo"), warn = $("#ppLinkWarn");
+  go.disabled = !(L.login && L.person);
+  go.textContent = L.login ? `Link ${L.login.name}` : "Link";
+  if (!L.login) { warn.textContent = `Find their ${L.lg.title} account and pick it.`; return; }
+  if (!L.person) { warn.textContent = "Search for the person and pick them, or pick a new person."; return; }
+  const who = L.person.id === "new:" ? `a new person named ${L.lg.name || L.login.name}` : L.person.label;
+  warn.textContent = `${L.login.name} will be ${who}'s ${L.lg.title} account: its help requests and characters show on their page.`;
+}
+
+async function loginLinkGo() {
+  const L = PP.link, err = $("#ppLinkErr");
+  const why = $("#ppLinkWhy").value.trim();
+  if (!why) { err.textContent = "Say why you are linking it: it is kept in the history."; err.hidden = false; return; }
+  try {
+    let id;
+    if (L.person.id === "new:") id = (await post("/api/person", { action: "create", name: L.lg.name || L.login.name })).id;
+    else if (L.person.id.startsWith("id:")) id = +L.person.id.slice(3);
+    else id = (await api("/api/person?polid=" + encodeURIComponent(L.person.id.slice(4)))).id;
+    await post("/api/person", { action: "link", id, system: L.lg.system, key: L.login.key, name: L.login.name, why });
+    $("#ppLinkModal").classList.remove("show");
+    toast(`Linked ${L.login.name}`);
+    if (L.after) L.after();
+  } catch (e) { err.textContent = e.message; err.hidden = false; }
+}
+
 $("#ppLinkGo").onclick = async () => {
+  if (PP.link && PP.link.mode === "login") return loginLinkGo();
   const c = linkChoice();
   const why = $("#ppLinkWhy").value.trim();
   const err = $("#ppLinkErr");
@@ -364,7 +505,8 @@ $("#ppMergeGo").onclick = async () => {
   const pk = PP.merge && PP.merge.picked();
   const err = $("#ppMergeErr");
   if (!pk) { err.textContent = "Search for the person to merge and pick them."; err.hidden = false; return; }
-  if (!confirm(`Merge ${pk.label} into ${PP.cur.name}? ${pk.label}'s page then leads to ${PP.cur.name}.`)) return;
+  if (!await uiAsk({ title: `Merge ${pk.label} into ${PP.cur.name}?`, ok: "Merge",
+                     text: `${pk.label}'s page leads to ${PP.cur.name} from now on.` })) return;
   const body = { action: "merge", force: $("#ppMergeForce").checked };
   if (pk.id.startsWith("id:")) body.other = pk.id.slice(3); else body.other_polid = pk.id.slice(4);
   try {
