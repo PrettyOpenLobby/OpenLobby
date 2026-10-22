@@ -287,6 +287,85 @@ def dns_name_listed(name, hosts):
     return any(name == h or name.endswith("." + h) for h in hosts if h)
 
 
+#: Names other installs on this machine add to this resolver, one file per game key
+#: (`stub.py dns-names add <key> <name>...`, docs/installs.md). Read again when they change.
+DNS_NAMES_DIR = os.environ.get("POL_DNS_NAMES_DIR", "/data/dns.d")
+_DNS_KEY = re.compile(r"^[a-z0-9]{1,16}$")
+_DNS_HOST = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$")
+
+
+class DnsNames:
+    """The names in DNS_NAMES_DIR/<key>.txt, re-read at most every few seconds when a file
+    changed, so a game's setup can add its names without restarting the resolver."""
+
+    def __init__(self, folder, every=5.0):
+        self.folder, self.every = folder, every
+        self._names, self._stamp, self._checked = [], None, 0.0
+
+    def _scan(self):
+        try:
+            files = sorted(f for f in os.listdir(self.folder) if f.endswith(".txt"))
+            return tuple((f, os.path.getmtime(os.path.join(self.folder, f))) for f in files)
+        except OSError:
+            return ()
+
+    def names(self):
+        now = time.monotonic()
+        if now - self._checked < self.every:
+            return self._names
+        self._checked = now
+        stamp = self._scan()
+        if stamp != self._stamp:
+            names = []
+            for f, _m in stamp:
+                try:
+                    with open(os.path.join(self.folder, f), encoding="utf-8") as fh:
+                        names += [n for n in (ln.strip().lower().rstrip(".") for ln in fh)
+                                  if _DNS_HOST.match(n)]
+                except OSError:
+                    continue
+            self._names, self._stamp = sorted(set(names)), stamp
+            log("dns", f"added names: {len(self._names)} from {len(stamp)} install(s)")
+        return self._names
+
+
+def dns_names_cli(args, folder=None):
+    """stub.py dns-names add <key> <name>... | remove <key> | list. -> exit code."""
+    folder = folder or DNS_NAMES_DIR
+    if not args or args[0] not in ("add", "remove", "list"):
+        print("usage: stub.py dns-names add <key> <name>... | remove <key> | list", file=sys.stderr)
+        return 2
+    if args[0] == "list":
+        for f in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+            if f.endswith(".txt"):
+                with open(os.path.join(folder, f), encoding="utf-8") as fh:
+                    print(f[:-4] + ": " + " ".join(ln.strip() for ln in fh if ln.strip()))
+        return 0
+    if len(args) < 2 or not _DNS_KEY.match(args[1]):
+        print("dns-names: the key is 1 to 16 of a-z and 0-9", file=sys.stderr)
+        return 2
+    path = os.path.join(folder, args[1] + ".txt")
+    if args[0] == "remove":
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        print("removed the names of " + args[1])
+        return 0
+    names = [n.lower().rstrip(".") for n in args[2:]]
+    bad = [n for n in names if not _DNS_HOST.match(n)]
+    if not names or bad:
+        print("dns-names: not a host name: " + (" ".join(bad) or "(none given)"), file=sys.stderr)
+        return 2
+    os.makedirs(folder, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(sorted(set(names))) + "\n")
+    os.replace(tmp, path)
+    print("%s: %d name(s)" % (args[1], len(set(names))))
+    return 0
+
+
 def dns_refused(query):
     """REFUSED, echoing the question and nothing else. It is never longer than
     the query it answers, so sending it to a forged source amplifies nothing."""
@@ -533,7 +612,12 @@ def run_dns():
                 f"{'async' if async_fwd else 'blocking'}, "
                 f"stall warn >={stall_warn:.0f}ms")
 
+    extra = DnsNames(DNS_NAMES_DIR)
+
     def matches(name):
+        # names other installs on this machine added (dns-names, docs/installs.md)
+        if dns_name_listed(name, extra.names()):
+            return True
         if redirect_only:
             return any(name == h or name.endswith("." + h) for h in redirect_only)
         return any(name == z or name.endswith("." + z) for z in zones)
@@ -1753,8 +1837,10 @@ def main():
         run_http()
     elif mode == "tcp":
         run_tcp()
+    elif mode == "dns-names":
+        raise SystemExit(dns_names_cli(sys.argv[2:]))
     else:
-        raise SystemExit("usage: stub.py {dns|http|tcp}")
+        raise SystemExit("usage: stub.py {dns|http|tcp|dns-names}")
 
 
 if __name__ == "__main__":

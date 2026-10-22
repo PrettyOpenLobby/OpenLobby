@@ -101,6 +101,10 @@ services:
     build: ./services
     pull_policy: build
     command: dns
+    # Other installs on this machine find this resolver by the label and add their
+    # names to it (docs/installs.md, "One DNS for every install").
+    labels:
+      org.openlobby.role: dns
     environment:
       <<: *appenv
       # Who may use this resolver (docs/configuration.md). Empty: loopback and

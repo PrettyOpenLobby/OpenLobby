@@ -86,6 +86,47 @@ Both calls are written to the panel's activity log.
 A setup program that finds a running panel asks something like "An OpenLobby admin panel
 is running here. Manage Kart Club from it?" If the owner says no, the game runs on its own.
 
+## One DNS for every install
+
+A console takes one DNS server, and a resolver needs port 53, so every install on a machine
+shares one: OpenLobby's `dns` service, labelled `org.openlobby.role=dns`. A game's setup:
+
+1. Looks for it: `docker ps --filter label=org.openlobby.role=dns`.
+2. If there is none (a game installed without OpenLobby), starts it from the published
+   image, as its own small service with that label:
+
+   ```yaml
+   services:
+     dns:
+       image: ghcr.io/prettyopenlobby/openlobby:latest
+       command: ["dns"]
+       restart: unless-stopped
+       labels:
+         org.openlobby.role: dns
+       environment:
+         POL_ADVERTISE: "<this machine's address>"
+       ports:
+         - "0.0.0.0:53:53/udp"
+       volumes:
+         - dns-data:/data
+   volumes:
+     dns-data:
+   ```
+
+   Whichever setup runs first owns it; the others only add names. Never start a second.
+3. Adds its names under its key:
+
+       docker exec <the dns container> python stub.py dns-names add kart lobby.kart.example ranking.kart.example
+
+   A name covers its subdomains. All names are answered with the machine's address
+   (`POL_ADVERTISE`); everything else is forwarded upstream. The resolver picks the names up
+   within a few seconds, with no restart. Adding again under the same key replaces that
+   key's names; `dns-names remove kart` takes them away (an uninstall should); `dns-names
+   list` shows them. They are kept in `/data/dns.d/<key>.txt` on the service's data volume.
+
+The resolver answers loopback and the private ranges by default (`POL_DNS_CLIENTS`), and
+`POL_DNS_BIND` pins it to one address on a host whose own resolver holds port 53.
+
 ## Updates
 
 A game that updates itself (through its own setup program) can report it in its

@@ -149,6 +149,7 @@ SUITES = [
     # client-build records other containers read from Valkey.
     ("polcore_blobs", [sys.executable, "test_polcore_blobs.py"], TESTS, {}),
     ("live_markers",  [sys.executable, "test_live_markers.py"], TESTS, {}),
+    ("dns_names",     [sys.executable, "test_dns_names.py"], TESTS, {}),
     # The importer that moves an old /data tree (the SQLite files and
     # resources/) into PostgreSQL, run against a fixture the pre-PostgreSQL
     # account code writes itself (taken from git).
