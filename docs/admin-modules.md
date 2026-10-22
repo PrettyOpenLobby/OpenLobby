@@ -48,6 +48,7 @@ should refuse a request without the right token.
      "fields": [{"id": "racer", "label": "Racer", "type": "player"}]}
   ],
   "players": true,
+  "accounts": "kartid",
   "services": [
     {"name": "Kart Club", "containers": ["kart-game-1"], "ports": {"7000": "game"},
      "warning": "Everyone in a race is disconnected."}
@@ -70,12 +71,19 @@ the panel sends the picked player's `id` as the field's value. It needs
 `"players": true` and the players search below; a game without it gets a plain
 text box.
 
+`accounts` is optional: the name of the account system your players' logins
+belong to, the same key the player lookup's `links` uses for them (several games
+that sign in with one login share it). The People pages link a person's login in
+your game under it, and send it back in `links` when they ask about that person.
+Left out, it is the game's `key`.
+
 Action kinds the panel looks for:
 
 | kind | used by |
 |---|---|
 | `announce` | the maintenance warning on the News page, to tell players inside the game |
-| `kick` | an account's Kick, to remove the player from this game too. It is sent `{"polid": "...", "handles": "Name1,Name2"}` (the account's PlayOnline ID and its handles), whatever fields it lists |
+| `kick` | an account's Kick, to remove the player from this game too. It is sent `{"polid": "...", "handles": "Name1,Name2"}` (the account's PlayOnline ID and its handles), whatever fields it lists. A person's page offers it too, with each field filled in: a `player` field gets the person's login in your game, any other field its name |
+| `ban` | a person's page offers it as "Ban in <game>", filled in the same way as `kick` |
 
 ### GET /openlobby/status.json
 

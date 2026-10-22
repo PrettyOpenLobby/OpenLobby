@@ -141,7 +141,7 @@ class Module:
     def __init__(self, key, title, short="", platform="", kind="game",
                  tools=(), services=None, live=None, actions=(), content_ids=(),
                  about="", markers=(), present=None, self_described=False, calendar=None,
-                 help=None, player=None, players=None):
+                 help=None, player=None, players=None, accounts=""):
         self.key, self.title, self.short = key, title, short or title
         self.platform, self.kind, self.about = platform, kind, about
         self.tools = list(tools)
@@ -156,6 +156,10 @@ class Module:
         #: fn(module, q, limit) -> [{"id", "label", "detail", "online"}]: the player picker
         #: (an action field of type "player"); see find_players()
         self.players = players
+        #: the account system its players' logins belong to: the key game_link uses for them
+        #: (one shared by several games, when they sign in with the same login); the
+        #: module key when the game has none of its own. The People pages link logins under it.
+        self.accounts = accounts or key
         self.actions = list(actions)
         self.content_ids = list(content_ids)
         #: live-session markers (live_sessions.py) that mean this game runs here
@@ -245,6 +249,7 @@ class Module:
                          for s in (self.services or [])],
             "has_tools": bool(self.tool_port()),
             "players": self.players is not None,
+            "accounts": self.accounts,
             "content_ids": self.content_ids,
         }
 
@@ -362,6 +367,8 @@ def _remotes(out):
             mod.help = mod.help or file_mod.help
             mod.player = mod.player or file_mod.player
             mod.players = mod.players or file_mod.players
+            if mod.accounts == key:
+                mod.accounts = file_mod.accounts
         _accept(mod, "the game at %s" % url, out, "game")
 
 

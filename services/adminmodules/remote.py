@@ -7,7 +7,7 @@ tool proxy (X-Devtool-Token, X-Devtool-Actor).
 
     GET  <url>/openlobby/module.json     what the game is (version 1):
         {"v": 1, "key": "<key>", "title": "...", "short": "...", "platform": "...",
-         "about": "...", "content_ids": [..],
+         "about": "...", "content_ids": [..], "accounts": "<its logins' account system>",
          "tools":    [{"id", "label", "path", "about"}],      pages under <url>/<path>
          "actions":  [{"id", "label", "kind", "about", "danger",
                        "fields": [{"id", "label", "type"}]}],
@@ -207,5 +207,8 @@ def build(key, url, token):
         m.player = _player
     if doc.get("players"):
         m.players = _players
+    acc = _str(doc.get("accounts"), 32)
+    if acc and acc.replace("_", "").replace("-", "").isalnum():
+        m.accounts = acc
     m.remote = True
     return m

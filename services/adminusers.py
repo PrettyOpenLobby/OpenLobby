@@ -34,6 +34,8 @@ PERMS = {
     "accounts_manage": "Manage accounts: create, passwords, login tokens, content, "
                        "refusals, notices, kick, outside mail",
     "accounts_delete": "Delete accounts",
+    "people": "People: the list, person pages and the logins linked to each person",
+    "people_link": "People: link and unlink logins, merge people, add people and notes",
     "news_edit": "Write and save announcements",
     "news_publish": "Publish announcements to players",
     "pml": "PML Preview",

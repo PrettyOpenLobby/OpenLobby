@@ -387,6 +387,8 @@ SUITES = [
     ("admin_players", [sys.executable, "admin_players_test.py"], TOOLS, {}),
     # The panel for one game without the PlayOnline core (POL_ADMIN_CORE=none).
     ("admin_corelite", [sys.executable, "admin_corelite_test.py"], TOOLS, {}),
+    # People: one human across PlayOnline and the games (links, merges, notes, permissions).
+    ("admin_people",  [sys.executable, "admin_people_test.py"], TOOLS, {}),
     # Self-host tools: the setup checker, the games launcher and its catalog,
     # and the patch publisher's revert guard.
     ("doctor",        [sys.executable, "doctor_test.py"], TOOLS, {}),

@@ -59,6 +59,7 @@ import contentlist  # noqa: E402  -- the shared content-id title table
 import newsgen    # noqa: E402  -- announcements store + every news PML we write
 import admincalendar  # noqa: E402
 import adminhelp  # noqa: E402  -- the Inbox's Game help (players' help requests in the games)
+import adminpeople  # noqa: E402  -- People: one human across PlayOnline and the games
 import adminplayers  # noqa: E402  -- one account across every game  -- Calendar: what the games have scheduled, and our own entries
 import eventnews  # noqa: E402  -- the event calendar's posts (newsgen adds them)
 import pmleval    # noqa: E402  -- template evaluator for the preview
@@ -1354,6 +1355,9 @@ _GET_PERMS = {
     "/api/games": "any", "/api/modules": "any",
     # the player picker: checked per game (adminmodules.can_see)
     "/api/games/players": "any",
+    # People (adminpeople.py): the PlayOnline parts still need accounts_view
+    "/api/people": "people", "/api/person": "people", "/api/person/games": "people",
+    "/api/people/logins": "people_link",
 }
 #: Path prefixes, for routes that carry a path of their own. /art/ draws the
 #: pictures in both the PML preview and the news preview.
@@ -1384,6 +1388,7 @@ _POST_PERMS = {
     "/api/alerts": "settings",
     # each action checks its own game.<key>.<id> permission
     "/api/modules/action": "any",
+    "/api/person": "people_link",
 }
 
 #: POL_ADMIN_CORE=none: the panel runs for games without PlayOnline (a
@@ -2394,6 +2399,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._modules()
         if path == "/api/games/players":
             return self._game_players()
+        if path == "/api/people":
+            return self._people_list()
+        if path == "/api/person":
+            return self._person_get()
+        if path == "/api/person/games":
+            return self._person_games()
+        if path == "/api/people/logins":
+            return self._people_logins()
         # the deployer (admindeploy.py): owner only, so not in the permission tables
         if path == "/api/deploy":
             return self._send(*admindeploy.overview())
@@ -2526,6 +2539,8 @@ class Handler(BaseHTTPRequestHandler):
             self._audit_post(path)
 
     def _route_post(self, path):
+        if path == "/api/person":
+            return self._person_post()
         if path == "/api/ops/fix":
             return self._ops_fix()
         if path == "/api/mods":
@@ -2744,6 +2759,134 @@ class Handler(BaseHTTPRequestHandler):
                detail={k: v for k, v in params.items() if k not in _AUDIT_SECRET
                        and len(str(v)) <= 120}, ok=ok, addr=self._addr())
         self._send(200 if ok else 502, {"ok": ok, "msg": msg})
+
+    # -- People (adminpeople.py) --------------------------------------------- #
+    def _see_pol(self):
+        """May this caller see PlayOnline accounts (IDs, handles) on the People pages?"""
+        return not CORE_OFF and self._can("accounts_view")
+
+    def _person_of(self, db, q):
+        """The person a request names: ?id= (or "id" in a body), or a PlayOnline ID
+        (?polid=), whose person is made the first time it is needed."""
+        pid = str(q.get("id") or "").strip()
+        if pid:
+            return adminpeople.get(db, pid)
+        pol = str(q.get("polid") or "").strip()
+        if pol and self._see_pol():
+            return adminpeople.person_for_polid(db, pol, self._caller()[0])
+        return None
+
+    def _query(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        return {k: v[0] for k, v in q.items()}
+
+    def _people_list(self):
+        """GET ?q=&f=all|online: the People list."""
+        q = self._query()
+        db = _db()
+        try:
+            rows = adminpeople.search(db, q.get("q", ""), q.get("f") == "online", see_pol=self._see_pol())
+        finally:
+            db.close()
+        self._send(200, {"people": rows, "core": not CORE_OFF, "see_pol": self._see_pol()})
+
+    def _person_get(self):
+        """GET ?id= or ?polid=: the person page."""
+        db = _db()
+        try:
+            p = self._person_of(db, self._query())
+            if p is None:
+                return self._send(404, {"error": "No such person."})
+            doc = adminpeople.page(db, p, self._can, self._is_owner())
+        finally:
+            db.close()
+        doc["can_link"] = self._can("people_link")
+        doc["can_force"] = self._is_owner()
+        self._send(200, doc)
+
+    def _person_games(self):
+        """GET ?id=: what each game knows of the person, asked with ALL their logins
+        (proven and staff-linked) and their PlayOnline account."""
+        db = _db()
+        try:
+            p = self._person_of(db, self._query())
+            if p is None:
+                return self._send(404, {"error": "No such person."})
+            who = adminpeople.who(db, p)
+        finally:
+            db.close()
+        return self._send(*adminplayers.lookup(who, self._can, self._is_owner()))
+
+    def _people_logins(self):
+        """GET ?game=&q=: the game's player search for the Link dialog, each row saying
+        whom it already belongs to."""
+        q = self._query()
+        key = q.get("game", "")
+        if not adminmodules.can_see(key, self._can):
+            return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
+        try:
+            rows = adminmodules.find_players(key, q.get("q", ""), 20)
+        except LookupError:
+            return self._send(404, {"error": "That game has no player search."})
+        except Exception as exc:                   # noqa: BLE001 -- the game's fault, said by kind
+            return self._send(502, {"error": "The game's player search failed (%s)." % exc.__class__.__name__})
+        db = _db()
+        try:
+            rows = adminpeople.logins(db, key, rows)
+        finally:
+            db.close()
+        self._send(200, {"players": rows})
+
+    def _person_post(self):
+        """{"action": "create"|"link"|"unlink"|"merge"|"note"|"rename", ...}: change a person.
+        Each change goes in the activity log under "person:<id>", which the person's History reads."""
+        body = self._json_body()
+        act = str(body.get("action") or "")
+        user, role, _p = self._caller()
+        db = _db()
+        detail = None
+        try:
+            if act == "create":
+                p = adminpeople.create(db, body.get("name"), user)
+                text = "added the person %s" % p["name"]
+            else:
+                p = self._person_of(db, body)
+                if p is None:
+                    return self._send(404, {"error": "No such person."})
+                if act == "link":
+                    row = adminpeople.link(db, p, body.get("system"), body.get("key"), body.get("name"),
+                                           body.get("why"), user)
+                    text = "linked %s %s to %s" % (adminpeople.system_title(row["system"]), row["name"], p["name"])
+                    detail = {"why": row["why"], "key": row["key"]}
+                elif act == "unlink":
+                    row = adminpeople.unlink(db, p, body.get("link"), body.get("why"))
+                    text = "unlinked %s %s from %s" % (adminpeople.system_title(row["system"]), row["name"], p["name"])
+                    detail = {"why": " ".join(str(body.get("why") or "").split())[:300], "key": row["key"]}
+                elif act == "merge":
+                    other = self._person_of(db, {"id": body.get("other"), "polid": body.get("other_polid")})
+                    if other is None:
+                        return self._send(404, {"error": "No such person to merge."})
+                    adminpeople.merge(db, p, other, force=bool(body.get("force")) and self._is_owner())
+                    text = "merged %s into %s" % (other["name"], p["name"])
+                    detail = {"merged": other["id"]}
+                elif act == "note":
+                    adminpeople.note(db, p, body.get("text"), user)
+                    text = "added a note about %s" % p["name"]
+                elif act == "rename":
+                    old = p["name"]
+                    new = adminpeople.rename(db, p, body.get("name"))
+                    text = "renamed %s to %s" % (old, new)
+                else:
+                    return self._send(400, {"error": "Unknown action."})
+            db.commit()
+        except adminpeople.PeopleError as exc:
+            db.rollback()
+            return self._send(exc.status, dict({"error": str(exc)},
+                                               **{k: v for k, v in exc.extra.items() if v is not None}))
+        finally:
+            db.close()
+        _audit(user, role, text, target="person:%d" % p["id"], detail=detail, addr=self._addr())
+        self._send(200, {"ok": True, "id": p["id"]})
 
     def _game_players(self):
         """GET ?game=&q=&limit=: the game's player search, for the picker on its

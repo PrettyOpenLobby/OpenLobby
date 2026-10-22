@@ -47,6 +47,7 @@ function toast(msg, err) {
 // (POL_ADMIN_CORE=none, SESSION.core); `lite`: shown only then.
 const VIEWS = [
   { id: "overview", group: "overview" },
+  { id: "people", group: "players", perm: "people" },
   { id: "accounts", group: "players", perm: "accounts_view", pol: true },
   { id: "codes", group: "players", perm: "codes", pol: true },
   { id: "gmcalls", group: "inbox", perm: "gm", pol: true },
@@ -69,7 +70,7 @@ const VIEWS = [
   { id: "deploy", group: "settings", perm: "owner" },
   { id: "activity", group: "settings", tab: "security", sub: "activity", perm: "audit" },
 ];
-const GROUP_TITLE = { overview: "Overview", players: "Players", inbox: "Inbox",
+const GROUP_TITLE = { overview: "Overview", players: "People", inbox: "Inbox",
                       games: "Games", news: "News", calendar: "Calendar", settings: "Settings" };
 const TABS = VIEWS.map((v) => v.id);
 const viewOf = (id) => VIEWS.find((v) => v.id === id);
@@ -181,6 +182,7 @@ function loadTab(name, refresh) {
   if (name === "overview") loadOverview();
   if (name === "codes") loadCodes();
   if (name === "accounts") loadAccounts();
+  if (name === "people") loadPeople();
   if (name === "reports") loadReports().then(() => markSeen("reports"));
   if (name === "issues") loadIssues().then(() => markSeen("issues"));
   if (name === "gmcalls") { loadGmCalls(); startGmDesk(); renderAlertBtn(); }
@@ -4142,6 +4144,7 @@ async function openAccount(polid) {
         `title="Mail to and from the internet as ${esc(outsideAddr(ACCT_ROW()))}">` +
         `Ext mail: ${ACCT_ROW().ext_mail ? "on" : "off"}</button>` : "") +
       `<button class="ghost" data-a="kick">Kick</button>` : "") +
+    (can("people") ? `<button class="ghost" data-a="person">Person page</button>` : "") +
     (can("accounts_delete") ? `<button class="danger" data-a="del">Delete</button>` : "");
   $("#acctActions").hidden = !$("#acctActions").innerHTML;
   $("#acctModal").classList.add("show");
@@ -4162,6 +4165,7 @@ $("#acctActions").onclick = (e) => {
   if (b.dataset.a === "ext") { if (ACCT_ROW()) toggleExtMail(ACCT_ROW(), b); return; }
   const account = ACCT, polid = account.polid, a = b.dataset.a;
   closeAccount();
+  if (a === "person") location.hash = "#people/pol/" + encodeURIComponent(polid);
   if (a === "grant") {
     location.hash = "#accounts";
     // The Accounts tab is (re)loading; aim the grant form once the row is there.

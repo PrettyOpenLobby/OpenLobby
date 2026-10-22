@@ -99,7 +99,7 @@ def _links(raw):
 
 class AdminPort:
     def __init__(self, key, title, short="", platform="", about="", token="",
-                 bind="127.0.0.1", port=0, content_ids=(), services=()):
+                 bind="127.0.0.1", port=0, content_ids=(), services=(), accounts=""):
         if not _KEY.match(key or ""):
             raise ValueError("key must be 1-16 of a-z and 0-9")
         if bind not in LOOPBACK and not token:
@@ -108,6 +108,9 @@ class AdminPort:
         self.platform, self.about = platform, about
         self.token, self.bind, self.port = token or "", bind, int(port)
         self.content_ids = list(content_ids)
+        #: the account system its logins belong to (the key in the player lookup's links and
+        #: the panel's People links); blank = the game key
+        self.accounts = accounts or ""
         #: [{"name", "containers": [...], "ports": {"7000": "game"}, "warning"}]
         self.services = list(services)
         self._status = None
@@ -170,6 +173,7 @@ class AdminPort:
         return {"v": 1, "key": self.key, "title": self.title, "short": self.short,
                 "platform": self.platform, "about": self.about,
                 "content_ids": self.content_ids, "services": self.services,
+                "accounts": self.accounts or self.key,
                 "calendar": self._calendar is not None,
                 "help": self._help is not None, "player": self._player is not None,
                 "players": self._players is not None,

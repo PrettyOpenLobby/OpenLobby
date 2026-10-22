@@ -1128,6 +1128,65 @@
     body.core-none #maintPanel .nw-formbtns { order: 2; }
     body.core-none #maintStatus:empty { display: none; }
     body.core-none .grid2:has(> #opsPanel[hidden]) { grid-template-columns: 1fr; }
+    /* People (people.js) */
+    .sr { position: absolute; left: -9999px; }
+    .pp-name { color: var(--text); font-weight: 600; text-decoration: none; }
+    .pp-name:hover { text-decoration: underline; }
+    .pp-sub { color: var(--muted); font-size: 12px; }
+    #tab-people a { color: var(--accent); }
+    #tab-people a.pp-name { color: var(--text); }
+    .pp-table td { font-size: 14px; padding: 10px; }
+    body.pp-core-off .pp-core { display: none; }
+    .pp-crumb { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+    #tab-people .pp-crumb a { color: var(--muted); }
+    .pp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-bottom: 18px; }
+    .pp-ava { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center;
+      justify-content: center; font-size: 22px; font-weight: 600; flex: none;
+      background: color-mix(in srgb, var(--accent) 25%, var(--panel2)); }
+    .pp-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .pp-title h2 { margin: 0; font-size: 24px; font-weight: 600; }
+    .pp-title .muted { font-size: 13px; }
+    .pp-grow { flex: 1; }
+    .pp-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .pp-card { background: var(--panel2); border-radius: 8px; padding: 10px 12px; display: flex;
+      flex-direction: column; gap: 4px; }
+    .pp-card-h { display: flex; justify-content: space-between; gap: 8px; }
+    .pp-card-d { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .pp-how { font-size: 12px; color: var(--good); white-space: nowrap; }
+    .pp-how.staff { color: var(--warn); }
+    button.pp-mini { align-self: flex-start; background: none; border: 1px solid var(--line); color: var(--muted);
+      border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+    button.pp-mini:hover { color: var(--text); }
+    .pp-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
+    .pp-two > .panel { min-width: 0; }
+    .pp-grow-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; flex-wrap: wrap; }
+    .pp-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+    button.pp-btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+      border-radius: 8px; padding: 8px 12px; font: inherit; cursor: pointer; }
+    button.pp-btn.bad { background: none; color: var(--bad); }
+    .pp-games { margin-top: 10px; font-size: 13px; }
+    .pp-histh { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .pp-histh h2 { margin-bottom: 8px; }
+    .pp-hrow { display: flex; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+    .pp-hrow:last-child { border-bottom: 0; }
+    .pp-when { color: var(--muted); width: 90px; flex: none; }
+    textarea#ppNoteText, textarea.pp-text { font: inherit; }
+    .pp-foot { display: flex; justify-content: flex-end; margin-top: 10px; }
+    .pp-dialog { max-width: 640px; }
+    .pp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .pp-chips button { background: none; color: var(--muted); border: 1px solid var(--line); border-radius: 999px;
+      padding: 6px 12px; font: inherit; cursor: pointer; }
+    .pp-chips button.on { background: var(--line); color: var(--text); border-color: var(--accent); }
+    .pp-warn { background: var(--panel2); border-radius: 8px; padding: 10px 12px; color: var(--muted);
+      font-size: 13px; margin-top: 14px; }
+    .pp-warn a { color: var(--accent); }
+    .pp-err { color: var(--bad); }
+    .pp-force { margin-top: 12px; display: inline-flex; }
+    .pp-dialog .pk { position: relative; }
+    @media (max-width: 760px) {
+      .pp-cards, .pp-two { grid-template-columns: 1fr; }
+      .pp-when { width: 56px; }
+    }
   </style>
 </head>
 <body>
@@ -1135,7 +1194,7 @@
     <nav class="side" id="side" aria-label="Sections">
       <div class="brand"><div class="logo" aria-hidden="true">OL</div><div>OpenLobby Admin<small>Server admin</small></div></div>
       <button class="grp" data-group="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>Overview</button>
-      <button class="grp" data-group="players"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"></path></svg>Players</button>
+      <button class="grp" data-group="players"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"></path></svg>People</button>
       <button class="grp" data-group="inbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 13l3-8h12l3 8v6H3z"></path><path d="M3 13h5l1 2h6l1-2h5"></path></svg>Inbox<span class="navbadge" id="inboxBadge" hidden></span></button>
       <button class="grp" data-group="games"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="2" y="7" width="20" height="11" rx="4"></rect><path d="M7 11v3M5.5 12.5h3"></path><circle cx="16" cy="12" r="1"></circle><circle cx="18" cy="14" r="1"></circle></svg>Games</button>
       <div class="subnav" id="gamesList" hidden></div>
@@ -1155,8 +1214,8 @@
         <h1 id="pageTitle">Overview</h1>
         <button id="refreshBtn" title="Reload this page's data (R)">Refresh</button>
       </div>
-      <nav class="subtabs" data-group="players" aria-label="Players" hidden>
-        <button data-tab="accounts">Accounts</button><button data-tab="codes">Registration codes</button>
+      <nav class="subtabs" data-group="players" aria-label="People" hidden>
+        <button data-tab="people">People</button><button data-tab="accounts">PlayOnline accounts</button><button data-tab="codes">Registration codes</button>
       </nav>
       <nav class="subtabs" data-group="inbox" id="inboxSubtabs" aria-label="Inbox" hidden>
         <button data-tab="gmcalls">GM calls<span class="navbadge" id="gmBadge" hidden></span></button>
@@ -1208,6 +1267,26 @@
           <div class="hint" id="ovHealthFoot"></div>
         </div>
       </div>
+    </section>
+
+    <!-- PEOPLE (people.js) -->
+    <section id="tab-people" class="tab">
+      <div id="ppListView">
+        <div class="panel">
+          <div class="toolbar">
+            <div class="grow"><label for="ppSearch" class="sr">Search people</label>
+              <input type="search" id="ppSearch" data-search placeholder="Search any name, ID or login in any game"></div>
+            <div class="seg" id="ppFilter"><button data-f="all" class="on">All</button><button data-f="online">Online</button></div>
+            <span class="count" id="ppCount"></span>
+            <button class="act sm" id="ppNew" data-perm="people_link">New person</button>
+          </div>
+          <div class="tablewrap"><table class="cards pp-table"><thead><tr><th>Person</th><th>Accounts</th>
+            <th class="pp-core">Playing now</th><th class="pp-core">Last seen</th><th></th></tr></thead>
+            <tbody id="ppBody"></tbody></table></div>
+          <p class="hint" id="ppHint"></p>
+        </div>
+      </div>
+      <div id="ppPageView" hidden></div>
     </section>
 
     <!-- CODES -->
@@ -2161,6 +2240,44 @@
     </div>
   </div>
 
+  <!-- People: link a login to a person (people.js). -->
+  <div class="modal" id="ppLinkModal">
+    <div class="card pp-dialog" role="dialog" aria-labelledby="ppLinkTitle">
+      <h3 id="ppLinkTitle">Link an account</h3>
+      <p id="ppLinkAbout"></p>
+      <label>Game</label>
+      <div class="pp-chips" id="ppLinkGames"></div>
+      <div id="ppLinkWhoWrap" hidden>
+        <label id="ppLinkWhoLabel" for="ppLinkQ">Their account</label>
+        <div id="ppLinkWho"></div>
+      </div>
+      <label for="ppLinkWhy">Why you are linking it (kept in the history)</label>
+      <textarea id="ppLinkWhy" rows="2" maxlength="300" class="pp-text"></textarea>
+      <div class="pp-warn" id="ppLinkWarn"></div>
+      <p class="hint pp-err" id="ppLinkErr" hidden></p>
+      <div class="foot">
+        <button class="ghost" id="ppLinkCancel">Cancel</button>
+        <button class="act" id="ppLinkGo" disabled>Link</button>
+      </div>
+    </div>
+  </div>
+  <!-- People: merge another person into this one. -->
+  <div class="modal" id="ppMergeModal">
+    <div class="card pp-dialog" role="dialog" aria-labelledby="ppMergeTitle">
+      <h3 id="ppMergeTitle">Merge</h3>
+      <p id="ppMergeAbout"></p>
+      <label for="ppMergeQ">The person to merge in</label>
+      <div id="ppMergeWho"></div>
+      <label class="chip pp-force" id="ppMergeForceWrap" hidden><input type="checkbox" id="ppMergeForce">
+        Merge even if both have a PlayOnline account (owner)</label>
+      <p class="hint pp-err" id="ppMergeErr" hidden></p>
+      <div class="foot">
+        <button class="ghost" id="ppMergeCancel">Cancel</button>
+        <button class="act" id="ppMergeGo">Merge</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Add or edit a moderator. -->
   <div class="modal" id="modModal">
     <div class="card wide">
@@ -2204,5 +2321,6 @@
   <script src="/static/calendar.js"></script>
   <script src="/static/helpdesk.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/people.js"></script>
 </body>
 </html>
