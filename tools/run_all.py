@@ -378,6 +378,8 @@ SUITES = [
     ("olport",        [sys.executable, "olport_test.py"], TOOLS, {}),
     # Installing games through the deployer, owner only (admindeploy.py).
     ("admin_deploy",  [sys.executable, "admin_deploy_test.py"], TOOLS, {}),
+    # Update notices: the deployer's items, a game's own report, the panel's own check.
+    ("admin_updates", [sys.executable, "admin_updates_test.py"], TOOLS, {}),
     ("admin_calendar", [sys.executable, "admin_calendar_test.py"], TOOLS, {}),
     ("admin_logs",    [sys.executable, "admin_logs_test.py"], TOOLS, {}),
     ("admin_help",    [sys.executable, "admin_help_test.py"], TOOLS, {}),

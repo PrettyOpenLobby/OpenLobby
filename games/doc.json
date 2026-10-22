@@ -7,6 +7,7 @@
   "content_id": 10,
   "platforms": ["ps2"],
   "repo": "https://github.com/PrettyOpenLobby/HippaulDirge",
+  "source": {"repo": "PrettyOpenLobby/HippaulDirge", "branch": "main"},
   "checkout": "hippauldirge",
   "compose": ["docker-compose.yml", "docker-compose.title.yml"],
   "compose_ghcr": ["docker-compose.ghcr.yml"],

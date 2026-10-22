@@ -18,6 +18,13 @@ a zip that understates its sizes), 411 and 413 on the request itself,
 upload listing, deletion and expiry, the import action's validation, and
 import jobs run against a stand-in tool, checking its arguments, working
 directory and environment, and that no answer carries an import's argv.
+
+The update check (GET /api/updates) runs against a stand-in GitHub API on
+127.0.0.1 and a stand-in docker CLI: a checkout game behind its remote
+(merges dropped, at most 50 changes), current and offline; the core's
+published image behind, current, without a revision, pinned, rate limited
+and offline; the one-hour cache surviving a restart, and the limit on
+forced checks. Nothing reaches the network.
 """
 import http.client
 import io
@@ -32,11 +39,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -186,7 +196,7 @@ class Server:
     def env(self):
         env = dict(os.environ)
         env.update({"POL_DEPLOYER_TOKEN": self.token, "FAKE_STACK_DIR": self.t.fakedir,
-                    "POL_DEPLOY_GHCR": ""})
+                    "POL_DEPLOY_GHCR": "", "POL_DEPLOY_GITHUB_API": self.t.no_github})
         env.pop("COMPOSE_PROFILES", None)
         env.pop("POL_DEPLOY_CLIENTS", None)
         env.pop("POL_DEPLOY_UPLOAD_MAX", None)
@@ -250,6 +260,7 @@ class Tree:
         with open(self.fake, "w") as f:
             f.write(FAKE_STACK)
         self.state = os.path.join(self.tmp, "state")
+        self.no_github = "http://127.0.0.1:%d" % free_port()     # nothing listens there
         self.git = shutil.which("git") is not None
         self.tm = os.path.join(self.root, "hippaulmaster")
         if self.git:
@@ -506,6 +517,366 @@ def test_games(c, t):
     ok(g["core"]["running"] is True and g["options"] == {"ghcr": False}, "core running, options")
     t.flag("ps.json", on=False)
     t.flag("check.json", on=False)
+
+
+# ------------------------------------------------------------ update checks
+
+# The stand-in docker CLI: `docker image inspect <ref>` answers from
+# FAKE_DOCKER_DIR/inspect.json ({ref: image}), exit 1 for an unknown ref.
+FAKE_DOCKER = r"""
+import json, os, sys
+args = sys.argv[1:]
+if args[:2] != ["image", "inspect"]:
+    sys.exit(2)
+try:
+    images = json.load(open(os.path.join(os.environ["FAKE_DOCKER_DIR"], "inspect.json")))
+except (OSError, ValueError):
+    images = {}
+if args[2] not in images:
+    sys.stderr.write("Error: No such image: " + args[2] + "\n")
+    sys.exit(1)
+print(json.dumps([images[args[2]]]))
+"""
+
+
+def sha(n, salt="kart"):
+    return hashlib.sha1(("%s-%d" % (salt, n)).encode()).hexdigest()
+
+
+class FakeGitHub:
+    """The parts of the GitHub API the check asks for, over one repository
+    with a straight history (MAIN, oldest first) whose commit 30 is a merge,
+    and tag v1.2.3 on commit 20."""
+    REPO = "PrettyOpenLobby/OpenLobby"
+
+    def __init__(self):
+        self.main = [{"sha": sha(i), "subject": ("Merge branch side" if i == 30 else "Change %d" % i),
+                      "date": "2026-10-%02dT%02d:00:00Z" % (1 + i // 24, i % 24),
+                      "merge": i == 30} for i in range(70)]
+        self.tags = {"v1.2.3": 20}
+        self.calls = []
+        self.mode = "ok"
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def reply(self, code, obj, headers=()):
+                body = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                fake.calls.append(self.path)
+                if fake.mode == "limit":
+                    return self.reply(403, {"message": "API rate limit exceeded"},
+                                      [("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", "1793404800")])
+                u = urllib.parse.urlsplit(self.path)
+                q = urllib.parse.parse_qs(u.query)
+                pre = "/repos/%s/" % fake.REPO
+                if not u.path.startswith(pre):
+                    return self.reply(404, {"message": "Not Found"})
+                rest = u.path[len(pre):]
+                if rest == "commits":
+                    i = fake.index((q.get("sha") or ["main"])[0])
+                    if i is None:
+                        return self.reply(404, {"message": "No commit found"})
+                    n = int((q.get("per_page") or ["30"])[0])
+                    return self.reply(200, [fake.api(c) for c in reversed(fake.main[max(0, i + 1 - n):i + 1])])
+                if rest == "tags":
+                    return self.reply(200, [{"name": k} for k in fake.tags] + [{"name": "v1.1.0"}])
+                if rest.startswith("compare/"):
+                    base, _, head = rest[len("compare/"):].partition("...")
+                    i, j = fake.index(base), fake.index(head)
+                    if i is None or j is None:
+                        return self.reply(404, {"message": "Not Found"})
+                    return self.reply(200, {"status": "ahead" if j > i else "identical",
+                                            "ahead_by": max(0, j - i), "behind_by": max(0, i - j),
+                                            "commits": [fake.api(c) for c in fake.main[i + 1:j + 1]][:250]})
+                return self.reply(404, {"message": "Not Found"})
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def index(self, ref):
+        if ref == "main":
+            return len(self.main) - 1
+        if ref in self.tags:
+            return self.tags[ref]
+        for i, c in enumerate(self.main):
+            if len(ref) >= 7 and c["sha"].startswith(ref):
+                return i
+        return None
+
+    def api(self, c):
+        parents = [{"sha": "0" * 40}, {"sha": "1" * 40}] if c["merge"] else [{"sha": "0" * 40}]
+        return {"sha": c["sha"], "parents": parents,
+                "commit": {"message": c["subject"] + "\n\nbody text", "committer": {"date": c["date"]}}}
+
+    def stop(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def updates(c, refresh=False, timeout=60):
+    """GET /api/updates, then again until no check is running."""
+    code, r = c.get("/api/updates" + ("?refresh=1" if refresh else ""))
+    first = r
+    t0 = time.time()
+    while code == 200 and r.get("checking") and time.time() - t0 < timeout:
+        time.sleep(0.1)
+        code, r = c.get("/api/updates")
+    return code, r, first
+
+
+def by_key(r):
+    return {i["key"]: i for i in r.get("items", [])}
+
+
+ITEM_KEYS = {"key", "name", "running", "latest", "behind", "changes", "update", "why", "how"}
+
+
+def shape_ok(it):
+    return (ITEM_KEYS <= set(it) and set(it["running"]) == {"commit", "built_at"}
+            and set(it["latest"]) == {"commit", "date"} and it["update"] in ("available", "current", "unknown")
+            and all(set(ch) == {"commit", "date", "subject"} for ch in it["changes"])
+            and len(it["changes"]) <= 50)
+
+
+def test_updates_checkout(c, t):
+    """The checkout deployer (no published images): tm is a clone of a local
+    bare repository, the core and fe are plain folders."""
+    if not t.git:
+        SKIPS.append("update check of a checkout (no git)")
+        print("SKIP update check of a checkout (no git on PATH)")
+        return
+    ok(c.get("/api/updates", token=None)[0] == 401, "updates without the token: 401")
+    code, r, _ = updates(c)
+    items = by_key(r)
+    ok(code == 200 and r["items"] and r["items"][0]["key"] == "core" and r["checked_at"],
+       "updates: 200, the core first, a checked_at (%s)" % [i["key"] for i in r.get("items", [])])
+    ok(all(shape_ok(i) for i in r["items"]), "  every item has the agreed shape")
+    ok(set(items) == {"core", "tm", "fe"}, "  the core and the installed games only (%s)" % sorted(items))
+    ok(items["core"]["update"] == "unknown" and "not a git checkout" in (items["core"]["why"] or ""),
+       "  a core folder that is not a checkout: unknown, and why (%s)" % items["core"]["why"])
+    tm = items["tm"]
+    head = git("rev-parse", "HEAD", cwd=t.tm).stdout.strip()
+    ok(tm["update"] == "current" and tm["behind"] == 0 and tm["changes"] == []
+       and tm["running"]["commit"] == head and tm["latest"]["commit"] == head and tm["how"] is None,
+       "  tm, just updated: current at its HEAD (%s)" % tm)
+    # 55 commits, then a merge of a side branch, on the remote
+    for i in range(1, 56):
+        with open(os.path.join(t.seed, "README.md"), "a") as f:
+            f.write("c%02d\n" % i)
+        git("commit", "-q", "-am", "c%02d lap times" % i, cwd=t.seed)
+    git("checkout", "-q", "-b", "side", cwd=t.seed)
+    with open(os.path.join(t.seed, "side.txt"), "w") as f:
+        f.write("side\n")
+    git("add", "side.txt", cwd=t.seed)
+    git("commit", "-q", "-m", "side work", cwd=t.seed)
+    git("checkout", "-q", "-", cwd=t.seed)
+    git("merge", "-q", "--no-ff", "side", "-m", "Merge branch side", cwd=t.seed)
+    git("push", "-q", "origin", "HEAD", cwd=t.seed)
+    newest = git("rev-parse", "HEAD", cwd=t.seed).stdout.strip()
+    code, r, first = updates(c, refresh=True)
+    ok(first.get("checking") is True, "refresh=1: answers at once, checking")
+    tm = by_key(r)["tm"]
+    subjects = [ch["subject"] for ch in tm["changes"]]
+    ok(tm["update"] == "available" and tm["behind"] == 57 and tm["latest"]["commit"] == newest,
+       "  tm behind its remote: available, behind 57 (%s, %s)" % (tm["update"], tm["behind"]))
+    ok(len(subjects) == 50 and not any(x.startswith("Merge") for x in subjects),
+       "  50 changes at most, merges dropped (%d)" % len(subjects))
+    ok("c55 lap times" in subjects and subjects.index("c55 lap times") < subjects.index("c10 lap times"),
+       "  newest first")
+    ok(all(re.match(r"^[0-9a-f]{40}$", ch["commit"]) and re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", ch["date"])
+           for ch in tm["changes"]), "  hex commits and UTC times")
+    ok(tm["how"] and "git pull" in tm["how"], "  and how to update (%s)" % tm["how"])
+    code, r2 = c.get("/api/updates?refresh=1")
+    ok(code == 200 and r2.get("limited") is True and r2.get("retry_after", 0) >= 1 and not r2["checking"],
+       "a second forced check within the gap: refused, the last answer kept (%s)"
+       % {k: r2.get(k) for k in ("limited", "retry_after", "checking")})
+    # the remote is gone
+    origin = os.path.join(t.tmp, "origin.git")
+    os.rename(origin, origin + ".away")
+    time.sleep(2.1)
+    code, r, _ = updates(c, refresh=True)
+    tm = by_key(r)["tm"]
+    ok(tm["update"] == "unknown" and "git fetch failed" in (tm["why"] or "") and tm["behind"] is None,
+       "remote unreachable: unknown, and why (%s)" % tm["why"])
+    os.rename(origin + ".away", origin)
+    j = c.run("update", "tm")
+    ok(j["state"] == "ok", "update tm: ok (%s)" % j["summary"])
+    t0 = time.time()
+    tm = {}
+    while time.time() - t0 < 20:
+        code, r, _ = updates(c)
+        tm = by_key(r)["tm"]
+        if tm["update"] == "current":
+            break
+        time.sleep(0.1)
+    ok(tm["update"] == "current" and tm["running"]["commit"] == newest,
+       "after a successful update job the item is checked again: current (%s)" % tm["update"])
+
+
+def test_updates_images(t, servers):
+    """The deployer with published images, against the stand-in GitHub."""
+    gh = FakeGitHub()
+    ddir = os.path.join(t.tmp, "fakedocker")
+    os.makedirs(ddir, exist_ok=True)
+    dock = os.path.join(ddir, "docker.py")
+    with open(dock, "w") as f:
+        f.write(FAKE_DOCKER)
+    core_ref = "ghcr.io/prettyopenlobby/openlobby:latest"
+
+    def images(core_rev=None, core_env=None, tm_env=None, extra=None):
+        m = {}
+        labels = {}
+        if core_rev:
+            labels = {"org.opencontainers.image.revision": core_rev,
+                      "org.opencontainers.image.created": "2026-10-20T08:30:00Z"}
+        m[core_ref] = {"Created": "2026-10-20T08:31:00.123456789Z",
+                       "Config": {"Labels": labels, "Env": ["PATH=/usr/bin"] + (core_env or [])}}
+        # a game image built on the core inherits OPENLOBBY_REVISION, which says nothing of the game
+        m["ghcr.io/prettyopenlobby/hippaulmaster:latest"] = {
+            "Created": "2026-10-20T08:00:00Z", "Config": {"Labels": {}, "Env": tm_env or []}}
+        m.update(extra or {})
+        with open(os.path.join(ddir, "inspect.json"), "w") as f:
+            json.dump(m, f)
+
+    images(core_rev=sha(5), tm_env=["OPENLOBBY_REVISION=" + sha(5)])
+    state = os.path.join(t.tmp, "state-ghcr")
+    env = {"POL_DEPLOY_GHCR": "1", "POL_DEPLOY_GITHUB_API": gh.url, "FAKE_DOCKER_DIR": ddir}
+    args = ["--state", state, "--docker", dock, "--refresh-gap", "2"]
+    s = Server(t, extra_env=env, args=args)
+    servers.append(s)
+    try:
+        c = s.start()
+        code, r, _ = updates(c)
+        items = by_key(r)
+        core = items.get("core") or {}
+        subjects = [ch["subject"] for ch in core.get("changes", [])]
+        ok(code == 200 and all(shape_ok(i) for i in r["items"]), "published images: every item has the agreed shape")
+        ok(core.get("update") == "available" and core["behind"] == 64 and core["running"]["commit"] == sha(5)
+           and core["latest"] == {"commit": sha(69), "date": gh.main[69]["date"]},
+           "core image 64 commits behind main: available (%s)" % {k: core.get(k) for k in ("update", "behind", "why")})
+        ok(core.get("running", {}).get("built_at") == "2026-10-20T08:30:00Z",
+           "  built_at from the image's created label")
+        ok(len(subjects) == 50 and "Merge branch side" not in subjects and subjects[0] == "Change 69"
+           and core["changes"][0]["commit"] == sha(69),
+           "  50 changes, newest first, the merge dropped (%s...)" % subjects[:2])
+        ok(core["how"] and "published images" in core["how"], "  how: %s" % core.get("how"))
+        tm = items.get("tm") or {}
+        ok(tm.get("update") == "unknown" and "does not say which commit" in (tm.get("why") or ""),
+           "a game image whose only revision is the core's inherited env: unknown (%s)" % tm.get("why"))
+        fe = items.get("fe") or {}
+        ok(fe.get("update") == "unknown" and "not on this host" in (fe.get("why") or ""),
+           "a game image that was never pulled: unknown (%s)" % fe.get("why"))
+        n = len(gh.calls)
+        ok(any("/compare/%s...%s" % (sha(5), sha(69)) in x for x in gh.calls), "  compared running...latest")
+        s.stop()
+
+        # a restart within the hour asks GitHub nothing: the answers are kept on the volume
+        s = Server(t, extra_env=env, args=args)
+        servers.append(s)
+        c = s.start()
+        code, r, _ = updates(c)
+        ok(len(gh.calls) == n and by_key(r)["core"]["behind"] == 64,
+           "restart within the hour: the cached answers, no new GitHub calls (%d -> %d)" % (n, len(gh.calls)))
+
+        # a forced check asks again; a second one within the gap does not
+        code, r, _ = updates(c, refresh=True)
+        m = len(gh.calls)
+        ok(m > n, "a forced check asks GitHub again (%d -> %d)" % (n, m))
+        code, r2 = c.get("/api/updates?refresh=1")
+        ok(r2.get("limited") is True and len(gh.calls) == m, "  a second forced check within the gap: refused")
+
+        # current
+        images(core_rev=sha(69))
+        time.sleep(2.1)
+        code, r, _ = updates(c, refresh=True)
+        core = by_key(r)["core"]
+        ok(core["update"] == "current" and core["behind"] == 0 and core["changes"] == [] and core["why"] is None
+           and core["how"] is None, "core image at main's head: current (%s)" % core)
+
+        # the revision from the image's environment when there is no label (the core only)
+        images(core_env=["OPENLOBBY_REVISION=" + sha(68), "OPENLOBBY_BUILT_AT=2026-10-19T01:02:03Z"])
+        time.sleep(2.1)
+        core = by_key(updates(c, refresh=True)[1])["core"]
+        ok(core["update"] == "available" and core["behind"] == 1 and core["running"] == {
+            "commit": sha(68), "built_at": "2026-10-19T01:02:03Z"},
+           "core image with OPENLOBBY_REVISION and no label: behind 1 (%s)" % core["running"])
+
+        # no revision at all
+        images()
+        time.sleep(2.1)
+        core = by_key(updates(c, refresh=True)[1])["core"]
+        ok(core["update"] == "unknown" and core["latest"]["commit"] == sha(69) and core["behind"] is None
+           and "does not say which commit" in (core["why"] or ""),
+           "core image without a revision: unknown, latest still shown (%s)" % core["why"])
+
+        # a commit the repository does not have (a private build)
+        images(core_rev="abcdef0123456789abcdef0123456789abcdef01")
+        time.sleep(2.1)
+        core = by_key(updates(c, refresh=True)[1])["core"]
+        ok(core["update"] == "unknown" and "not in PrettyOpenLobby/OpenLobby" in (core["why"] or ""),
+           "a running commit GitHub does not know: unknown (%s)" % core["why"])
+
+        # pinned: OPENLOBBY_TAG=1.2.3 in the core's .env follows tag v1.2.3 only
+        with open(os.path.join(t.core, ".env"), "w") as f:
+            f.write("OPENLOBBY_TAG=1.2.3\n")
+        images(extra={"ghcr.io/prettyopenlobby/openlobby:1.2.3": {
+            "Config": {"Labels": {"org.opencontainers.image.revision": sha(20)}}}})
+        time.sleep(2.1)
+        core = by_key(updates(c, refresh=True)[1])["core"]
+        ok(core["update"] == "current" and core["latest"]["commit"] == sha(20)
+           and "pinned to 1.2.3" in (core["why"] or "") and "OPENLOBBY_TAG" in core["why"],
+           "pinned to 1.2.3: current on the pin, and why says main has more (%s)" % core["why"])
+        os.remove(os.path.join(t.core, ".env"))
+
+        # rate limited
+        images(core_rev=sha(5))
+        gh.mode = "limit"
+        time.sleep(2.1)
+        core = by_key(updates(c, refresh=True)[1])["core"]
+        ok(core["update"] == "unknown" and "limit" in (core["why"] or "") and core["changes"] == [],
+           "GitHub rate limited: unknown, and why (%s)" % core["why"])
+        gh.mode = "ok"
+
+        # offline
+        gh.stop()
+        time.sleep(2.1)
+        core = by_key(updates(c, refresh=True)[1])["core"]
+        ok(core["update"] == "unknown" and "could not be reached" in (core["why"] or ""),
+           "GitHub unreachable: unknown, and why (%s)" % core["why"])
+        ok(os.path.isfile(os.path.join(state, "updates.json"))
+           and os.path.isfile(os.path.join(state, "github-cache.json")),
+           "results and GitHub's answers are kept in the state folder")
+        s.stop()
+    finally:
+        try:
+            gh.stop()
+        except Exception:
+            pass
+
+
+def test_update_helpers():
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import updatecheck as u
+    ok(u.to_iso("2026-10-21T14:00:00+02:00") == "2026-10-21T12:00:00Z"
+       and u.to_iso("2026-10-21T12:00:00.5Z") == "2026-10-21T12:00:00Z"
+       and u.to_iso("yesterday") is None and u.to_iso(5) is None, "to_iso: zones to UTC, junk to None")
+    ok(u.commit_id(" ABCDEF0 ") == "abcdef0" and u.commit_id("xyz") is None and u.commit_id("abc") is None,
+       "commit_id: hex only")
+    ok(u.repo_of({"repo": "https://github.com/PrettyOpenLobby/KartClub"}) == ("PrettyOpenLobby/KartClub", "main")
+       and u.repo_of({"source": {"repo": "a/b", "branch": "stable"}}) == ("a/b", "stable")
+       and u.repo_of({}, "x/y") == ("x/y", "main"), "repo_of: source, then the repo URL, then the default")
 
 
 def test_logs_and_token(c, t):
@@ -1084,7 +1455,9 @@ def main():
     servers = []
     try:
         test_refuses_without_token(t)
-        s = Server(t, extra_env={"FAKE_ECHO": "echo before %s after" % TOKEN})
+        test_update_helpers()
+        s = Server(t, extra_env={"FAKE_ECHO": "echo before %s after" % TOKEN},
+                   args=["--refresh-gap", "2"])
         servers.append(s)
         c = s.start()
         test_auth(c)
@@ -1094,6 +1467,7 @@ def main():
         test_busy_and_order(c, t)
         test_actions(c, t)
         test_update(c, t)
+        test_updates_checkout(c, t)
         test_games(c, t)
         big = test_logs_and_token(c, t)
         code, j = c.get("/api/jobs/" + c.get("/api/jobs?limit=50")[1]["jobs"][-1]["id"])
@@ -1120,6 +1494,7 @@ def main():
         s2.stop()
 
         run_import_tests(t, servers)
+        test_updates_images(t, servers)
         hits = scan_for_token(t, servers)
         ok(not hits, "the token is in no job file or server log (%s)" % hits)
     finally:

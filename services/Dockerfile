@@ -22,6 +22,16 @@ RUN useradd --uid 1000 --user-group --create-home --shell /usr/sbin/nologin pol
 WORKDIR /app
 COPY . /app/
 
+# The commit this image was built from, and when, for the admin panel's
+# update notices (docs/deployer.md, "Updates"). The publishing workflow
+# passes both (the same commit as its org.opencontainers.image.revision
+# label); a build that does not leaves them empty, which reads as unknown.
+# Last, so the layers above stay cached from one commit to the next.
+ARG OPENLOBBY_REVISION=""
+ARG OPENLOBBY_BUILT_AT=""
+ENV OPENLOBBY_REVISION=$OPENLOBBY_REVISION \
+    OPENLOBBY_BUILT_AT=$OPENLOBBY_BUILT_AT
+
 # Default: the observation stub (dns / http / tcp modes). Services override
 # the entrypoint to run their own module (responders.py, ucscgi.py, ...).
 ENTRYPOINT ["python", "stub.py"]

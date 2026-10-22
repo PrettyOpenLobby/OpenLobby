@@ -403,6 +403,113 @@ folder lacks when it is not the right one:
      "missing": [{"path": "DATA/dat.pak", "hint": "your Fantasy Earth install folder, ..."}]}
 ```
 
+## Updates
+
+The deployer also tells the panel whether the core and each installed game
+run the newest version of their code, and what changed since. It checks
+when it starts, every six hours, after an `install` or `update` job, and
+when the panel asks for a fresh check. A check never waits for a job and
+no job waits for a check; a checkout a job is working in is not fetched
+while it runs.
+
+What runs and what is newest depend on how the stack runs:
+
+- Built from the checkouts (the default): what runs is `git rev-parse
+  HEAD` in the checkout. The deployer runs `git fetch --quiet` there (as
+  the checkout's owner, stopped after a minute, never asking for a
+  password) and compares with the branch the checkout follows, or
+  `origin/<branch>` from the catalog when it follows none. `changes` are
+  `git log --no-merges HEAD..<that branch>`. A checkout with commits of
+  its own says so in `why`, since `update` (`git pull --ff-only`) refuses
+  then.
+- Published images (`POL_DEPLOY_GHCR=1`): what runs is the commit in the
+  `org.opencontainers.image.revision` label of the image the tag names on
+  this host (`docker image inspect`), and for the core also
+  `OPENLOBBY_REVISION` in the image's environment, which the image build
+  sets. What is newest comes from the GitHub repository in the catalog
+  entry's `source` (`{"repo": "owner/name", "branch": "main"}`; the
+  core's default is the public OpenLobby repository), through the GitHub
+  API: `GET /repos/<repo>/commits?sha=<branch>` and `GET
+  /repos/<repo>/compare/<running>...<newest>`.
+
+GitHub is asked without a token, so its limit for unauthenticated callers
+applies: 60 requests an hour from one address. A full check asks about
+two requests per published image. Answers are kept for an hour, and a
+comparison of two commits for good, in the `pol-deployer` volume
+(`github-cache.json`), so a restart asks nothing new. With the limit used
+up, or GitHub out of reach, the items say `unknown` and why, and the next
+check tries again.
+
+A version pin is followed. When the image's tag variable (`OPENLOBBY_TAG`
+for the core, the `tag_var` of a game's image) is set to anything but
+`latest`, the newest commit is looked for on that pin only: `1.2.3` is git
+tag `v1.2.3`, `1.2` the newest `v1.2.x` tag, `sha-<commit>` that commit.
+When the branch has newer commits outside the pin, `why` says so.
+
+`GET /api/updates` answers at once with the last results:
+
+```
+{"checked_at": "2026-10-21T12:00:00Z", "checking": false,
+ "items": [{"key": "core", "name": "OpenLobby core (PlayOnline Viewer services)",
+            "running": {"commit": "1a2b3c4d5e6f...", "built_at": "2026-10-20T08:30:00Z"},
+            "latest": {"commit": "9f8e7d6c5b4a...", "date": "2026-10-21T09:12:00Z"},
+            "behind": 3,
+            "changes": [{"commit": "9f8e7d6c5b4a...", "date": "2026-10-21T09:12:00Z",
+                         "subject": "Kart Club: show lap times in the lobby"}, ...],
+            "update": "available", "why": null,
+            "how": "Update it from Settings > Install games; ..."},
+           {"key": "tm", "module": "tm", ...}]}
+```
+
+- `items` holds the core and every installed game, the core first. A game
+  item also has `module`, its `admin_module` from the catalog.
+- `update` is `available`, `current` or `unknown`. `unknown` comes with a
+  one-sentence `why`: the checkout or the image does not say which commit
+  it is, the remote or GitHub could not be reached, the limit is used up,
+  or the running commit is not in the repository (a build of your own).
+- `behind` is how many commits the newest version has that the running one
+  lacks, null when unknown. `changes` lists them newest first, merge
+  commits left out, at most 50.
+- Commits are 40 hex digits; times are ISO 8601 UTC. `built_at` is null
+  for a checkout and for an image that does not say.
+- `how` is set when an update is available.
+- `checking` is true while a check runs.
+
+`GET /api/updates?refresh=1` starts a check now, past the hour's cache,
+and answers at once with `checking` true; ask again until it is false.
+One forced check is made a minute at most: another within the minute
+answers the last results with `"limited": true` and `retry_after`, the
+seconds to wait.
+
+The image the public workflow publishes carries the commit it was built
+from twice: in the `org.opencontainers.image.revision` label and in
+`OPENLOBBY_REVISION` (with `OPENLOBBY_BUILT_AT`), from the build
+arguments of the same names in `services/Dockerfile`. An image you build
+yourself without them reads as `unknown`, unless it runs from a checkout.
+
+### In the admin panel
+
+The panel (`services/adminupdates.py`) shows one list built from three
+sources, the first that has an item for a key winning:
+
+1. the deployer's items, when a deployer is set up and answers;
+2. for a game the deployer has no item for, the game's own report: the
+   `update` object of its status JSON, in the same shape
+   (docs/admin-modules.md);
+3. for the core, when no deployer answers, the panel's own check: its
+   image's `OPENLOBBY_REVISION` and `OPENLOBBY_BUILT_AT` against the
+   newest commits of `POL_ADMIN_UPDATE_REPO` (default
+   `PrettyOpenLobby/OpenLobby`) on `POL_ADMIN_UPDATE_BRANCH` (default
+   `main`), from the GitHub API, kept an hour, forced at most once a
+   minute. Its `how` is `POL_ADMIN_UPDATE_HOW`, by default "Run docker
+   compose pull and docker compose up -d."
+
+Whatever a game sends is checked before it is shown: strings are trimmed,
+commits must be hex and times ISO 8601, at most 50 changes are kept, and a
+report that does not fit the shape shows as `unknown` with a sentence
+saying so. `POL_ADMIN_GITHUB_API` points the panel's check at another
+GitHub API, as the tests do.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -415,6 +522,7 @@ folder lacks when it is not the right one:
 | `POL_DEPLOY_UPLOAD_MAX` | `8G` | The most an uploaded archive may be, and may unpack to (`K`, `M`, `G` suffixes, powers of 1024). |
 | `POL_DEPLOYER_BIND` | `0.0.0.0:8099` | Address inside the container. Change `POL_DEPLOYER_URL` with it. |
 | `POL_DEPLOYER_URL` | `http://deployer:8099` | Where the admin service finds the deployer. |
+| `POL_DEPLOY_GITHUB_API` | `https://api.github.com` | The GitHub API the update check asks. Tests point it at a stand-in. |
 
 ## The image
 
@@ -423,8 +531,9 @@ of the stack and adds git from Debian, and the official static builds of
 the docker CLI, the compose plugin and buildx, each pinned by version and
 checksum in `services/deployer/fetch_docker.py`, and pinned Pillow, numpy,
 fontTools and brotli for the import tools. The server is
-`services/deployer/deployer.py` with `clientdata.py` beside it (archives,
-paths and uploads), standard library only. It runs as root inside its
+`services/deployer/deployer.py` with `clientdata.py` (archives,
+paths and uploads) and `updatecheck.py` (the update check, which the admin
+panel uses too) beside it, standard library only. It runs as root inside its
 container: it needs the socket, whose group id differs from host to host,
 and it has to start git and the import tools as the checkout's owner.
 
@@ -433,6 +542,7 @@ game's image because the game images carry only the server (`services/`)
 and not the repository's `tools/`, and starting another container for them
 would hand a request's folder to the Docker daemon.
 
-`python tools/deployer_test.py` tests it offline, with a stand-in for
-`stack.py` and for an import tool, and needs only Python and git. It
+`python tools/deployer_test.py` tests it offline, with stand-ins for
+`stack.py`, an import tool, the docker CLI and the GitHub API, and needs
+only Python and git. It
 builds its malicious archives itself.

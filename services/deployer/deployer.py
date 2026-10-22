@@ -23,6 +23,8 @@ Settings (environment, or the options of the same meaning):
     POL_DEPLOY_CLIENTS   absolute path of a folder holding client installs, for
                          the folder browser (unset: browsing is off)
     POL_DEPLOY_UPLOAD_MAX  the most an upload may hold, unpacked (default 8G)
+    POL_DEPLOY_GITHUB_API  the GitHub API the update check asks (default
+                         https://api.github.com; tests point it at a stand-in)
 
 Standard library only.
 """
@@ -47,6 +49,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import clientdata  # noqa: E402
+import updatecheck  # noqa: E402
 
 VERSION = "2.0"
 
@@ -62,6 +65,9 @@ GAMES_TTL = 5.0            # seconds GET /api/games reuses its last answer
 UPLOAD_MAX = 8 << 30       # default POL_DEPLOY_UPLOAD_MAX
 IMPORT_TIMEOUT = 6 * 3600  # an import tool is stopped after this long
 NOBODY = 65534             # the uid and gid an import runs as when the checkout is root's
+UPDATE_PERIOD = 6 * 3600   # the update check runs at start and this often
+REFRESH_GAP = 60.0         # at most one forced update check this often
+GIT_TIMEOUT = 60           # a git fetch for the update check is stopped after this long
 
 JOB_ID = re.compile(r"^[0-9]{8}T[0-9]{6}-[0-9a-f]{6}$")
 ACTIVE = ("queued", "running")
@@ -113,6 +119,9 @@ class Config:
         self.clients_note = "POL_DEPLOY_CLIENTS is not set, so browsing is off"
         self.upload_max = UPLOAD_MAX
         self.max_files = clientdata.MAX_FILES
+        self.docker = ["docker"]     # the docker CLI, as an argv prefix
+        self.github_api = updatecheck.API
+        self.refresh_gap = REFRESH_GAP
 
 
 def parse_args(argv):
@@ -139,6 +148,11 @@ def parse_args(argv):
     ap.add_argument("--stack", default="",
                     help="the stack.py to run (default CORE/tools/stack.py; tests point "
                          "this at a stand-in)")
+    ap.add_argument("--refresh-gap", type=float, default=REFRESH_GAP,
+                    help="seconds between two forced update checks (tests lower it)")
+    ap.add_argument("--docker", default="",
+                    help="the docker CLI the update check runs (default docker; tests point "
+                         "this at a stand-in .py)")
     ap.add_argument("--healthcheck", action="store_true",
                     help="ask the local server for /api/health and exit 0 if it answers")
     return ap.parse_args(argv)
@@ -182,6 +196,15 @@ def make_config(args):
             say("POL_DEPLOY_UPLOAD_MAX must be a size such as 8G or 500M (got %r)" % args.upload_max)
             sys.exit(2)
     cfg.max_files = max(1, args.max_files)
+    cfg.refresh_gap = max(0.0, args.refresh_gap)
+    if args.docker:
+        cfg.docker = ([cfg.python] if args.docker.endswith(".py") else []) + [args.docker]
+    api = os.environ.get("POL_DEPLOY_GITHUB_API", "").strip()
+    if api:
+        if not api.startswith(("http://", "https://")):
+            say("POL_DEPLOY_GITHUB_API must be an http(s) URL (got %r)" % api)
+            sys.exit(2)
+        cfg.github_api = api.rstrip("/")
     clients = args.clients.strip()
     if clients:
         if not os.path.isabs(clients):
@@ -802,6 +825,258 @@ ACT = {"install": act_install, "enable": act_enable, "disable": act_disable,
        "update": act_update, "restart": act_restart, "check": act_check}
 
 
+# --------------------------------------------------------------- updates
+
+class Updates:
+    """GET /api/updates: whether the core and each installed game have a
+    newer version than the one this host runs (docs/deployer.md, "Updates").
+    Checked at start, every UPDATE_PERIOD, after an install or update job,
+    and on a forced refresh (at most one every REFRESH_GAP seconds, or
+    --refresh-gap). The results and GitHub's answers are kept in the state
+    volume. A check never waits for a job and a job never waits for a
+    check; a checkout a job is working in is not fetched."""
+
+    def __init__(self, dep):
+        self.dep, self.cfg = dep, dep.cfg
+        self.path = os.path.join(self.cfg.state, "updates.json")
+        self.gh = updatecheck.GitHub(api=self.cfg.github_api,
+                                     cache_path=os.path.join(self.cfg.state, "github-cache.json"))
+        self.lock = threading.Lock()        # the results below
+        self.run_lock = threading.Lock()    # one check at a time
+        self.items, self.checked_at, self.running = {}, None, 0
+        self.last_forced = 0.0
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                got = json.load(f)
+            if isinstance(got, dict) and isinstance(got.get("items"), dict):
+                self.items, self.checked_at = got["items"], got.get("checked_at")
+        except (OSError, ValueError):
+            pass
+
+    def save(self):
+        with self.lock:
+            snap = {"checked_at": self.checked_at, "items": dict(self.items)}
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snap, f)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            say("cannot keep the update check's results: %s" % exc)
+
+    def start(self):
+        with self.lock:
+            self.running += 1
+        threading.Thread(target=self._loop, daemon=True, name="updates").start()
+
+    def _loop(self):
+        counted = True
+        while True:
+            self.check(counted=counted)
+            counted = False
+            time.sleep(UPDATE_PERIOD)
+
+    def kick(self, keys=None, force=False, fetch=True):
+        """Check in the background; the answer says "checking" until done."""
+        with self.lock:
+            self.running += 1
+        threading.Thread(target=self.check, args=(keys, force, fetch, True), daemon=True,
+                         name="updates-now").start()
+
+    def installed(self, catalog):
+        keys = ["core"] if "core" in catalog else []
+        for key, e in sorted(catalog.items(), key=lambda kv: (kv[1].get("order", 0), kv[0])):
+            if e["kind"] == "game" and os.path.isdir(os.path.join(self.cfg.root, e["checkout"])):
+                keys.append(key)
+        return keys
+
+    def env_values(self, catalog, keys):
+        """What compose sees for the image tags: the core's .env, then each
+        installed game's, then the deployer's own environment."""
+        vals = read_dotenv(os.path.join(self.cfg.core, ".env"))
+        for key in keys:
+            if key != "core":
+                vals.update(read_dotenv(os.path.join(self.cfg.root, catalog[key]["checkout"], ".env")))
+        vals.update(os.environ)
+        return vals
+
+    def check(self, keys=None, force=False, fetch=True, counted=False):
+        if not counted:
+            with self.lock:
+                self.running += 1
+        try:
+            with self.run_lock:
+                catalog = load_catalog(self.cfg.core)
+                have = self.installed(catalog)
+                vals = self.env_values(catalog, have)
+                for key in have if keys is None else [k for k in have if k in keys]:
+                    try:
+                        it = self.check_one(key, catalog[key], vals, force, fetch)
+                    except Exception as exc:  # one item's fault is its own
+                        say("update check of %s: %s" % (key, traceback.format_exc()))
+                        it = updatecheck.unknown(updatecheck.item(key, catalog[key]["name"]),
+                                                 "The check failed: %s." % exc)
+                    with self.lock:
+                        self.items[key] = it
+                with self.lock:
+                    self.checked_at = now_iso()
+                    for gone in set(self.items) - set(have):
+                        del self.items[gone]
+                self.save()
+                self.gh.save()
+        finally:
+            with self.lock:
+                self.running -= 1
+
+    def answer(self, refresh=False):
+        limited = False
+        if refresh:
+            now = time.time()
+            with self.lock:
+                limited = now - self.last_forced < self.cfg.refresh_gap
+                if not limited:
+                    self.last_forced = now
+            if not limited:
+                self.kick(force=True)
+        catalog = load_catalog(self.cfg.core)
+        with self.lock:
+            items, checked, busy = dict(self.items), self.checked_at, self.running > 0
+            wait = max(0, int(self.last_forced + self.cfg.refresh_gap - time.time() + 0.999))
+        out = []
+        for key in self.installed(catalog):
+            it = items.get(key)
+            if it is None:
+                it = updatecheck.unknown(updatecheck.item(key, catalog[key]["name"]),
+                                         "It has not been checked yet." if not busy
+                                         else "The check is still running.")
+                if key != "core":
+                    it["module"] = catalog[key].get("admin_module")
+            out.append(it)
+        ans = {"checked_at": checked, "checking": busy, "items": out}
+        if limited:
+            ans["limited"] = True
+            ans["retry_after"] = wait
+        return ans
+
+    # ---- one item
+
+    def job_on(self, key):
+        return self.dep.current is not None and self.dep.current_game == key
+
+    def check_one(self, key, e, vals, force, fetch):
+        it = updatecheck.item(key, e["name"])
+        if e["kind"] == "game":
+            it["module"] = e.get("admin_module")
+        repo, branch = updatecheck.repo_of(e, "PrettyOpenLobby/OpenLobby" if key == "core" else None)
+        img = (e.get("images") or [{}])[0]
+        if self.cfg.ghcr and img.get("ghcr"):
+            tag = (vals.get(img.get("tag_var") or "") or "latest").strip()
+            ref = "%s:%s" % (img["ghcr"], tag)
+            rev, built, why = self.image_revision(ref, key == "core")
+            it["running"] = {"commit": rev, "built_at": built}
+            updatecheck.check_github(it, self.gh, repo, branch, force=force,
+                                     pin=None if tag == "latest" else tag,
+                                     pin_name=img.get("tag_var") or "", no_revision=why)
+            how = "Update it from Settings > Install games; the deployer pulls the published images and restarts it."
+        else:
+            d = self.cfg.core if e["kind"] == "core" else os.path.join(self.cfg.root, e["checkout"])
+            self.check_checkout(it, d, branch, fetch and not self.job_on(key))
+            how = "Update it from Settings > Install games; the deployer pulls its checkout (git pull --ff-only) and rebuilds."
+        if it["update"] == "available":
+            it["how"] = how
+        return it
+
+    def image_revision(self, ref, core):
+        """(commit, built_at, why it is unknown) of the image `ref` names on
+        this host: its org.opencontainers.image.revision label, or for the
+        core the OPENLOBBY_REVISION its build left in the environment."""
+        env = {k: v for k, v in os.environ.items()
+               if k != "POL_DEPLOYER_TOKEN" and v != self.cfg.token}
+        try:
+            r = subprocess.run(self.cfg.docker + ["image", "inspect", ref], env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+            doc = json.loads(r.stdout.decode("utf-8", "replace")) if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            doc = None
+        if not isinstance(doc, list) or not doc or not isinstance(doc[0], dict):
+            return None, None, ("The image %s is not on this host, so the version that runs "
+                                "is unknown." % ref)
+        conf = doc[0].get("Config") if isinstance(doc[0].get("Config"), dict) else {}
+        labels = conf.get("Labels") if isinstance(conf.get("Labels"), dict) else {}
+        envs = dict(x.split("=", 1) for x in conf.get("Env") or [] if isinstance(x, str) and "=" in x)
+        rev = labels.get("org.opencontainers.image.revision") or \
+            (envs.get("OPENLOBBY_REVISION") if core else "") or ""
+        built = labels.get("org.opencontainers.image.created") or \
+            (envs.get("OPENLOBBY_BUILT_AT") if core else "") or doc[0].get("Created")
+        why = None
+        if not updatecheck.commit_id(rev):
+            why = ("The image %s does not say which commit it was built from, so it cannot be "
+                   "compared." % ref)
+        return updatecheck.commit_id(rev), updatecheck.to_iso(built), why
+
+    def git(self, d, args, timeout=30):
+        """(exit code, stdout, last line of stderr) of git in checkout d, as
+        its owner, never asking for a password."""
+        kw = owner_kwargs(d)
+        env = {k: v for k, v in os.environ.items()
+               if k != "POL_DEPLOYER_TOKEN" and v != self.cfg.token}
+        env.update(GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+        if kw:
+            env["HOME"] = "/tmp"
+        try:
+            r = subprocess.run(["git", "-C", d] + list(args), env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=timeout, **kw)
+        except FileNotFoundError:
+            return 127, "", "git is not installed in the deployer image"
+        except subprocess.TimeoutExpired:
+            return 124, "", "it did not finish within %d seconds" % timeout
+        err = [l for l in r.stderr.decode("utf-8", "replace").splitlines() if l.strip()]
+        return r.returncode, r.stdout.decode("utf-8", "replace").strip(), (err[-1].strip() if err else "")
+
+    def check_checkout(self, it, d, branch, fetch):
+        rel = os.path.relpath(d, self.cfg.core).replace(os.sep, "/")
+        rc, head, _ = self.git(d, ["rev-parse", "HEAD"])
+        if rc != 0 or not updatecheck.commit_id(head):
+            return updatecheck.unknown(it, "%s is not a git checkout, so its version is unknown." % rel)
+        it["running"]["commit"] = head.lower()
+        if fetch:
+            rc, _, err = self.git(d, ["fetch", "--quiet"], timeout=GIT_TIMEOUT)
+            if rc != 0:
+                return updatecheck.unknown(it, "git fetch failed in %s (%s), so newer commits are "
+                                               "unknown." % (rel, err[:160] or "exit %d" % rc))
+        rc, up, _ = self.git(d, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        if rc != 0 or not up:
+            up = "origin/" + branch
+            if self.git(d, ["rev-parse", "--verify", "--quiet", up + "^{commit}"])[0] != 0:
+                return updatecheck.unknown(it, "%s is not on a branch that follows a remote one, so "
+                                               "there is nothing to compare it with." % rel)
+        rc, out, _ = self.git(d, ["log", "-1", "--format=%H%x1f%ct", up])
+        parts = out.split("\x1f")
+        if rc != 0 or len(parts) != 2 or not parts[1].isdigit():
+            return updatecheck.unknown(it, "git could not read %s in %s." % (up, rel))
+        it["latest"] = {"commit": parts[0].lower(), "date": now_iso(int(parts[1]))}
+        rc, counts, _ = self.git(d, ["rev-list", "--left-right", "--count", "HEAD..." + up])
+        try:
+            mine, behind = (int(x) for x in counts.split())
+        except ValueError:
+            return updatecheck.unknown(it, "git could not compare %s with %s." % (rel, up))
+        rc, log, _ = self.git(d, ["log", "--no-merges", "-n", str(updatecheck.MAX_CHANGES),
+                                  "--format=%H%x1f%ct%x1f%s", "HEAD.." + up])
+        changes = []
+        for line in log.splitlines() if rc == 0 else []:
+            p = line.split("\x1f", 2)
+            if len(p) == 3 and p[1].isdigit() and updatecheck.commit_id(p[0]):
+                changes.append({"commit": p[0].lower(), "date": now_iso(int(p[1])),
+                                "subject": updatecheck.subject(p[2])})
+        it.update(behind=behind, changes=changes, update="available" if behind else "current",
+                  why=None)
+        if mine:
+            it["why"] = ("The checkout has %d commit%s of its own that %s does not, so update "
+                         "(git pull --ff-only) %s." % (mine, "" if mine == 1 else "s", up,
+                                                       "will refuse" if behind else "has nothing to do"))
+        return it
+
+
 # ---------------------------------------------------------------- server
 
 class Deployer:
@@ -812,12 +1087,14 @@ class Deployer:
         self.store.prune()
         self.lock = threading.Lock()
         self.current = None
+        self.current_game = None
         self.current_upload = None    # the upload the running import reads
         self.games_cache = (0.0, None)
         self.uploads = clientdata.Uploads(cfg.state)
         shutil.rmtree(os.path.join(cfg.state, "imports"), ignore_errors=True)
         for uid in self.uploads.expire():
             say("upload %s expired and was removed" % uid)
+        self.updates = Updates(self)
 
     def busy(self):
         return self.current
@@ -833,6 +1110,7 @@ class Deployer:
                 return 409, {"job": self.current, "error": "another job is running"}
             job = self.store.create(action, game, extra)
             self.current = job["id"]
+            self.current_game = game
             self.current_upload = upload
         if upload:
             self.uploads.touch(upload, now_iso())
@@ -910,12 +1188,17 @@ class Deployer:
         upload = (job.get("source") or {}).get("upload")
         if upload:
             self.uploads.touch(upload, job["ended"])
+        # what runs now changed: check that item again (its checkout was just fetched),
+        # counted as running before anyone can see the job finished
+        if job["action"] in ("install", "update") and state in ("ok", "needs_data"):
+            self.updates.kick(keys=[job["game"]], fetch=False)
         # one step, so whoever sees the job finished can start the next one
         with self.lock:
             try:
                 self.store.save(job)
             finally:
                 self.current = None
+                self.current_game = None
                 self.current_upload = None
                 self.games_cache = (0.0, None)
 
@@ -1023,6 +1306,9 @@ def make_handler(dep):
                                             "busy": bool(dep.busy())})
             if parts == ["api", "games"]:
                 return self.send_json(200, dep.games())
+            if parts == ["api", "updates"]:
+                return self.send_json(200, dep.updates.answer(
+                    truthy((q.get("refresh") or [""])[0])))
             if parts == ["api", "jobs"]:
                 try:
                     limit = int((q.get("limit") or ["20"])[0])
@@ -1238,6 +1524,7 @@ def main(argv=None):
     dep = Deployer(cfg)
     srv = ThreadingHTTPServer((cfg.host, cfg.port), make_handler(dep))
     srv.daemon_threads = True
+    dep.updates.start()
 
     def stop(*_):
         threading.Thread(target=srv.shutdown, daemon=True).start()

@@ -7,6 +7,7 @@
   "content_id": 3,
   "platforms": ["ps2"],
   "repo": "https://github.com/PrettyOpenLobby/HippaulHoLo",
+  "source": {"repo": "PrettyOpenLobby/HippaulHoLo", "branch": "main"},
   "checkout": "hippaulholo",
   "compose": ["docker-compose.yml"],
   "compose_ghcr": ["docker-compose.ghcr.yml"],

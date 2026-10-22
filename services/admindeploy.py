@@ -81,6 +81,13 @@ def overview():
                  "options": games.get("options") or {}, "jobs": (jobs or {}).get("jobs") or []}
 
 
+def updates(refresh=False):
+    """The deployer's update check (docs/deployer.md, "Updates"): (status, {"checked_at",
+    "checking", "items"}). refresh asks it to check again now; it does that at most once a
+    minute and answers at once either way, with "checking" true while the check runs."""
+    return _call("GET", "/api/updates" + ("?refresh=1" if refresh else ""))
+
+
 def _rel(path):
     """A path relative to the deployer's clients folder or an upload, or None. The deployer
     checks again (and refuses symlinks out); this only keeps obvious escapes off the wire."""

@@ -11,7 +11,9 @@ A module's `live` is a callable taking the module and returning a status:
      "facts":    [{"label", "value"}],              a few more numbers
      "error":    why the status could not be read, or None,
      "source":   where it came from, for the module's About box,
-     "at":       when it was read}
+     "at":       when it was read,
+     "update":   the game's own update report, when its status JSON has one
+                 (unchecked here; services/adminupdates.py cleans it)}
 
 `board(...)` builds one from a status JSON (the game's own live.json or a
 board's /state.json; the side games share one layout, see generic()) and the
@@ -27,6 +29,7 @@ MAX_ROWS = 200
 MAX_BYTES = 4 << 20
 TIMEOUT = 3.0
 MARKER_FRESH = 60.0
+MAX_UPDATE = 64 << 10      # the most a status's "update" object may hold, as JSON
 
 
 def fetch(where):
@@ -139,6 +142,15 @@ def generic(doc):
     matches = doc.get("matches")
     if isinstance(matches, list) and matches:
         st["facts"].append({"label": "matches playing", "value": len(matches)})
+    # the game's own update report (docs/admin-modules.md), passed on as it came when it is an
+    # object of a sane size; services/adminupdates.py checks every field before showing it
+    upd = doc.get("update")
+    if isinstance(upd, dict):
+        try:
+            if len(json.dumps(upd)) <= MAX_UPDATE:
+                st["update"] = upd
+        except (TypeError, ValueError):
+            pass
     return st
 
 

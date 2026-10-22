@@ -99,6 +99,28 @@ A player is a name or an object with `name` and, if it has one, where they are
 (`zone`, `place`, `room` or `lobby`). The panel asks at most every few seconds
 and caches the answer.
 
+A game that knows whether it runs its newest version can say so in an
+`update` object, which the panel shows among its update notices when the
+deployer has nothing on the game:
+
+```json
+"update": {
+  "running": {"commit": "1a2b3c4d5e6f", "built_at": "2026-10-20T08:30:00Z"},
+  "latest": {"commit": "9f8e7d6c5b4a", "date": "2026-10-21T09:12:00Z"},
+  "behind": 2,
+  "changes": [{"commit": "9f8e7d6c5b4a", "date": "2026-10-21T09:12:00Z",
+               "subject": "Show lap times in the lobby"}],
+  "update": "available",
+  "why": null,
+  "how": "Pull the Kart Club image and restart it."
+}
+```
+
+`update` is `available`, `current` or `unknown` (then say why in `why`).
+Commits are hex, 7 to 40 digits; times are ISO 8601; `changes` are newest
+first, at most 50 are shown. The key and name are the module's own. A
+report that does not fit this shape is shown as unknown.
+
 ### GET /openlobby/calendar.json?from=&lt;unix&gt;&to=&lt;unix&gt;
 
 Optional, for a game with a schedule: say `"calendar": true` in module.json

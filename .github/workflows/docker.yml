@@ -49,6 +49,12 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # the commit and build time the admin panel's update notices read
+          # (docs/deployer.md, "Updates"); the same values as the
+          # org.opencontainers.image.revision and .created labels above
+          build-args: |
+            OPENLOBBY_REVISION=${{ github.sha }}
+            OPENLOBBY_BUILT_AT=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           cache-from: type=gha,scope=core
           cache-to: type=gha,mode=max,scope=core
 

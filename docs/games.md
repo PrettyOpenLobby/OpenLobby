@@ -241,6 +241,7 @@ are relative to the game's checkout.
 | `content_id` | number or null | The PlayOnline content code (the one granted on the admin panel). |
 | `platforms` | list | `pc`, `ps2`. |
 | `repo` | string | The repository's URL (clone it with `.git` appended). |
+| `source` | object | Where the update check looks for newer versions: `repo` (`owner/name` on GitHub) and `branch` (docs/deployer.md, "Updates"). |
 | `checkout` | string | Directory name beside `openlobby`; the compose files expect exactly this. |
 | `compose` | list | Compose files applied, in order, when building. |
 | `compose_ghcr` | list | Overrides applied after them for published images. |

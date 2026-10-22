@@ -7,6 +7,7 @@
   "content_id": 11,
   "platforms": ["pc"],
   "repo": "https://github.com/PrettyOpenLobby/HippaulRing",
+  "source": {"repo": "PrettyOpenLobby/HippaulRing", "branch": "main"},
   "checkout": "hippaulring",
   "compose": ["docker-compose.yml", "docker-compose.title.yml"],
   "compose_ghcr": ["docker-compose.ghcr.yml"],

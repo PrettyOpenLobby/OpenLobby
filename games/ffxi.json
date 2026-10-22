@@ -7,6 +7,7 @@
   "content_id": 1,
   "platforms": ["pc", "ps2"],
   "repo": "https://github.com/PrettyOpenLobby/HippaulBridge",
+  "source": {"repo": "PrettyOpenLobby/HippaulBridge", "branch": "main"},
   "checkout": "hippaulbridge",
   "compose": ["docker-compose.yml", "docker-compose.title.yml"],
   "compose_ghcr": ["docker-compose.ghcr.yml"],
