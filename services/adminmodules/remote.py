@@ -144,7 +144,8 @@ HELP = HelpDesk(_help_list, _help_thread,
 def _player(m, who):
     url, token = m.tool_port()
     q = urllib.parse.urlencode({"polid": who.get("polid") or "", "handles": ",".join(who.get("handles") or []),
-                                "members": ",".join(str(x) for x in who.get("members") or [])})
+                                "members": ",".join(str(x) for x in who.get("members") or []),
+                                "links": json.dumps(who.get("links") or {}, separators=(",", ":"))})
     doc = _get(url, token, PREFIX + "player.json?" + q)
     return doc if isinstance(doc, dict) else None
 

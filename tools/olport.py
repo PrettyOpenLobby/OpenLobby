@@ -50,7 +50,9 @@ thread(id) -> {"id", "subject", "closed", "who": {"name", "online"}, "messages":
 reply(id, text, close, actor) and close(id, actor) -> (ok, message).
 
 The account window asks every game about one player with @port.player: fn(who) gets
-{"polid", "handles": [...], "members": [...]} and returns {"characters": [{"name", "detail",
+{"polid", "handles": [...], "members": [...], "links": {account system: [{"key", "name"}]}}
+(links: logins on this game's server the account's members have proved are theirs, the reliable
+way to find a player who signs in to the game with its own login) and returns {"characters": [{"name", "detail",
 "online", "facts": [{"label", "value"}]}], "note"}, or None for a player the game never saw.
 
 An action gets the posted fields (strings) and the name of the panel user who
@@ -74,6 +76,19 @@ MAX_BODY = 1 << 20
 _ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _KEY = re.compile(r"^[a-z0-9]{1,16}$")
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
+def _links(raw):
+    """The player lookup's links parameter: {system: [{"key", "name"}]}, or {} for anything else."""
+    try:
+        got = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(got, dict):
+        return {}
+    return {str(k): [{"key": str(x.get("key", "")), "name": str(x.get("name", ""))}
+                     for x in v if isinstance(x, dict)]
+            for k, v in got.items() if isinstance(v, list)}
 
 
 class AdminPort:
@@ -249,7 +264,8 @@ class AdminPort:
                     who = {"polid": unquote(q.get("polid", "")),
                            # the panel encodes the commas too (urlencode), so unquote first
                            "handles": [h for h in unquote(q.get("handles", "")).split(",") if h],
-                           "members": [x for x in unquote(q.get("members", "")).split(",") if x]}
+                           "members": [x for x in unquote(q.get("members", "")).split(",") if x],
+                           "links": _links(unquote(q.get("links", "")))}
                     try:
                         return self._send(200, port._player(who) or {})
                     except Exception as exc:            # noqa: BLE001

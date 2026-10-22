@@ -1,5 +1,5 @@
 """Front Mission Online. Tools are the lobby NPC editor and the story gates
-on the fmo service's dev tool port."""
+on the fmo service's dev tool port, which also serves the calendar."""
 from adminmodules import Module, Service, Tool, sources
 
 
@@ -21,4 +21,7 @@ MODULE = Module(
     services=[Service(["{core}-fmo-1"], {61300: "lobby"},
                       warning="Everyone in Front Mission Online is disconnected.")],
     live=sources.board(_parse, markers=["fmo"]),
+    # the war's phases and the Coliseum's seasons and arenas, off the tool port
+    # (hippaulfront fmoserver/devtool.py, calendar.json)
+    calendar=sources.tool_calendar(),
 )

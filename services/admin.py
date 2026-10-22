@@ -2022,10 +2022,22 @@ class Handler(BaseHTTPRequestHandler):
             members = db.execute("SELECT id FROM member WHERE polid=%s ORDER BY id", (pol,)).fetchall()
             handles = [h["handle_name"] for m in members for h in db.execute(
                 "SELECT handle_name FROM handle WHERE member_id=%s ORDER BY id", (m["id"],))]
+            # logins on other games' servers the member has proved are theirs (game_link,
+            # migration 0014): how a game that never sees a PlayOnline identity knows its player
+            links = {}
+            try:
+                for r in db.execute("SELECT game, account_key, account_name FROM game_link"
+                                    " WHERE member_id = ANY(%s) ORDER BY game, account_key",
+                                    ([m["id"] for m in members],)):
+                    links.setdefault(r["game"], []).append({"key": r["account_key"], "name": r["account_name"]})
+            except Exception:                   # noqa: BLE001 -- no table yet: no links
+                db.rollback()
+                links = {}
         finally:
             db.close()
         return self._send(*adminplayers.lookup({"polid": pol, "handles": handles,
-                                                "members": [str(m["id"]) for m in members]},
+                                                "members": [str(m["id"]) for m in members],
+                                                "links": links},
                                                self._can, self._is_owner()))
 
     def _logs(self, method):

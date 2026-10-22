@@ -2,8 +2,10 @@
 
 A game module may answer for a player (Module.player: fn(module, who) -> dict or None; a game
 that describes itself does it through /openlobby/player.json, adminmodules.remote). `who` is
-{"polid", "handles": [...], "members": [...]}: the account's PlayOnline ID, its handle names and
-member ids, which is how the games know their players. The answer is
+{"polid", "handles": [...], "members": [...], "links": {game: [{"key", "name"}]}}: the account's
+PlayOnline ID, its handle names, member ids, and the logins on other games' servers its members
+have proved are theirs (keyed by the account system, an id the game server chooses), which
+is how the games know their players. The answer is
 
     {"characters": [{"name", "detail", "online", "facts": [{"label", "value"}]}], "note"}
 

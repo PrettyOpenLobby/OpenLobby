@@ -109,7 +109,11 @@ def main():
     adminusers.create_mod(db, "gm_view", "pass for gm_view", ["accounts_view"], by=OWNER)
     polid = "KARTPOL1"
     accounts.create_polid(db, polid, "pw-account")
-    accounts.set_handle(db, accounts.add_member(db, polid, "ardenlogin", "pw-member"), "Arden")
+    arden = accounts.add_member(db, polid, "ardenlogin", "pw-member")
+    accounts.set_handle(db, arden, "Arden")
+    # a login on another game's server Arden has proved is theirs (game_link, migration 0014)
+    db.execute("INSERT INTO game_link (game, account_key, account_name, member_id, linked_at)"
+               " VALUES ('kart', '0012345678', 'arden_k', %s, '2026-10-21T00:00:00Z')", (arden,))
     accounts.set_handle(db, accounts.add_member(db, polid, "brynlogin", "pw-member2"), "Bryn")
     db.commit()
     db.close()
@@ -160,6 +164,8 @@ def main():
             chk("...each of its handles and members on its own",
                 (sorted(ASKED[-1]["handles"]), len(ASKED[-1]["members"]), ASKED[-1]["polid"]),
                 (["Arden", "Bryn"], 2, polid))
+            chk("...and the logins its members proved on other games' servers",
+                ASKED[-1].get("links"), {"kart": [{"key": "0012345678", "name": "arden_k"}]})
             chk("...with what the game says about them",
                 d["games"][0]["characters"][0]["facts"], [{"label": "best lap", "value": "1:02.4"}])
             chk("a moderator who may not see the game is not shown it",

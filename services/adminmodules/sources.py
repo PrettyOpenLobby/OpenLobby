@@ -242,3 +242,39 @@ def kv_calendar(key, kinds=None):
                         "start": start, "end": end, "kind": (kinds or {}).get(src, src or "event")})
         return out
     return cal
+
+
+def tool_calendar(path="calendar.json"):
+    """The calendar a game serves on its own tool port (the panel's proxy, admingames.get_json):
+    GET <path>?from=&to= answering {"events": [{"id", "title", "start", "end", "kind", "about",
+    "times"}]}. A game with no tools set up on this panel has no calendar; one that does not
+    answer raises, so the Calendar names it."""
+    def cal(m, lo, hi):
+        import admingames
+        if m.key not in admingames.configured():
+            return []
+        status, doc = admingames.get_json(m.key, path, "from=%d&to=%d" % (int(lo), int(hi)), "panel")
+        if status != 200:
+            raise OSError(doc.get("error") or doc.get("msg") or "HTTP %d" % status)
+        out = []
+        for e in doc.get("events") or []:
+            if not isinstance(e, dict):
+                continue
+            try:
+                start, end = int(e["start"]), int(e["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end <= lo or start >= hi:
+                continue
+            times = []
+            for t in (e.get("times") if isinstance(e.get("times"), list) else [])[:200]:
+                try:
+                    times.append([int(t[0]), int(t[1])])
+                except (TypeError, ValueError, IndexError, KeyError):
+                    pass
+            out.append({"id": _text(e.get("id"), 80) or "%s-%d" % (m.key, start),
+                        "title": _text(e.get("title"), 80) or "Event", "start": start,
+                        "end": max(end, start), "kind": _text(e.get("kind"), 20) or "event",
+                        "about": _text(e.get("about"), 300), "times": times})
+        return out
+    return cal

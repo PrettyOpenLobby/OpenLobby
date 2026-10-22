@@ -252,5 +252,56 @@ mods = reload(POL_ADMIN_MODULES="ffxi")
 chk("without the bridge's tools set up there is nothing to ask",
     mods["ffxi"].player(mods["ffxi"], {"polid": "", "handles": [], "members": ["7"]}), None)
 
+print("a module file's calendar from its game's tool port")
+CAL_ASKED = []
+
+
+class _Cal(BaseHTTPRequestHandler):
+    """A game's tool port, as far as /calendar.json goes: two yearly runs, one with two parts."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        CAL_ASKED.append((self.path, self.headers.get("X-Devtool-Token")))
+        doc = {"events": [
+            {"id": "FEST_001-1797000000", "title": "Winter Fair", "start": 1797000000, "end": 1798300000,
+             "kind": "limited quest", "about": "In 2 parts.", "times": [[1797000000, 1797600000],
+                                                                       [1797600000, 1798300000]]},
+            {"id": "LATE_001-1799000000", "title": "Outside the range", "start": 1799000000, "end": 1799100000},
+            {"title": "No dates"}]}
+        body = json.dumps(doc).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+import tempfile  # noqa: E402
+CAL_MODS = tempfile.mkdtemp(prefix="calmods-")
+with open(os.path.join(CAL_MODS, "kart.py"), "w") as f:
+    f.write("from adminmodules import Module, sources
+"
+            "MODULE = Module('kart', 'Kart Club', calendar=sources.tool_calendar())
+")
+srv = ThreadingHTTPServer(("127.0.0.1", 0), _Cal)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+mods = reload(POL_ADMIN_MODULES_DIR=CAL_MODS, POL_ADMIN_MODULES="kart",
+              POL_ADMIN_GAME_KART_URL="http://127.0.0.1:%d" % srv.server_address[1],
+              POL_ADMIN_GAME_KART_TOKEN="kart-tok")
+kart = mods["kart"]
+lo, hi = 1796083200, 1798761600
+got = kart.calendar(kart, lo, hi)
+chk("the game's runs in the range, its parts as times",
+    [(e["id"], e["title"], e["start"], e["end"], e["kind"], e["times"]) for e in got],
+    [("FEST_001-1797000000", "Winter Fair", 1797000000, 1798300000, "limited quest",
+      [[1797000000, 1797600000], [1797600000, 1798300000]])])
+chk("...asked for that range with the panel's token",
+    CAL_ASKED[-1], ("/calendar.json?from=%d&to=%d" % (lo, hi), "kart-tok"))
+srv.shutdown()
+mods = reload(POL_ADMIN_MODULES_DIR=CAL_MODS, POL_ADMIN_MODULES="kart")
+chk("without its tools set up there is nothing to ask", mods["kart"].calendar(mods["kart"], lo, hi), [])
+
 print("all checks passed" if not bad else "%d check(s) FAILED" % bad)
 sys.exit(1 if bad else 0)

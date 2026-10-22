@@ -1,6 +1,6 @@
 """Fantasy Earth: The Ring of Dominion. Tools are the world builder on the
-world server's dev tool port; the actions POST to its /admin routes
-(hippaulring services/world/devtool.py)."""
+world server's dev tool port; the actions POST to its /admin routes and the
+calendar reads its calendar.json (hippaulring services/world/devtool.py)."""
 from adminmodules import Action, Module, Service, Tool, sources
 
 
@@ -64,4 +64,7 @@ MODULE = Module(
     services=[Service(["{core}-felobby-1", "{core}-feworld-1", "{core}-fellb-1"], {54848: "lobby"},
                       warning="Everyone in Fantasy Earth is disconnected.")],
     live=sources.board(_parse, markers=["felobby", "feworld"]),
+    # the wars under way and their phases ahead, off the tool port
+    # (hippaulring world/devtool.py, calendar.json)
+    calendar=sources.tool_calendar(),
 )
