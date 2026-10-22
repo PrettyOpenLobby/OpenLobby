@@ -56,6 +56,17 @@ volumes:
   pol-pgdata:
   pol-deployer:
 
+# The network every OpenLobby install on this machine shares (docs/installs.md): the
+# admin panel joins it, and a game installed with its own setup program joins it with its
+# key as an alias, so the panel reaches it as http://<key>:<port>. It is external, so it
+# must exist before `docker compose up`: setup.sh and setup.ps1 create it, and by hand it is
+#
+#   docker network inspect openlobby >/dev/null 2>&1 || docker network create openlobby
+networks:
+  openlobby:
+    external: true
+    name: openlobby
+
 services:
   # The database. Accounts, friends, mail and saves live here; back up the
   # pol-pgdata volume (or run pg_dump) the way you back up pol-data. Not
@@ -133,6 +144,14 @@ services:
       - pol-data:/data
       - pol-logs:/logs
       - ${POL_WWW:-./www}:/www:ro
+    # Port 80 for every install on this machine (docs/installs.md): a game's setup program
+    # finds this service by its label and adds its host names (stub.py http-hosts); the
+    # games' web servers are reached over the `openlobby` network.
+    labels:
+      org.openlobby.role: http
+    networks:
+      default: {}
+      openlobby: {}
     healthcheck: *pyhc
 
   # SSL 3.0 terminators for the 2002-era client. Each container mints the
@@ -377,6 +396,15 @@ services:
     # name; on Linux it exists only through this entry.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # How other installs on this machine find the panel and reach their games' admin
+    # ports (docs/installs.md): a game's setup program lists containers by these labels,
+    # and each game joins the `openlobby` network with its key as an alias.
+    labels:
+      org.openlobby.role: panel
+      org.openlobby.panel.url: "http://127.0.0.1:8090"
+    networks:
+      default: {}
+      openlobby: {}
     healthcheck: *pyhc
 
   # The version-check server. The Viewer's FIRST connection is here (POL-1160

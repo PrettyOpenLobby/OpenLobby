@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""Games added to the admin panel by hand, and paired through their setup program (adminpair.py).
+
+    python tools/admin_pair_test.py
+
+A made-up game, Kart Club, serves the admin protocol through tools/olport.py (a tool page and an
+announce action); a second one, Derby Night, stands at another address to be mistaken for it.
+
+Checks that the owner can test, add, change and remove a game in Settings > Modules, that the
+test says what the game describes or a plain sentence when it cannot, that a stored game is a
+module like one in the environment (its tools proxied, its actions run, shown even when
+POL_ADMIN_MODULES is an explicit list), that its token never comes back to the browser, and that
+every change is in the activity log. Then pairing (docs/installs.md): the owner's one-time code,
+POST /api/pair with no login (a wrong, used or expired code; a game that calls itself something
+else; the happy path, where only the secret's hash is kept), POST /api/pair/update with the right
+and a wrong secret and an unknown key, and unpairing, which ends the secret. A moderator gets 403
+for everything here, /api/updates included. Then the rate limit (five tries a minute from one
+address, then 429) on a panel with the default, and a panel without the PlayOnline core
+(POL_ADMIN_CORE=none) pairing the same way. Throwaway PostgreSQL (tools/pgtest.py); the panels run
+as subprocesses.
+"""
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SERVICES = os.path.abspath(os.path.join(HERE, os.pardir, "services"))
+sys.path.insert(0, HERE)
+sys.path.insert(0, SERVICES)
+
+import pgtest  # noqa: E402
+
+pgtest.use_fresh_database()
+for _k in ("POL_VALKEY_URL", "POL_ADMIN_MODULES_DIR", "POL_ADMIN_GAMES_EXTRA", "POL_DEPLOYER_URL",
+           "POL_DEPLOYER_TOKEN", "OPENLOBBY_REVISION", "POL_ADMIN_PAIR_TRIES"):
+    os.environ.pop(_k, None)
+for _k in [k for k in os.environ if k.startswith("POL_ADMIN_GAME_")]:
+    os.environ.pop(_k)
+
+import olport  # noqa: E402
+
+TOKEN = "kart-token-0123456789"
+NEW_TOKEN = "kart-token-after-setup-9876"
+SAID = []
+
+kart = olport.AdminPort("kart", "Kart Club", short="Kart", platform="PC", token=TOKEN)
+derby = olport.AdminPort("derby", "Derby Night", token="derby-token-0123456789")
+
+
+@kart.status
+def status():
+    return {"up": True, "online": 3, "summary": "3 racing"}
+
+
+@kart.action("banner", "Banner message", kind="announce", fields=[{"id": "text", "label": "Message"}])
+def banner(params, actor):
+    SAID.append(params.get("text"))
+    return True, "Shown in every lobby."
+
+
+@kart.tool("laps", "Lap times", "laps")
+def laps(method, sub, query, body, actor):
+    return 200, "text/html; charset=utf-8", b"<h1>Lap times</h1>"
+
+
+import accounts  # noqa: E402
+import adminpair  # noqa: E402
+import adminusers  # noqa: E402
+from admin_http import Client, free_port, start_panel, stop  # noqa: E402
+
+OWNER, OWNER_PW = "op", "kart club owner 1"
+bad = 0
+
+
+def chk(what, got, want):
+    global bad
+    ok = got == want
+    bad += not ok
+    print("  %s %s: %r%s" % ("ok  " if ok else "FAIL", what, got, "" if ok else "  (want %r)" % (want,)))
+
+
+def sql(q, args=()):
+    db = accounts.connect()
+    try:
+        return [dict(r) for r in db.execute(q, args).fetchall()]
+    finally:
+        db.close()
+
+
+def audit_since(n):
+    return [(r["actor"], r["action"], bool(r["ok"]))
+            for r in sql("SELECT * FROM admin_audit WHERE id > %s ORDER BY id", (n,))]
+
+
+def audit_top():
+    return (sql("SELECT coalesce(max(id), 0) AS n FROM admin_audit") or [{"n": 0}])[0]["n"]
+
+
+def seed():
+    db = accounts.connect()
+    accounts.set_admin_cred(db, OWNER, OWNER_PW)
+    db.commit()
+    adminusers.create_mod(db, "mod_set", "pass for mod_set", ["audit", "settings"], by=OWNER)
+    db.close()
+
+
+def raw_get(client, path):
+    """The body as text, to look for what must not be in it."""
+    import urllib.request
+    return client.op.open(urllib.request.Request(client.url + path), timeout=15).read().decode()
+
+
+def modules_of(client):
+    code, r = client.call("api/modules?fresh=1")
+    return {m["key"]: m for m in r.get("modules", [])}, r
+
+
+def hand_added(owner, mod, kport, dport, dead):
+    kurl = "http://127.0.0.1:%d" % kport
+    print("Add a game, by hand")
+    for path, body in (("api/modules/test", {"key": "kart", "url": kurl, "token": TOKEN}),
+                       ("api/modules/game", {"action": "save", "key": "kart", "url": kurl, "token": TOKEN}),
+                       ("api/pair/code", {})):
+        chk("a moderator cannot POST %s" % path, mod.call(path, body)[0], 403)
+    chk("...nor read the update notices", mod.call("api/updates")[0], 403)
+    code, r = owner.call("api/modules/test", {"key": "Kart!", "url": kurl, "token": TOKEN})
+    chk("a key that does not fit: 400 with a sentence", (code, "lower-case" in r.get("error", "")), (400, True))
+    code, r = owner.call("api/modules/test", {"key": "kart", "url": "kart:8820", "token": TOKEN})
+    chk("an address without http://: 400", (code, "http://" in r.get("error", "")), (400, True))
+    code, r = owner.call("api/modules/test", {"key": "kart", "url": kurl, "token": "wrong-token-000"})
+    chk("a wrong token: the game refused it", (code, r.get("error")),
+        (400, "The game at %s refused that token." % kurl))
+    code, r = owner.call("api/modules/test", {"key": "kart", "url": dead, "token": TOKEN})
+    chk("nothing answering: said so", (code, r.get("error", "").startswith("Nothing answered at %s" % dead)),
+        (400, True))
+    code, r = owner.call("api/modules/test", {"key": "kart", "url": "http://127.0.0.1:%d" % dport,
+                                              "token": "derby-token-0123456789"})
+    chk("a game that calls itself something else", (code, "calls itself 'derby'" in r.get("error", "")),
+        (400, True))
+    code, r = owner.call("api/modules/test", {"key": "kart", "url": kurl + "/", "token": TOKEN})
+    g = r.get("game") or {}
+    chk("the test: what the game describes", (code, g.get("title"), [t["label"] for t in g.get("tools", [])],
+                                              [a["label"] for a in g.get("actions", [])]),
+        (200, "Kart Club", ["Lap times"], ["Banner message"]))
+    chk("a test stores nothing", sql("SELECT count(*) AS n FROM admin_game")[0]["n"], 0)
+
+    n = audit_top()
+    code, r = owner.call("api/modules/game", {"action": "save", "key": "kart", "url": kurl, "token": "wrong-token-000"})
+    chk("save tests first: a refused token is not stored",
+        (code, sql("SELECT count(*) AS n FROM admin_game")[0]["n"]), (400, 0))
+    code, r = owner.call("api/modules/game", {"action": "save", "key": "kart", "url": kurl + "/", "token": TOKEN})
+    chk("save", (code, r.get("title"), r.get("added")), (200, "Kart Club", True))
+    row = sql("SELECT * FROM admin_game WHERE key = 'kart'")[0]
+    chk("  stored by hand, by the owner", (row["url"], row["token"], row["title"], row["how"], row["added_by"],
+                                           row["pairing_hash"]), (kurl, TOKEN, "Kart Club", "manual", OWNER, None))
+    chk("  both in the activity log", audit_since(n),
+        [(OWNER, "could not add the game kart", False), (OWNER, "added Kart Club by hand", True)])
+
+    mods, r = modules_of(owner)
+    k = mods.get("kart") or {}
+    chk("a stored game is a module, with its tools and actions",
+        ([t["label"] for t in k.get("tools", [])], [a["label"] for a in k.get("actions", [])], k.get("has_tools")),
+        (["Lap times"], ["Banner message"], True))
+    chk("  shown although POL_ADMIN_MODULES names only derby", sorted(mods), ["kart"])
+    chk("  its live status read with the stored token", ((k.get("live") or {}).get("online")), 3)
+    found = {f["key"]: f for f in r.get("found", [])}
+    chk("  the Modules page says where its address comes from", (found["kart"]["origin"], found["kart"]["port"]),
+        ("game", "stored"))
+    added = r.get("added") or []
+    chk("  and lists it as added here, the token only as set",
+        [(a["key"], a["title"], a["how"], a["token_set"], a["paired"], a["env"], "token" in a) for a in added],
+        [("kart", "Kart Club", "manual", True, False, False, False)])
+    chk("  the token is nowhere in what the browser gets", TOKEN in raw_get(owner, "api/modules?fresh=1"), False)
+    code, page = owner.call("games/kart/laps")
+    chk("its tool page is proxied", (code, "Lap times" in str(page)), (200, True))
+    code, r = owner.call("api/modules/action", {"key": "kart", "action": "banner", "params": {"text": "Hello"}})
+    chk("its action runs", (code, r.get("ok"), SAID[-1:]), (200, True, ["Hello"]))
+
+    n = audit_top()
+    code, r = owner.call("api/modules/game", {"action": "save", "key": "kart", "url": kurl, "token": ""})
+    chk("saving again with no token keeps the token",
+        (code, r.get("added"), sql("SELECT token FROM admin_game WHERE key = 'kart'")[0]["token"]),
+        (200, False, TOKEN))
+    code, r = owner.call("api/modules/test", {"key": "kart", "url": kurl, "token": ""})
+    chk("...and a test with no token uses the stored one", code, 200)
+    code, r = owner.call("api/modules/game", {"action": "unpair", "key": "kart"})
+    chk("a game added by hand is not paired", (code, r.get("error")), (400, "Kart Club is not paired."))
+    code, r = owner.call("api/modules/game", {"action": "remove", "key": "kart"})
+    chk("remove", (code, sql("SELECT count(*) AS n FROM admin_game")[0]["n"]), (200, 0))
+    chk("  gone from the modules", "kart" in modules_of(owner)[0], False)
+    chk("  again: 404", owner.call("api/modules/game", {"action": "remove", "key": "kart"})[0], 404)
+    chk("  all in the activity log", [a[1] for a in audit_since(n)],
+        ["changed the address or token of Kart Club", "unpaired kart", "removed Kart Club from the panel",
+         "removed kart from the panel"])
+
+
+def pairing(owner, mod, anon, kport, dport):
+    kurl = "http://127.0.0.1:%d" % kport
+    print("pairing")
+    n = audit_top()
+    chk("a moderator cannot make a code", mod.call("api/pair/code", {})[0], 403)
+    code, r = owner.call("api/pair/code", {})
+    pc = r.get("code") or ""
+    chk("the owner gets an 8-character code, 10 minutes",
+        (code, bool(re.fullmatch("[%s]{8}" % adminpair.CODE_ALPHABET, pc)), r.get("ttl")), (200, True, 600))
+    chk("  the panel keeps only its hash", sql("SELECT code_hash FROM admin_pair_code")[0]["code_hash"],
+        hashlib.sha256(pc.encode()).hexdigest())
+    chk("  waiting", owner.call("api/pair/code?code=" + pc)[1].get("state"), "waiting")
+    chk("  a moderator cannot see it", mod.call("api/pair/code?code=" + pc)[0], 403)
+    body = {"code": pc, "key": "kart", "title": "Kart Club", "url": kurl, "token": TOKEN}
+
+    chk("not JSON: 400", anon.call("api/pair", {})[0], 400)
+    code, r = anon.call("api/pair", dict(body, code="ZZZZZZZZ"))
+    chk("a wrong code: 403", (code, r.get("error")),
+        (403, "That code is wrong. Check it against the one the panel shows."))
+    code, r = anon.call("api/pair", dict(body, url="http://127.0.0.1:%d" % dport, token="derby-token-0123456789"))
+    chk("a game that calls itself something else: 400",
+        (code, "calls itself 'derby'" in r.get("error", "")), (400, True))
+    chk("  and the code is still good", owner.call("api/pair/code?code=" + pc)[1].get("state"), "waiting")
+    code, r = anon.call("api/pair", dict(body, token="wrong-token-000"))
+    chk("a token the game refuses: 400", (code, "refused that token" in r.get("error", "")), (400, True))
+    code, r = anon.call("api/pair", dict(body, key="Kart"))
+    chk("a key that does not fit: 400", code, 400)
+
+    typed = (pc[:4] + "-" + pc[4:]).lower()
+    code, r = anon.call("api/pair", dict(body, code=typed))
+    secret = r.get("pairing") or ""
+    chk("the code as typed (lower case, a dash): paired",
+        (code, r.get("ok"), r.get("title"), len(secret) >= 43), (200, True, "Kart Club", True))
+    row = sql("SELECT * FROM admin_game WHERE key = 'kart'")[0]
+    chk("  stored as paired, the secret only as its hash",
+        (row["how"], row["token"], row["url"], row["added_by"], row["pairing_hash"],
+         secret in json.dumps(row, default=str)),
+        ("paired", TOKEN, kurl, OWNER, hashlib.sha256(secret.encode()).hexdigest(), False))
+    chk("  the code view says so", owner.call("api/pair/code?code=" + pc)[1],
+        {"state": "used", "key": "kart", "title": "Kart Club"})
+    mods, r = modules_of(owner)
+    chk("  the game is a module now", [t["label"] for t in (mods.get("kart") or {}).get("tools", [])], ["Lap times"])
+    chk("  and listed as paired", [(a["how"], a["paired"]) for a in r.get("added", [])], [("paired", True)])
+    code, r = anon.call("api/pair", body)
+    chk("the same code again: 403, used", (code, r.get("error")),
+        (403, "That code was already used. Make a new one in the panel."))
+    code, r = owner.call("api/pair/code", {})
+    old = r["code"]
+    db = accounts.connect()
+    db.execute("UPDATE admin_pair_code SET expires_at = %s WHERE code_hash = %s",
+               (time.time() - 1, hashlib.sha256(old.encode()).hexdigest()))
+    db.commit()
+    db.close()
+    code, r = anon.call("api/pair", dict(body, code=old))
+    chk("an expired code: 403", (code, r.get("error")), (403, "That code has expired. Make a new one in the panel."))
+    chk("  the code view says expired", owner.call("api/pair/code?code=" + old)[1].get("state"), "expired")
+
+    print("the setup program changes the token")
+    upd = {"key": "kart", "pairing": secret, "token": NEW_TOKEN}
+    code, r = anon.call("api/pair/update", dict(upd, pairing="not-the-secret"))
+    chk("a wrong secret: 403", (code, r.get("error")),
+        (403, "That pairing secret is not this panel's for kart. Pair again."))
+    code, r = anon.call("api/pair/update", dict(upd, key="derby"))
+    chk("a key the panel does not have: 404", (code, r.get("error")), (404, "This panel has no game with the key derby."))
+    code, r = anon.call("api/pair/update", dict(upd, url="ftp://x"))
+    chk("a url that does not fit: 400", code, 400)
+    kart.token = NEW_TOKEN
+    code, r = anon.call("api/pair/update", upd)
+    chk("the right secret: 200", (code, r), (200, {"ok": True}))
+    chk("  the new token is stored", sql("SELECT token FROM admin_game WHERE key = 'kart'")[0]["token"], NEW_TOKEN)
+    code, page = owner.call("games/kart/laps")
+    chk("  and used", (code, "Lap times" in str(page)), (200, True))
+
+    code, r = owner.call("api/modules/game", {"action": "unpair", "key": "kart"})
+    chk("unpair", (code, sql("SELECT how, pairing_hash FROM admin_game WHERE key = 'kart'")[0]),
+        (200, {"how": "manual", "pairing_hash": None}))
+    code, r = anon.call("api/pair/update", dict(upd, token=TOKEN))
+    chk("  the secret no longer works", code, 403)
+    chk("  the game stays", "kart" in modules_of(owner)[0], True)
+
+    got = audit_since(n)
+    chk("the activity log", got, [
+        (OWNER, "made a pairing code for a setup program", True),
+        ("setup program", "a setup program tried to pair kart with a wrong code", False),
+        ("setup program", "a setup program could not pair kart: The game at %s answered, but it calls itself "
+         "'derby', the panel calls it 'kart'." % ("http://127.0.0.1:%d" % dport), False),
+        ("setup program", "a setup program could not pair kart: The game at %s refused that token." % kurl, False),
+        ("setup program", "paired Kart Club through its setup program", True),
+        ("setup program", "a setup program tried to pair kart with a used code", False),
+        (OWNER, "made a pairing code for a setup program", True),
+        ("setup program", "a setup program tried to pair kart with an expired code", False),
+        ("setup program", "a setup program tried to change the token of Kart Club with a wrong pairing secret", False),
+        ("setup program", "a setup program tried to change the token of derby, which is not here", False),
+        ("setup program", "Kart Club changed its token through its setup program", True),
+        (OWNER, "unpaired Kart Club", True),
+        ("setup program", "a setup program tried to change the token of Kart Club with a wrong pairing secret", False)])
+    owner.call("api/modules/game", {"action": "remove", "key": "kart"})
+    kart.token = TOKEN
+
+
+def updates(owner):
+    print("update notices")
+    code, r = owner.call("api/updates")
+    chk("the owner reads them", (code, sorted(r)), (200, ["checked_at", "checking", "items"]))
+    core = next((i for i in r.get("items", []) if i["key"] == "core"), {})
+    chk("  the core's own check, GitHub out of reach: unknown", core.get("update"), "unknown")
+
+
+def main():
+    _h, kport = kart.start()
+    _h, dport = derby.start()
+    dead = "http://127.0.0.1:%d" % free_port()
+    seed()
+    base = {"POL_ADMIN_BIND": "127.0.0.1", "POL_ADMIN_MODULES": "derby", "POL_ADMIN_LIVE_TTL": "0",
+            "POL_ADMIN_GITHUB_API": dead}
+    tmp = tempfile.mkdtemp(prefix="adminpair-")
+    proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=dict(base, POL_ADMIN_PAIR_TRIES="1000"))
+    try:
+        owner, mod, anon = Client(url), Client(url), Client(url)
+        chk("owner signs in", owner.login(OWNER, OWNER_PW), 200)
+        chk("moderator signs in", mod.login("mod_set", "pass for mod_set"), 200)
+        hand_added(owner, mod, kport, dport, dead)
+        pairing(owner, mod, anon, kport, dport)
+        updates(owner)
+    finally:
+        stop(proc)
+
+    print("five tries a minute from one address")
+    proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=base)
+    try:
+        anon = Client(url)
+        codes = [anon.call("api/pair", {"code": "ZZZZZZZZ", "key": "kart", "title": "Kart Club",
+                                        "url": "http://127.0.0.1:%d" % kport, "token": TOKEN})[0] for _ in range(5)]
+        chk("five wrong codes: 403 each", codes, [403] * 5)
+        code, r = anon.call("api/pair", {"code": "ZZZZZZZZ"})
+        chk("the sixth: 429, with how long to wait", (code, "Try again in" in r.get("error", "")), (429, True))
+        chk("  /api/pair/update counts the same tries", anon.call("api/pair/update", {"key": "kart"})[0], 429)
+        owner = Client(url)
+        owner.login(OWNER, OWNER_PW)
+        chk("  the panel itself is not limited", owner.call("api/pair/code", {})[0], 200)
+    finally:
+        stop(proc)
+
+    print("without the PlayOnline core")
+    env = {"POL_ADMIN_CORE": "none", "POL_ADMIN_BIND": "127.0.0.1", "POL_ADMIN_PAIR_TRIES": "1000",
+           "POL_ADMIN_LIVE_TTL": "0", "POL_ADMIN_GITHUB_API": dead}
+    proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=env)
+    try:
+        owner, anon = Client(url), Client(url)
+        owner.login(OWNER, OWNER_PW)
+        chk("no games yet", modules_of(owner)[0], {})
+        pc = owner.call("api/pair/code", {})[1].get("code")
+        code, r = anon.call("api/pair", {"code": pc, "key": "kart", "title": "Kart Club",
+                                         "url": "http://127.0.0.1:%d" % kport, "token": TOKEN})
+        chk("a setup program pairs", (code, r.get("title")), (200, "Kart Club"))
+        mods, _r = modules_of(owner)
+        chk("  the game is shown", (sorted(mods), (mods.get("kart") or {}).get("live", {}).get("online")),
+            (["kart"], 3))
+        code, r = anon.call("api/pair/update", {"key": "kart", "pairing": r.get("pairing"), "token": TOKEN})
+        chk("  and changes its token", code, 200)
+        code, r = owner.call("api/updates")
+        chk("  the update notices: no core item without the core",
+            (code, [i["key"] for i in r.get("items", [])]), (200, []))
+    finally:
+        stop(proc)
+        kart.stop()
+        derby.stop()
+    print("admin_pair_test: %d failed" % bad)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

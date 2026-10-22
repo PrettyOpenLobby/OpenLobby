@@ -515,6 +515,16 @@ if ($NoStart) {
 
 Step 'Starting the stack'
 if (-not $DryRun) { Set-Location -LiteralPath $Checkout }
+# The network every install on this PC shares (docs/installs.md); the admin panel joins
+# it, so it must exist before compose starts anything.
+$null = docker network inspect openlobby 2>$null
+if ($LASTEXITCODE -ne 0) {
+    if ((Run 'docker' @('network', 'create', 'openlobby')) -ne 0) {
+        # another install may have made it in between; only a network still missing is an error
+        $null = docker network inspect openlobby 2>$null
+        if ($LASTEXITCODE -ne 0) { Fail 'could not create the Docker network openlobby' }
+    }
+}
 if ((Test-Path (Join-Path $Checkout '.games')) -and (Get-Content (Join-Path $Checkout '.games') | Where-Object { $_.Trim() })) {
     Say 'Games are enabled in .games; this script starts the core only. Start the whole'
     Say 'stack with: python tools\stack.py compose up -d (add --ghcr for published images).'

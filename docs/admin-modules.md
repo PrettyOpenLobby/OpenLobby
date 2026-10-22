@@ -206,6 +206,22 @@ module that finds its game: one with a tool URL, a status source, or a
 live-session marker some service has published. The owner's Modules page in
 Settings lists any module that did not load, and why.
 
+## Games added in the panel
+
+A game's URL and token can also live in the panel's database instead of its
+environment. The owner adds one under Settings, Modules, "Add a game" (a key, the
+admin address and the token; Test loads `<url>/openlobby/module.json` with the
+token and shows what the game describes), or the game's own setup program pairs
+with the panel using a one-time code ([installs.md](installs.md), "Pairing").
+
+A stored game is treated exactly like `POL_ADMIN_GAME_<KEY>_URL` and `_TOKEN`:
+it describes itself, its tool pages are proxied and its actions run. When the
+environment and the database both name a key, the environment wins; the Modules
+page says which one each game's address comes from. An explicit
+`POL_ADMIN_MODULES` list gets the stored keys added to it, since the owner added
+those on purpose. The token is never sent back to a browser, and every add,
+change, removal, pairing and unpairing is in the activity log.
+
 ## Running the panel for one game
 
 The panel can run on its own for a game that has nothing to do with

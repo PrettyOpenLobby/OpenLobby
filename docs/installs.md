@@ -8,9 +8,11 @@ token is ever copied by hand and nothing joins a panel without its owner's say.
 The game side of the admin protocol itself (what a game serves to the panel) is in
 [admin-modules.md](admin-modules.md) and `tools/olport.py`. This page is about installing.
 
-Status: the labels, network and update object are agreed. The panel's pairing routes
-(`/api/pair`, `/api/pair/update`) and its "Add a game" page are being built; until they are
-on main, a game is added to a panel with `POL_ADMIN_GAME_<KEY>_URL` and `_TOKEN`.
+Status: the labels, network and update object are agreed. The panel has its labels, joins
+the network, and answers `/api/pair` and `/api/pair/update`; its owner can also add a game by
+hand (Settings, Modules, "Add a game"). `POL_ADMIN_GAME_<KEY>_URL` and `_TOKEN` still work and
+win over a game stored in the panel ([admin-modules.md](admin-modules.md), "Games added in the
+panel").
 
 ## Labels
 
@@ -37,6 +39,10 @@ A game (on the service that runs its admin port):
 One external Docker network, `openlobby`. Whichever setup program runs first creates it:
 
     docker network inspect openlobby >/dev/null 2>&1 || docker network create openlobby
+
+No install ever removes it, not on uninstall and not when cleaning up after an error,
+because the other installs share it. A setup program whose `docker network create` fails
+because the network already exists (another setup made it in between) goes on as normal.
 
 The panel joins it. Each game's admin-port service joins it with an alias equal to its key:
 
@@ -126,6 +132,53 @@ shares one: OpenLobby's `dns` service, labelled `org.openlobby.role=dns`. A game
 
 The resolver answers loopback and the private ranges by default (`POL_DNS_CLIENTS`), and
 `POL_DNS_BIND` pins it to one address on a host whose own resolver holds port 53.
+
+## One port 80 for every install
+
+Port 80 is one per machine too, so every install shares OpenLobby's `http` service,
+labelled `org.openlobby.role=http`. It sends a request whose Host header names a game's
+host to that game's web server, and answers everything else itself. A game's setup:
+
+1. Looks for it: `docker ps --filter label=org.openlobby.role=http`.
+2. If there is none, starts it from the published image, as its own small service with
+   that label, on the `openlobby` network:
+
+   ```yaml
+   services:
+     http:
+       image: ghcr.io/prettyopenlobby/openlobby:latest
+       command: ["http"]
+       restart: unless-stopped
+       labels:
+         org.openlobby.role: http
+       ports:
+         - "80:80"
+       volumes:
+         - http-data:/data
+       networks:
+         - openlobby
+   volumes:
+     http-data:
+   networks:
+     openlobby:
+       external: true
+   ```
+
+   Whichever setup runs first owns it; the others only add hosts. Never start a second.
+3. Adds its hosts under its key, with the upstream they go to:
+
+       docker exec <the http container> python stub.py http-hosts add kart http://kart:8080 patch.kart.example www.kart.example
+
+   The upstream is the game's alias on the `openlobby` network. A host matches exactly
+   (the port in the Host header is ignored); the request goes on whole and streamed, with
+   `X-Forwarded-For`, and a game that is down gets a 502. Changes are picked up within
+   5 seconds. Adding again under the same key replaces that key's hosts; `http-hosts remove
+   kart` takes them away (an uninstall should); `http-hosts list` shows them. They are kept
+   in `/data/http.d/<key>.txt`. Hosts under `pol.com` and `playonline.com` are refused.
+
+This is plain HTTP only. Port 443 on an OpenLobby machine belongs to the SSL 3.0
+terminator for the PlayOnline web pages, and the old clients send no SNI, so 443 cannot be
+shared by host name. A game that needs HTTPS should ask.
 
 ## Updates
 

@@ -3510,6 +3510,7 @@ async function loadOverview() {
   if (can("health")) { loadHealth(); loadOps(); }
   if (can("audit")) loadRecentActivity();
   if (canSeeGames()) fetchGames(false).then(renderOverviewGames);
+  loadUpdateNotice();       // owner: "Updates available: ..." (games.js)
 }
 
 // The Overview without the PlayOnline core: the games, who is playing them,
@@ -3547,6 +3548,7 @@ async function loadOverviewLite(card) {
     `<span class="t2">${esc(t.game_title || "")}${t.at ? ", " + esc(ago(t.at * 1000)) : ""}</span></li>`));
   $("#ovAttention").innerHTML = att.join("") || `<li class="empty">Nothing needs attention.</li>`;
   renderOverviewGames();
+  loadUpdateNotice();
 }
 
 async function loadRecentActivity() {

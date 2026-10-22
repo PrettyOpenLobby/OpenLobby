@@ -38,6 +38,14 @@ module at its game without code changes:
     POL_ADMIN_GAME_<KEY>_TOKEN   that port's token (as before)
     POL_ADMIN_GAME_<KEY>_LIVE    a URL or file path to the game's status JSON
 
+A game can also be stored in the panel's database instead: the owner adds it in
+Settings > Modules ("Add a game"), or its setup program pairs with the panel
+(docs/installs.md). The panel sets STORE to read them (adminpair.stored); a
+stored game is treated exactly like the two variables above, and when both
+name a key the environment wins. An explicit POL_ADMIN_MODULES list gets the
+stored keys added to it. Host tools that import this package leave STORE unset
+and see only the environment.
+
 Importing this package needs only the standard library, so host tools can use
 service_groups() without the panel's dependencies. Anything heavier (the
 live-state store) is imported when a live source is read. An ops runner that
@@ -180,9 +188,19 @@ class Module:
         return os.environ.get("POL_ADMIN_GAME_%s_%s" % (self.key.upper(), name), default).strip()
 
     def tool_port(self):
-        """(url, token) of the game's tool port, or None."""
+        """(url, token) of the game's tool port, or None: the environment's, else the one
+        stored in the panel (Add a game, or paired by the game's setup program)."""
         url = self.env("URL")
-        return (url.rstrip("/"), self.env("TOKEN")) if url else None
+        if url:
+            return url.rstrip("/"), self.env("TOKEN")
+        got = _STORED.get(self.key)
+        return (got[0].rstrip("/"), got[1]) if got else None
+
+    def port_from(self):
+        """Where tool_port() comes from: "env", "stored" or None."""
+        if self.env("URL"):
+            return "env"
+        return "stored" if self.key in _STORED else None
 
     def available(self):
         """Whether this server runs the game, as far as the panel can tell."""
@@ -266,6 +284,11 @@ _REMOTE_RETRY = 60.0
 _REDESCRIBE = 300.0
 _remote_failed = {"at": 0.0, "keys": set()}
 _loaded = {"at": 0.0}
+#: fn() -> {key: (url, token)}: the games stored in the panel's database. Set by the panel
+#: (admin.py sets adminpair.stored); unset, only the environment is read.
+STORE = None
+#: what STORE answered at the last load(); tool_port() reads it
+_STORED = {}
 
 
 def _note(msg):
@@ -334,22 +357,49 @@ def _legacy_extras(out):
         _accept(mod, "POL_ADMIN_GAMES_EXTRA[%s]" % key, out, "legacy")
 
 
-def _remotes(out):
-    """Games with a tool URL and no module: ask each to describe itself
-    (adminmodules.remote, the OpenLobby admin protocol)."""
-    _remote_failed["keys"] = set()
-    _remote_failed["at"] = time.time()
+def _read_store():
+    """Refresh _STORED from STORE. A store that cannot be read keeps what it last said."""
+    global _STORED
+    if STORE is None:
+        _STORED = {}
+        return
+    try:
+        got = STORE() or {}
+    except Exception as exc:                   # noqa: BLE001 -- the database is away
+        _note("the games added in the panel could not be read (%s)" % exc.__class__.__name__)
+        return
+    _STORED = {k: (str(v[0]), str(v[1] or "")) for k, v in got.items()
+               if KEY_RE.match(k or "") and v and v[0]}
+
+
+def _ports():
+    """[(key, url, token)] of every game with a tool URL: the environment's, then the
+    stored ones the environment does not name."""
     pre = "POL_ADMIN_GAME_"
+    out, seen = [], set()
     for name, url in sorted(os.environ.items()):
         if not (name.startswith(pre) and name.endswith("_URL") and url.strip()):
             continue
         key = name[len(pre):-len("_URL")].lower()
         if not KEY_RE.match(key):
             continue
+        seen.add(key)
+        out.append((key, url.strip(), os.environ.get(pre + key.upper() + "_TOKEN", "").strip()))
+    for key in sorted(_STORED):
+        if key not in seen:
+            out.append((key, _STORED[key][0].strip(), _STORED[key][1].strip()))
+    return out
+
+
+def _remotes(out):
+    """Games with a tool URL and no module: ask each to describe itself
+    (adminmodules.remote, the OpenLobby admin protocol)."""
+    _remote_failed["keys"] = set()
+    _remote_failed["at"] = time.time()
+    for key, url, token in _ports():
         file_mod = out.get(key)
         if file_mod is not None and not file_mod.self_described:
             continue
-        token = os.environ.get(pre + key.upper() + "_TOKEN", "").strip()
         try:
             from adminmodules import remote
             mod = remote.build(key, url.strip().rstrip("/"), token)
@@ -379,6 +429,7 @@ def load(reload=False):
         if _ALL is not None and not reload:
             return _ALL
         del _PROBLEMS[:]
+        _read_store()
         out = {}
         want = _wanted() if core_off() else None
         for key in BUILTIN:
@@ -411,6 +462,7 @@ def found():
     """Every module found, shown or not, for the owner's Modules page."""
     shown = enabled()
     return [{"key": k, "title": m.title, "origin": m.origin, "shown": k in shown,
+             "port": m.port_from(),
              "tools": len([t for t in m.tools if not t.panel]), "has_tools": bool(m.tool_port()),
              "actions": len(m.actions), "live": m.live is not None}
             for k, m in load().items()]
@@ -422,8 +474,18 @@ def problems():
 
 
 def _wanted():
+    """The keys an explicit POL_ADMIN_MODULES list names, with the games stored in the
+    panel added (the owner added those on purpose); None for "*"."""
     raw = os.environ.get("POL_ADMIN_MODULES", "*").strip() or "*"
-    return None if raw == "*" else {k.strip() for k in raw.split(",") if k.strip()}
+    if raw == "*":
+        return None
+    return {k.strip() for k in raw.split(",") if k.strip()} | set(_STORED)
+
+
+def refresh():
+    """Load the modules again now (a game was added, removed or paired)."""
+    load(reload=True)
+    _AVAIL["keys"] = None
 
 
 _AVAIL = {"at": 0.0, "keys": None}

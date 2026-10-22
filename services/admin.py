@@ -92,7 +92,13 @@ import adminbots  # noqa: E402
 import admingames  # noqa: E402  -- the Games section's tool proxy
 import adminmodules  # noqa: E402  -- one module per game (adminmodules/)
 import admindeploy  # noqa: E402  -- installing games through the deployer (owner only)
+import adminpair  # noqa: E402  -- games added by hand or paired by their setup program
+import adminupdates  # noqa: E402  -- update notices: the core and each game (owner only)
 import webpush  # noqa: E402
+
+# The games stored in the panel (Settings > Modules, Add a game; pairing) are read by the
+# modules exactly like POL_ADMIN_GAME_<KEY>_URL and _TOKEN.
+adminmodules.STORE = adminpair.stored
 
 try:
     # TESTER ISSUE REPORTS. Imported for its LAYOUT, the same way gmd is
@@ -2421,6 +2427,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(*admindeploy.browse(q.get("path", [""])[0]))
         if path == "/api/deploy/uploads":
             return self._send(*admindeploy.uploads())
+        # update notices (adminupdates.py) and a pairing code's state: owner only, as above
+        if path == "/api/updates":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            return self._send(200, adminupdates.overview(q.get("refresh", [""])[0] == "1"))
+        if path == "/api/pair/code":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            return self._send(*adminpair.code_state(q.get("code", [""])[0]))
         if path == "/api/deploy/patches":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._send(*admindeploy.patches(q.get("recheck", [""])[0] == "1"))
@@ -2525,6 +2538,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._login()
         if path == "/api/logout":
             return self._logout()
+        if path in ("/api/pair", "/api/pair/update"):
+            return self._pair(path)              # a setup program: a code or a secret, no login
         if not self._authed(path):
             return
         if CORE_OFF and _pol_route("POST", path):
@@ -2646,6 +2661,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(status, out)
         if path == "/api/deploy/upload":
             return self._deploy_upload()
+        # Settings > Modules: Add a game, pairing codes (owner only: not in the permission tables)
+        if path == "/api/modules/test":
+            return self._send(*adminpair.test(self._json_body()))
+        if path == "/api/modules/game":
+            return self._stored_game()
+        if path == "/api/pair/code":
+            user, role, _p = self._caller()
+            status, out = adminpair.new_code(user)
+            _audit(user, role, "made a pairing code for a setup program", ok=status == 200,
+                   addr=self._addr())
+            return self._send(status, out)
         if path == "/api/deploy/patch":
             body = self._json_body()
             status, out = admindeploy.patch_action(body)
@@ -2666,6 +2692,54 @@ class Handler(BaseHTTPRequestHandler):
                    target=str(body.get("upload"))[:32], ok=status == 200, addr=self._addr())
             return self._send(status, out)
         return self._send(404, {"error": "not found"})
+
+    def _stored_game(self):
+        """Settings > Modules: {"action": "save" | "remove" | "unpair", "key", "url", "token"}
+        for a game stored in the panel (adminpair). Owner only; every change is audited."""
+        body = self._json_body()
+        act, key = body.get("action"), body.get("key")
+        user, role, _p = self._caller()
+        if act == "save":
+            status, out = adminpair.save(body, user)
+            title = out.get("title") or key
+            what = ("added %s by hand" if out.get("added") else "changed the address or token of %s") % title \
+                if status == 200 else "could not add the game %s" % key
+            detail = {"url": adminpair.clean_url(body.get("url")) or str(body.get("url"))[:120],
+                      "token": "changed" if body.get("token") else "kept"}
+        elif act == "remove":
+            status, out = adminpair.remove(key)
+            what, detail = "removed %s from the panel" % (out.get("title") or key), None
+        elif act == "unpair":
+            status, out = adminpair.unpair(key)
+            what, detail = "unpaired %s" % (out.get("title") or key), None
+        else:
+            return self._send(400, {"error": "Unknown action."})
+        if status >= 400 and out.get("error"):
+            detail = dict(detail or {}, error=out["error"])
+        _audit(user, role, what, target=str(key)[:32], detail=detail, ok=status == 200, addr=self._addr())
+        return self._send(status, out)
+
+    def _pair(self, path):
+        """POST /api/pair and /api/pair/update (docs/installs.md, "Pairing"): a game's setup
+        program, with no panel login. A one-time code or the pairing secret lets it in; each
+        client address gets five tries a minute. An open panel off loopback refuses them as it
+        refuses everything else."""
+        if not _auth_required() and _open_panel_refused():
+            return self._authed(path)            # the 503 every request gets in that state
+        ok, wait = adminpair.LIMIT.allow(self._addr())
+        if not ok:
+            return self._send(429, {"error": "Too many tries from this address. Try again in %d seconds." % wait},
+                              headers=[("Retry-After", str(wait))])
+        body = self._json_body()
+        if path == "/api/pair":
+            status, out, aud = adminpair.pair(body)
+        else:
+            status, out, aud = adminpair.pair_update(body)
+        if aud is not None:
+            url = adminpair.clean_url(body.get("url"))
+            _audit("setup program", "setup", aud[0], target=str(body.get("key") or "")[:32],
+                   detail={"url": url} if url else None, ok=aud[1], addr=self._addr())
+        return self._send(status, out)
 
     def _deploy_upload(self):
         """A client archive for the deployer, owner only: the raw body goes straight on
@@ -2926,6 +3000,11 @@ class Handler(BaseHTTPRequestHandler):
         if role == "owner":
             out["problems"] = adminmodules.problems()
             out["found"] = adminmodules.found()
+            try:
+                # Settings > Modules: the games added here (tokens left out)
+                out["added"] = adminpair.listing()
+            except polcore_db.Error:
+                out["added"] = []
         self._send(200, out)
 
     # -- static / art -------------------------------------------------------- #

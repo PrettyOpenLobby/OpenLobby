@@ -750,6 +750,40 @@
     .imp-build .chip { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
     @media (max-width: 640px) { .imp-build { grid-template-columns: 1fr 1fr; } }
     .patch-why { font-size: 12px; color: var(--muted); max-width: 320px; }
+    /* Settings > Modules: Add a game, the pairing code; the Updates panel (games.js) */
+    .ga-box { background: var(--panel2); border: 1px solid var(--line); border-radius: 9px;
+      padding: 12px 14px; margin: 4px 0 12px; }
+    .ga-box h3 { margin: 0 0 4px; font-size: 14px; }
+    .ga-box input[type=text], .ga-box input[type=password] { background: var(--panel); }
+    .ga-result { margin-top: 12px; font-size: 13px; border-left: 3px solid var(--good);
+      padding: 6px 10px; background: var(--panel); border-radius: 0 7px 7px 0; }
+    .ga-result.bad { border-left-color: var(--bad); }
+    .ga-result .muted { display: block; margin-top: 2px; }
+    .pair-code { font-size: 34px; font-weight: 600; letter-spacing: .2em; margin: 10px 0 4px;
+      color: var(--text); user-select: all; }
+    .pair-code span { margin-right: .5em; }
+    .pair-state { font-size: 13px; color: var(--muted); }
+    .pair-state.good { color: var(--good); }
+    .upd-list { display: grid; gap: 10px; }
+    .upd-item { border: 1px solid var(--line); border-radius: 9px; padding: 10px 14px;
+      background: var(--panel2); min-width: 0; }
+    .upd-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+    .upd-head .nm { font-weight: 600; }
+    .upd-vers { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12.5px; color: var(--muted);
+      margin-top: 6px; }
+    .upd-vers code.mono { font-size: 12px; }
+    .upd-how { font-size: 13px; margin-top: 8px; }
+    .upd-why { font-size: 13px; margin-top: 8px; color: var(--muted); }
+    .upd-act { margin-top: 8px; }
+    .upd-item details { margin-top: 8px; }
+    .upd-item summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+    .upd-changes { list-style: none; margin: 6px 0 0; padding: 0; }
+    .upd-changes li { display: flex; gap: 12px; justify-content: space-between; padding: 5px 0;
+      border-top: 1px solid var(--line); font-size: 13px; }
+    .upd-changes li .d { color: var(--muted); font-size: 12px; white-space: nowrap; flex: none; }
+    .upd-changes li .s { min-width: 0; overflow-wrap: anywhere; }
+    @media (max-width: 560px) { .pair-code { font-size: 28px; } .upd-changes li { flex-direction: column; gap: 0; } }
+    #ovAttention li.upd-note .t1 b { color: var(--accent); }
     .perm-edit { display: flex; flex-direction: column; gap: 8px; }
     .perm-edit label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
     .perm-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -1869,6 +1903,7 @@
         <h2>Install games</h2>
         <p class="hint" id="deployWhy"></p>
       </div>
+      <div class="panel upd-panel" id="updDeploy" hidden></div>
       <div class="panel" id="deployPanel" hidden>
         <h2>Games this server can run</h2>
         <p class="hint">The deployer (a separate service, the only one that touches Docker) installs,
@@ -1902,6 +1937,52 @@
     </section>
 
     <section id="tab-modules" class="tab">
+      <!-- Games stored in the panel (adminpair.py): added by hand, or paired by their setup program. -->
+      <div class="panel" id="addedPanel">
+        <h2>Games added here</h2>
+        <p class="hint">A game server with an OpenLobby admin port can be added by hand, with its
+          admin address and token, or by its own setup program with a one-time code. The panel keeps
+          the token and never shows it again.</p>
+        <div class="toolbar">
+          <button class="act sm" id="gaOpen">Add a game</button>
+          <button class="ghost sm" id="pairOpen">Pair with a setup program</button>
+        </div>
+        <div class="ga-box" id="gaForm" hidden>
+          <h3 id="gaTitle">Add a game</h3>
+          <div class="row">
+            <div style="flex:0 1 150px"><label for="gaKey">Key</label>
+              <input type="text" id="gaKey" class="mono" maxlength="16" autocomplete="off" spellcheck="false" placeholder="kart"></div>
+            <div style="flex:2 1 240px"><label for="gaUrl">Admin address</label>
+              <input type="text" id="gaUrl" class="mono" maxlength="300" autocomplete="off" spellcheck="false" placeholder="http://kart:8820"></div>
+            <div style="flex:2 1 200px"><label for="gaToken">Token</label>
+              <input type="password" id="gaToken" class="mono" maxlength="512" autocomplete="new-password" spellcheck="false"></div>
+          </div>
+          <div class="hint">The key is the one the game's module.json gives: 1 to 16 lower-case letters
+            and digits. The address is where its admin port answers, as seen from this panel.</div>
+          <div class="ga-result" id="gaResult" hidden></div>
+          <div class="toolbar" style="margin-top:12px">
+            <button class="ghost sm" id="gaTest">Test</button>
+            <button class="act sm" id="gaSave">Save</button>
+            <button class="ghost sm" id="gaCancel">Cancel</button>
+          </div>
+        </div>
+        <div class="ga-box" id="pairBox" hidden>
+          <h3>Pair with a setup program</h3>
+          <p class="hint" style="margin-top:0">Run the game's setup program on this machine and type
+            this code when it asks for one. It finds the panel by itself.</p>
+          <div class="pair-code mono" id="pairCode" aria-live="polite"></div>
+          <div class="pair-state" id="pairState"></div>
+          <div class="toolbar" style="margin-top:12px">
+            <button class="ghost sm" id="pairNew">New code</button>
+            <button class="ghost sm" id="pairClose">Close</button>
+          </div>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>Admin address</th>
+          <th>Added</th><th>Token</th><th></th></tr></thead>
+          <tbody id="addedBody"></tbody></table></div>
+      </div>
+      <!-- Update notices when there is no deployer (the Install games tab is hidden then). -->
+      <div class="panel upd-panel" id="updModules" hidden></div>
       <div class="panel">
         <h2>Game modules</h2>
         <p class="hint">Each game is a module: a file in <span class="mono">services/adminmodules</span>,
@@ -1909,7 +1990,7 @@
           that describes itself (docs/admin-modules.md). <span class="mono">POL_ADMIN_MODULES</span>
           picks which ones show.</p>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>Key</th><th>From</th>
-          <th>Shown</th><th>Tools</th><th>Live status</th></tr></thead>
+          <th>Address set in</th><th>Shown</th><th>Tools</th><th>Live status</th></tr></thead>
           <tbody id="modulesBody"></tbody></table></div>
       </div>
       <div class="panel" id="modulesProblems" hidden>

@@ -71,6 +71,7 @@ so a server can run without a compiler or a build step:
 
 ```
 cp .env.example .env
+docker network inspect openlobby >/dev/null 2>&1 || docker network create openlobby
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
 ```

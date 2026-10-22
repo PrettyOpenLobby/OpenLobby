@@ -150,6 +150,7 @@ SUITES = [
     ("polcore_blobs", [sys.executable, "test_polcore_blobs.py"], TESTS, {}),
     ("live_markers",  [sys.executable, "test_live_markers.py"], TESTS, {}),
     ("dns_names",     [sys.executable, "test_dns_names.py"], TESTS, {}),
+    ("http_hosts",    [sys.executable, "test_http_hosts.py"], TESTS, {}),
     # The importer that moves an old /data tree (the SQLite files and
     # resources/) into PostgreSQL, run against a fixture the pre-PostgreSQL
     # account code writes itself (taken from git).
@@ -389,6 +390,8 @@ SUITES = [
     ("admin_corelite", [sys.executable, "admin_corelite_test.py"], TOOLS, {}),
     # People: one human across PlayOnline and the games (links, merges, notes, permissions).
     ("admin_people",  [sys.executable, "admin_people_test.py"], TOOLS, {}),
+    # Games added by hand in Settings > Modules, and paired through their setup program.
+    ("admin_pair",    [sys.executable, "admin_pair_test.py"], TOOLS, {}),
     # Self-host tools: the setup checker, the games launcher and its catalog,
     # and the patch publisher's revert guard.
     ("doctor",        [sys.executable, "doctor_test.py"], TOOLS, {}),

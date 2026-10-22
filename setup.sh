@@ -748,6 +748,13 @@ fi
 
 step "Starting the stack"
 cd "$CHECKOUT" 2>/dev/null || { [ -n "$DRY" ] || die "cannot enter $CHECKOUT"; }
+# The network every install on this machine shares (docs/installs.md); the admin panel
+# joins it, so it must exist before compose starts anything.
+if ! docker network inspect openlobby >/dev/null 2>&1; then
+    # another install may have made it in between; only a network still missing is an error
+    run docker network create openlobby || docker network inspect openlobby >/dev/null 2>&1 \
+        || die "could not create the Docker network openlobby"
+fi
 local HAVE_PY=""
 command -v python3 >/dev/null 2>&1 && HAVE_PY=1
 local GAMES=""

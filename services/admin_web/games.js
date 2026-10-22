@@ -414,7 +414,14 @@ function renderOverviewGames() {
 const ORIGIN = { "built-in": "OpenLobby", file: "this server's modules folder",
                  game: "the game itself", legacy: "POL_ADMIN_GAMES_EXTRA" };
 
+const PORT_FROM = { env: "the environment", stored: "this panel" };
+let ADDED = [];
+
 async function loadModules() {
+  // no deployer: the update notices live here, since the Install games tab is hidden
+  if (!DEPLOY) await probeDeploy();
+  if (!(DEPLOY && DEPLOY.available)) loadUpdates(false);
+  else $("#updModules").hidden = true;
   let r;
   try { r = await api("/api/modules?fresh=1"); } catch (e) { toast(e.message, true); return; }
   const live = Object.fromEntries((r.modules || []).map((m) => [m.key, m.live]));
@@ -428,13 +435,290 @@ async function loadModules() {
     const tools = m.tools ? m.tools + (m.has_tools ? "" : " (port not set up)") : "none";
     return `<tr><td class="strong">${m.shown ? `<a href="#games/${esc(m.key)}">${esc(m.title)}</a>` : esc(m.title)}</td>`
       + `<td class="mono">${esc(m.key)}</td><td>${esc(ORIGIN[m.origin] || m.origin)}</td>`
+      + `<td>${esc(PORT_FROM[m.port] || "-")}</td>`
       + `<td>${m.shown ? "yes" : "no"}</td><td>${esc(tools)}${m.actions ? `, ${m.actions} action${m.actions === 1 ? "" : "s"}` : ""}</td>`
       + `<td class="${st && st.error ? "bad" : "muted"}">${esc(liveText)}</td></tr>`;
-  }).join("") || `<tr><td colspan="6" class="muted">No modules found.</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">No modules found.</td></tr>`;
   const probs = r.problems || [];
   $("#modulesProblems").hidden = !probs.length;
   $("#modulesProblemList").innerHTML = probs.map((p) => `<li>${esc(p)}</li>`).join("");
+  ADDED = r.added || [];
+  renderAdded();
 }
+
+// ---- Settings > Modules: games added here, by hand or by their setup program (adminpair.py) ----
+function renderAdded() {
+  $("#addedBody").innerHTML = ADDED.map((g) => {
+    const how = g.how === "paired" && g.paired ? "Paired by its setup program" : "Added by hand";
+    const when = g.added_at ? ago(g.added_at * 1000) : "";
+    return `<tr><td class="strong">${esc(g.title)}<div class="muted mono">${esc(g.key)}</div></td>`
+      + `<td><span class="mono">${esc(g.url)}</span>`
+      + `${g.env ? `<div class="patch-why">The environment also sets POL_ADMIN_GAME_${esc(g.key.toUpperCase())}_URL, and it wins.</div>` : ""}</td>`
+      + `<td>${esc(how)}<div class="muted">${esc([g.added_by, when].filter(Boolean).join(", "))}</div></td>`
+      + `<td>${g.token_set ? "set" : '<span class="muted">none</span>'}</td>`
+      + `<td><div class="deploy-acts"><button class="ghost sm" data-ga-edit="${esc(g.key)}">Change</button>`
+      + `${g.paired ? `<button class="ghost sm" data-ga-unpair="${esc(g.key)}">Unpair</button>` : ""}`
+      + `<button class="danger sm" data-ga-remove="${esc(g.key)}">Remove</button></div></td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">None yet. Games set up in the environment are listed below.</td></tr>`;
+}
+
+let GA_EDIT = null;   // the key being changed, or null for a new game
+
+function gaOpen(key) {
+  const g = key ? ADDED.find((x) => x.key === key) : null;
+  GA_EDIT = g ? g.key : null;
+  $("#pairBox").hidden = true;
+  stopPairPoll();
+  $("#gaForm").hidden = false;
+  $("#gaTitle").textContent = g ? `Change ${g.title}` : "Add a game";
+  $("#gaKey").value = g ? g.key : "";
+  $("#gaKey").readOnly = !!g;
+  $("#gaUrl").value = g ? g.url : "";
+  $("#gaToken").value = "";
+  $("#gaToken").placeholder = g && g.token_set ? "set: leave empty to keep it" : "";
+  $("#gaResult").hidden = true;
+  (g ? $("#gaUrl") : $("#gaKey")).focus();
+}
+
+function gaBody() {
+  return { key: $("#gaKey").value.trim(), url: $("#gaUrl").value.trim(), token: $("#gaToken").value };
+}
+
+function gaShow(ok, html) {
+  const box = $("#gaResult");
+  box.hidden = false;
+  box.classList.toggle("bad", !ok);
+  box.innerHTML = html;
+}
+
+async function gaTest() {
+  const b = gaBody();
+  $("#gaTest").disabled = true;
+  try {
+    const r = await api("/api/modules/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) });
+    const g = r.game || {};
+    const list = (xs) => xs.length ? xs.map((x) => esc(x.label)).join(", ") : "none";
+    gaShow(true, `<b>${esc(g.title)}</b> answered${g.platform ? ` (${esc(g.platform)})` : ""}.`
+      + `<span class="muted">Pages: ${list(g.tools || [])}</span>`
+      + `<span class="muted">Actions: ${list(g.actions || [])}</span>`);
+  } catch (e) {
+    gaShow(false, esc(e.message));
+  } finally {
+    $("#gaTest").disabled = false;
+  }
+}
+
+async function gaSave() {
+  const b = gaBody();
+  $("#gaSave").disabled = true;
+  try {
+    const r = await api("/api/modules/game", { method: "POST", headers: { "Content-Type": "application/json" },
+                                               body: JSON.stringify(Object.assign({ action: "save" }, b)) });
+    toast(r.added ? `${r.title} added` : `${r.title} saved`);
+    $("#gaForm").hidden = true;
+    loadModules();
+  } catch (e) {
+    gaShow(false, esc(e.message));
+  } finally {
+    $("#gaSave").disabled = false;
+  }
+}
+
+async function gaAct(action, key) {
+  const g = ADDED.find((x) => x.key === key) || { title: key };
+  const sure = action === "remove"
+    ? confirm(`Remove ${g.title} from the panel?\n\nIts pages and actions leave the panel. The game itself keeps running`
+      + (g.paired ? ", and its setup program can no longer change its token here." : "."))
+    : confirm(`Unpair ${g.title}?\n\nIts setup program can no longer tell the panel a new token. The game stays; `
+      + "if its token changes, change it here by hand.");
+  if (!sure) return;
+  try {
+    await api("/api/modules/game", { method: "POST", headers: { "Content-Type": "application/json" },
+                                     body: JSON.stringify({ action, key }) });
+    toast(action === "remove" ? `${g.title} removed` : `${g.title} unpaired`);
+    if (GA_EDIT === key) $("#gaForm").hidden = true;
+    loadModules();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- Pair with a setup program: a one-time code, 10 minutes ----
+let PAIR = null, PAIR_TIMER = null;
+
+function stopPairPoll() { clearInterval(PAIR_TIMER); PAIR_TIMER = null; }
+
+async function pairNew() {
+  $("#gaForm").hidden = true;
+  stopPairPoll();
+  let r;
+  try { r = await api("/api/pair/code", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); }
+  catch (e) { toast(e.message, true); return; }
+  PAIR = { code: r.code, until: Date.now() + (r.ttl || 600) * 1000, polled: 0 };
+  $("#pairBox").hidden = false;
+  $("#pairCode").innerHTML = `<span>${esc(r.code.slice(0, 4))}</span>${esc(r.code.slice(4))}`;
+  $("#pairCode").title = r.code;
+  pairTick();
+  PAIR_TIMER = setInterval(pairTick, 1000);
+}
+
+function pairSay(text, good) {
+  $("#pairState").textContent = text;
+  $("#pairState").classList.toggle("good", !!good);
+}
+
+async function pairTick() {
+  if (!PAIR) return;
+  if (CUR_TAB !== "modules") { stopPairPoll(); return; }
+  const left = Math.max(0, Math.round((PAIR.until - Date.now()) / 1000));
+  if (!left) { pairSay("This code has expired. Make a new one."); $("#pairCode").classList.add("muted"); stopPairPoll(); return; }
+  $("#pairCode").classList.remove("muted");
+  pairSay(`Good for one pairing, for ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} more.`);
+  if (++PAIR.polled % 3) return;          // ask the panel every 3 s whether it was used
+  let s;
+  try { s = await api("/api/pair/code?code=" + encodeURIComponent(PAIR.code)); } catch (e) { return; }
+  if (s.state === "used") {
+    stopPairPoll();
+    pairSay(`Paired with ${s.title}. It is in the list below.`, true);
+    $("#pairCode").classList.add("muted");
+    loadModules();
+  } else if (s.state === "expired") {
+    stopPairPoll();
+    pairSay("This code has expired. Make a new one.");
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (t.closest("#gaOpen")) return gaOpen(null);
+  if (t.closest("#gaCancel")) { $("#gaForm").hidden = true; return; }
+  if (t.closest("#gaTest")) return gaTest();
+  if (t.closest("#gaSave")) return gaSave();
+  if (t.closest("#pairOpen") || t.closest("#pairNew")) return pairNew();
+  if (t.closest("#pairClose")) { stopPairPoll(); PAIR = null; $("#pairBox").hidden = true; return; }
+  const ed = t.closest("[data-ga-edit]");
+  if (ed) return gaOpen(ed.dataset.gaEdit);
+  const rm = t.closest("[data-ga-remove]");
+  if (rm) return gaAct("remove", rm.dataset.gaRemove);
+  const up = t.closest("[data-ga-unpair]");
+  if (up) return gaAct("unpair", up.dataset.gaUnpair);
+});
+
+// ---- Updates: the core and each game (adminupdates.py), owner only ----
+// In Install games when a deployer answers (with its Update buttons), else in Settings > Modules.
+let UPD = null, UPD_TIMER = null;
+const UPD_WORD = { available: ["live", "Update available"], current: ["env", "Up to date"], unknown: ["off", "Unknown"] };
+
+const short12 = (c) => (c ? String(c).slice(0, 12) : "");
+function updDate(iso) {
+  const ms = Date.parse(iso || "");
+  if (isNaN(ms)) return "";
+  return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+// the deployer can update the core and the games it installed
+function updByDeployer(key) {
+  if (!(DEPLOY && DEPLOY.available)) return false;
+  return key === "core" || (DEPLOY.games || []).some((g) => g.key === key && g.installed);
+}
+
+function updItem(it) {
+  const [cls, word] = UPD_WORD[it.update] || UPD_WORD.unknown;
+  const run = it.running || {}, lat = it.latest || {};
+  const behind = typeof it.behind === "number" && it.update === "available"
+    ? `${it.behind} change${it.behind === 1 ? "" : "s"} behind` : "";
+  const vers = [
+    run.commit ? `Running <code class="mono">${esc(short12(run.commit))}</code>${run.built_at ? ` built ${esc(updDate(run.built_at))}` : ""}` : "",
+    lat.commit ? `Newest <code class="mono">${esc(short12(lat.commit))}</code>${lat.date ? ` from ${esc(updDate(lat.date))}` : ""}` : ""]
+    .filter(Boolean).map((s) => `<span>${s}</span>`).join("");
+  let tail = "";
+  if (it.update === "available") {
+    tail = updByDeployer(it.key)
+      ? `<div class="upd-act"><button class="act sm" data-upd-go="${esc(it.key)}">Update</button></div>`
+      : (it.how ? `<div class="upd-how">${esc(it.how)}</div>` : "");
+  } else if (it.update === "unknown" && it.why) {
+    tail = `<div class="upd-why">${esc(it.why)}</div>`;
+  }
+  const ch = it.changes || [];
+  const li = (c) => `<li><span class="s">${esc(c.subject)}</span><span class="d">${esc(updDate(c.date))}</span></li>`;
+  const news = ch.length ? `<details${ch.length <= 3 ? " open" : ""}><summary>What's new (${ch.length})</summary>`
+    + `<ul class="upd-changes">${ch.slice(0, 10).map(li).join("")}</ul>`
+    + (ch.length > 10 ? `<button class="ghost sm" data-upd-all="${esc(it.key)}" style="margin-top:6px">Show all ${ch.length}</button>` : "")
+    + `</details>` : "";
+  return `<div class="upd-item" data-upd="${esc(it.key)}"><div class="upd-head"><span class="nm">${esc(it.name || it.key)}</span>`
+    + `<span class="pill ${cls}">${esc(word)}</span>${behind ? `<span class="muted">${esc(behind)}</span>` : ""}</div>`
+    + `${vers ? `<div class="upd-vers">${vers}</div>` : ""}${tail}${news}</div>`;
+}
+
+function renderUpdates() {
+  const box = DEPLOY && DEPLOY.available ? $("#updDeploy") : $("#updModules");
+  const other = box.id === "updDeploy" ? $("#updModules") : $("#updDeploy");
+  other.hidden = true;
+  const r = UPD || {};
+  const items = r.items || [];
+  box.hidden = false;
+  const when = r.checking ? "checking now..." : (r.checked_at ? "checked " + ago(Date.parse(r.checked_at)) : "");
+  box.innerHTML = `<h2>Updates <span class="h2sub">${esc(when)}</span></h2>`
+    + `<div class="toolbar"><button class="ghost sm" data-upd-check${r.checking ? " disabled" : ""}>Check now</button></div>`
+    + `<div class="upd-list">${items.map(updItem).join("") || '<p class="hint">Nothing reports its version yet.</p>'}</div>`;
+}
+
+async function loadUpdates(refresh) {
+  if (!isOwner()) return;
+  clearTimeout(UPD_TIMER);
+  try { UPD = await api("/api/updates" + (refresh ? "?refresh=1" : "")); }
+  catch (e) { toast(e.message, true); return; }
+  if (CUR_TAB === "deploy" || CUR_TAB === "modules") renderUpdates();
+  // while a check runs, ask again every 3 s
+  if (UPD.checking && ["deploy", "modules", "overview"].includes(CUR_TAB))
+    UPD_TIMER = setTimeout(() => loadUpdates(false), 3000);
+  return UPD;
+}
+
+// Overview: one line when anything has an update, linking to where the list is
+async function loadUpdateNotice() {
+  if (!isOwner()) return;
+  let r;
+  try { r = await api("/api/updates"); } catch (e) { return; }
+  const avail = (r.items || []).filter((it) => it.update === "available");
+  const ul = $("#ovAttention");
+  ul.querySelectorAll(".upd-note").forEach((li) => li.remove());
+  if (!avail.length || CUR_TAB !== "overview") return;
+  if (!DEPLOY) await probeDeploy();
+  const go = DEPLOY && DEPLOY.available ? "deploy" : "modules";
+  ul.querySelectorAll("li.empty").forEach((li) => li.remove());
+  ul.insertAdjacentHTML("afterbegin", `<li class="upd-note" data-go="${go}"><span class="t1"><b>Updates available:</b> `
+    + `${esc(avail.map((it) => it.name || it.key).join(", "))}</span><span class="t2">${go === "deploy" ? "Install games" : "Settings, Modules"}</span></li>`);
+}
+
+document.addEventListener("click", async (e) => {
+  const t = e.target;
+  if (t.closest("[data-upd-check]")) { t.closest("[data-upd-check]").disabled = true; return loadUpdates(true); }
+  const all = t.closest("[data-upd-all]");
+  if (all) {
+    const it = ((UPD || {}).items || []).find((x) => x.key === all.dataset.updAll);
+    if (!it) return;
+    const li = (c) => `<li><span class="s">${esc(c.subject)}</span><span class="d">${esc(updDate(c.date))}</span></li>`;
+    all.previousElementSibling.innerHTML = (it.changes || []).map(li).join("");
+    all.remove();
+    return;
+  }
+  const go = t.closest("[data-upd-go]");
+  if (!go) return;
+  const key = go.dataset.updGo;
+  const it = ((UPD || {}).items || []).find((x) => x.key === key) || { name: key };
+  const name = it.name || key;
+  const sure = key === "core"
+    ? confirm(`Update ${name}?\n\nThe deployer fetches the new version and restarts the core services, this panel among them. `
+      + "The panel goes away for a minute or two and comes back by itself; reload the page if it does not.")
+    : confirm(`Update ${name}?\n\nThe deployer fetches the new version and restarts ${name}. Everyone playing it is disconnected.`);
+  if (!sure) return;
+  try {
+    const r = await api("/api/deploy/action", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ action: "update", game: key }) });
+    toast(`Update ${name}: started`);
+    await probeDeploy(); renderDeploy();
+    followJob(r.job);
+  } catch (err) { toast(err.message, true); }
+});
 
 // ---- Settings > Install games (owner): the deployer (admindeploy.py) ----
 // The deployer runs one job at a time and keeps its jobs, so a panel that was
@@ -586,6 +870,7 @@ async function loadDeploy() {
   renderDeploy();
   loadPatches();
   if (!DEPLOY || !DEPLOY.available) return;
+  loadUpdates(false);
   const live = (DEPLOY.jobs || []).find((j) => !JOB_DONE.has(j.state));
   if (live && live.id !== DEPLOY_JOB) followJob(live.id);
   else if (!live && !DEPLOY_JOB && (DEPLOY.jobs || [])[0]) showJob(DEPLOY.jobs[0].id);

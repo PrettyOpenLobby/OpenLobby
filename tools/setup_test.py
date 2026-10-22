@@ -57,6 +57,7 @@ case "$*" in
     echo "Server: test" ;;
   "info --format "*) echo "Ubuntu 24.04 LTS" ;;
   "volume inspect "*) exit 1 ;;
+  "network inspect "*) exit 1 ;;
   "compose ps "*) printf 'admin running healthy\ndns running healthy\npostgres running healthy\n' ;;
   *"--show-admin"*)
     if [ -f "$STUB_STATE/admin-password" ]; then echo "[admin] user='admin' set 2026-01-01"
@@ -391,9 +392,10 @@ class SetupShTest(unittest.TestCase):
         self.assertIn("POL_DB_PASSWORD=<secret>", out)
         self.assertIn("would run: docker compose pull", out)
         self.assertIn("would run: docker compose --profile deployer up -d deployer", out)
+        self.assertIn("would run: docker network create openlobby", out)
         for c in self.calls():
             if c.startswith("docker "):
-                self.assertRegex(c, r"^docker (--version|compose version|info|volume inspect)", c)
+                self.assertRegex(c, r"^docker (--version|compose version|info|volume inspect|network inspect)", c)
         self.assertFalse([c for c in self.calls() if c.startswith("chmod")])
 
     def test_clone_when_not_in_a_checkout(self):
@@ -456,6 +458,7 @@ function docker {
         'docker compose version' { 'Docker Compose version v2.29.1' }
         'docker info*' { 'ok' }
         'docker volume inspect*' { $global:LASTEXITCODE = 1 }
+        'docker network inspect*' { $global:LASTEXITCODE = 1 }
     }
 }
 function git { $global:StubLog.Add('git ' + ($args -join ' ')); $global:LASTEXITCODE = 0; 'git version 2.45.0' }
@@ -522,6 +525,7 @@ class SetupPs1Test(unittest.TestCase):
         self.assertIn("COMPOSE_FILE=docker-compose.yml;docker-compose.ghcr.yml", out)
         self.assertIn("POL_DB_PASSWORD=<secret>", out)
         self.assertIn("would run: docker compose pull", out)
+        self.assertIn("would run: docker network create openlobby", out)
         self.assertIn("Linux", out)          # the deployer note
         log = out.split("STUBLOG:", 1)[1]
         self.assertNotIn("compose up", log)

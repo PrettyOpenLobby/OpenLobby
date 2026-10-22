@@ -190,9 +190,12 @@ The same setup without the scripts:
    `docs/configuration.md` has the DNS settings for players on a VPN or over
    the internet. Set `POL_DB_PASSWORD` too, before the first start.
 
-3. Start it:
+3. Start it. The admin panel joins the Docker network `openlobby`, which every
+   OpenLobby install on the machine shares ([installs.md](installs.md)); the
+   first line creates it if it is not there yet (the setup scripts do this too):
 
    ```
+   docker network inspect openlobby >/dev/null 2>&1 || docker network create openlobby
    docker compose up -d --build
    ```
 
