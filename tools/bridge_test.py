@@ -597,6 +597,51 @@ else:
     B._save_event_posts(ldb, [p for p in B._event_posts(ldb) if p.get("feed") != "ffxi"])
     announce("111", "role", [{"type": 3, "name": "game", "value": "ffxi"}])
 
+    print("the other games' own events -> channel (gamenews.py)")
+    nights = [[at(2026, 11, d, 12), at(2026, 11, d, 14)] for d in (12, 13, 14)]
+    fmo_events = [
+        {"id": "coi-S01", "title": "Clash of Iron S01: Two-Guns Shootout", "kind": "tournament",
+         "start": nights[0][0], "end": nights[-1][1], "times": nights, "about": "Preliminary nights."},
+        {"id": "event-holy-2026", "title": "Operation Holy Night", "kind": "event",
+         "start": at(2026, 12, 22, 3), "end": at(2026, 12, 28, 3), "about": "Event battles."},
+        {"id": "heavy-1", "title": "Heavy Mobile Weapon Orders", "kind": "arena rule",
+         "start": at(2026, 11, 11, 7), "end": at(2026, 11, 11, 15)},
+    ]
+
+    def fmo_at(t):
+        _kv.default().set_json("fmo:events", {"at": t, "events": fmo_events})
+        return B.scan_game_posts(t)
+
+    announce("111", "role", [{"type": 3, "name": "game", "value": "fmo"},
+                             {"type": 8, "name": "role", "value": "R12"}])
+    k20 = len(net.calls)
+    n = fmo_at(at(2026, 11, 11, 13))
+    posts = reminders(k20)
+    embs = posts[0][2]["embeds"] if posts else []
+    check("the day before the season, one FMO post: the season, not the weekly arena rule",
+          n == 1 and len(posts) == 1
+          and [e["title"] for e in embs] == ["Clash of Iron S01: Two-Guns Shootout starts soon"]
+          and "Front Mission Online" in embs[0]["footer"]["text"],
+          (n, [e.get("title") for e in embs]))
+    check("...pinging the FMO role only",
+          posts and posts[0][2].get("content") == "<@&R12>"
+          and posts[0][2]["allowed_mentions"] == {"parse": [], "roles": ["R12"]})
+    k21 = len(net.calls)
+    check("the next pass does not repeat it", fmo_at(at(2026, 11, 11, 14)) == 0 and not reminders(k21))
+    fmo_at(at(2026, 12, 21, 4))
+    check("Holy Night gets its own post; both FMO posts stay up",
+          len(reminders(k21)) == 1
+          and len([p for p in B._event_posts(ldb) if p.get("feed") == "game:fmo"]) == 2)
+    os.environ["POL_BRIDGE_GAME_NEWS"] = "0"
+    k22 = len(net.calls)
+    check("POL_BRIDGE_GAME_NEWS=0 turns them off",
+          fmo_at(at(2026, 12, 26, 4)) == 0 and not reminders(k22))
+    os.environ.pop("POL_BRIDGE_GAME_NEWS")
+    _kv.default().delete("fmo:events")
+    check("no list from the game, no posts", B.scan_game_posts(at(2026, 12, 26, 4)) == 0)
+    B._save_event_posts(ldb, [p for p in B._event_posts(ldb) if p.get("feed") != "game:fmo"])
+    announce("111", "role", [{"type": 3, "name": "game", "value": "fmo"}])
+
     print("news posts under the game's own name (the channel's webhook)")
     net.hooks = True
     B.GAME_BOTS, B._PROFILES, B._HOOK_REFUSED = {"tetra": "TMBOT"}, {}, {}

@@ -69,6 +69,11 @@ try:
 except ImportError:                                  # pragma: no cover
     ffxinews = None
 
+try:
+    import gamenews             # the other games' own events (each game publishes its list)
+except ImportError:                                  # pragma: no cover
+    gamenews = None
+
 DISCORD_API = polboards.DISCORD_API
 _UA = "DiscordBot (https://playonline.invalid/polbridge, 1) polbridge"
 
@@ -785,6 +790,80 @@ def scan_ffxi_posts(now=None):
         ldb.close()
 
 
+def game_posts_on():
+    return (gamenews is not None
+            and os.environ.get("POL_BRIDGE_GAME_NEWS", "1") != "0")
+
+
+def game_post_payload(post, content, ping_role=None, now=None):
+    """One game event post (gamenews.due) as a channel post, shaped like the FFXI ones."""
+    label = _content_label({"content": content})
+    embeds = [{"title": e["title"], "description": e["description"],
+               "footer": {"text": "%s - event" % label},
+               "color": ANNOUNCE_COLORS["event"]} for e in gamenews.message(post, now)]
+    payload = {"embeds": embeds[:10],
+               "allowed_mentions": {"parse": [],
+                                    "roles": [str(ping_role)] if ping_role else []}}
+    if ping_role:
+        payload["content"] = "<@&%s>" % ping_role
+    return payload
+
+
+def scan_game_posts(now=None):
+    """scan_ffxi_posts for every game in gamenews: each game's current post into every bound
+    announcement channel, once per guild, under that game's bot, pinging its role. Only the
+    newest gamenews.discord_keep() posts of a game stay in a channel. Returns how many went out."""
+    if not game_posts_on():
+        return 0
+    now = time.time() if now is None else now
+    due = []
+    for game in gamenews.games():
+        try:
+            due += [(game, p) for p in gamenews.due(game, now)]
+        except Exception as e:                   # noqa: BLE001
+            log("cannot work out the %s event posts (%r)" % (game, e))
+    if not due:
+        return 0
+    ldb = discordlink.connect()
+    sent = 0
+    posts = _event_posts(ldb)
+    try:
+        for row in discordlink.announce_rows(ldb):
+            roles = None
+            for game, p in due:
+                content = gamenews.GAMES[game][0]
+                name = "game-news:%s:%s" % (row["guild_id"], p["key"])
+                if discordlink.is_notified(ldb, name):
+                    continue
+                if roles is None:
+                    roles = discordlink.announce_roles(ldb, row["guild_id"])
+                st, data, hook = news_post(ldb, row["channel_id"],
+                                           game_post_payload(p, content, roles.get(content), now),
+                                           content)
+                if st not in (200, 201):
+                    log("%s event post %s to channel %s failed (%s %s)"
+                        % (game, p["key"], row["channel_id"], st, str(data)[:160]))
+                    break                        # try again next pass
+                discordlink.mark_notified(ldb, name, now)
+                sent += 1
+                log("%s event post %s posted in channel %s" % (game, p["key"], row["channel_id"]))
+                mid = str((data or {}).get("id") or "")
+                if mid:
+                    posts.append({"guild": row["guild_id"], "channel": row["channel_id"],
+                                  "id": mid, "cup": p["key"], "feed": "game:" + game,
+                                  "hook": hook, "end": p["end"]})
+                mine = [q for q in posts if q.get("feed") == "game:" + game
+                        and q["guild"] == row["guild_id"]]
+                for old in mine[:-gamenews.discord_keep()]:
+                    if _delete_event_post(ldb, old, "more than %d %s event posts"
+                                          % (gamenews.discord_keep(), game)):
+                        posts.remove(old)
+                _save_event_posts(ldb, posts)
+        return sent
+    finally:
+        ldb.close()
+
+
 def _event_posts(ldb):
     try:
         v = json.loads(discordlink.get_meta(ldb, EVENT_POSTS_META, "[]") or "[]")
@@ -854,6 +933,10 @@ def announce_watch():
             scan_ffxi_posts()
         except Exception as e:                   # noqa: BLE001 -- never die
             log("FFXI post error (%r) -- still running" % e)
+        try:
+            scan_game_posts()
+        except Exception as e:                   # noqa: BLE001 -- never die
+            log("game event post error (%r) -- still running" % e)
         try:
             sweep_event_posts()
         except Exception as e:                   # noqa: BLE001 -- never die
