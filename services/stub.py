@@ -366,6 +366,112 @@ def dns_names_cli(args, folder=None):
     return 0
 
 
+#: Hosts other installs on this machine serve through this port 80, one file per game
+#: key (`stub.py http-hosts add <key> <upstream> <host>...`, docs/installs.md). The first
+#: line of a file is its upstream, the rest its hosts.
+HTTP_HOSTS_DIR = os.environ.get("POL_HTTP_HOSTS_DIR", "/data/http.d")
+_HTTP_UPSTREAM = re.compile(r"^http://([a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?):([0-9]{1,5})/?$")
+#: Ours: an install cannot take the PlayOnline names away from this server.
+_HTTP_OWN = ("pol.com", "playonline.com")
+
+
+def _http_upstream(text):
+    """(host, port) of an `http://host:port` upstream, or None."""
+    m = _HTTP_UPSTREAM.match(text.strip().lower())
+    if not m or not 0 < int(m.group(3)) < 65536:
+        return None
+    return m.group(1), int(m.group(3))
+
+
+class HttpHosts:
+    """{host: (upstream host, port)} from HTTP_HOSTS_DIR/<key>.txt, re-read at most every
+    few seconds when a file changed, so a game's setup can add its hosts without a restart."""
+
+    def __init__(self, folder, every=5.0):
+        self.folder, self.every = folder, every
+        self._routes, self._stamp, self._checked = {}, None, 0.0
+        self._lock = threading.Lock()
+
+    def _scan(self):
+        try:
+            files = sorted(f for f in os.listdir(self.folder) if f.endswith(".txt"))
+            return tuple((f, os.path.getmtime(os.path.join(self.folder, f))) for f in files)
+        except OSError:
+            return ()
+
+    def routes(self):
+        with self._lock:
+            now = time.monotonic()
+            if now - self._checked < self.every:
+                return self._routes
+            self._checked = now
+            stamp = self._scan()
+            if stamp != self._stamp:
+                routes = {}
+                for f, _m in stamp:
+                    try:
+                        with open(os.path.join(self.folder, f), encoding="utf-8") as fh:
+                            lines = [ln.strip().lower() for ln in fh if ln.strip()]
+                    except OSError:
+                        continue
+                    up = _http_upstream(lines[0]) if lines else None
+                    if up:
+                        for h in lines[1:]:
+                            if _DNS_HOST.match(h) and not dns_name_listed(h, _HTTP_OWN):
+                                routes.setdefault(h, up)
+                self._routes, self._stamp = routes, stamp
+                log("http", f"added hosts: {len(routes)} from {len(stamp)} install(s)")
+            return self._routes
+
+
+def http_hosts_cli(args, folder=None):
+    """stub.py http-hosts add <key> <upstream> <host>... | remove <key> | list. -> exit code."""
+    folder = folder or HTTP_HOSTS_DIR
+    if not args or args[0] not in ("add", "remove", "list"):
+        print("usage: stub.py http-hosts add <key> http://<host>:<port> <host>... "
+              "| remove <key> | list", file=sys.stderr)
+        return 2
+    if args[0] == "list":
+        for f in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+            if f.endswith(".txt"):
+                with open(os.path.join(folder, f), encoding="utf-8") as fh:
+                    lines = [ln.strip() for ln in fh if ln.strip()]
+                if lines:
+                    print("%s: %s -> %s" % (f[:-4], " ".join(lines[1:]), lines[0]))
+        return 0
+    if len(args) < 2 or not _DNS_KEY.match(args[1]):
+        print("http-hosts: the key is 1 to 16 of a-z and 0-9", file=sys.stderr)
+        return 2
+    path = os.path.join(folder, args[1] + ".txt")
+    if args[0] == "remove":
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        print("removed the hosts of " + args[1])
+        return 0
+    if len(args) < 3 or not _http_upstream(args[2]):
+        print("http-hosts: the upstream is http://<host>:<port>, for example http://kart:8080",
+              file=sys.stderr)
+        return 2
+    hosts = [h.lower().rstrip(".") for h in args[3:]]
+    bad = [h for h in hosts if not _DNS_HOST.match(h)]
+    if not hosts or bad:
+        print("http-hosts: not a host name: " + (" ".join(bad) or "(none given)"), file=sys.stderr)
+        return 2
+    own = [h for h in hosts if dns_name_listed(h, _HTTP_OWN)]
+    if own:
+        print("http-hosts: these are served by OpenLobby itself: " + " ".join(own), file=sys.stderr)
+        return 2
+    os.makedirs(folder, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(args[2].strip().lower().rstrip("/") + "\n" + "\n".join(sorted(set(hosts))) + "\n")
+    os.replace(tmp, path)
+    print("%s: %d host(s) -> %s" % (args[1], len(set(hosts)), args[2]))
+    return 0
+
+
 def dns_refused(query):
     """REFUSED, echoing the question and nothing else. It is never longer than
     the query it answers, so sending it to a forged source amplifies nothing."""
@@ -745,6 +851,10 @@ class StubHandler(BaseHTTPRequestHandler):
                   encoding="utf-8") as f:
             f.write(f"{_stamp()} {self._scheme()}://{host}\n{detail}\n")
 
+        # 00) another install's host (stub.py http-hosts): the whole request is its game's,
+        #     before anything here can answer for it.
+        if self._try_install_host(host, body):
+            return
         # 0) the account servlet. SE's game pages link to
         #    https://userctl.pol.com/pml-cgi-bin/UMENZ001.cgi?kinou_id=NN&...
         #    -- the Content ID and registration-code operations. Those hosts are
@@ -831,6 +941,48 @@ class StubHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    #: set by run_http(); None in a process that never serves
+    install_hosts = None
+
+    def _try_install_host(self, host, body):
+        """Pass a request for a host another install added to its game. True if handled.
+
+        Streamed both ways, since these are patch downloads as often as pages."""
+        routes = self.install_hosts.routes() if self.install_hosts else {}
+        host_only = host.split(":", 1)[0].lower().rstrip(".")
+        up = routes.get(host_only)
+        if not up:
+            return False
+        target, port = up
+        req = f"{self.command} {self.path} HTTP/1.1\r\n"
+        skip = ("connection", "keep-alive", "transfer-encoding", "x-forwarded-for")
+        for k, v in self.headers.items():
+            if k.lower() in skip:
+                continue
+            req += f"{k}: {v}\r\n"
+        req += f"X-Forwarded-For: {self.client_address[0]}\r\nConnection: close\r\n\r\n"
+        sent = 0
+        try:
+            with socket.create_connection((target, port), timeout=15) as up_sock:
+                up_sock.sendall(req.encode("latin-1", "replace") + body)
+                while True:
+                    d = up_sock.recv(65536)
+                    if not d:
+                        break
+                    self.wfile.write(d)
+                    sent += len(d)
+        except OSError as exc:
+            log("http", f"  {host_only} -> {target}:{port} FAILED after {sent} bytes: {exc}")
+            if not sent:
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            self.close_connection = True
+            return True
+        log("http", f"  {host_only}{self.path.split('?')[0]} -> {target}:{port} ({sent} bytes)")
+        self.close_connection = True
+        return True
 
     @staticmethod
     def _relay_rules():
@@ -1186,6 +1338,7 @@ def _make_cert():
 
 
 def run_http():
+    StubHandler.install_hosts = HttpHosts(HTTP_HOSTS_DIR)
     cfg = load_config()
     listen = cfg.get("listen", {})
     # content-mirror config: forward+archive listed hosts we have no file for.
@@ -1839,8 +1992,10 @@ def main():
         run_tcp()
     elif mode == "dns-names":
         raise SystemExit(dns_names_cli(sys.argv[2:]))
+    elif mode == "http-hosts":
+        raise SystemExit(http_hosts_cli(sys.argv[2:]))
     else:
-        raise SystemExit("usage: stub.py {dns|http|tcp|dns-names}")
+        raise SystemExit("usage: stub.py {dns|http|tcp|dns-names|http-hosts}")
 
 
 if __name__ == "__main__":
