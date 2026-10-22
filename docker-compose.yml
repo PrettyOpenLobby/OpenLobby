@@ -426,7 +426,11 @@ services:
   # (never created when missing). Unset, the deployer's own source folder
   # stands in at a placeholder path so the container still starts, and
   # browsing is off. Uploaded archives are kept in the pol-deployer volume,
-  # up to POL_DEPLOY_UPLOAD_MAX unpacked.
+  # up to POL_DEPLOY_UPLOAD_MAX unpacked. The patch actions write bundles
+  # into the folder the patch service serves: the bind below names it with
+  # the same ${POL_MIRRORS:-./mirrors} as that service, so both always mean
+  # one host folder, and it is created when missing just as the patch
+  # service's own mount creates it.
   deployer:
     profiles: ["deployer"]
     build: ./services/deployer
@@ -441,6 +445,7 @@ services:
       POL_DEPLOY_GHCR: "${POL_DEPLOY_GHCR:-}"
       POL_DEPLOY_CLIENTS: "${POL_DEPLOY_CLIENTS:-}"
       POL_DEPLOY_UPLOAD_MAX: "${POL_DEPLOY_UPLOAD_MAX:-8G}"
+      POL_DEPLOY_MIRRORS: /mirrors
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - type: bind
@@ -454,6 +459,11 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: "${POL_MIRRORS:-./mirrors}"
+        target: /mirrors
+        bind:
+          create_host_path: true
       - pol-deployer:/deployer
     healthcheck:
       test: ["CMD", "python", "/app/deployer.py", "--healthcheck"]
