@@ -900,6 +900,29 @@
     .gx-act label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
     .gx-act button { align-self: flex-start; }
     .gx-act input[type=text] { background: var(--bg); width: 100%; }
+    /* the player picker (picker.js) */
+    .pk { position: relative; width: 100%; min-width: 0; color: var(--text); font-size: 14px; }
+    .pk .pk-q { width: 100%; padding-right: 34px; }
+    .pk.picked .pk-q { border-color: var(--accent); }
+    .pk .pk-x { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+      align-self: auto; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; }
+    .pk .pk-x:hover, .pk .pk-x:focus-visible { background: var(--hover); color: var(--text); }
+    .pk-list { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30;
+      max-height: 280px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line);
+      border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.28); padding: 4px; }
+    .pk-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px;
+      cursor: pointer; }
+    .pk-row.on, .pk-row:hover { background: var(--panel2); }
+    .pk-row.on { box-shadow: inset 2px 0 0 var(--accent); }
+    .pk-who { display: grid; min-width: 0; }
+    .pk-who b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pk-det { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pk-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; }
+    .pk-dot.on { background: var(--good); }
+    .pk-dot.off { border: 1.5px solid var(--muted); }
+    .pk-note { padding: 8px 10px; color: var(--muted); }
+    .pk-note.bad { color: var(--bad); }
     .gx > * { min-width: 0; }
     .gx-frame { width: 100%; height: calc(100vh - 230px); min-height: 480px; display: block;
       border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
@@ -1266,9 +1289,8 @@
         <h2>Grant content to an account</h2>
         <p class="hint">Adds titles to an account directly, without a registration code.</p>
         <div class="row">
-          <div style="flex:1"><label>PlayOnline ID</label>
-            <input type="text" id="grantPol" placeholder="AB-1234567" list="polidList">
-            <datalist id="polidList"></datalist></div>
+          <div style="flex:1"><label for="grantPolQ">Account</label>
+            <span id="grantPol"></span></div>
         </div>
         <label>Content <span class="hint" style="display:inline">(pick any number)</span></label>
         <div class="chips" id="grantChips"></div>
@@ -2177,6 +2199,7 @@
   <script src="/static/pml.js"></script>
   <script src="/static/pmlexpr.js"></script>
   <script src="/static/pmlrt.js"></script>
+  <script src="/static/picker.js"></script>
   <script src="/static/games.js"></script>
   <script src="/static/calendar.js"></script>
   <script src="/static/helpdesk.js"></script>

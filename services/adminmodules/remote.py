@@ -17,6 +17,9 @@ tool proxy (X-Devtool-Token, X-Devtool-Actor).
                                          shape (adminmodules.sources, top)
     POST <url>/openlobby/actions/<id>    JSON of the action's fields
                                          -> {"ok": true|false, "msg": "..."}
+    GET  <url>/openlobby/players.json?q=&limit=   with "players": true in module.json:
+        {"players": [{"id", "label", "detail", "online"}]} for the player picker (a field
+        of "type": "player" gets the chosen "id")
 
 `key` must equal the <KEY> the panel was given. An action of kind "announce"
 is used by the maintenance warning, "kick" by an account's Kick. Ids follow
@@ -150,6 +153,12 @@ def _player(m, who):
     return doc if isinstance(doc, dict) else None
 
 
+def _players(m, q, limit):
+    url, token = m.tool_port()
+    doc = _get(url, token, PREFIX + "players.json?" + urllib.parse.urlencode({"q": q, "limit": int(limit)}))
+    return [p for p in (doc.get("players") if isinstance(doc, dict) else None) or [] if isinstance(p, dict)]
+
+
 def build(key, url, token):
     """A Module for the game at `url`. Raises OSError/ValueError when the game
     does not answer or its description does not fit."""
@@ -196,5 +205,7 @@ def build(key, url, token):
         m.help = HELP
     if doc.get("player"):
         m.player = _player
+    if doc.get("players"):
+        m.players = _players
     m.remote = True
     return m

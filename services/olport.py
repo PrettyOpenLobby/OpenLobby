@@ -12,6 +12,7 @@ file is the game side: a small HTTP server, standard library only (Python
                                     POST help/reply and help/close)
     GET  /openlobby/player.json     what the game knows of one account (optional;
                                     ?polid=&handles=&members=)
+    GET  /openlobby/players.json    find players by name or id (optional; ?q=&limit=)
     POST /openlobby/actions/<id>    run one action
 
 and, if the game has them, its own tool pages under any other path.
@@ -54,6 +55,11 @@ The account window asks every game about one player with @port.player: fn(who) g
 (links: logins on this game's server the account's members have proved are theirs, the reliable
 way to find a player who signs in to the game with its own login) and returns {"characters": [{"name", "detail",
 "online", "facts": [{"label", "value"}]}], "note"}, or None for a player the game never saw.
+
+The panel's player picker (an action field of "type": "player", and the account boxes) asks
+@port.players: fn(q, limit) gets the typed text (maybe empty) and 1-50, and returns
+[{"id", "label", "detail", "online": True, False or None}], best first: a case-insensitive
+match on name or id, players online now before the rest. "id" is what the action field gets.
 
 An action gets the posted fields (strings) and the name of the panel user who
 asked, and returns (ok, message). One that raises answers {"ok": false} with
@@ -108,6 +114,7 @@ class AdminPort:
         self._calendar = None
         self._help = None
         self._player = None
+        self._players = None
         self._actions = {}          # id -> (meta, fn)
         self._tools = []            # (meta, fn), in order
         self._srv = None
@@ -130,6 +137,11 @@ class AdminPort:
     def player(self, fn):
         """Decorator: `fn(who)` -> what the game knows of one account, or None."""
         self._player = fn
+        return fn
+
+    def players(self, fn):
+        """Decorator: `fn(q, limit)` -> [{"id", "label", "detail", "online"}] for the picker."""
+        self._players = fn
         return fn
 
     def action(self, id, label, kind="", fields=(), about="", danger=False):
@@ -160,6 +172,7 @@ class AdminPort:
                 "content_ids": self.content_ids, "services": self.services,
                 "calendar": self._calendar is not None,
                 "help": self._help is not None, "player": self._player is not None,
+                "players": self._players is not None,
                 "tools": [m for m, _fn in self._tools],
                 "actions": [m for m, _fn in self._actions.values()]}
 
@@ -270,6 +283,18 @@ class AdminPort:
                         return self._send(200, port._player(who) or {})
                     except Exception as exc:            # noqa: BLE001
                         return self._send(500, {"error": "player failed: %s" % exc.__class__.__name__})
+                if path == PREFIX + "players.json" and method == "GET" and port._players is not None:
+                    try:
+                        limit = int(q.get("limit") or "20")
+                    except ValueError:
+                        limit = 0
+                    if not 1 <= limit <= 50:
+                        return self._send(400, {"error": "limit is 1 to 50"})
+                    try:
+                        got = list(port._players(unquote(q.get("q", "")), limit) or [])[:limit]
+                    except Exception as exc:            # noqa: BLE001
+                        return self._send(500, {"error": "players failed: %s" % exc.__class__.__name__})
+                    return self._send(200, {"players": got})
                 if path.startswith(PREFIX + "actions/") and method == "POST":
                     hit = port._actions.get(path[len(PREFIX + "actions/"):])
                     if hit is None:

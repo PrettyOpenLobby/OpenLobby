@@ -141,7 +141,7 @@ class Module:
     def __init__(self, key, title, short="", platform="", kind="game",
                  tools=(), services=None, live=None, actions=(), content_ids=(),
                  about="", markers=(), present=None, self_described=False, calendar=None,
-                 help=None, player=None):
+                 help=None, player=None, players=None):
         self.key, self.title, self.short = key, title, short or title
         self.platform, self.kind, self.about = platform, kind, about
         self.tools = list(tools)
@@ -153,6 +153,9 @@ class Module:
         self.help = help
         #: fn(module, who) -> what the game knows of one PlayOnline account (adminplayers.py)
         self.player = player
+        #: fn(module, q, limit) -> [{"id", "label", "detail", "online"}]: the player picker
+        #: (an action field of type "player"); see find_players()
+        self.players = players
         self.actions = list(actions)
         self.content_ids = list(content_ids)
         #: live-session markers (live_sessions.py) that mean this game runs here
@@ -241,6 +244,7 @@ class Module:
                           "ports": {str(k): v for k, v in s.ports.items()}}
                          for s in (self.services or [])],
             "has_tools": bool(self.tool_port()),
+            "players": self.players is not None,
             "content_ids": self.content_ids,
         }
 
@@ -357,6 +361,7 @@ def _remotes(out):
             mod.calendar = mod.calendar or file_mod.calendar
             mod.help = mod.help or file_mod.help
             mod.player = mod.player or file_mod.player
+            mod.players = mod.players or file_mod.players
         _accept(mod, "the game at %s" % url, out, "game")
 
 
@@ -471,6 +476,33 @@ def can_see(key, can):
     if not m:
         return False
     return any(can(p) for p in m.perms()) or any(can(t.perm) for t in m.tools if t.perm)
+
+
+PLAYERS_MAX = 50
+
+
+def find_players(key, q, limit=20):
+    """The game's player search for the picker, cleaned: at most `limit` (1-50) rows of
+    {"id", "label", "detail", "online": True/False/None}, strings trimmed. Raises
+    LookupError when the game has no search; whatever the game raises otherwise."""
+    m = enabled().get(key)
+    if m is None or m.players is None:
+        raise LookupError("no player search")
+    limit = max(1, min(PLAYERS_MAX, int(limit)))
+    out = []
+    for r in m.players(m, " ".join(str(q or "").split())[:64], limit) or []:
+        if not isinstance(r, dict):
+            continue
+        pid = str(r.get("id") if r.get("id") is not None else "").strip()[:64]
+        if not pid:
+            continue
+        online = r.get("online")
+        out.append({"id": pid, "label": " ".join(str(r.get("label") or pid).split())[:80],
+                    "detail": " ".join(str(r.get("detail") or "").split())[:120],
+                    "online": online if isinstance(online, bool) else None})
+        if len(out) >= limit:
+            break
+    return out
 
 
 def listing(can):

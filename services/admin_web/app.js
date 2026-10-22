@@ -621,8 +621,6 @@ async function loadAccounts() {
     const rows = await api("/api/accounts");
     if (rows.error) { toast(rows.error, true); return; }
     ACCOUNTS = rows;
-    // Fill the ID picker on the grant form from the same fetch.
-    $("#polidList").innerHTML = rows.map((r) => `<option value="${esc(r.polid)}">`).join("");
     renderAccounts();
   } catch (e) { toast(e.message, true); }
 }
@@ -895,7 +893,7 @@ $("#infoGo").onclick = async () => {
 // "Content" on a row: aim the grant form at that account and tick what it
 // already owns, so the operator sees the current state before changing it.
 function prefillGrant(r) {
-  $("#grantPol").value = r.polid;
+  GRANT_PK.set(r.polid, r.handle ? `${r.handle} (${r.polid})` : r.polid);
   const owned = new Set((r.contents || []).map(String));
   grantChecks().forEach((c) => { c.checked = owned.has(c.value); });
   const p = $("#grantPanel");
@@ -2046,8 +2044,16 @@ function grantChecks() {
 $("#grantAllBtn").onclick = () => grantChecks().forEach((c) => { c.checked = true; });
 $("#grantNoneBtn").onclick = () => grantChecks().forEach((c) => { c.checked = false; });
 
+// The account to grant to: found by PlayOnline ID or handle (/api/accounts/find).
+const findAccounts = (q, limit) =>
+  api(`/api/accounts/find?q=${encodeURIComponent(q)}&limit=${limit}`).then((r) => r.players || []);
+const GRANT_PK = makePicker({ id: "grantPolQ", placeholder: "Search by handle or PlayOnline ID",
+                              search: findAccounts });
+if ($("#grantPol")) $("#grantPol").replaceWith(GRANT_PK.el);
+GRANT_PK.el.id = "grantPol";
+
 $("#grantBtn").onclick = async () => {
-  const polid = $("#grantPol").value.trim();
+  const polid = GRANT_PK.value();
   const codes = grantChecks().filter((c) => c.checked).map((c) => +c.value);
   if (!polid) return toast("Which account?", true);
   if (!codes.length) return toast("Pick at least one content", true);
@@ -2068,7 +2074,7 @@ $("#grantBtn").onclick = async () => {
 };
 
 $("#revokeBtn").onclick = async () => {
-  const polid = $("#grantPol").value.trim();
+  const polid = GRANT_PK.value();
   const codes = grantChecks().filter((c) => c.checked).map((c) => +c.value);
   if (!polid) return toast("Which account?", true);
   if (!codes.length) return toast("Pick at least one content to revoke", true);

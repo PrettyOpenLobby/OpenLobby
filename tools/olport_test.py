@@ -66,6 +66,20 @@ def kick(params, actor):
     raise RuntimeError("secret detail that must not leak")
 
 
+RACERS = [("17", "Arden", True), ("4", "Ardley", False), ("9", "Mira", True), ("31", "Tobin", None)]
+ASKED = []
+
+
+@port.players
+def players(q, limit):
+    ASKED.append((q, limit))
+    if q == "boom":
+        raise KeyError("secret detail that must not leak")
+    hits = [r for r in RACERS if q.lower() in r[1].lower() or q == r[0]]
+    hits.sort(key=lambda r: r[2] is not True)
+    return [{"id": i, "label": n, "detail": "Class A", "online": on} for i, n, on in hits]
+
+
 @port.tool("laps", "Lap times", "laps")
 def laps(method, sub, query, body, actor):
     return 200, "text/html; charset=utf-8", ("<p>%s %s</p>" % (method, sub)).encode()
@@ -94,6 +108,24 @@ chk("a failing action says what kind of failure, not its text",
     json.loads(get("/openlobby/actions/kick", body={})[1]), {"ok": False, "msg": "failed: RuntimeError"})
 chk("a tool page", get("/laps/edit")[1], b"<p>GET laps/edit</p>")
 chk("an unknown action", get("/openlobby/actions/nope", body={})[0], 404)
+chk("module.json says it has a player search", json.loads(get("/openlobby/module.json")[1])["players"], True)
+st, body = get("/openlobby/players.json?q=ard&limit=5")
+chk("players.json: the matches, online first",
+    (st, [(p["id"], p["online"]) for p in json.loads(body)["players"]], ASKED[-1]),
+    (200, [("17", True), ("4", False)], ("ard", 5)))
+st, body = get("/openlobby/players.json")
+chk("no q and no limit: everyone the game answers, limit 20", (st, len(json.loads(body)["players"]), ASKED[-1]),
+    (200, 4, ("", 20)))
+chk("the limit cuts the answer", len(json.loads(get("/openlobby/players.json?limit=1")[1])["players"]), 1)
+chk("q is url-decoded", (get("/openlobby/players.json?q=Mi%72a")[0], ASKED[-1]), (200, ("Mira", 20)))
+n = len(ASKED)
+chk("a bad limit is 400 and never reaches the game",
+    ([get("/openlobby/players.json?limit=" + x)[0] for x in ("0", "51", "x", "-1")], len(ASKED) - n),
+    ([400, 400, 400, 400], 0))
+st, body = get("/openlobby/players.json?q=boom")
+chk("a failing search says what kind of failure, not its text",
+    (st, json.loads(body), b"secret" in body), (500, {"error": "players failed: KeyError"}, False))
+chk("players.json needs the token", get("/openlobby/players.json", token="nope")[0], 403)
 
 print("the panel, given the URL and the token")
 os.environ["POL_ADMIN_GAME_KART_URL"] = url
@@ -114,6 +146,13 @@ chk("who is playing", (live["online"], [p["name"] for p in live["players"]], liv
 ok, msg = kart.action("announce").run(kart, {"text": "Back at 10:00"}, "lex")
 chk("the panel's announce runs the game's banner, with the panel user's name",
     (ok, msg, SAID), (True, "Shown in every lobby.", [("Back at 10:00", "lex")]))
+chk("the remote module has the player search and says so",
+    (kart.players is not None, kart.describe()["players"]), (True, True))
+chk("the panel's find_players asks the game and cleans the rows",
+    (M.find_players("kart", " ard ", 50), ASKED[-1]),
+    ([{"id": "17", "label": "Arden", "detail": "Class A", "online": True},
+      {"id": "4", "label": "Ardley", "detail": "Class A", "online": False}], ("ard", 50)))
+chk("...and keeps an unknown online as None", M.find_players("kart", "tob", 3)[0]["online"], None)
 chk("the panel's kick reaches the game and reports its failure",
     kart.action("kick").run(kart, {"polid": "ABCD1234", "handles": "Arden"}, "lex"),
     (False, "failed: RuntimeError"))

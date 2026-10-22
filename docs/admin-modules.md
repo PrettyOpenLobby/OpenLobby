@@ -43,8 +43,11 @@ should refuse a request without the right token.
     {"id": "banner", "label": "Banner message", "kind": "announce",
      "fields": [{"id": "text", "label": "Message", "type": "text"}]},
     {"id": "kick", "label": "Kick a player", "kind": "kick", "danger": true,
-     "fields": [{"id": "handles", "label": "Handle", "type": "text"}]}
+     "fields": [{"id": "handles", "label": "Handle", "type": "text"}]},
+    {"id": "mute", "label": "Mute a racer", "danger": true,
+     "fields": [{"id": "racer", "label": "Racer", "type": "player"}]}
   ],
+  "players": true,
   "services": [
     {"name": "Kart Club", "containers": ["kart-game-1"], "ports": {"7000": "game"},
      "warning": "Everyone in a race is disconnected."}
@@ -60,6 +63,12 @@ so a tool owns its path and everything under it (`laps`, `laps.json`,
 
 Each tool and each action is a separate moderator permission, so an owner can
 let a moderator post banners without letting them kick.
+
+A field's `type` is `text` (the default) or `player`. A `player` field is a
+search box: the moderator types part of a name or id and picks from a list, and
+the panel sends the picked player's `id` as the field's value. It needs
+`"players": true` and the players search below; a game without it gets a plain
+text box.
 
 Action kinds the panel looks for:
 
@@ -107,6 +116,23 @@ you answer here, to anyone with the game's permission.
 A game that does not answer within a few seconds is named on the Calendar and
 the rest still shows.
 
+### GET /openlobby/players.json?q=&lt;text&gt;&limit=&lt;n&gt;
+
+Optional, for the player picker: say `"players": true` in module.json (olport
+does when you use `@port.players`).
+
+```json
+{"players": [{"id": "1042", "label": "Wren", "detail": "Class A, 41 races", "online": true},
+             {"id": "877", "label": "Wrenna", "detail": "Class C, 3 races", "online": false}]}
+```
+
+Match `q` against names and ids, ignoring case; put the players online now
+first. `limit` is 1 to 50 (20 when left out); answer 400 for anything else.
+An empty `q` may answer the players online now. `id` is what an action field
+of type `player` receives, so make it whatever your actions look players up
+by. `online` is `true`, `false` or `null` when the game cannot tell. Anyone
+who may see the game in the panel may search its players.
+
 ### POST /openlobby/actions/&lt;id&gt;
 
 The body is a JSON object of the action's fields. Answer
@@ -132,6 +158,9 @@ MODULE = Module(
     live=sources.board(_parse),
 )
 ```
+
+A module file can offer the player picker too: `Module(..., players=find)`,
+where `find(module, q, limit)` returns the same rows as players.json.
 
 `sources.board` reads the JSON at `POL_ADMIN_GAME_KART_LIVE` (a URL or a file)
 in the status shape above, then calls `_parse` for anything only this game has.

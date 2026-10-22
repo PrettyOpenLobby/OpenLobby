@@ -39,7 +39,9 @@ async function loadGames(refresh) {
     if (CUR_TAB !== "games" || document.hidden) return;
     const [key, tool] = (GAME_TOOL || "").split("/");
     if (tool) return;
+    if (gamesBusy()) return;
     await fetchGames(false);
+    if (gamesBusy()) return;
     renderGamesSide();
     if (key) renderGame(key); else renderGameGrid();
   }, 10000);
@@ -208,10 +210,16 @@ function renderGame(key, toolId) {
       + `<div class="muted">${esc(Object.entries(s.ports || {}).map(([p, w]) => w + " :" + p).join(", "))}</div></div></div>`).join("")
     + `</section>` : "";
 
-  const actHtml = g.actions.length ? `<section class="panel gx-wide"><h3>Actions</h3><div class="gx-acts">`
+  // a field of type "player" is a search box with a pick-list when the game can search its
+  // players (picker.js); without that it stays a plain text box
+  const field = (f) => f.type === "player" && g.players
+    ? `<label>${esc(f.label || f.id)}<span data-pk="${esc(f.id)}"></span></label>`
+    : `<label>${esc(f.label || f.id)}<input type="text" name="${esc(f.id)}" autocomplete="off"></label>`;
+  const actSig = esc(g.key + ":" + JSON.stringify(g.actions.map((a) => [a.id, a.fields])) + ":" + !!g.players);
+  const actHtml = g.actions.length ? `<section class="panel gx-wide"><h3>Actions</h3><div class="gx-acts" data-sig="${actSig}">`
     + g.actions.map((a) => `<form class="gx-act" data-action="${esc(a.id)}">`
       + `<div class="strong">${esc(a.label)}</div>${a.about ? `<div class="muted">${esc(a.about)}</div>` : ""}`
-      + (a.fields || []).map((f) => `<label>${esc(f.label || f.id)}<input type="text" name="${esc(f.id)}" autocomplete="off"></label>`).join("")
+      + (a.fields || []).map(field).join("")
       + `<button type="submit" class="${a.danger ? "danger" : "act"}">${esc(a.label)}</button></form>`).join("")
     + `</div></section>` : "";
 
@@ -224,9 +232,29 @@ function renderGame(key, toolId) {
     + `<dt>Why it shows</dt><dd>${esc(st.why || "running normally")}</dd>`
     + `</dl></section>`;
 
+  // the status redraw keeps the action forms as they are, with what was typed and picked
+  const kept = $("#gamesMain .gx-acts");
   $("#gamesMain").innerHTML = head + `<div class="gx-stats">${statHtml}</div>`
     + `<div class="gx-layout">${playersHtml}${actHtml}${roomsHtml}${svcHtml}${about}</div>`;
+  const fresh = $("#gamesMain .gx-acts");
+  if (kept && fresh && kept.dataset.sig === fresh.dataset.sig) fresh.replaceWith(kept);
+  else mountGamePickers(g);
 }
+
+function mountGamePickers(g) {
+  document.querySelectorAll("#gamesMain [data-pk]").forEach((slot) => {
+    const pk = makePicker({
+      name: slot.dataset.pk, placeholder: "Search players by name or id",
+      search: (q, limit) => api(`/api/games/players?game=${encodeURIComponent(g.key)}`
+        + `&q=${encodeURIComponent(q)}&limit=${limit}`).then((r) => r.players || []),
+    });
+    slot.replaceWith(pk.el);
+  });
+}
+
+// typing or picking in an action form: the status redraw waits
+const gamesBusy = () => !!(document.activeElement && document.activeElement.closest
+  && document.activeElement.closest("#gamesMain .gx-acts"));
 
 const cap = (s) => String(s || "").charAt(0).toUpperCase() + String(s || "").slice(1);
 
@@ -351,7 +379,7 @@ function wireGames() {
     if (!a) return;
     if (a.danger && !confirm(a.label + "?")) return;
     const params = Object.fromEntries(new FormData(form).entries());
-    const btn = form.querySelector("button");
+    const btn = form.querySelector("button[type=submit]");
     btn.disabled = true;
     try {
       const r = await api("/api/modules/action", {

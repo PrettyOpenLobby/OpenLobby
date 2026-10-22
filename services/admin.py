@@ -1339,6 +1339,7 @@ _GET_PERMS = {
     "/api/account-games": "accounts_view",
     "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
     "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
+    "/api/accounts/find": "accounts_view",
     "/api/account-clients": "accounts_manage",
     "/api/account-footprint": ("accounts_manage", "accounts_delete"),
     "/api/online": "any", "/api/push/key": "gm",
@@ -1351,6 +1352,8 @@ _GET_PERMS = {
     "/api/ops": "health",
     # the list is cut to the caller's games; /games/<key>/ checks its own
     "/api/games": "any", "/api/modules": "any",
+    # the player picker: checked per game (adminmodules.can_see)
+    "/api/games/players": "any",
 }
 #: Path prefixes, for routes that carry a path of their own. /art/ draws the
 #: pictures in both the PML preview and the news preview.
@@ -1393,7 +1396,7 @@ CORE_OFF = adminmodules.core_off()
 _POL_GET = frozenset((
     "/api/content-names", "/api/gm-calls", "/api/gm-desk", "/api/gm-notices",
     "/api/gm-players", "/api/face-sheet", "/api/codes", "/api/account-games",
-    "/api/reports", "/api/issues", "/api/issue-file", "/api/accounts",
+    "/api/reports", "/api/issues", "/api/issue-file", "/api/accounts", "/api/accounts/find",
     "/api/account-detail", "/api/account-clients", "/api/account-footprint",
     "/api/push/key", "/api/news", "/api/news/outputs", "/api/news/art",
     "/api/pml-list", "/api/pml-load", "/api/pml-refs", "/api/pml-resolve",
@@ -2389,6 +2392,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"games": admingames.listing(self._can)})
         if path == "/api/modules":
             return self._modules()
+        if path == "/api/games/players":
+            return self._game_players()
         # the deployer (admindeploy.py): owner only, so not in the permission tables
         if path == "/api/deploy":
             return self._send(*admindeploy.overview())
@@ -2455,6 +2460,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._sessions_list()
         if path == "/api/accounts":
             return self._accounts_list()
+        if path == "/api/accounts/find":
+            return self._accounts_find()
         if path == "/api/account-clients":
             return self._account_clients()
         if path == "/api/account-footprint":
@@ -2737,6 +2744,27 @@ class Handler(BaseHTTPRequestHandler):
                detail={k: v for k, v in params.items() if k not in _AUDIT_SECRET
                        and len(str(v)) <= 120}, ok=ok, addr=self._addr())
         self._send(200 if ok else 502, {"ok": ok, "msg": msg})
+
+    def _game_players(self):
+        """GET ?game=&q=&limit=: the game's player search, for the picker on its
+        action fields of type "player". Anyone who may see the game may search it."""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        key = q.get("game", [""])[0]
+        if not adminmodules.can_see(key, self._can):
+            return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
+        try:
+            limit = int(q.get("limit", ["20"])[0] or "20")
+        except ValueError:
+            limit = 0
+        if not 1 <= limit <= adminmodules.PLAYERS_MAX:
+            return self._send(400, {"error": "limit is 1 to %d" % adminmodules.PLAYERS_MAX})
+        try:
+            rows = adminmodules.find_players(key, q.get("q", [""])[0], limit)
+        except LookupError:
+            return self._send(404, {"error": "That game has no player search."})
+        except Exception as exc:                   # noqa: BLE001 -- the game's fault, said by kind
+            return self._send(502, {"error": "The game's player search failed (%s)." % exc.__class__.__name__})
+        self._send(200, {"players": rows})
 
     def _modules(self):
         """/api/modules: the game modules this caller may see, each with its
@@ -4032,6 +4060,50 @@ class Handler(BaseHTTPRequestHandler):
                          "pending": gmchat.pending(rb)})
 
     # -- accounts ------------------------------------------------------------ #
+    def _accounts_find(self):
+        """GET ?q=&limit=: accounts for the picker on PlayOnline ID boxes. A match on
+        the PlayOnline ID or any of its handles, signed-in accounts first; with no q,
+        the signed-in ones and the newest. -> {"players": [{"id": polid, "label",
+        "detail", "online"}]}"""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        text = " ".join(q.get("q", [""])[0].split())[:64]
+        try:
+            limit = int(q.get("limit", ["20"])[0] or "20")
+        except ValueError:
+            limit = 0
+        if not 1 <= limit <= 50:
+            return self._send(400, {"error": "limit is 1 to 50"})
+        pat = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        db = _db()
+        try:
+            rows = db.execute(
+                "SELECT p.polid, p.status, p.created_at,"
+                " (SELECT string_agg(h.handle_name, ',' ORDER BY h.is_primary DESC, h.id)"
+                "  FROM handle h JOIN member m ON m.id = h.member_id WHERE m.polid = p.polid) AS handles,"
+                " EXISTS (SELECT 1 FROM session s JOIN member m ON m.id = s.member_id"
+                "  WHERE m.polid = p.polid AND s.expires_at > %s) AS online"
+                " FROM polid p WHERE p.polid ILIKE %s ESCAPE '\\' OR EXISTS (SELECT 1 FROM handle h"
+                "  JOIN member m ON m.id = h.member_id WHERE m.polid = p.polid"
+                "  AND h.handle_name ILIKE %s ESCAPE '\\')"
+                " ORDER BY online DESC, p.created_at DESC LIMIT %s",
+                (now, pat, pat, limit)).fetchall()
+        finally:
+            db.close()
+        out = []
+        for r in rows:
+            handles = [h for h in (r["handles"] or "").split(",") if h]
+            bits = ["PlayOnline ID " + r["polid"]]
+            if len(handles) > 1:
+                bits.append("also " + ", ".join(handles[1:4]))
+            if r["status"] and r["status"] != "active":
+                bits.append(str(r["status"]))
+            out.append({"id": r["polid"],
+                        "label": "%s (%s)" % (handles[0], r["polid"]) if handles else r["polid"],
+                        "detail": ", ".join(bits) if handles else ", ".join(bits[1:]) or "no handle yet",
+                        "online": bool(r["online"])})
+        self._send(200, {"players": out})
+
     def _accounts_list(self):
         db = _db()
         try:
