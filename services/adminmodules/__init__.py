@@ -27,6 +27,9 @@ Which modules a server shows:
                             source, a marker some service published)
     POL_ADMIN_MODULES_DIR   extra module files (*.py) a deployment adds; one
                             whose key a built-in already uses is skipped
+    POL_ADMIN_CORE          "none": a panel for games without PlayOnline; the
+                            built-in modules (all PlayOnline titles) load only
+                            when POL_ADMIN_MODULES names them
 
 Per-module settings come from the environment, so a compose file can point a
 module at its game without code changes:
@@ -93,6 +96,14 @@ def core_project():
     """The compose project of the core stack, for "{core}" in container names
     (POL_ADMIN_CORE_PROJECT; a checkout of the public repo is "openlobby")."""
     return os.environ.get("POL_ADMIN_CORE_PROJECT", "").strip() or "openlobby"
+
+
+def core_off():
+    """True when the panel runs without the PlayOnline core (POL_ADMIN_CORE=none):
+    one game's own panel, with no PlayOnline accounts, news or Viewer. The
+    built-in PlayOnline title modules then load only when POL_ADMIN_MODULES
+    names them."""
+    return os.environ.get("POL_ADMIN_CORE", "").strip().lower() == "none"
 
 
 class HelpDesk:
@@ -357,7 +368,10 @@ def load(reload=False):
             return _ALL
         del _PROBLEMS[:]
         out = {}
+        want = _wanted() if core_off() else None
         for key in BUILTIN:
+            if core_off() and (want is None or key not in want):
+                continue                        # a PlayOnline title, not asked for
             try:
                 m = importlib.import_module("adminmodules." + key)
             except ImportError as exc:

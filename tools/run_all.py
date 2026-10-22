@@ -380,6 +380,8 @@ SUITES = [
     ("admin_calendar", [sys.executable, "admin_calendar_test.py"], TOOLS, {}),
     ("admin_logs",    [sys.executable, "admin_logs_test.py"], TOOLS, {}),
     ("admin_help",    [sys.executable, "admin_help_test.py"], TOOLS, {}),
+    # The panel for one game without the PlayOnline core (POL_ADMIN_CORE=none).
+    ("admin_corelite", [sys.executable, "admin_corelite_test.py"], TOOLS, {}),
     # Self-host tools: the setup checker, the games launcher and its catalog,
     # and the patch publisher's revert guard.
     ("doctor",        [sys.executable, "doctor_test.py"], TOOLS, {}),

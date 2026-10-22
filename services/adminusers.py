@@ -49,11 +49,23 @@ PERMS = {
 # described itself later (adminmodules.remote).
 PERMS.update(adminmodules.all_perms())
 
+#: The PlayOnline core's permissions: players' accounts and codes, GM calls,
+#: reports, news and the PML preview. A panel run without the core
+#: (POL_ADMIN_CORE=none, adminmodules.core_off) neither lists nor grants them,
+#: and a moderator who was given one before simply does not hold it there.
+POL_PERMS = frozenset(("gm", "codes", "codes_void", "reports", "accounts_view",
+                       "accounts_manage", "accounts_delete", "news_edit",
+                       "news_publish", "pml"))
+
 
 def perm_labels():
     """{perm: label}: the panel's own permissions, then every game module's."""
     out = dict(PERMS)
     out.update(adminmodules.all_perms())
+    if adminmodules.core_off():
+        for p in POL_PERMS:
+            out.pop(p, None)
+        out["settings"] = "Change alert and service check settings"
     return out
 
 

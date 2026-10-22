@@ -43,24 +43,28 @@ function toast(msg, err) {
 // sub-tabs. A view is a <section id="tab-X">, or a part of one (`sub`: only
 // that section's [data-sub] panels of that name show). The hash names the
 // view, as it always has: #accounts, #gmcalls, #games/fmo/gates, #pml/<file>.
+// `pol`: a PlayOnline view, gone when the panel runs without the core
+// (POL_ADMIN_CORE=none, SESSION.core); `lite`: shown only then.
 const VIEWS = [
   { id: "overview", group: "overview" },
-  { id: "accounts", group: "players", perm: "accounts_view" },
-  { id: "codes", group: "players", perm: "codes" },
-  { id: "gmcalls", group: "inbox", perm: "gm" },
-  { id: "reports", group: "inbox", perm: "reports" },
-  { id: "issues", group: "inbox", perm: "reports" },
+  { id: "accounts", group: "players", perm: "accounts_view", pol: true },
+  { id: "codes", group: "players", perm: "codes", pol: true },
+  { id: "gmcalls", group: "inbox", perm: "gm", pol: true },
+  { id: "reports", group: "inbox", perm: "reports", pol: true },
+  { id: "issues", group: "inbox", perm: "reports", pol: true },
   // each game's help desk has its own permission (helpdesk.js canGameHelp)
   { id: "gamehelp", group: "inbox", perm: "gamehelp" },
   { id: "games", group: "games" },
   // PML Preview belongs to the PlayOnline Viewer's module (Games > POL Viewer)
-  { id: "pml", group: "games", perm: "pml" },
-  { id: "news", group: "news", perm: "news_edit" },
+  { id: "pml", group: "games", perm: "pml", pol: true },
+  { id: "news", group: "news", perm: "news_edit", pol: true },
+  // without the core, the News section is only the maintenance warning, into the games
+  { id: "maint", group: "news", tab: "news", lite: true },
   { id: "calendar", group: "calendar", perm: "calendar" },
   { id: "security", group: "settings", sub: "account" },
   { id: "mods", group: "settings", tab: "security", sub: "mods", perm: "owner" },
   { id: "alerts", group: "settings", tab: "security", sub: "alerts", perm: "settings" },
-  { id: "bots", group: "settings", perm: "owner" },
+  { id: "bots", group: "settings", perm: "owner", pol: true },
   { id: "modules", group: "settings", perm: "owner" },
   { id: "deploy", group: "settings", perm: "owner" },
   { id: "activity", group: "settings", tab: "security", sub: "activity", perm: "audit" },
@@ -98,12 +102,21 @@ function writeHash(tab, path) {
 // The SERVER enforces all of this (admin._permit); hiding things here only
 // keeps a moderator from clicking into a 403.
 const isOwner = () => SESSION.role !== "mod";
-const can = (p) => isOwner() || (SESSION.perms || []).includes(p);
+// POL_ADMIN_CORE=none: a panel for games without PlayOnline. The server refuses
+// the PlayOnline routes; here the same permissions simply read as not held.
+const coreOff = () => SESSION.core === "none";
+const POL_PERMS = new Set(["gm", "codes", "codes_void", "reports", "accounts_view", "accounts_manage",
+                           "accounts_delete", "news_edit", "news_publish", "pml"]);
+const can = (p) => !(coreOff() && POL_PERMS.has(p)) && (isOwner() || (SESSION.perms || []).includes(p));
+// the maintenance warning without the core: any game's announce action
+const canAnnounce = () => isOwner() || (SESSION.perms || []).some((p) => /^game\.[a-z0-9]+\.announce$/.test(p));
 // Games has permissions per game and per tool ("game.<key>[.<id>]", games.js);
 // any of them opens the section.
 const tabAllowed = (t) => {
   const v = viewOf(t);
   if (!v) return false;
+  if (v.pol && coreOff()) return false;
+  if (v.lite) return coreOff() && canAnnounce();
   if (t === "games") return canSeeGames();
   if (t === "gamehelp") return canGameHelp();
   return !v.perm || (v.perm === "owner" ? isOwner() : can(v.perm));
@@ -114,13 +127,25 @@ const groupViews = (g) => VIEWS.filter((v) => v.group === g && tabAllowed(v.id))
 const visibleGroups = () => GROUPS.filter((g) => groupViews(g).length);
 
 function applyRole() {
+  document.body.classList.toggle("core-none", coreOff());
+  if (coreOff()) {
+    GROUP_TITLE.news = "Maintenance";
+    const nb = document.querySelector('.side .grp[data-group="news"]');
+    if (nb && nb.lastChild) nb.lastChild.textContent = "Maintenance";
+    $("#maintHint").textContent = "Sends a message into each game you tick, to the players in it now.";
+    $("#maintMsgBtn").textContent = "Announce in the games";
+    $("#maintGamesLabel").textContent = "Announce in";
+    $("#alertsTab").textContent = "Service checks";
+    $("#ovHealthTitle").textContent = "Service checks";
+  }
   document.querySelectorAll(".side .grp").forEach((b) => { b.hidden = !groupViews(b.dataset.group).length; });
   document.querySelectorAll(".subtabs button[data-tab]").forEach((b) => { b.hidden = !tabAllowed(b.dataset.tab); });
   document.querySelectorAll("[data-owner]").forEach((el) => { el.hidden = !isOwner(); });
   document.querySelectorAll("[data-perm]").forEach((el) => { el.hidden = !can(el.dataset.perm); });
+  if (coreOff()) $("#maintPanel").hidden = !canAnnounce();
   $("#mePanel").hidden = isOwner();
   const sec = document.querySelector('.subtabs button[data-tab="security"]');
-  sec.textContent = isOwner() ? "Sign-in" : "My account";
+  sec.textContent = isOwner() ? (coreOff() ? "My login" : "Sign-in") : "My account";
 }
 
 let CUR_TAB = "";
@@ -160,6 +185,7 @@ function loadTab(name, refresh) {
   if (name === "issues") loadIssues().then(() => markSeen("issues"));
   if (name === "gmcalls") { loadGmCalls(); startGmDesk(); renderAlertBtn(); }
   if (name === "news") loadNews();
+  if (name === "maint") loadMaint();
   if (name === "calendar") loadCalendar();
   if (name === "gamehelp") loadGameHelp();
   if (name === "games") loadGames(refresh);
@@ -3268,6 +3294,12 @@ async function loadMaint() {
   try {
     const j = await api("/api/maintenance");
     renderMaintChoices(j);
+    if (coreOff()) {
+      const n = Object.keys(j.games || {}).length;
+      $("#maintStatus").textContent = n ? "" : "None of your games can announce from the panel.";
+      $("#maintGamesWrap").hidden = !n;
+      return;
+    }
     const shown = j.files.filter((f) => f.posted);
     $("#maintStatus").textContent = shown.length
       ? `Notice up on ${shown.length} of ${j.files.length} title pages: ${shown[0].subject || "(no subject)"}`
@@ -3310,11 +3342,21 @@ $("#maintClearBtn").onclick = async () => {
   loadMaint();
 };
 $("#maintMsgBtn").onclick = async () => {
-  const subject = $("#maintSubject").value.trim().slice(0, 15), text = $("#maintText").value.trim();
+  const lite = coreOff();
+  const subject = lite ? $("#maintSubject").value.trim() : $("#maintSubject").value.trim().slice(0, 15);
+  const text = $("#maintText").value.trim();
   if (!subject || !text) return toast("A message needs a subject and a text.", true);
-  if (!confirm(`Send "${subject}" to everyone online now? The subject is cut to 15 characters.`)) return;
+  if (lite && !maintGames().length) return toast("Tick at least one game.", true);
+  if (!confirm(lite ? `Announce "${subject}" in ${maintGames().length} game${maintGames().length === 1 ? "" : "s"} now?`
+                    : `Send "${subject}" to everyone online now? The subject is cut to 15 characters.`)) return;
   try {
     const r = await post("/api/maintenance", { action: "message", subject, text, games: maintGames() });
+    if (lite) {
+      const g = Object.entries(r.games || {}), failed = g.filter(([, v]) => !v.ok);
+      if (!failed.length) toast(`Announced in ${g.length} game${g.length === 1 ? "" : "s"}.`);
+      else toast(`Announcing failed in ${failed.map(([k, v]) => k + " (" + v.msg + ")").join(", ")}`, true);
+      return;
+    }
     const sent = `Sent ${r.messages} message${r.messages === 1 ? "" : "s"} to ${r.members} member${r.members === 1 ? "" : "s"} online`;
     const g = Object.entries(r.games || {});
     const failed = g.filter(([, v]) => !v.ok);
@@ -3411,6 +3453,13 @@ async function loadOverview() {
     `<button class="stat ${cls || ""}" data-go="${go}"><span class="lab">${lab}</span>` +
     `<span class="num">${num}</span><span class="sub">${sub}</span></button>`;
   const duty = desk ? (desk.on_duty ? "GM on duty" : "no GM on duty") : "GM service unavailable";
+  if (coreOff()) {
+    loadOverviewLite(card);
+    $("#ovAttention").innerHTML = `<li class="empty">Nothing needs attention.</li>`;
+    if (can("health")) { loadHealth(); loadOps(); }
+    if (can("audit")) loadRecentActivity();
+    return;
+  }
   $("#ovStats").innerHTML =
     card("accounts", "Accounts", acc ? A.length : "?",
          `${newAcc} new this week` + (notPlayable.length ? `, ${notPlayable.length} not playable` : ""),
@@ -3453,6 +3502,43 @@ async function loadOverview() {
   if (can("health")) { loadHealth(); loadOps(); }
   if (can("audit")) loadRecentActivity();
   if (canSeeGames()) fetchGames(false).then(renderOverviewGames);
+}
+
+// The Overview without the PlayOnline core: the games, who is playing them,
+// players' help requests and what is coming up.
+async function loadOverviewLite(card) {
+  const now = Math.floor(Date.now() / 1000), week = now + 7 * 86400;
+  const [, help, cal] = await Promise.all([
+    canSeeGames() ? fetchGames(false) : Promise.resolve(),
+    canGameHelp() ? api("/api/help?open=1").catch(() => null) : Promise.resolve(null),
+    can("calendar") ? api(`/api/calendar?from=${now}&to=${week}`).catch(() => null) : Promise.resolve(null)]);
+  const G = canSeeGames() ? GAMES.filter((g) => g.kind !== "platform") : [];
+  const states = G.map(gameState);
+  const running = states.filter((st) => st.cls === "good").length;
+  const trouble = states.filter((st) => st.cls === "bad").length;
+  const online = G.reduce((n, g) => n + (g.live && typeof g.live.online === "number" ? g.live.online : 0), 0);
+  const T = help ? (help.threads || []) : [];
+  const waiting = T.filter((t) => t.waiting && !t.closed);
+  const E = cal ? (cal.entries || []) : [];
+  const next = E.find((e) => e.end > now);
+  $("#ovStats").innerHTML =
+    card("games", "Games", G.length ? `${running} of ${G.length}` : "0",
+         !G.length ? "none set up yet" : trouble ? `${trouble} need${trouble === 1 ? "s" : ""} a look` : "running",
+         trouble ? "warn" : "") +
+    card("games", "Playing now", online, `across ${G.length} game${G.length === 1 ? "" : "s"}`) +
+    card("gamehelp", "Help requests", help ? waiting.length : "?",
+         help ? `waiting, of ${T.length} open` : "help desk unavailable", waiting.length ? "warn" : "") +
+    card("calendar", "This week", cal ? E.length : "?",
+         next ? `${next.start <= now ? "on now" : "next"}: ${next.title}` : "nothing scheduled");
+  const att = [];
+  G.forEach((g, i) => { if (states[i].cls === "bad" || states[i].cls === "warn") att.push(
+    `<li data-go="games"><span class="t1"><b>${esc(g.title)}</b>: ${esc(states[i].word)}</span>` +
+    `<span class="t2">${esc(states[i].why || "")}</span></li>`); });
+  waiting.slice(0, 4).forEach((t) => att.push(
+    `<li data-go="gamehelp"><span class="t1">Help request from <b>${esc(t.who || "?")}</b>: ${esc(t.subject || "(no subject)")}</span>` +
+    `<span class="t2">${esc(t.game_title || "")}${t.at ? ", " + esc(ago(t.at * 1000)) : ""}</span></li>`));
+  $("#ovAttention").innerHTML = att.join("") || `<li class="empty">Nothing needs attention.</li>`;
+  renderOverviewGames();
 }
 
 async function loadRecentActivity() {
@@ -3616,7 +3702,7 @@ async function loadMods() {
   body.innerHTML = MODS.map((m, i) =>
     `<tr><td><b>${esc(m.username)}</b></td>` +
     `<td>${m.perms.length ? permChips(m.perms, short) : `<span class="muted">nothing yet</span>`}</td>` +
-    `<td>${m.perms.includes("codes") ? `${m.codes_24h} / ${m.code_limit ?? "no limit"}` : `<span class="muted">-</span>`}</td>` +
+    `<td class="pol-only">${m.perms.includes("codes") ? `${m.codes_24h} / ${m.code_limit ?? "no limit"}` : `<span class="muted">-</span>`}</td>` +
     `<td>${m.disabled ? `<span class="pill used">disabled</span>` : `<span class="pill open">active</span>`}</td>` +
     `<td class="muted">${m.last_seen ? esc(ago(m.last_seen * 1000)) + ` (${m.sessions} signed in)` : "not signed in"}</td>` +
     `<td><div class="rowacts">` +
@@ -3880,7 +3966,8 @@ async function loadHealth(fresh) {
     `<span class="t2">${sv.ok ? sv.ms + " ms" : esc(sv.error || "down")}</span></li>`);
   const b = r.backup;
   let bl;
-  if (!b) bl = `<li><span class="t1"><span class="dot warn"></span>Backups</span><span class="t2">no status yet</span></li>`;
+  if (!b && coreOff()) bl = "";
+  else if (!b) bl = `<li><span class="t1"><span class="dot warn"></span>Backups</span><span class="t2">no status yet</span></li>`;
   else {
     const last = b.last_ok || (b.ok ? b : null);
     const age = last ? (Date.now() / 1000 - last.at) : Infinity;
@@ -3890,7 +3977,8 @@ async function loadHealth(fresh) {
       (last ? `last good ${esc(ago(last.at * 1000))}, ${esc(fmtBytes(last.bytes))}` : "none succeeded") +
       `</span></li>`;
   }
-  $("#ovHealth").innerHTML = bl + rows.join("");
+  $("#ovHealth").innerHTML = bl + rows.join("") || `<li class="empty">No ports to check yet. ` +
+    (isOwner() ? "Add them in Settings, under Service checks." : "The owner can add them.") + `</li>`;
   const d = r.disk;
   $("#ovHealthFoot").innerHTML = (d ? `Disk: ${esc(fmtBytes(d.free))} free of ${esc(fmtBytes(d.total))}. ` : "") +
     `Checked ${esc(ago(r.checked_at * 1000))}. <a class="acct-link" id="healthRecheck">Check now</a>`;
@@ -4333,15 +4421,13 @@ function syncInboxBadge() {
   probeDeploy();            // shows Settings > Install games when a deployer answers
   renderMeState();
   loadGmCallsBadge();       // after the session: a moderator without GM gets no call
-  await loadContentNames();
-  limitCodeChips();
+  if (!coreOff()) { await loadContentNames(); limitCodeChips(); }
   if (can("pml")) PML_LIST_READY = loadPmlFileList();
   // Seed the editor with a tiny sample so the preview isn't blank -- but not
   // when the hash names a file, or the restore would flash the sample first.
-  if (!parseHash().path) $("#pml").value =
+  if (!coreOff() && !parseHash().path) $("#pml").value =
     `<pml><head>\n  <style name="hdr" face="6" size="18" color="#ffffffff">\n</head>\n<body>\n  <text pos="30,30" size="400,24" style="hdr">PlayOnline PML preview</text>\n  <scrollarea pos="30,70" size="200,24" skin="0" bgcolor="#efe9dcff" skincolor="#00000000"></scrollarea>\n  <input name="demo" type="text" pos="30,70" size="200,24" style="hdr" skin="1" skincolor="#efe9dcff" value="type here">\n</body></pml>`;
-  updateGutter();
-  if (!parseHash().path) renderPreview();
+  if (!coreOff()) { updateGutter(); if (!parseHash().path) renderPreview(); }
   applyHash();          // restore the tab, and the file if the hash names one
   loadBadges();
 })();

@@ -1383,6 +1383,55 @@ _POST_PERMS = {
     "/api/modules/action": "any",
 }
 
+#: POL_ADMIN_CORE=none: the panel runs for games without PlayOnline (a
+#: self-hoster's one game server that describes itself). Everything below is
+#: PlayOnline's and is refused there: player accounts and registration codes,
+#: GM calls, player and bug reports, news and the PML preview, the Viewer's
+#: art, the GM alert pushes and the Discord bots. The panel's own login,
+#: moderators, activity log, settings, games, calendar and Game help stay.
+CORE_OFF = adminmodules.core_off()
+_POL_GET = frozenset((
+    "/api/content-names", "/api/gm-calls", "/api/gm-desk", "/api/gm-notices",
+    "/api/gm-players", "/api/face-sheet", "/api/codes", "/api/account-games",
+    "/api/reports", "/api/issues", "/api/issue-file", "/api/accounts",
+    "/api/account-detail", "/api/account-clients", "/api/account-footprint",
+    "/api/push/key", "/api/news", "/api/news/outputs", "/api/news/art",
+    "/api/pml-list", "/api/pml-load", "/api/pml-refs", "/api/pml-resolve",
+    "/api/page", "/api/bots"))
+_POL_POST = frozenset((
+    "/api/codes", "/api/codes/random", "/api/codes/void", "/api/gm-control",
+    "/api/gm-say", "/api/gm-ticket", "/api/gm-notices", "/api/gm-discord",
+    "/api/push/subscribe", "/api/push/test", "/api/push/unsubscribe",
+    "/api/triage", "/api/report-reply", "/api/account-create",
+    "/api/account-password", "/api/account-state", "/api/account-info",
+    "/api/account-kick", "/api/account-clear-token", "/api/account-extmail",
+    "/api/grant", "/api/revoke", "/api/account-delete", "/api/news",
+    "/api/news/render", "/api/news/publish", "/api/pml-expand", "/api/bots"))
+_POL_PREFIXES = ("/art/",)
+if CORE_OFF:
+    for _p in _POL_GET:
+        _GET_PERMS.pop(_p, None)
+    for _p in _POL_POST:
+        _POST_PERMS.pop(_p, None)
+    for _p in _POL_PREFIXES:
+        _GET_PREFIX_PERMS.pop(_p, None)
+    # the maintenance warning only announces in the games, and each game's
+    # announce action checks its own permission (Handler._maintenance_games)
+    _GET_PERMS["/api/maintenance"] = _POST_PERMS["/api/maintenance"] = "any"
+
+
+def _default_targets():
+    """The ports the Overview probes until the owner sets their own: the
+    PlayOnline services', or none at all without the core."""
+    return "" if CORE_OFF else adminops.DEFAULT_TARGETS
+
+
+def _pol_route(method, path):
+    """Is this one of the PlayOnline core's routes (refused with the core off)?"""
+    if path.startswith(_POL_PREFIXES):
+        return True
+    return path in (_POL_GET if method == "GET" else _POL_POST)
+
 #: What the audit log calls each change. A POST not named here is not logged
 #: (the PML preview and the random-code button change nothing).
 _AUDIT_ACTIONS = {
@@ -1555,6 +1604,11 @@ class Handler(BaseHTTPRequestHandler):
                          "forbidden": True})
         return False
 
+    def _core_off_refusal(self):
+        self._send(404, {"error": "This panel runs without PlayOnline, so it has no "
+                                  "player accounts, codes, GM calls, reports, news "
+                                  "or PML pages.", "core": "none"})
+
     def _authed(self, path):
         """Gate every request. True = may proceed.
 
@@ -1597,7 +1651,9 @@ class Handler(BaseHTTPRequestHandler):
         s = self._session()
         out = {"auth_required": bool(ADMIN_PASSWORD) or _stored_cred() is not None,
                "authenticated": bool(s),
-               "user": s["user"] if s else None}
+               "user": s["user"] if s else None,
+               # "none": no PlayOnline core (POL_ADMIN_CORE), the UI hides its views
+               "core": "none" if CORE_OFF else "playonline"}
         headers = ()
         user, role, perms = self._caller() if (s or not out["auth_required"]) \
             else (None, None, [])
@@ -1953,6 +2009,8 @@ class Handler(BaseHTTPRequestHandler):
         """Live game counts for anyone signed in; the signed-in accounts for
         those who may look accounts up (addresses for the owner only)."""
         user, role, perms = self._caller()
+        if CORE_OFF:             # PlayOnline sessions and markers: none here
+            return self._send(200, {"games": [], "accounts": None})
         out = {"games": adminops.live_counts(), "accounts": None}
         if role == "owner" or "accounts_view" in perms:
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1988,7 +2046,7 @@ class Handler(BaseHTTPRequestHandler):
         if c["out"] is None or fresh or time.time() - c["at"] > 15:
             mdb = adminusers.connect()
             try:
-                text = adminusers.get_setting(mdb, "health_targets", adminops.DEFAULT_TARGETS)
+                text = adminusers.get_setting(mdb, "health_targets", _default_targets())
                 host = adminusers.get_setting(mdb, "health_host", adminops.DEFAULT_HOST)
             finally:
                 mdb.close()
@@ -2200,7 +2258,7 @@ class Handler(BaseHTTPRequestHandler):
                 "discord_hint": ("..." + hook[-6:]) if hook else "",
                 "panel_url": adminusers.get_setting(mdb, "panel_url") or "",
                 "health_targets": adminusers.get_setting(
-                    mdb, "health_targets", adminops.DEFAULT_TARGETS),
+                    mdb, "health_targets", _default_targets()),
                 "health_host": adminusers.get_setting(
                     mdb, "health_host", adminops.DEFAULT_HOST),
                 "devices": [{"username": r["username"], "role": r["role"],
@@ -2321,6 +2379,8 @@ class Handler(BaseHTTPRequestHandler):
                                            posixpath.basename(path)))
         if not self._authed(path):
             return
+        if CORE_OFF and _pol_route("GET", path):
+            return self._core_off_refusal()
         if path.startswith("/games/"):
             return self._game_tool("GET")
         if not self._permit(path, _GET_PERMS):
@@ -2447,6 +2507,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._logout()
         if not self._authed(path):
             return
+        if CORE_OFF and _pol_route("POST", path):
+            return self._core_off_refusal()
         if path.startswith("/games/"):
             return self._game_tool("POST")
         if not self._permit(path, _POST_PERMS):
@@ -4873,6 +4935,9 @@ class Handler(BaseHTTPRequestHandler):
     # -- the maintenance warning ------------------------------------------------ #
     def _maintenance_state(self):
         """Which forced-news files carry a notice now (maintnotice.status)."""
+        if CORE_OFF:             # no title pages: the warning only goes into the games
+            return self._send(200, {"ok": True, "files": [], "posted": 0, "titles": [],
+                                    "games": self._announceable(), "core": "none"})
         try:
             files = maintnotice.status(WWW_ROOT)
         except OSError as exc:
@@ -4901,6 +4966,8 @@ class Handler(BaseHTTPRequestHandler):
         (_maintenance_games); the old "ffxi": true means ["ffxi"].
         `titles` are the sftp directory names (ff11, tetra, jan, fmo, dc,
         fe); empty = all."""
+        if CORE_OFF:
+            return self._maintenance_games_only()
         if not self._can("news_publish"):
             return self._send(403, {"error": "You don't have permission to "
                                              "warn players.", "forbidden": True})
@@ -4948,9 +5015,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": f"write failed: {exc}"})
         return self._send(400, {"error": "action must be notice, clear or message"})
 
+    def _maintenance_games_only(self):
+        """The maintenance warning without the PlayOnline core: no title-page
+        notice and no mail, only {"action": "message", "subject", "text",
+        "games": [keys]} into each game's announce action the caller may run."""
+        body = self._json_body()
+        if body.get("action") != "message":
+            return self._send(404, {"error": "This panel runs without PlayOnline, so "
+                                             "there are no title pages to show a notice on.",
+                                    "core": "none"})
+        games = [g for g in (body.get("games") or []) if isinstance(g, str)]
+        if not games:
+            return self._send(400, {"error": "Pick at least one game to announce in."})
+        if not str(body.get("subject") or "").strip() and not str(body.get("text") or "").strip():
+            return self._send(400, {"error": "The warning needs a subject or a text."})
+        said = self._maintenance_games(games, body.get("subject"), body.get("text"))
+        sent = [k for k, v in said.items() if v["ok"]]
+        if not sent:
+            return self._send(502, {"error": "No game took the announcement.", "games": said})
+        return self._send(200, {"ok": True, "messages": 0, "members": 0, "games": said})
+
     def _announceable(self):
-        """{key: title} of the enabled games that can announce in game."""
-        return {k: m.title for k, m in adminmodules.enabled().items() if m.action("announce")}
+        """{key: title} of the enabled games that can announce in game (without
+        the core, only those whose announce action the caller may run)."""
+        out = {}
+        for k, m in adminmodules.enabled().items():
+            act = m.action("announce")
+            if act and (not CORE_OFF or self._can(m.perm(act.id))):
+                out[k] = m.title
+        return out
 
     def _maintenance_games(self, keys, subject, text):
         """Send the maintenance message into each game's own chat (its module's
@@ -4970,6 +5063,9 @@ class Handler(BaseHTTPRequestHandler):
             act = m.action("announce") if m else None
             if act is None:
                 out[key] = {"ok": False, "msg": "This game cannot announce from the panel."}
+                continue
+            if CORE_OFF and not self._can(m.perm(act.id)):
+                out[key] = {"ok": False, "msg": "You don't have permission to announce there."}
                 continue
             try:
                 ok, msg = act.run(m, {"text": line, "urgent": True}, user)
@@ -5225,14 +5321,20 @@ def main():
     else:
         print("[admin] auth: OPEN (no credential set) -- safe only while bound "
               "to loopback", flush=True)
-    _start_worker()
-    # The GM notices pages are generated and not tracked in git; a fresh
-    # checkout has none until they are written.
-    wrote = gmnotices.ensure(WWW_ROOT)
-    if wrote:
-        print(f"[admin] wrote the missing GM notices page(s): {wrote}", flush=True)
-    if eventnews.enabled():
-        threading.Thread(target=_event_news_loop, daemon=True).start()
+    if CORE_OFF:
+        # No PlayOnline here: no GM calls or codes for the worker, no GM
+        # notices or event posts to write, no PML tree to index.
+        print("[admin] core: none (POL_ADMIN_CORE); PlayOnline views and routes are off",
+              flush=True)
+    else:
+        _start_worker()
+        # The GM notices pages are generated and not tracked in git; a fresh
+        # checkout has none until they are written.
+        wrote = gmnotices.ensure(WWW_ROOT)
+        if wrote:
+            print(f"[admin] wrote the missing GM notices page(s): {wrote}", flush=True)
+        if eventnews.enabled():
+            threading.Thread(target=_event_news_loop, daemon=True).start()
     n = _load_sessions()
     if n:
         print(f"[admin] restored {n} remembered sign-in(s) from {SESSION_STORE}",
@@ -5244,7 +5346,8 @@ def main():
         tally = collections.Counter(shapes.values())
         print(f"[admin] indexed {len(files)} pml files -- "
               + ", ".join(f"{n} {k}" for k, n in tally.most_common()), flush=True)
-    threading.Thread(target=_warm, daemon=True).start()
+    if not CORE_OFF:
+        threading.Thread(target=_warm, daemon=True).start()
     srv.serve_forever()
 
 

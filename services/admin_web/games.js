@@ -84,8 +84,10 @@ function gameGroup(g) {
 }
 function groupedGames() {
   const name = (g) => String(g.short || g.title || g.key).toLowerCase();
-  return GAME_GROUPS.map(([id, label]) => [label, GAMES.filter((g) => gameGroup(g) === id)
+  const groups = GAME_GROUPS.map(([id, label]) => [label, GAMES.filter((g) => gameGroup(g) === id)
     .sort((a, b) => name(a).localeCompare(name(b)))]).filter(([, gs]) => gs.length);
+  // without the PlayOnline core one heading over every game says nothing
+  return coreOff() && groups.length === 1 ? [["", groups[0][1]]] : groups;
 }
 
 function renderGamesSide() {

@@ -1097,6 +1097,14 @@
     .nw-preview { position: sticky; top: 70px; }
     .nw-pvbar { display: flex; justify-content: space-between; align-items: center;
       gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+    /* POL_ADMIN_CORE=none: the News section is only the maintenance warning, into the games */
+    body.core-none #tab-news > :not(#maintPanel) { display: none; }
+    body.core-none .pol-only { display: none !important; }
+    body.core-none #maintPanel { display: flex; flex-direction: column; max-width: 720px; }
+    body.core-none #maintGamesWrap { order: 1; }
+    body.core-none #maintPanel .nw-formbtns { order: 2; }
+    body.core-none #maintStatus:empty { display: none; }
+    body.core-none .grid2:has(> #opsPanel[hidden]) { grid-template-columns: 1fr; }
   </style>
 </head>
 <body>
@@ -1134,7 +1142,7 @@
         <button data-tab="gamehelp">Game help</button>
       </nav>
       <nav class="subtabs" data-group="settings" aria-label="Settings" hidden>
-        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts">Alerts and checks</button><button data-tab="bots">Discord bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="activity">Activity log</button>
+        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts" id="alertsTab">Alerts and checks</button><button data-tab="bots">Discord bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="activity">Activity log</button>
       </nav>
   <main>
     <!-- OVERVIEW -->
@@ -1172,7 +1180,7 @@
           <ul class="feed" id="ovActivity"></ul>
         </div>
         <div class="panel" data-perm="health">
-          <h2>Backups and ports</h2>
+          <h2 id="ovHealthTitle">Backups and ports</h2>
           <ul class="feed" id="ovHealth"></ul>
           <div class="hint" id="ovHealthFoot"></div>
         </div>
@@ -1589,22 +1597,22 @@
       <!-- Maintenance warning: forced news before Play, and a message to everyone online. -->
       <div class="panel" id="maintPanel" data-perm="news_publish">
         <h2 style="margin:0 0 2px">Maintenance warning</h2>
-        <div class="hint">The notice opens on a title page before the player can press Play, the way the retail service announced maintenance. The message reaches everyone who is online now, in a game or not.</div>
+        <div class="hint" id="maintHint">The notice opens on a title page before the player can press Play, the way the retail service announced maintenance. The message reaches everyone who is online now, in a game or not.</div>
         <div class="nw-status" id="maintStatus">&hellip;</div>
         <label for="maintSubject">Subject</label>
         <input type="text" id="maintSubject" maxlength="60" spellcheck="true" placeholder="All Worlds Maintenance">
         <label for="maintText">Text</label>
         <textarea id="maintText" rows="4" spellcheck="true" placeholder="Maintenance begins at 10:00 UTC and lasts about one hour."></textarea>
-        <label>Show the notice on <span class="hint" style="display:inline">(none ticked: every title)</span></label>
-        <div class="chips" id="maintTitles"></div>
+        <label class="pol-only">Show the notice on <span class="hint" style="display:inline">(none ticked: every title)</span></label>
+        <div class="chips pol-only" id="maintTitles"></div>
         <div class="nw-formbtns">
-          <button class="act sm" id="maintPostBtn">Show notice before Play</button>
-          <button class="ghost sm" id="maintClearBtn">Take notice down</button>
+          <button class="act sm pol-only" id="maintPostBtn">Show notice before Play</button>
+          <button class="ghost sm pol-only" id="maintClearBtn">Take notice down</button>
           <span style="flex:1"></span>
           <button class="act sm" id="maintMsgBtn">Message everyone online</button>
         </div>
         <div id="maintGamesWrap" hidden>
-          <label>Also announce inside these games <span class="hint" style="display:inline">(players in the game see it in their chat)</span></label>
+          <label><span id="maintGamesLabel">Also announce inside these games</span> <span class="hint" style="display:inline">(players in the game see it in their chat)</span></label>
           <div class="chips" id="maintGames"></div>
         </div>
       </div>
@@ -1851,7 +1859,7 @@
         </div>
         <div class="inv" id="modResult" hidden></div>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Username</th>
-          <th>Allowed</th><th>Codes / 24 h</th><th>Status</th><th>Last active</th>
+          <th>Allowed</th><th class="pol-only">Codes / 24 h</th><th>Status</th><th>Last active</th>
           <th></th></tr></thead>
           <tbody id="modsBody"></tbody></table></div>
       </div>
@@ -1873,7 +1881,7 @@
         </div>
       </div>
 
-      <div class="panel" id="alertsPanel" data-perm="settings" data-sub="alerts">
+      <div class="panel pol-only" id="alertsPanel" data-perm="settings" data-sub="alerts">
         <h2>GM call alerts</h2>
         <p class="hint">New GM calls are posted to a Discord channel and sent to every
           device that turned alerts on from the GM Calls tab.</p>
@@ -2139,10 +2147,10 @@
       <input type="text" id="modUser" autocomplete="off" spellcheck="false" maxlength="64">
       <label>Allowed to</label>
       <div id="modPerms" class="perm-edit"></div>
-      <label>Registration codes per 24 hours <span class="hint" style="display:inline">(blank = no limit)</span></label>
-      <input type="text" id="modLimit" inputmode="numeric" maxlength="5" placeholder="no limit">
-      <label>Codes may grant <span class="hint" style="display:inline">(none ticked = any title)</span></label>
-      <div class="chips" id="modTitles"></div>
+      <label class="pol-only">Registration codes per 24 hours <span class="hint" style="display:inline">(blank = no limit)</span></label>
+      <input type="text" id="modLimit" class="pol-only" inputmode="numeric" maxlength="5" placeholder="no limit">
+      <label class="pol-only">Codes may grant <span class="hint" style="display:inline">(none ticked = any title)</span></label>
+      <div class="chips pol-only" id="modTitles"></div>
       <div id="modPwWrap">
         <label>Password <span class="hint" style="display:inline">(blank = generated and shown once)</span></label>
         <input type="text" id="modPw" autocomplete="new-password" spellcheck="false" class="mono">

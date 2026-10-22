@@ -147,6 +147,78 @@ module that finds its game: one with a tool URL, a status source, or a
 live-session marker some service has published. The owner's Modules page in
 Settings lists any module that did not load, and why.
 
+## Running the panel for one game
+
+The panel can run on its own for a game that has nothing to do with
+PlayOnline: one game server that describes itself (section 1), with the panel
+beside it for status, actions, tool pages, logs, the calendar and players'
+help requests. Set `POL_ADMIN_CORE=none` and the PlayOnline parts are switched
+off: player accounts and registration codes, GM calls, player and bug reports,
+news, the PlayOnline Viewer and PML Preview, the notice before Play and the
+sessions count. Their routes answer 404, their permissions are not offered to
+moderators, and the built-in PlayOnline title modules load only if
+`POL_ADMIN_MODULES` names them. The News section keeps only the maintenance
+warning, which goes into each game's `announce` action. The panel's own login,
+moderators, activity log, settings and Overview stay as they are.
+
+It needs PostgreSQL and a `/data` volume, nothing else: no Valkey (live state is
+kept in memory), no web tree and no other OpenLobby service. On first start
+the panel brings the database schema up to date by itself, the same migrations
+as a full server; the PlayOnline tables are created but stay empty, and nothing
+reads them in this mode.
+
+```yaml
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openlobby
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: openlobby
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "openlobby"]
+      interval: 5s
+  admin:
+    image: ghcr.io/prettyopenlobby/openlobby:latest
+    restart: unless-stopped
+    entrypoint: ["python", "admin.py"]
+    environment:
+      POL_DATABASE_URL: postgresql://openlobby:change-me@postgres:5432/openlobby
+      POL_ADMIN_CORE: none
+      POL_ADMIN_MODULES: kart
+      POL_ADMIN_GAME_KART_URL: http://kart:8820
+      POL_ADMIN_GAME_KART_TOKEN: a-long-random-token
+      POL_ADMIN_USER: admin
+      POL_ADMIN_PASSWORD: a-long-password
+    volumes:
+      - admin-data:/data
+    ports:
+      - "127.0.0.1:8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  pgdata:
+  admin-data:
+```
+
+- `POL_ADMIN_CORE=none` turns the PlayOnline parts off. Unset, the panel is
+  the full PlayOnline one.
+- `POL_ADMIN_MODULES` lists the game keys to show (here `kart`).
+- `POL_ADMIN_GAME_<KEY>_URL` and `POL_ADMIN_GAME_<KEY>_TOKEN` point at the
+  game's admin port and its token, as in section 1. Use one pair per game.
+- `POL_ADMIN_PASSWORD` (with `POL_ADMIN_USER`, `admin` unless set) is the
+  first login. Once in, set a password under Settings, My login, which is kept
+  in the database, and clear the variable again if you like.
+- `/data` holds remembered sign-ins and the panel's files; the database holds
+  the moderators, settings, calendar entries and the activity log.
+- Port 8090 is the panel. Keep it on loopback or a private network and reach
+  it through a tunnel; a panel with no password refuses every request unless
+  it is bound to loopback (`POL_ADMIN_BIND`).
+
 ## Server checks
 
 A host ops runner (not part of this repository) can read the module files'
