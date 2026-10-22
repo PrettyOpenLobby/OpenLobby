@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR GPL-3.0-or-later
+# Copyright (C) OpenLobby contributors. This file alone may be used under either licence,
+# so a GPL-3.0 game server can carry a copy of it unchanged. See LICENSE for the AGPL.
 """olpage.py -- small HTML pages for a game's admin tools, in the admin panel's own look.
 
 A game's tool page (olport.AdminPort.tool) is shown inside the panel, so it should read as

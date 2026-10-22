@@ -35,6 +35,9 @@ import adminmodules
 
 TIMEOUT = float(os.environ.get("POL_ADMIN_GAME_TIMEOUT", "20"))
 MAX_BODY = 1 << 20
+# What a tool may send back: pages and JSON are small, but a download (a player's save
+# or transfer file) can be big. A larger answer is refused, never cut short.
+MAX_REPLY = int(os.environ.get("POL_ADMIN_GAME_MAX_REPLY_MB", "64")) << 20
 _KEY = re.compile(r"^[a-z0-9]{1,16}$")
 
 
@@ -110,7 +113,10 @@ def forward(key, sub, method, query, body, ctype, actor):
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             status, rtype, rcache, data = (r.status, r.headers.get("Content-Type", ""),
-                                           r.headers.get("Cache-Control", ""), r.read(MAX_BODY * 8))
+                                           r.headers.get("Cache-Control", ""), r.read(MAX_REPLY + 1))
+        if len(data) > MAX_REPLY:
+            return _error(502, "The %s tools answered with more than %d MB, more than the panel passes on."
+                          % (title(key), MAX_REPLY >> 20), sub, key)
     except urllib.error.HTTPError as e:
         status, rtype, rcache = e.code, e.headers.get("Content-Type", ""), ""
         data = e.read(MAX_BODY)
