@@ -1311,6 +1311,15 @@ def test_import_validation(c, port, t, uid):
     ok(code == 400 and r.get("missing"), "import from an upload's top when the install is a folder down: 400")
 
 
+def docker_open_to_me():
+    """Whether this user may connect to a Docker socket, as the deployer's import guard sees it."""
+    if not hasattr(os, "getuid") or os.getuid() == 0:
+        return False
+    import deployer as dep
+    gids = set(os.getgroups()) | {os.getgid()}
+    return any(dep.socket_open_to(os.getuid(), gids, s) for s in dep.docker_sockets())
+
+
 def tool_record(t):
     with open(os.path.join(t.fakedir, "tool.json")) as f:
         return json.load(f)
@@ -1327,6 +1336,12 @@ def test_import_jobs(c, port, t, uid):
         return j
     t.clear_calls()
     j = run({"path": "TetraMaster"})
+    if docker_open_to_me():
+        # A machine whose user may use the Docker socket (a CI runner): the deployer must refuse
+        # to start the tool, and nothing after this can run here.
+        ok(j["state"] != "ok" and "Docker socket" in j["summary"],
+           "import as a user who may use the Docker socket: refused (%s)" % j["summary"])
+        return
     ok(j["state"] == "ok" and "Imported" in j["summary"], "import tm card tables from a folder: ok (%s)"
        % j["summary"])
     ok(j.get("item") == "tmdata" and j.get("source") == {"path": "TetraMaster"},

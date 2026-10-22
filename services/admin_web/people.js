@@ -304,8 +304,14 @@ function linkWarn() {
   }
   if (c.person) { go.disabled = true; warn.textContent = `That login is linked to ${p.name} already.`; return; }
   go.disabled = false;
-  warn.textContent = `${c.name} plays ${t.title} for ${p.name} from now on: their characters there show on ${p.name}'s page, `
-    + `and the game's actions on that page reach this login. Moderators who may see linked accounts see this link.`;
+  if (c.system === "discord") {
+    const who = c.name === c.key ? `Discord user ${c.key}` : `${c.name} (Discord user ${c.key})`;
+    warn.textContent = `${who} will be listed on ${p.name}'s page as their Discord account, marked as linked by staff. `
+      + `Moderators who may see linked accounts will see it.`;
+    return;
+  }
+  warn.textContent = `${c.name} will be ${p.name}'s ${t.title} account: its characters show on ${p.name}'s page, `
+    + `and ${t.title}'s actions on that page (such as kick or ban) act on it. Moderators who may see linked accounts will see the link.`;
 }
 
 $("#ppLinkGames").addEventListener("click", (e) => {

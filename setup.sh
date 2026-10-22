@@ -19,7 +19,6 @@ set -u
 set -o pipefail
 
 local REPO_URL_DEFAULT="https://github.com/PrettyOpenLobby/OpenLobby.git"
-local RAW_URL="https://raw.githubusercontent.com/PrettyOpenLobby/OpenLobby/main/setup.sh"
 local LOOKUP_URL="https://api.ipify.org"
 
 # ------------------------------------------------------------------ options
@@ -796,7 +795,7 @@ fi
 step "Admin panel password"
 local ADMIN_USER ADMIN_PW="" ADMIN_STATE=""
 ADMIN_USER="$(env_get POL_ADMIN_USER "$WORK")"
-[ -n "$ADMIN_USER" ] || ADMIN_USER=admin
+[ -n "$ADMIN_USER" ] || ADMIN_USER="admin"
 if [ -n "$DRY" ]; then
     say "  would run: ${DC[*]} exec -T admin python admin.py --show-admin"
     say "  and, when no credential is stored, generate a password and pipe it to"

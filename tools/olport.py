@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR GPL-3.0-or-later
+# Copyright (C) OpenLobby contributors. This file alone may be used under either licence,
+# so a GPL-3.0 game server can carry a copy of it unchanged. See LICENSE for the AGPL.
 """OpenLobby admin port: drop this one file into a game server, and an
 OpenLobby admin panel can show the game and run its actions.
 

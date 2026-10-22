@@ -6,7 +6,7 @@ PostgreSQL.
 
 The fixture is made the way a real server made it: accounts.db, admin.db and
 discord_links.db are created by the pre-PostgreSQL accounts.py, adminusers.py
-and discordlink.py, taken from git (OLD_COMMIT, the commit before the move),
+and discordlink.py, taken from git (OLD_COMMITS, the commit before the move),
 and run from a temporary directory. On top of that go the rows SQLite let
 through and PostgreSQL will not (children of missing parents), the two backup
 tables the old rebuilds kept, an unknown table, a value its column cannot
@@ -37,8 +37,10 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 import pgtest  # noqa: E402
 
-#: The last commit whose account code wrote SQLite (the `core-split` branch).
-OLD_COMMIT = "9e58ab97f86faa91d2aa19d4abd8fe5ad1bf70b2"
+#: The last commit whose account code wrote SQLite (the `core-split` branch), as the
+#: development tree has it, then the same era in the public repository's own history.
+OLD_COMMITS = ("9e58ab97f86faa91d2aa19d4abd8fe5ad1bf70b2",
+               "760e9d57e28a722de14f66be84943bc62a619a5e")
 OLD_FILES = ("services/accounts.py", "services/adminusers.py",
              "services/discordlink.py")
 
@@ -68,12 +70,14 @@ def chk(what, got, want):
 def old_code():
     out = os.path.join(BASE, "old")
     os.makedirs(out)
-    commit = OLD_COMMIT
-    probe = subprocess.run(["git", "cat-file", "-e", commit + "^{commit}"],
-                           cwd=ROOT, capture_output=True)
-    if probe.returncode != 0:
-        print("FAIL: this suite needs the pre-PostgreSQL account code at %s "
-              "(a shallow clone lacks it: git fetch --unshallow)" % commit)
+    for commit in OLD_COMMITS[int(os.environ.get("DB_IMPORT_SKIP_FIRST", "0")):]:
+        probe = subprocess.run(["git", "cat-file", "-e", commit + "^{commit}"],
+                               cwd=ROOT, capture_output=True)
+        if probe.returncode == 0:
+            break
+    else:
+        print("FAIL: this suite needs the pre-PostgreSQL account code at one of %s "
+              "(a shallow clone lacks it: git fetch --unshallow)" % ", ".join(OLD_COMMITS))
         sys.exit(1)
     for f in OLD_FILES:
         src = subprocess.run(["git", "show", "%s:%s" % (commit, f)], cwd=ROOT,

@@ -135,6 +135,12 @@ def serve_and_selfcheck(mirrors, bundle, reference):
                            capture_output=True, text=True, timeout=120)
     finally:
         stop.set()
+        # On Linux a close() alone leaves the socket listening while loop() is blocked in
+        # accept(); shutdown() wakes it.
+        try:
+            ls.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         ls.close()
         t.join(5)
     try:
