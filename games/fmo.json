@@ -53,12 +53,20 @@
      "description": "The rank ladder, the class curve and the catalogues (and the board's backdrop). The server runs without them, with gaps.",
      "source": "your Front Mission Online install",
      "tool": "python tools/fmodata_build.py --client <install>",
-     "paths": ["services/fmodata/fmo-ranks.tsv"]},
+     "paths": ["services/fmodata/fmo-ranks.tsv"],
+     "import": {"label": "game data",
+                "argv": ["python", "tools/fmodata_build.py", "--client", "{input}"],
+                "expects": ["Data/AI/F32/D15.DAT"],
+                "hint": "your FRONT MISSION ONLINE install folder, the one holding PolBoot.exe and Data/"}},
     {"id": "boardart", "required": false, "build_only": false,
      "description": "The City Control board's satellite backdrop (fmodata_build.py also bakes it).",
      "source": "your Front Mission Online install",
      "tool": "python tools/fmo_boardart_bake.py --client <install>",
-     "paths": ["services/boardart/fmo/backdrop.png"]}
+     "paths": ["services/boardart/fmo/backdrop.png"],
+     "import": {"label": "board backdrop",
+                "argv": ["python", "tools/fmo_boardart_bake.py", "--client", "{input}"],
+                "expects": ["Data/AJ/F40/D54.DAT"],
+                "hint": "your FRONT MISSION ONLINE install folder, the one holding PolBoot.exe and Data/"}}
   ],
   "volumes": [],
   "ports": [

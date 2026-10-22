@@ -49,12 +49,20 @@
      "source": "your Tetra Master install (the Viewer's SquareEnix/TetraMaster directory)",
      "tool": "python tools/tmdata_build.py --client <install>",
      "paths": ["services/tmdata/CardPri.BIN", "services/tmdata/CardPrm.BIN", "services/tmdata/CoPrm.BIN",
-               "services/tmdata/PackPrm.BIN", "services/tmdata/PlPrm.BIN"]},
+               "services/tmdata/PackPrm.BIN", "services/tmdata/PlPrm.BIN"],
+     "import": {"label": "card tables",
+                "argv": ["python", "tools/tmdata_build.py", "--client", "{input}"],
+                "expects": ["data/CardPrm.BIN", "data/PlPrm.BIN"],
+                "hint": "your Tetra Master install: the TetraMaster folder in the SquareEnix folder of your PlayOnline install, the one holding data/"}},
     {"id": "boardart", "required": false, "build_only": false,
      "description": "Card and board art for the live board (--profile board).",
      "source": "your Tetra Master install",
      "tool": "python tools/tm_boardart_bake.py --client <install>",
-     "paths": ["services/boardart/tm/*.png"]}
+     "paths": ["services/boardart/tm/*.png"],
+     "import": {"label": "board art",
+                "argv": ["python", "tools/tm_boardart_bake.py", "--client", "{input}"],
+                "expects": ["data/gW000.dat", "data/gW101.dat", "data/PlPrm.BIN"],
+                "hint": "your Tetra Master PC install: the TetraMaster folder in the SquareEnix folder of your PlayOnline install, the one holding data/gW000.dat"}}
   ],
   "volumes": [],
   "ports": [

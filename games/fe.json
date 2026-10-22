@@ -43,7 +43,11 @@
      "description": "Spawn tables, item and skill parameters, map geometry and minimap art.",
      "source": "your Fantasy Earth install",
      "tool": "python tools/fedata_build.py --client <install>",
-     "paths": ["services/fedata/fe-fet-area.tsv"]}
+     "paths": ["services/fedata/fe-fet-area.tsv"],
+     "import": {"label": "game data",
+                "argv": ["python", "tools/fedata_build.py", "--client", "{input}"],
+                "expects": ["DATA/dat.pak"],
+                "hint": "your Fantasy Earth install folder, the one holding DATA/ and FE_Client.dll"}}
   ],
   "volumes": [],
   "ports": [

@@ -37,6 +37,8 @@ PERMS = {
     "news_edit": "Write and save announcements",
     "news_publish": "Publish announcements to players",
     "pml": "PML Preview",
+    "calendar": "See the calendar (each game's entries need that game's permission)",
+    "calendar_edit": "Add, change and delete the panel's own calendar entries",
     "audit": "See the activity log",
     "health": "See service status and backups",
     "settings": "Change GM alert and service check settings",

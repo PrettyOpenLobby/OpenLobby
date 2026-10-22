@@ -193,6 +193,51 @@ def ops_request(data_dir, action, by, now=None):
     return True, "%s requested. It usually takes under a minute." % actions[action].get("name", action)
 
 
+#: IPv4 and IPv6 addresses, masked in logs shown to anyone but the owner
+_ADDR = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"                       # 192.0.2.10
+                   r"|\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b"             # full IPv6
+                   r"|(?<![\w:])(?=[0-9a-f:]*::)[0-9a-f:.]{3,}(?![\w:])",  # fe80::1, ::ffff:192.0.2.1 (a time has no ::)
+                   re.I)
+LOGS_FRESH = 20.0
+
+
+def logs_request(data_dir, group, by, now=None):
+    """Ask the host runner for one group's logs -> (ok, message). Only a group
+    the runner listed, and not while it is stale."""
+    st = ops_status(data_dir, now)
+    if st is None or st["stale"]:
+        return False, "The server checker is not running, so it cannot read logs."
+    if not isinstance(group, str) or not _OPS_ID.match(group) or group not in (st.get("logs") or []):
+        return False, "The server checker has no logs for that."
+    now = time.time() if now is None else now
+    req = os.path.join(data_dir, "ops", "logreq")
+    os.makedirs(req, exist_ok=True)
+    name = "%d-%s.json" % (int(now * 1000), group)
+    tmp = os.path.join(req, "." + name)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"group": group, "by": str(by)[:64], "at": now}, f)
+    os.replace(tmp, os.path.join(req, name))
+    return True, "Asked for the logs."
+
+
+def logs_read(data_dir, group, show_addresses):
+    """The runner's last logs for `group`, or None. Addresses are masked unless
+    show_addresses (the owner)."""
+    if not isinstance(group, str) or not _OPS_ID.match(group):
+        return None
+    try:
+        with open(os.path.join(data_dir, "ops", "logs", group + ".json"), encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if not show_addresses:
+        for c in doc.get("containers") or []:
+            c["lines"] = [_ADDR.sub("<address>", str(ln)) for ln in c.get("lines") or []]
+    return doc
+
+
 # --------------------------------------------------------------------------- #
 # Discord
 # --------------------------------------------------------------------------- #

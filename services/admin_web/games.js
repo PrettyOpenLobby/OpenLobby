@@ -120,6 +120,7 @@ function gameTabs(g, active) {
     const href = t.panel ? "#" + t.id : `#games/${g.key}/${t.id}`;
     tabs.push(`<a href="${esc(href)}" class="${active === t.id ? "on" : ""}">${esc(t.label)}</a>`);
   }
+  if (canGameLogs(g)) tabs.push(`<a href="#games/${esc(g.key)}/logs" class="${active === "logs" ? "on" : ""}">Logs</a>`);
   return `<nav class="gx-tabs" aria-label="${esc(g.title)}">${tabs.join("")}</nav>`;
 }
 
@@ -135,6 +136,7 @@ function renderGame(key, toolId) {
   const g = GAMES.find((x) => x.key === key);
   if (!g) return renderGameGrid();
   const head = gameHeader(g) + gameTabs(g, toolId);
+  if (toolId === "logs") return renderGameLogs(g, head);
   if (toolId) {
     const t = g.tools.find((x) => x.id === toolId);
     const src = "/games/" + g.key + "/" + t.path;
@@ -208,6 +210,70 @@ function renderGame(key, toolId) {
 
 const cap = (s) => String(s || "").charAt(0).toUpperCase() + String(s || "").slice(1);
 
+// ---- a game's server logs (the host runner reads them: pol-ops, data/ops/logs) ----
+// The owner sees everything; a moderator with the game's serverlogs permission
+// sees them with players' addresses masked by the panel.
+const canGameLogs = (g) => (g.services || []).length > 0 && (isOwner() || can(`game.${g.key}.serverlogs`));
+let LOGS = { key: "", doc: null, shown: 0, filter: "", busy: false, timer: null };
+
+async function renderGameLogs(g, head) {
+  if (LOGS.key !== g.key) LOGS = { key: g.key, doc: null, shown: 0, filter: "", busy: false, timer: null };
+  $("#gamesMain").innerHTML = head + `<section class="panel"><div class="lg-tools">`
+    + `<button class="act sm" id="lgFresh">Fetch the latest</button><span class="muted" id="lgWhen"></span>`
+    + `<span class="grow"></span><input type="text" id="lgFilter" autocomplete="off" placeholder="Only lines with..." value="${esc(LOGS.filter)}"></div>`
+    + `<div class="lg-ctrs" id="lgCtrs"></div><pre class="deploy-log lg-pre" id="lgPre">Loading...</pre></section>`;
+  let r;
+  try { r = await api("/api/logs?group=" + encodeURIComponent(g.key)); }
+  catch (e) { $("#lgPre").textContent = e.message; return; }
+  LOGS.doc = r.logs;
+  LOGS.addresses = r.addresses;
+  LOGS.available = r.available;
+  drawLogs();
+  if (r.available && (!r.logs || Date.now() / 1000 - r.logs.at > 60)) fetchLogs();
+}
+
+function drawLogs() {
+  const d = LOGS.doc;
+  if (!$("#lgPre")) return;
+  $("#lgFresh").disabled = LOGS.busy || !LOGS.available;
+  $("#lgWhen").textContent = LOGS.busy ? "Asking the server..."
+    : !LOGS.available ? "The server checker (pol-ops) is not reading logs on this server."
+    : d ? `Read ${ago(d.at * 1000)}${d.by ? " for " + d.by : ""}${LOGS.addresses ? "" : ". Players' addresses are hidden."}` : "";
+  const ctrs = (d && d.containers) || [];
+  $("#lgCtrs").innerHTML = ctrs.length > 1 ? ctrs.map((c, i) => `<button class="cal-chip${i === LOGS.shown ? "" : " off-lite"}" data-lgctr="${i}">`
+    + `${esc(c.name)}${c.missing ? " (not found)" : ""}</button>`).join("") : "";
+  const c = ctrs[Math.min(LOGS.shown, ctrs.length - 1)];
+  if (!c) { $("#lgPre").textContent = LOGS.available ? "No logs read yet." : ""; return; }
+  const f = LOGS.filter.toLowerCase();
+  const lines = (c.lines || []).filter((l) => !f || l.toLowerCase().includes(f));
+  const pre = $("#lgPre");
+  pre.textContent = c.missing ? `${c.name} is not on this server.` : lines.join("\n") || (f ? "No line has that." : "Nothing logged.");
+  pre.scrollTop = pre.scrollHeight;
+}
+
+async function fetchLogs() {
+  if (LOGS.busy) return;
+  const key = LOGS.key, asked = Date.now() / 1000;
+  LOGS.busy = true; drawLogs();
+  try {
+    await api("/api/logs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group: key }) });
+    for (let i = 0; i < 30 && LOGS.key === key; i++) {
+      await new Promise((ok) => setTimeout(ok, 1000));
+      const r = await api("/api/logs?group=" + encodeURIComponent(key));
+      if (r.logs && r.logs.at >= asked - 1) { LOGS.doc = r.logs; break; }
+    }
+  } catch (e) { toast(e.message, true); }
+  LOGS.busy = false;
+  if (LOGS.key === key) drawLogs();
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#lgFresh")) return fetchLogs();
+  const b = e.target.closest("[data-lgctr]");
+  if (b) { LOGS.shown = +b.dataset.lgctr; drawLogs(); }
+});
+document.addEventListener("input", (e) => { if (e.target.id === "lgFilter") { LOGS.filter = e.target.value; drawLogs(); } });
+
 // ---- navigation ----
 // `id` is the hash path: "", "<key>" or "<key>/<tool>". Unknown parts fall
 // back to the nearest page that exists.
@@ -220,7 +286,7 @@ function openGameTool(id, reload) {
   let [key, tool] = String(id || "").split("/");
   const g = GAMES.find((x) => x.key === key);
   if (!g) key = tool = "";
-  else if (tool && !g.tools.some((t) => t.id === tool && !t.panel)) tool = "";
+  else if (tool && !g.tools.some((t) => t.id === tool && !t.panel) && !(tool === "logs" && canGameLogs(g))) tool = "";
   if (reload && $("#gamesFrame")) $("#gamesFrame").dataset.src = "";
   GAME_TOOL = key ? key + (tool ? "/" + tool : "") : "";
   writeHash("games", GAME_TOOL);
@@ -358,10 +424,14 @@ function renderDeploy() {
   $("#deployBody").innerHTML = rows.map((g) => {
     const [cls, word, acts] = g.core ? ["good", "Running", ["update", "restart", "check"]] : deployState(g);
     const needs = (g.missing || []).map((m) => `<div><span class="mono">${esc(m.path)}</span>`
+      + (m.required === false ? ' <span class="muted">(optional)</span>' : "")
       + `${m.hint ? ` <span class="muted">${esc(m.hint)}</span>` : ""}</div>`).join("")
       + (g.installed && g.enabled && (g.admin_env || []).length
         ? `<div class="muted">For its admin page set ${(g.admin_env || []).map((e) => `<span class="mono">${esc(e)}</span>`).join(" and ")}.</div>` : "")
-      + (g.notes ? `<div class="muted">${esc(g.notes)}</div>` : "");
+      + (g.notes ? `<div class="muted">${esc(g.notes)}</div>` : "")
+      + [...new Set((g.missing || []).filter((m) => m.import && m.item).map((m) => m.item))]
+        .map((it) => `<div><button class="ghost sm" data-import="${esc(g.key)}" data-item="${esc(it)}"`
+          + `${busy ? " disabled" : ""}>Import ${esc(it)} from a client...</button></div>`).join("");
     return `<tr><td class="strong">${esc(g.name || g.key)}<div class="muted mono">${esc(g.key)}</div></td>`
       + `<td><span class="pill ${cls === "good" ? "live" : cls === "bad" ? "off" : "env"}">${esc(word)}</span></td>`
       + `<td>${needs || '<span class="muted">-</span>'}</td>`
@@ -371,8 +441,16 @@ function renderDeploy() {
   $("#deployJobs").innerHTML = (d.jobs || []).map((j) =>
     `<li data-job="${esc(j.id)}"><span class="t1">${esc(ACT_WORD[j.action] || j.action)} ${esc(j.game)}: `
     + `${esc(JOB_WORD[j.state] || j.state)}${j.summary ? " - " + esc(j.summary) : ""}</span>`
-    + `<span class="t2">${j.started ? esc(ago(j.started * 1000)) : ""}</span></li>`).join("")
+    + `<span class="t2">${esc(jobWhen(j))}</span></li>`).join("")
     || '<li class="empty">No jobs yet.</li>';
+}
+
+// job times are ISO strings (or epoch seconds from an older deployer), null until set
+function jobWhen(j) {
+  const t = j.started || j.created;
+  if (t === null || t === undefined || t === "") return "";
+  const ms = typeof t === "number" ? t * 1000 : Date.parse(t);
+  return isNaN(ms) ? "" : ago(ms);
 }
 
 async function loadDeploy() {
@@ -409,9 +487,11 @@ async function followJob(id) {
     if (r.text) {
       const pre = $("#deployLog");
       pre.textContent += r.text;
-      DEPLOY_OFFSET += new TextEncoder().encode(r.text).length;
       pre.scrollTop = pre.scrollHeight;
     }
+    // the deployer says where the text it sent started; the next read follows on from it
+    DEPLOY_OFFSET = typeof r.next === "number" ? r.next
+      : DEPLOY_OFFSET + new TextEncoder().encode(r.text || "").length;
     if (JOB_DONE.has(r.state)) {
       stopDeployPoll();
       await showJob(id);
@@ -422,6 +502,159 @@ async function followJob(id) {
 }
 
 function stopDeployPoll() { clearInterval(DEPLOY_TIMER); DEPLOY_TIMER = null; }
+
+// ---- Install games > Import from client: hand the deployer a game client ----
+// Two ways in: an archive the browser uploads (streamed through the panel to the deployer),
+// or a folder in the deployer's clients folder (POL_DEPLOY_CLIENTS). The deployer checks the
+// item's expected files before it runs anything; a 400 lists what is missing.
+let IMP = null;
+
+function impBytes(n) {
+  if (!(n >= 0)) return "";
+  const u = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + " " + u[i];
+}
+const impMatches = (ms) => (ms || []).some((m) => m.game === IMP.game && m.item === IMP.item);
+
+function impChoose(src, words) {
+  IMP.source = src;
+  $("#impChosen").textContent = src ? "From " + words : "";
+  $("#impGo").disabled = !src;
+  $("#impMissing").hidden = true;
+  document.querySelectorAll("#impModal .imp-list li").forEach((li) =>
+    li.classList.toggle("chosen", !!src && li.dataset.key === JSON.stringify(src)));
+}
+
+function impTab(which) {
+  document.querySelectorAll("#impModal [data-imp]").forEach((b) => b.classList.toggle("active", b.dataset.imp === which));
+  $("#impUpload").hidden = which !== "upload";
+  $("#impBrowse").hidden = which !== "browse";
+  impChoose(null);
+  if (which === "browse") impBrowse(IMP.path || "");
+  else impUploads();
+}
+
+async function impUploads() {
+  let r;
+  try { r = await api("/api/deploy/uploads"); } catch (e) { $("#impUploads").innerHTML = `<li class="empty">${esc(e.message)}</li>`; return; }
+  $("#impUploads").innerHTML = (r.uploads || []).map((u) => {
+    const key = JSON.stringify({ upload: u.id });
+    return `<li data-key="${esc(key)}" data-upload="${esc(u.id)}" data-name="${esc(u.name)}" class="${impMatches(u.matches) ? "match" : ""}">`
+      + `<span class="t1">${esc(u.name || u.id)}</span><span class="t2">${esc(impBytes(u.size))}, ${esc(u.files)} files`
+      + ` <button class="ghost sm" data-imp-del="${esc(u.id)}">Remove</button></span></li>`;
+  }).join("") || '<li class="empty">No uploads yet.</li>';
+}
+
+async function impBrowse(path) {
+  let r;
+  try { r = await api("/api/deploy/browse?path=" + encodeURIComponent(path)); }
+  catch (e) { $("#impDirs").innerHTML = `<li class="empty">${esc(e.message)}</li>`; return; }
+  IMP.path = r.path || "";
+  IMP.parent = r.parent;
+  $("#impPath").textContent = "/" + IMP.path;
+  $("#impUp").disabled = r.parent === null || r.parent === undefined;
+  const here = JSON.stringify({ path: IMP.path });
+  $("#impDirs").innerHTML = `<li data-key="${esc(here)}" data-use="${esc(IMP.path)}" class="${impMatches(r.matches) ? "match" : ""}">`
+      + `<span class="t1">Use this folder</span><span class="t2">${(r.files || []).length === 1 ? "1 file" : esc((r.files || []).length) + " files"} here</span></li>`
+    + (r.dirs || []).map((d) => `<li data-dir="${esc((IMP.path ? IMP.path + "/" : "") + d)}"><span class="t1">${esc(d)}/</span></li>`).join("")
+    + (r.truncated ? '<li class="empty">More folders than shown.</li>' : "");
+  if (impMatches(r.matches)) impChoose({ path: IMP.path }, "/" + IMP.path);
+}
+
+async function openImport(game, item) {
+  const g = ((DEPLOY || {}).games || []).find((x) => x.key === game) || {};
+  const m = (g.missing || []).find((x) => x.item === item && x.import) || {};
+  IMP = { game, item, path: "", source: null };
+  $("#impWhat").textContent = `${g.name || game}: ${item}`;
+  $("#impHint").textContent = (m.import || {}).hint ? `Point it at ${m.import.hint}.` : "";
+  $("#impProgress").hidden = true;
+  $("#impModal").classList.add("show");
+  impTab("upload");
+  // the folder tab only when the deployer has a clients folder
+  let canBrowse = true;
+  try { await api("/api/deploy/browse?path="); } catch (e) { canBrowse = false; }
+  $("#impBrowseTab").hidden = !canBrowse;
+}
+
+function impSend(file) {
+  if (!file || !IMP) return;
+  const x = new XMLHttpRequest();
+  x.open("POST", "/api/deploy/upload");
+  x.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+  x.setRequestHeader("Content-Type", "application/octet-stream");
+  $("#impProgress").hidden = false;
+  $("#impBar").style.width = "0";
+  $("#impPct").textContent = "Uploading " + file.name;
+  $("#impGo").disabled = true;
+  x.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.floor(100 * e.loaded / e.total);
+    $("#impBar").style.width = pct + "%";
+    $("#impPct").textContent = pct < 100 ? `${pct}% of ${impBytes(e.total)}` : "Unpacking on the server...";
+  };
+  x.onload = async () => {
+    let j = {}; try { j = JSON.parse(x.responseText || "{}"); } catch (e) { /* not JSON */ }
+    if (x.status !== 201) { $("#impPct").textContent = j.error || "The upload failed (" + x.status + ")."; return; }
+    $("#impPct").textContent = `Uploaded: ${j.files} files.` + (impMatches(j.matches) ? " It looks right." : "");
+    await impUploads();
+    impChoose({ upload: j.upload }, file.name);
+  };
+  x.onerror = () => { $("#impPct").textContent = "The upload stopped. Check the connection and try again."; };
+  x.send(file);
+}
+
+async function impGo() {
+  if (!IMP || !IMP.source) return;
+  $("#impGo").disabled = true;
+  const r = await fetch("/api/deploy/action", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "import", game: IMP.game, item: IMP.item, source: IMP.source }) });
+  let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ }
+  if (r.status !== 202) {
+    const miss = (j.missing || []).map((m) => `<div><span class="mono">${esc(m.path)}</span>${m.hint ? ` <span class="muted">${esc(m.hint)}</span>` : ""}</div>`).join("");
+    $("#impMissing").innerHTML = esc(j.error || "The deployer refused the import.") + miss;
+    $("#impMissing").hidden = false;
+    $("#impGo").disabled = false;
+    return;
+  }
+  $("#impModal").classList.remove("show");
+  toast(`Import ${IMP.item}: started`);
+  await probeDeploy(); renderDeploy();
+  followJob(j.job);
+}
+
+document.addEventListener("click", async (e) => {
+  const opener = e.target.closest("[data-import]");
+  if (opener) return openImport(opener.dataset.import, opener.dataset.item);
+  if (!e.target.closest("#impModal")) return;
+  const tab = e.target.closest("[data-imp]");
+  if (tab) return impTab(tab.dataset.imp);
+  const del = e.target.closest("[data-imp-del]");
+  if (del) {
+    e.stopPropagation();
+    if (!confirm("Remove this upload from the server?")) return;
+    try { await api("/api/deploy/upload/delete", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                   body: JSON.stringify({ upload: del.dataset.impDel }) }); }
+    catch (err) { toast(err.message, true); }
+    impChoose(null);
+    return impUploads();
+  }
+  const li = e.target.closest(".imp-list li");
+  if (li && li.dataset.upload) return impChoose({ upload: li.dataset.upload }, li.dataset.name || li.dataset.upload);
+  if (li && li.dataset.use !== undefined) return impChoose({ path: li.dataset.use }, "/" + li.dataset.use);
+  if (li && li.dataset.dir) return impBrowse(li.dataset.dir);
+  if (e.target.closest("#impUp")) return impBrowse(IMP.parent || "");
+  if (e.target.closest("#impCancel") || e.target.id === "impModal") return $("#impModal").classList.remove("show");
+  if (e.target.closest("#impGo")) return impGo();
+});
+document.addEventListener("change", (e) => { if (e.target.id === "impFile") impSend(e.target.files[0]); });
+["dragover", "dragleave", "drop"].forEach((ev) => document.addEventListener(ev, (e) => {
+  const drop = e.target.closest && e.target.closest("#impDrop");
+  if (!drop) return;
+  e.preventDefault();
+  drop.classList.toggle("over", ev === "dragover");
+  if (ev === "drop") impSend(e.dataTransfer.files[0]);
+}));
 
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-deploy]");

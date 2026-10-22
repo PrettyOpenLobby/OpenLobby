@@ -63,10 +63,10 @@ chk("a game without a root tool owns nothing else",
 
 print("permissions")
 perms = M.all_perms()
-chk("one to see the game, one per tool, one per action",
+chk("one to see the game, one per tool, one per action, one for its server logs",
     sorted(p for p in perms if p.startswith("game.ffxi")),
     ["game.ffxi", "game.ffxi.ah", "game.ffxi.announce", "game.ffxi.bonanza", "game.ffxi.chars",
-     "game.ffxi.events", "game.ffxi.federation", "game.ffxi.notices"])
+     "game.ffxi.events", "game.ffxi.federation", "game.ffxi.notices", "game.ffxi.serverlogs"])
 chk("a panel page keeps its own permission and adds none",
     (mods["viewer"].perm("pml"), "game.viewer.pml" in perms), ("pml", False))
 chk("the old per-game grant expands to the whole game",

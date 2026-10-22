@@ -90,6 +90,23 @@ A player is a name or an object with `name` and, if it has one, where they are
 (`zone`, `place`, `room` or `lobby`). The panel asks at most every few seconds
 and caches the answer.
 
+### GET /openlobby/calendar.json?from=&lt;unix&gt;&to=&lt;unix&gt;
+
+Optional, for a game with a schedule: say `"calendar": true` in module.json
+(olport does when you use `@port.calendar`) and the panel's Calendar shows what
+you answer here, to anyone with the game's permission.
+
+```json
+{"events": [{"id": "gp-20261031", "title": "Halloween Grand Prix", "start": 1793404800,
+             "end": 1793491200, "kind": "cup", "about": "Pumpkin karts only.",
+             "times": [[1793469600, 1793473200]]}]}
+```
+
+`start` and `end` are unix seconds; answer the entries that touch the range.
+`times` is optional: the sessions inside a long entry, shown in the week view.
+A game that does not answer within a few seconds is named on the Calendar and
+the rest still shows.
+
 ### POST /openlobby/actions/&lt;id&gt;
 
 The body is a JSON object of the action's fields. Answer

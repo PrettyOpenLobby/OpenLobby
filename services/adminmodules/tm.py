@@ -16,4 +16,5 @@ MODULE = Module(
     services=[Service(["{core}-tmrank-1", "{core}-board-master-1|{core}-tmboard-1"], name="Rankings and board",
                       warning="Rankings and the board pause for a few seconds. Matches go on.")],
     live=sources.board(_parse, counted=[("tm", "matches")]),
+    calendar=sources.eventcal("tm", {"weekly": "cup", "event": "holiday cup"}),
 )

@@ -115,6 +115,11 @@ bring a client from any earlier version to that one in a single step. It
 cannot install a title from nothing: `file.txt` lists the data files, and the
 executables and launchers belong to the title's installer.
 
+If the title is installed on a different PC from the one that runs your
+server, build a `.polpatch` instead: the same bundle packed into one file that
+you copy across and import. [polpatch.md](polpatch.md) covers it, including a
+double-click route on Windows.
+
 ## What is in a bundle
 
 ```

@@ -24,6 +24,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import stack  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "services", "deployer"))
+import clientdata  # noqa: E402
 
 FAILS = []
 SKIPS = []
@@ -92,10 +94,37 @@ def check_catalog(catalog, root, parent):
         if e["admin_module"] is not None and akeys is not None:
             ok(e["admin_module"] in akeys, "%s: admin_module %r is an adminmodules key"
                % (key, e["admin_module"]))
+        for item in e["data"]:
+            imp = item.get("import")
+            if imp is None:
+                continue
+            why = clientdata.valid_import(imp)
+            ok(why is None, "%s: %s import block: %s" % (key, item["id"], why))
+            ok(not item.get("build_only") and not item["source"].startswith("none"),
+               "%s: %s has an import but needs no client" % (key, item["id"]))
+            m = re.search(r"tools/[\w.]+\.py", item["tool"])
+            ok(why is not None or (m and imp["argv"][1] == m.group(0)),
+               "%s: %s import runs the tool its entry names (%s)" % (key, item["id"], item["tool"]))
         d = stack.checkout_of(e, root, parent)
         if not os.path.isdir(d):
             skip("%s: no checkout at %s" % (key, d))
             continue
+        for item in e["data"]:
+            imp = item.get("import")
+            if imp is None or clientdata.valid_import(imp):
+                continue
+            tool = os.path.join(d, *imp["argv"][1].split("/"))
+            if not ok(os.path.isfile(tool), "%s: import tool %s exists" % (key, imp["argv"][1])):
+                continue
+            src = read(tool)
+            for a in imp["argv"][2:]:
+                if a.startswith("--"):
+                    ok(re.search(r"add_argument\([^)]*[\"']%s[\"']" % re.escape(a), src),
+                       "%s: %s takes %s" % (key, imp["argv"][1], a))
+                elif "{input}" in a and not a.startswith("-"):
+                    prev = imp["argv"][imp["argv"].index(a) - 1]
+                    ok(prev.startswith("--") or re.search(r"add_argument\(\s*[\"'][a-z_]+[\"']", src),
+                       "%s: %s takes the folder as a positional argument" % (key, imp["argv"][1]))
         files = list(e["compose"]) + list(e["compose_ghcr"])
         if e.get("title"):
             files.append(e["title"]["compose"])
@@ -156,6 +185,20 @@ def check_catalog(catalog, root, parent):
                 owner[s] = key
 
 
+def plan_files(p, root, parent):
+    """The -f list of a plan as short names: the core's files as core/<file>
+    (the core checkout may have any directory name, e.g. OpenLobby on a CI
+    runner), a game's as <checkout>/<file>."""
+    out = []
+    for f in p["files"]:
+        rel = os.path.relpath(f, root)
+        if not rel.startswith(os.pardir):
+            out.append("core/" + rel.replace(os.sep, "/"))
+        else:
+            out.append(os.path.relpath(f, parent).replace(os.sep, "/"))
+    return out
+
+
 def check_plan(catalog, root, parent):
     p = stack.plan(catalog, [], ["up", "-d"], root=root, parent=parent, environ={})
     ok(len(p["steps"]) == 1 and p["titles"] == "", "core alone: one step, no titles")
@@ -178,8 +221,8 @@ def check_plan(catalog, root, parent):
     ok([s["env"].get("POL_TITLE_BASE_IMAGE") for s in pre] ==
        [None, "openlobby:latest", "hippaulmaster:latest"],
        "tm+fe+ffxi: core, then tm on the core, then fe on tm")
-    fl = [os.path.relpath(f, parent).replace(os.sep, "/") for f in p["files"]]
-    ok(fl == ["openlobby/docker-compose.yml",
+    fl = plan_files(p, root, parent)
+    ok(fl == ["core/docker-compose.yml",
               "hippaulmaster/docker-compose.yml",
               "hippaulring/docker-compose.yml", "hippaulring/docker-compose.title.yml",
               "hippaulbridge/docker-compose.yml", "hippaulbridge/docker-compose.title.yml"],
@@ -202,7 +245,7 @@ def check_plan(catalog, root, parent):
     # published images: tm is the first link and pulled; jan builds on it
     p = stack.plan(catalog, ["tm", "jan"], ["up", "-d"], ghcr=True, root=root, parent=parent,
                    environ={"HIPPAULMASTER_TAG": "0.2.0"})
-    fl = [os.path.relpath(f, parent).replace(os.sep, "/") for f in p["files"]]
+    fl = plan_files(p, root, parent)
     ok("hippaulmaster/docker-compose.ghcr.yml" in fl and "hippaulholo/docker-compose.ghcr.yml" not in fl,
        "ghcr tm+jan: tm's override in, jan's out (%s)" % fl)
     ok(p["steps"][-1]["env"]["POL_TITLE_BASE_IMAGE"] == "ghcr.io/prettyopenlobby/hippaulmaster:0.2.0",
@@ -211,8 +254,8 @@ def check_plan(catalog, root, parent):
     p = stack.plan(catalog, ["fe", "fmo"], ["up", "-d"], ghcr=True, root=root, parent=parent, environ={})
     ok(p["steps"][0]["env"].get("POL_TITLE_BASE_IMAGE") == "ghcr.io/prettyopenlobby/openlobby:latest",
        "ghcr fe+fmo: the first local link builds on the published core")
-    fl = [os.path.relpath(f, parent).replace(os.sep, "/") for f in p["files"]]
-    ok("hippaulring/docker-compose.ghcr.yml" in fl and "openlobby/docker-compose.ghcr.yml" in fl,
+    fl = plan_files(p, root, parent)
+    ok("hippaulring/docker-compose.ghcr.yml" in fl and "core/docker-compose.ghcr.yml" in fl,
        "ghcr fe+fmo: game overrides and the core's included")
 
 

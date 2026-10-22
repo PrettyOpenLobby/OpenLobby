@@ -601,6 +601,131 @@
       border-radius: 8px; padding: 10px 12px; max-height: 420px; overflow: auto; white-space: pre-wrap;
       margin: 0; color: var(--muted); }
     .deploy-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+    .lg-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .lg-tools .grow { flex: 1; }
+    .lg-tools input { min-width: 200px; }
+    .lg-ctrs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; font-size: 13px; }
+    .cal-chip.off-lite { opacity: .55; }
+    .lg-pre { max-height: 62vh; min-height: 200px; font-size: 12px; }
+    /* Calendar (calendar.js). One hue per game; the panel's own entries in the accent. */
+    :root { --c1: #6ea6ff; --c2: #43c08f; --c3: #e5a63e; --c4: #c38bff; --c5: #ff8fa3; --c6: #3fc6d4;
+            --c7: #b8c95a; --c8: #f08a4b; --own: #9aa3b2; }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) { --c1: #1f5fd6; --c2: #0f7a54; --c3: #935800; --c4: #7a3fc2;
+        --c5: #b4234a; --c6: #0b7f8c; --c7: #5e6b12; --c8: #a5480f; --own: #566070; }
+    }
+    :root[data-theme="light"] { --c1: #1f5fd6; --c2: #0f7a54; --c3: #935800; --c4: #7a3fc2;
+      --c5: #b4234a; --c6: #0b7f8c; --c7: #5e6b12; --c8: #a5480f; --own: #566070; }
+    .cal-bar, .cal-block, .cal-dot { --hue: var(--own); }
+    .cal-bar.own, .cal-block.own, .cal-dot.own { --hue: var(--own); }
+    .cal-bar.warn, .cal-block.warn, .cal-dot.warn { --hue: var(--warn); }
+    .cal-bar.c1, .cal-block.c1, .cal-dot.c1 { --hue: var(--c1); } .cal-bar.c2, .cal-block.c2, .cal-dot.c2 { --hue: var(--c2); }
+    .cal-bar.c3, .cal-block.c3, .cal-dot.c3 { --hue: var(--c3); } .cal-bar.c4, .cal-block.c4, .cal-dot.c4 { --hue: var(--c4); }
+    .cal-bar.c5, .cal-block.c5, .cal-dot.c5 { --hue: var(--c5); } .cal-bar.c6, .cal-block.c6, .cal-dot.c6 { --hue: var(--c6); }
+    .cal-bar.c7, .cal-block.c7, .cal-dot.c7 { --hue: var(--c7); } .cal-bar.c8, .cal-block.c8, .cal-dot.c8 { --hue: var(--c8); }
+    .cal-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .cal-tools h2 { margin: 0 8px 0 4px; font-size: 18px; min-width: 0; }
+    .cal-tools .grow { flex: 1; }
+    .cal-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .cal-seg button { background: none; border: 0; color: var(--muted); padding: 6px 12px; font: inherit; cursor: pointer; }
+    .cal-seg button.active { background: var(--panel2); color: var(--text); font-weight: 600; }
+    .cal-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; font-size: 13px; }
+    .cal-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font: inherit; cursor: pointer; }
+    .cal-chip.off { opacity: .45; text-decoration: line-through; }
+    .cal-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--hue); margin-right: 6px; flex: none; }
+    .cal-chip .cal-dot { margin-right: 0; }
+    .cal-month { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .cal-head { display: grid; grid-template-columns: repeat(7, 1fr); background: var(--panel2);
+      font-size: 12px; color: var(--muted); text-align: center; }
+    .cal-head div { padding: 6px 0; }
+    .cal-week { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); min-height: 112px;
+      border-top: 1px solid var(--line); }
+    .cal-day { border-left: 1px solid var(--line); padding: 4px 6px; position: relative; min-width: 0; }
+    .cal-day:first-child { border-left: 0; }
+    .cal-day.out { background: color-mix(in srgb, var(--panel2) 45%, transparent); }
+    .cal-day.out .cal-num { color: var(--muted); }
+    .cal-num { font-size: 12px; font-weight: 600; display: inline-block; min-width: 22px; height: 22px; line-height: 22px;
+      text-align: center; border-radius: 50%; }
+    .cal-day.today .cal-num { background: var(--accent); color: var(--on-accent); }
+    .cal-more { position: absolute; left: 4px; right: 4px; bottom: 3px; background: none; border: 0; padding: 0;
+      color: var(--muted); font-size: 11px; text-align: left; cursor: pointer; }
+    .cal-more:hover { color: var(--text); }
+    .cal-bars { position: absolute; inset: 28px 2px 20px; display: grid; grid-template-columns: repeat(7, 1fr);
+      grid-auto-rows: 20px; gap: 2px 0; pointer-events: none; }
+    .cal-bar { pointer-events: auto; margin: 0 2px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+      text-align: left; font: 12px/18px inherit; font-family: inherit; color: var(--text); cursor: pointer;
+      background: color-mix(in srgb, var(--hue) 22%, var(--panel)); border: 0; border-left: 3px solid var(--hue);
+      border-radius: 4px; padding: 0 6px; }
+    .cal-bar.from { border-left-style: dashed; border-top-left-radius: 0; border-bottom-left-radius: 0; }
+    .cal-bar.to { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+    .cal-bar:hover, .cal-block:hover { background: color-mix(in srgb, var(--hue) 34%, var(--panel)); }
+    .cal-wk { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .cal-wk-days, .cal-wk-all { display: grid; grid-template-columns: 56px 1fr; }
+    .cal-wk-days { grid-template-columns: 56px repeat(7, 1fr); background: var(--panel2); font-size: 12px; color: var(--muted); }
+    .cal-wk-days div { padding: 6px 4px; text-align: center; }
+    .cal-wk-days .today b { color: var(--accent); }
+    .cal-wk-all { border-top: 1px solid var(--line); font-size: 11px; }
+    .cal-wk-all > div:first-child { padding: 4px; text-align: right; }
+    .cal-wk-all .cal-bars { position: static; padding: 3px 0; grid-auto-rows: 22px; }
+    .cal-wk-scroll { max-height: 560px; overflow-y: auto; border-top: 1px solid var(--line); }
+    .cal-wk-grid { display: grid; grid-template-columns: 56px repeat(7, 1fr); position: relative;
+      background-image: linear-gradient(var(--line) 1px, transparent 1px); background-size: 100% 28px; }
+    .cal-wk-hours div { height: 28px; font-size: 11px; color: var(--muted); text-align: right; padding-right: 6px;
+      transform: translateY(-7px); }
+    .cal-wk-hours div:first-child { transform: none; }
+    .cal-wk-col { position: relative; border-left: 1px solid var(--line); height: calc(24 * 28px); }
+    .cal-wk-col.today { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    .cal-block { position: absolute; overflow: hidden; text-align: left; font: 11px/1.3 inherit; font-family: inherit;
+      color: var(--text); cursor: pointer; padding: 2px 5px; border: 0; border-left: 3px solid var(--hue); border-radius: 4px;
+      background: color-mix(in srgb, var(--hue) 24%, var(--panel)); margin-left: 2px; }
+    .cal-block.short { white-space: nowrap; text-overflow: ellipsis; }
+    .cal-now { position: absolute; left: 0; right: 0; height: 2px; background: var(--bad); pointer-events: none; }
+    .cal-list-day { font-size: 13px; margin: 16px 0 4px; color: var(--muted); }
+    .cal-list-day.today { color: var(--accent); }
+    .cal-list li { cursor: pointer; }
+    .cal-list .t1 { display: block; }
+    .cal-sub { display: block; color: var(--muted); font-size: 12px; margin-left: 15px; }
+    .cal-z { margin-left: 8px; }
+    .cal-det .kv span.cal-z { display: inline; }
+    .cal-det .kv { display: grid; grid-template-columns: 70px 1fr; gap: 6px 12px; margin: 6px 0 10px; font-size: 13px; }
+    .cal-det .kv span:nth-child(2n) { display: flex; align-items: center; }
+    .cal-det h4 { margin: 12px 0 4px; font-size: 13px; }
+    .cal-ed { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+    .cal-ed .full { grid-column: 1 / -1; }
+    .cal-ed label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin: 0; }
+    .cal-ed .when { display: flex; gap: 6px; }
+    .cal-ed .when input[type=date] { flex: 1; min-width: 0; }
+    .cal-ed .check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
+    @media (max-width: 640px) {
+      .cal-week { min-height: 74px; }
+      .cal-bars { inset: 26px 0 16px; grid-auto-rows: 14px; }
+      .cal-bar { font-size: 0; padding: 0; margin: 0 1px; border-left-width: 0; background: var(--hue); border-radius: 3px; height: 6px; }
+      .cal-bar b { display: none; }
+      .cal-more { font-size: 10px; }
+      .cal-wk-days, .cal-wk-grid { grid-template-columns: 34px repeat(7, 1fr); }
+      .cal-wk-all { grid-template-columns: 34px 1fr; }
+      .cal-wk-hours div { font-size: 9px; padding-right: 2px; }
+      .cal-block { font-size: 9px; padding: 1px 2px; }
+      .cal-ed { grid-template-columns: 1fr; }
+    }
+    .imp-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 0 0 12px; overflow-x: auto; }
+    .imp-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+      padding: 8px 10px; font: inherit; font-weight: 500; cursor: pointer; white-space: nowrap; }
+    .imp-tabs button.active { color: var(--text); border-color: var(--accent); }
+    .imp-tabs button[hidden] { display: none; }
+    .imp-drop { display: flex; align-items: center; justify-content: center; text-align: center; min-height: 110px;
+      border: 2px dashed var(--line); border-radius: 10px; padding: 16px; color: var(--muted); cursor: pointer; margin: 0; }
+    .imp-drop.over { border-color: var(--accent); color: var(--text); }
+    .imp-progress { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+    .imp-progress .bar { flex: 1; height: 8px; border-radius: 4px; background: var(--panel2); overflow: hidden; }
+    .imp-progress .bar span { display: block; height: 100%; width: 0; background: var(--accent); }
+    .imp-list { margin-top: 10px; max-height: 300px; overflow: auto; }
+    .feed.imp-list li { cursor: pointer; padding-left: 10px; padding-right: 10px; }
+    .imp-list li.chosen { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+    .imp-list li.match .t1::after { content: " - looks right"; color: var(--good); font-weight: 600; }
+    .imp-crumb { display: flex; align-items: center; gap: 8px; }
+    .imp-missing { margin-top: 12px; color: var(--bad); font-size: 13px; }
     .perm-edit { display: flex; flex-direction: column; gap: 8px; }
     .perm-edit label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
     .perm-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -954,6 +1079,7 @@
       <button class="grp" data-group="games"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="2" y="7" width="20" height="11" rx="4"></rect><path d="M7 11v3M5.5 12.5h3"></path><circle cx="16" cy="12" r="1"></circle><circle cx="18" cy="14" r="1"></circle></svg>Games</button>
       <div class="subnav" id="gamesList" hidden></div>
       <button class="grp" data-group="news"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 10v4h3l6 4V6L7 10z"></path><path d="M16 9c1 .8 1.5 1.8 1.5 3s-.5 2.2-1.5 3"></path></svg>News</button>
+      <button class="grp" data-group="calendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M3 10h18M8 3v4M16 3v4"></path></svg>Calendar</button>
       <button class="grp" data-group="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg>Settings</button>
       <div class="foot">
         <div class="who" id="who"></div>
@@ -1311,6 +1437,23 @@
     </section>
 
     <!-- NEWS -->
+    <section id="tab-calendar" class="tab">
+      <div class="panel">
+        <div class="cal-tools">
+          <button class="ghost sm" id="calToday">Today</button>
+          <button class="ghost sm" id="calPrev" aria-label="Earlier">&lt;</button>
+          <button class="ghost sm" id="calNext" aria-label="Later">&gt;</button>
+          <h2 id="calTitle"></h2>
+          <span class="grow"></span>
+          <div class="cal-seg"><button data-calview="month">Month</button><button data-calview="week">Week</button><button data-calview="list">List</button></div>
+          <button class="ghost sm" id="calZone"></button>
+          <button class="act" id="calNew" hidden>New entry</button>
+        </div>
+        <div class="cal-chips" id="calChips"></div>
+        <p class="hint" id="calProblems" hidden></p>
+        <div id="calBody"></div>
+      </div>
+    </section>
     <section id="tab-news" class="tab">
       <div class="panel nw-bar">
         <div>
@@ -1736,6 +1879,67 @@
 
   <!-- Delete-account confirmation. Shows the inventory the server counted, and
        takes the POL ID typed back, because nothing here can be undone. -->
+  <!-- Settings > Install games: hand the deployer a game client (games.js, "Import from client"). -->
+  <div class="modal" id="impModal">
+    <div class="card wide">
+      <h3>Import <span id="impWhat"></span></h3>
+      <p id="impHint"></p>
+      <div class="imp-tabs"><button data-imp="upload" class="active">Upload an archive</button><button data-imp="browse" id="impBrowseTab">A folder on the server</button></div>
+      <div id="impUpload">
+        <label class="imp-drop" id="impDrop">
+          <input type="file" id="impFile" accept=".zip,.tar,.tar.gz,.tgz" hidden>
+          <span>Drop a .zip or .tar.gz of the game folder here, or click to pick one.</span>
+        </label>
+        <div class="imp-progress" id="impProgress" hidden><div class="bar"><span id="impBar"></span></div><span class="muted" id="impPct"></span></div>
+        <ul class="feed imp-list" id="impUploads"></ul>
+      </div>
+      <div id="impBrowse" hidden>
+        <div class="imp-crumb"><button class="ghost sm" id="impUp">Up</button> <span class="mono" id="impPath"></span></div>
+        <ul class="feed imp-list" id="impDirs"></ul>
+      </div>
+      <div class="imp-missing" id="impMissing" hidden></div>
+      <div class="foot">
+        <span class="muted" id="impChosen"></span>
+        <button class="ghost" id="impCancel">Cancel</button>
+        <button class="act" id="impGo" disabled>Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Calendar: one entry, and adding or changing the panel's own (calendar.js). -->
+  <div class="modal" id="calDetModal">
+    <div class="card cal-det">
+      <h3 id="calDetTitle"></h3>
+      <div id="calDetBody"></div>
+      <div class="foot">
+        <button class="danger" id="calDetDel" hidden>Delete</button>
+        <button class="ghost" id="calDetEdit" hidden>Change</button>
+        <button class="ghost" id="calDetClose">Close</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal" id="calEdModal">
+    <div class="card">
+      <h3 id="calEdTitle">New calendar entry</h3>
+      <p id="calEdZone"></p>
+      <input type="hidden" id="calEdId">
+      <div class="cal-ed">
+        <label class="full">Title<input type="text" id="calEdName" maxlength="80" autocomplete="off"></label>
+        <label>Game<select id="calEdGame"></select></label>
+        <label>Kind<select id="calEdKind"><option value="event">Event</option><option value="maintenance">Maintenance</option><option value="match">Match</option><option value="community">Community night</option><option value="reminder">Reminder</option></select></label>
+        <label class="full check"><input type="checkbox" id="calEdAll"> All day</label>
+        <label>Starts<span class="when"><input type="date" id="calEdStartD"><input type="time" id="calEdStartT"></span></label>
+        <label>Ends<span class="when"><input type="date" id="calEdEndD"><input type="time" id="calEdEndT"></span></label>
+        <label class="full">Notes<textarea id="calEdAbout" rows="3" maxlength="500"></textarea></label>
+      </div>
+      <p class="hint" id="calEdErr" hidden style="color: var(--bad)"></p>
+      <div class="foot">
+        <button class="ghost" id="calEdCancel">Cancel</button>
+        <button class="act" id="calEdSave">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal" id="delModal">
     <div class="card">
       <h3>Delete <code class="mono" id="delPolid"></code>?</h3>
@@ -1894,6 +2098,7 @@
   <script src="/static/pmlexpr.js"></script>
   <script src="/static/pmlrt.js"></script>
   <script src="/static/games.js"></script>
+  <script src="/static/calendar.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

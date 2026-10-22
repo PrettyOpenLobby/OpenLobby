@@ -38,4 +38,7 @@ MODULE = Module(
                       warning="Everyone in FFXI is disconnected. The world takes a minute "
                               "or two to come back.")],
     live=sources.board(_parse),
+    # the bridge publishes FFXI's own schedule (hippaulbridge lsb/ffxi_calendar.py)
+    calendar=sources.kv_calendar("ffxi:calendar", {"campaigns": "campaign", "login": "login campaign",
+                                                   "seasonal": "festival", "bonanza": "Mog Bonanza"}),
 )

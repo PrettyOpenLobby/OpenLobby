@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The deployer: installs, enables, updates and restarts games for the admin
-panel, by running tools/stack.py. docs/deployer.md describes the HTTP API
-and how to run it.
+panel, by running tools/stack.py, and builds a game's client data from a
+client folder or an uploaded archive. docs/deployer.md describes the HTTP
+API and how to run it.
 
     python deployer.py                 serve (settings from the environment)
     python deployer.py --healthcheck   exit 0 when the local server answers
@@ -18,7 +19,10 @@ Settings (environment, or the options of the same meaning):
                          checkout and the game checkouts beside it
     POL_DEPLOY_CORE      the openlobby checkout (default POL_DEPLOY_ROOT/openlobby)
     POL_DEPLOY_GHCR      1: run the stack from the published images
-    POL_DEPLOYER_STATE   where jobs and logs are kept (default /deployer)
+    POL_DEPLOYER_STATE   where jobs, logs and uploads are kept (default /deployer)
+    POL_DEPLOY_CLIENTS   absolute path of a folder holding client installs, for
+                         the folder browser (unset: browsing is off)
+    POL_DEPLOY_UPLOAD_MAX  the most an upload may hold, unpacked (default 8G)
 
 Standard library only.
 """
@@ -41,9 +45,12 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import clientdata  # noqa: E402
 
-ACTIONS = ("install", "enable", "disable", "update", "restart", "check")
+VERSION = "2.0"
+
+ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import")
 CORE_ACTIONS = ("update", "restart", "check")
 
 KEEP_JOBS = 50
@@ -52,6 +59,9 @@ LOG_KEEP = 768 << 10       # what is left of it after a trim (the tail)
 TAIL = 64 << 10            # the log tail GET /api/jobs/<id> returns
 MAX_BODY = 4096
 GAMES_TTL = 5.0            # seconds GET /api/games reuses its last answer
+UPLOAD_MAX = 8 << 30       # default POL_DEPLOY_UPLOAD_MAX
+IMPORT_TIMEOUT = 6 * 3600  # an import tool is stopped after this long
+NOBODY = 65534             # the uid and gid an import runs as when the checkout is root's
 
 JOB_ID = re.compile(r"^[0-9]{8}T[0-9]{6}-[0-9a-f]{6}$")
 ACTIVE = ("queued", "running")
@@ -71,6 +81,23 @@ def truthy(v):
 
 # ------------------------------------------------------------- settings
 
+def parse_size(text):
+    """'8G', '512M', '1048576' -> bytes; ValueError otherwise."""
+    t = str(text).strip().upper()
+    for suffix in ("IB", "B"):
+        if t.endswith(suffix) and len(t) > len(suffix):
+            t = t[:-len(suffix)]
+            break
+    mult = 1
+    if t and t[-1] in "KMGT":
+        mult = 1 << (10 * ("KMGT".index(t[-1]) + 1))
+        t = t[:-1]
+    n = int(float(t) * mult)
+    if n <= 0:
+        raise ValueError(text)
+    return n
+
+
 class Config:
     def __init__(self, token, bind, root, core, stack, state, ghcr):
         self.token = token
@@ -82,6 +109,10 @@ class Config:
         self.state = state
         self.ghcr = ghcr
         self.python = sys.executable or "python3"
+        self.clients = None          # realpath of POL_DEPLOY_CLIENTS; None: browsing is off
+        self.clients_note = "POL_DEPLOY_CLIENTS is not set, so browsing is off"
+        self.upload_max = UPLOAD_MAX
+        self.max_files = clientdata.MAX_FILES
 
 
 def parse_args(argv):
@@ -99,6 +130,12 @@ def parse_args(argv):
                     help="the openlobby checkout (POL_DEPLOY_CORE, default ROOT/openlobby)")
     ap.add_argument("--state", default=env.get("POL_DEPLOYER_STATE") or "/deployer",
                     help="where jobs and their logs are kept (POL_DEPLOYER_STATE)")
+    ap.add_argument("--clients", default=env.get("POL_DEPLOY_CLIENTS", ""),
+                    help="folder of client installs the panel may browse (POL_DEPLOY_CLIENTS)")
+    ap.add_argument("--upload-max", default=env.get("POL_DEPLOY_UPLOAD_MAX", ""),
+                    help="the most an upload may hold unpacked, e.g. 8G (POL_DEPLOY_UPLOAD_MAX)")
+    ap.add_argument("--max-files", type=int, default=clientdata.MAX_FILES,
+                    help="the most files an upload may hold (tests lower it)")
     ap.add_argument("--stack", default="",
                     help="the stack.py to run (default CORE/tools/stack.py; tests point "
                          "this at a stand-in)")
@@ -138,6 +175,26 @@ def make_config(args):
     except ValueError:
         say("POL_DEPLOYER_BIND must be host:port (got %r)" % args.bind)
         sys.exit(2)
+    if args.upload_max.strip():
+        try:
+            cfg.upload_max = parse_size(args.upload_max)
+        except ValueError:
+            say("POL_DEPLOY_UPLOAD_MAX must be a size such as 8G or 500M (got %r)" % args.upload_max)
+            sys.exit(2)
+    cfg.max_files = max(1, args.max_files)
+    clients = args.clients.strip()
+    if clients:
+        if not os.path.isabs(clients):
+            cfg.clients_note = ("POL_DEPLOY_CLIENTS must be an absolute path (got %r), so "
+                                "browsing is off" % clients)
+        elif not os.path.isdir(clients):
+            cfg.clients_note = ("POL_DEPLOY_CLIENTS (%s) is not a folder inside the container; "
+                                "it must be mounted at the same path. Browsing is off" % clients)
+        else:
+            cfg.clients = os.path.realpath(clients)
+            cfg.clients_note = ""
+    if cfg.clients_note:
+        say(cfg.clients_note)
     os.makedirs(os.path.join(cfg.state, "jobs"), exist_ok=True)
     return cfg
 
@@ -188,6 +245,64 @@ def owner_kwargs(path):
     return {"user": st.st_uid, "group": st.st_gid, "extra_groups": []}
 
 
+def docker_sockets():
+    """Unix sockets a Docker client could use from here."""
+    out = ["/var/run/docker.sock", "/run/docker.sock"]
+    host = os.environ.get("DOCKER_HOST", "")
+    if host.startswith("unix://"):
+        out.append(host[len("unix://"):])
+    return [p for i, p in enumerate(out) if p not in out[:i]]
+
+
+def socket_open_to(uid, gids, path):
+    """Whether uid (with the groups gids) may connect to the socket at path.
+    Connecting to a unix socket needs write permission on it."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if uid == 0:
+        return True
+    mode = st.st_mode
+    if st.st_uid == uid:
+        return bool(mode & 0o200)
+    if st.st_gid in gids:
+        return bool(mode & 0o020)
+    return bool(mode & 0o002)
+
+
+def import_identity(checkout):
+    """(subprocess kwargs, uid, gids) for an import tool: the checkout's
+    owner, or nobody when the checkout belongs to root; never root itself.
+    uid is None where there are no uids (Windows)."""
+    if not hasattr(os, "getuid"):
+        return {}, None, set()
+    if os.getuid() != 0:
+        return {}, os.getuid(), set(os.getgroups()) | {os.getgid()}
+    st = os.stat(checkout)
+    uid, gid = st.st_uid, st.st_gid
+    if uid == 0:
+        uid = NOBODY
+    if gid == 0:
+        gid = NOBODY
+    return {"user": uid, "group": gid, "extra_groups": []}, uid, {gid}
+
+
+def import_env(home):
+    """The whole environment an import tool gets. Nothing of the deployer's
+    own is passed on: no token, no DOCKER_*, no POL_*."""
+    env = {"HOME": home, "TMPDIR": home, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+           "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"}
+    if os.name == "nt":
+        for k in ("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATHEXT", "COMSPEC"):
+            if os.environ.get(k):
+                env[k] = os.environ[k]
+        env["TEMP"] = env["TMP"] = home
+    else:
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    return env
+
+
 # ----------------------------------------------------------------- jobs
 
 class Store:
@@ -236,12 +351,13 @@ class Store:
                 jobs.append(j)
         return jobs
 
-    def create(self, action, game):
+    def create(self, action, game, extra=None):
         t = time.time()
         jid = time.strftime("%Y%m%dT%H%M%S", time.gmtime(t)) + "-" + secrets.token_hex(3)
         job = {"id": jid, "action": action, "game": game, "state": "queued",
                "created": now_iso(t), "started": None, "ended": None, "exit": None,
                "summary": "", "missing": [], "log_dropped": 0, "_t": t}
+        job.update(extra or {})
         open(self.log_path(jid), "wb").close()
         self.save(job)
         return job
@@ -298,6 +414,9 @@ def public(job):
     out = {k: job.get(k) for k in ("id", "action", "game", "state", "created", "started",
                                    "ended", "exit", "summary", "missing")}
     out["missing"] = out["missing"] or []
+    if job.get("action") == "import":
+        out["item"] = job.get("item")
+        out["source"] = job.get("source")
     return out
 
 
@@ -370,20 +489,43 @@ class Runner:
             shown.append(shlex.quote(a))
         return " ".join(shown)
 
-    def run(self, argv, owner=None):
-        """Run argv with its output streamed into the log; the exit code."""
-        kw = owner_kwargs(owner) if owner else {}
+    def run(self, argv, owner=None, cwd=None, env=None, kw=None, timeout=None):
+        """Run argv with its output streamed into the log; the exit code.
+        kw and env, when given, replace the owner's identity and the usual
+        environment (the import tools get both from the caller)."""
+        if kw is None:
+            kw = owner_kwargs(owner) if owner else {}
+        if env is None:
+            env = self.child_env(bool(kw))
         self.log.line("$ " + self.show(argv))
+        if timeout and os.name != "nt":
+            kw = dict(kw, start_new_session=True)
         try:
-            p = subprocess.Popen(argv, cwd=self.cfg.core, env=self.child_env(bool(kw)),
+            p = subprocess.Popen(argv, cwd=cwd or self.cfg.core, env=env,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, **kw)
         except FileNotFoundError:
             raise JobFailed("%s is not installed in the deployer image" % os.path.basename(argv[0]))
+        timer = None
+        if timeout:
+            def stop():
+                self.log.line("(stopped after %d seconds)" % timeout)
+                try:
+                    if os.name != "nt":
+                        os.killpg(p.pid, signal.SIGKILL)
+                    else:
+                        p.kill()
+                except OSError:
+                    pass
+            timer = threading.Timer(timeout, stop)
+            timer.daemon = True
+            timer.start()
         for chunk in iter(p.stdout.readline, b""):
             self.log.write(chunk)
         p.stdout.close()
         rc = p.wait()
+        if timer:
+            timer.cancel()
         self.last_rc = rc
         self.log.line("(exit %d)" % rc)
         return rc
@@ -472,14 +614,27 @@ class Runner:
         return self.catalog[key]["name"]
 
 
-def evaluate(report, done):
+def missing_entry(catalog, key, m, required=False):
+    """One "missing" row as the API shows it: the path, the hint, the
+    catalog data item it belongs to, and, when that item can be imported,
+    what the import wants (its hint and expects; never its argv)."""
+    out = {"path": m["path"], "hint": m["hint"], "item": m.get("id")}
+    if required:
+        out["required"] = bool(m.get("required"))
+    _, _, imp = clientdata.find_import(catalog, key, m.get("id"))
+    if imp:
+        out["import"] = clientdata.public_import(imp)
+    return out
+
+
+def evaluate(catalog, report, done):
     """(state, summary, missing) from a check report. `done` is the summary
     when nothing is wrong."""
     for g in report.get("games", []):
         req = [m for m in g.get("missing", []) if m.get("required")]
         if req:
             return "needs_data", needs_sentence(g["name"], req), \
-                [{"path": m["path"], "hint": m["hint"]} for m in req]
+                [missing_entry(catalog, g.get("key"), m) for m in req]
     for g in report.get("games", []):
         if g.get("enabled") and not g.get("installed"):
             return "failed", "%s is enabled but has no checkout; install it." % g["name"], []
@@ -513,13 +668,13 @@ def act_install(r, key):
         raise JobFailed("Cloning %s failed; the log has git's message." % r.name(key), r.last_rc)
     if not os.path.isdir(r.checkout(key)):
         raise JobFailed("%s was not cloned to %s." % (r.name(key), r.checkout(key)))
-    return evaluate(r.check_report([key]), "%s is installed; enable it to start it." % r.name(key))
+    return evaluate(r.catalog, r.check_report([key]), "%s is installed; enable it to start it." % r.name(key))
 
 
 def act_enable(r, key):
     if not os.path.isdir(r.checkout(key)):
         raise JobFailed("%s is not installed; install it first." % r.name(key))
-    state, summary, missing = evaluate(r.check_report([key]), "")
+    state, summary, missing = evaluate(r.catalog, r.check_report([key]), "")
     if state != "ok":
         return state, summary + (". It was not enabled." if state == "needs_data" else ""), missing
     if r.stack(["enable", key], owner=r.cfg.core) != 0:
@@ -552,16 +707,16 @@ def act_update(r, key):
         raise JobFailed("git pull --ff-only failed in %s; the log has git's message." % rel, r.last_rc)
     if key != "core":
         if key not in r.enabled():
-            return evaluate(r.check_report([key]),
+            return evaluate(r.catalog, r.check_report([key]),
                             "%s is updated; it is not enabled, so nothing was restarted." % r.name(key))
-        state, summary, missing = evaluate(r.check_report([key]), "")
+        state, summary, missing = evaluate(r.catalog, r.check_report([key]), "")
         if state != "ok":
             return state, summary + (". It was updated but not restarted." if state == "needs_data" else ""), missing
     if r.cfg.ghcr:
         r.compose(["pull", "--ignore-buildable", "--ignore-pull-failures"], prebuild=False)
     r.up()
     if key == "core":
-        return evaluate(r.check_report([]), "%s is updated and restarted." % r.name(key))
+        return evaluate(r.catalog, r.check_report([]), "%s is updated and restarted." % r.name(key))
     return "ok", "%s is updated and restarted." % r.name(key), []
 
 
@@ -578,7 +733,69 @@ def act_restart(r, key):
 def act_check(r, key):
     report = r.check_report([] if key == "core" else [key])
     what = "the enabled games" if key == "core" else r.name(key)
-    return evaluate(report, "Everything %s needs is in place." % what)
+    return evaluate(r.catalog, report, "Everything %s needs is in place." % what)
+
+
+def act_import(r, key, job):
+    """Run the item's import tool on the folder the request named, as the
+    checkout's owner with a bare environment, then check the game."""
+    e, item, imp = clientdata.find_import(r.catalog, key, job["item"])
+    if not imp:
+        raise JobFailed("%s's %s cannot be imported from the panel." % (r.name(key), job["item"]))
+    what = imp["label"]
+    folder = job["_input"]
+    if not os.path.isdir(folder):
+        raise JobFailed("The folder to import from is gone; upload or choose it again.")
+    gone = clientdata.missing_expects(folder, job["_input_root"], imp)
+    if gone:
+        raise JobFailed("The folder to import from no longer holds %s." % ", ".join(gone))
+    d = r.checkout(key)
+    if not os.path.isdir(d):
+        raise JobFailed("%s is not installed; install it first." % r.name(key))
+    tool = os.path.join(d, *imp["argv"][1].split("/"))
+    if not os.path.isfile(tool):
+        raise JobFailed("%s has no %s; update it, then import again." % (r.name(key), imp["argv"][1]))
+    kw, uid, gids = import_identity(d)
+    if uid is not None:
+        if uid == 0:
+            raise JobFailed("The import would run as root; the deployer refuses that.")
+        for sock in docker_sockets():
+            if socket_open_to(uid, gids, sock):
+                raise JobFailed("The import tool would run as uid %d, which may use the Docker "
+                                "socket %s, so it was not started. Give the checkout to a user "
+                                "outside the docker group (docs/deployer.md)." % (uid, sock))
+    home = os.path.join(r.cfg.state, "imports", job["id"])
+    os.makedirs(home, exist_ok=True)
+    if kw:
+        os.chown(home, kw["user"], kw["group"])
+    argv = [r.cfg.python, tool] + [a.replace("{input}", folder) for a in imp["argv"][2:]]
+    try:
+        rc = r.run(argv, cwd=d, env=import_env(home), kw=kw, timeout=IMPORT_TIMEOUT)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    tool_name = imp["argv"][1]
+    report = r.check_report([key])
+    g = next((x for x in report.get("games", []) if x.get("key") == key), {})
+    still = [m for m in g.get("missing", []) if m.get("id") == item["id"]]
+    if still:
+        if rc != 0:
+            raise JobFailed("%s failed (exit %d) and %s is still missing; the log has its "
+                            "output." % (tool_name, rc, still[0]["path"]), rc)
+        return "needs_data", "%s ran, but %s is still missing; check that the folder is %s." % (
+            tool_name, still[0]["path"], imp["hint"]), \
+            [missing_entry(r.catalog, key, m) for m in still]
+    if rc != 0 and not item.get("paths"):
+        raise JobFailed("%s failed (exit %d); the log has its output." % (tool_name, rc), rc)
+    state, summary, missing = evaluate(r.catalog, report, "")
+    if state == "needs_data":
+        return state, "Imported the %s. %s" % (what, summary), missing
+    note = "" if rc == 0 else " %s exited %d, so some optional files may be missing; the log " \
+                              "has its messages." % (tool_name, rc)
+    if key in r.enabled():
+        then = "Run enable again to rebuild and restart it with the new data."
+    else:
+        then = "Enable it to start it."
+    return "ok", "Imported %s's %s. %s%s" % (r.name(key), what, then, note), []
 
 
 ACT = {"install": act_install, "enable": act_enable, "disable": act_disable,
@@ -595,21 +812,76 @@ class Deployer:
         self.store.prune()
         self.lock = threading.Lock()
         self.current = None
+        self.current_upload = None    # the upload the running import reads
         self.games_cache = (0.0, None)
+        self.uploads = clientdata.Uploads(cfg.state)
+        shutil.rmtree(os.path.join(cfg.state, "imports"), ignore_errors=True)
+        for uid in self.uploads.expire():
+            say("upload %s expired and was removed" % uid)
 
     def busy(self):
         return self.current
 
-    def start(self, action, game):
+    def expire_uploads(self):
+        self.uploads.expire(keep=[self.current_upload] if self.current_upload else [])
+
+    def start(self, action, game, extra=None):
         """(202, {"job"}) or (409, {"job": running id})."""
+        upload = ((extra or {}).get("source") or {}).get("upload")
         with self.lock:
             if self.current:
                 return 409, {"job": self.current, "error": "another job is running"}
-            job = self.store.create(action, game)
+            job = self.store.create(action, game, extra)
             self.current = job["id"]
+            self.current_upload = upload
+        if upload:
+            self.uploads.touch(upload, now_iso())
         self.store.prune()
         threading.Thread(target=self._run, args=(job,), daemon=True).start()
         return 202, {"job": job["id"]}
+
+    def import_request(self, body, catalog):
+        """(code, answer) for POST /api/actions with action import: 202 with
+        the job, or the 400/409 the request earns."""
+        game, item_id, src = body.get("game"), body.get("item"), body.get("source")
+        e, item, imp = clientdata.find_import(catalog, game, item_id)
+        if item is None:
+            known = ", ".join(i["id"] for i in e.get("data", [])) or "none"
+            return 400, {"error": "%s has no data item %r (its items: %s)" % (e["name"], item_id, known)}
+        if imp is None:
+            return 400, {"error": "%s's %s cannot be imported from the panel; %s"
+                         % (e["name"], item_id, item.get("tool", "see its README"))}
+        if not isinstance(src, dict) or len(set(src) & {"upload", "path"}) != 1 \
+                or set(src) - {"upload", "path", "subdir"} \
+                or ("subdir" in src and "upload" not in src):
+            return 400, {"error": "source must be {\"upload\": id, \"subdir\": folder} or "
+                                  "{\"path\": folder under POL_DEPLOY_CLIENTS}"}
+        try:
+            if "upload" in src:
+                meta = self.uploads.load(src["upload"]) if isinstance(src["upload"], str) else None
+                if not meta:
+                    return 400, {"error": "there is no upload %r; it may have expired"
+                                 % (src["upload"],)}
+                root = os.path.realpath(self.uploads.tree(meta["id"]))
+                folder, rel = clientdata.resolve_under(root, src.get("subdir") or "")
+                shown = {"upload": meta["id"], "subdir": rel}
+            else:
+                if not self.cfg.clients:
+                    return 409, {"error": self.cfg.clients_note}
+                root = self.cfg.clients
+                folder, rel = clientdata.resolve_under(root, src["path"])
+                shown = {"path": rel}
+        except clientdata.PathError as exc:
+            return 400, {"error": "the folder to import from is refused: %s" % exc}
+        if not os.path.isdir(folder):
+            return 400, {"error": "%s is not a folder" % (rel or "the top")}
+        gone = clientdata.missing_expects(folder, root, imp)
+        if gone:
+            return 400, {"error": "This folder is not %s: it has no %s."
+                                  % (imp["hint"], " or ".join(gone)),
+                         "missing": [{"path": p, "hint": imp["hint"]} for p in gone]}
+        return self.start("import", game, {"item": item["id"], "source": shown,
+                                           "_input": folder, "_input_root": root})
 
     def _run(self, job):
         log = JobLog(self.store, job, self.cfg.token)
@@ -620,7 +892,11 @@ class Deployer:
             self.store.save(job)
             log.line("deployer %s: %s %s%s" % (VERSION, job["action"], job["game"],
                                                 " (published images)" if self.cfg.ghcr else ""))
-            state, summary, missing = ACT[job["action"]](r, job["game"])
+            if job["action"] == "import":
+                log.line("importing %s from %s" % (job["item"], json.dumps(job["source"])))
+                state, summary, missing = act_import(r, job["game"], job)
+            else:
+                state, summary, missing = ACT[job["action"]](r, job["game"])
             job["exit"] = 0 if r.last_rc is None else r.last_rc
         except JobFailed as exc:
             state, summary, missing = "failed", exc.summary, []
@@ -631,12 +907,16 @@ class Deployer:
             job["exit"] = 1
         log.line("%s: %s" % (state, summary))
         job.update(state=state, summary=summary, missing=missing, ended=now_iso())
+        upload = (job.get("source") or {}).get("upload")
+        if upload:
+            self.uploads.touch(upload, job["ended"])
         # one step, so whoever sees the job finished can start the next one
         with self.lock:
             try:
                 self.store.save(job)
             finally:
                 self.current = None
+                self.current_upload = None
                 self.games_cache = (0.0, None)
 
     def _stack_json(self, args, timeout):
@@ -675,8 +955,7 @@ class Deployer:
                 "running": psg.get("running") if ps_ok else None,
                 "services": psg.get("services", {}) if ps_ok else {},
                 "data_ok": c["data_ok"] if c and installed else None,
-                "missing": [{"path": m["path"], "hint": m["hint"],
-                             "required": bool(m.get("required"))}
+                "missing": [missing_entry(catalog, key, m, required=True)
                             for m in (c or {}).get("missing", [])],
                 "admin_env": (["POL_ADMIN_GAME_%s_URL" % mod.upper(),
                                "POL_ADMIN_GAME_%s_TOKEN" % mod.upper()] if mod else []),
@@ -709,6 +988,7 @@ def make_handler(dep):
     class Handler(BaseHTTPRequestHandler):
         server_version = "openlobby-deployer/" + VERSION
         sys_version = ""
+        timeout = 300      # seconds a request (an upload included) may sit silent
 
         def log_message(self, fmt, *args):
             say("%s %s" % (self.address_string(), fmt % args))
@@ -774,12 +1054,113 @@ def make_handler(dep):
                     self.end_headers()
                     self.wfile.write(data)
                     return
+            if parts == ["api", "browse"]:
+                if not cfg.clients:
+                    return self.send_json(409, {"error": cfg.clients_note})
+                rel = (q.get("path") or [""])[0]
+                try:
+                    out = clientdata.browse(cfg.clients, rel, load_catalog(cfg.core))
+                except clientdata.PathError as exc:
+                    return self.send_json(400, {"error": "%s: %s" % (rel, exc)})
+                except (FileNotFoundError, NotADirectoryError):
+                    return self.send_json(404, {"error": "no folder %s under the clients folder"
+                                                % rel})
+                except PermissionError:
+                    return self.send_json(403, {"error": "the deployer may not read %s" % rel})
+                return self.send_json(200, out)
+            if parts == ["api", "uploads"]:
+                dep.expire_uploads()
+                return self.send_json(200, {"uploads": [clientdata.public_upload(m)
+                                                        for m in dep.uploads.all()]})
             self.send_json(404, {"error": "not found"})
+
+        def refuse_upload(self, code, obj):
+            # the body was not read, so this connection cannot carry another request
+            self.close_connection = True
+            self.send_json(code, obj, [("Connection", "close")])
+
+        def upload(self):
+            if self.headers.get("Transfer-Encoding"):
+                return self.refuse_upload(411, {"error": "send the archive with a Content-Length; "
+                                                         "chunked uploads are not accepted"})
+            raw = self.headers.get("Content-Length")
+            if raw is None:
+                return self.refuse_upload(411, {"error": "Content-Length is required"})
+            try:
+                n = int(raw)
+            except ValueError:
+                return self.refuse_upload(400, {"error": "Content-Length is not a number"})
+            if n <= 0:
+                return self.refuse_upload(400, {"error": "the upload is empty"})
+            if n > cfg.upload_max:
+                return self.refuse_upload(413, {"error": "The archive is larger than the %d bytes "
+                                                         "POL_DEPLOY_UPLOAD_MAX allows."
+                                                         % cfg.upload_max,
+                                                "max": cfg.upload_max})
+            dep.expire_uploads()
+            ups = dep.uploads
+            try:
+                free = shutil.disk_usage(ups.dir).free
+            except OSError:
+                free = None
+            if free is not None and free < 2 * n:
+                return self.refuse_upload(507, {"error": "The deployer's volume has %d bytes free, "
+                                                         "too little for this archive." % free})
+            uid = ups.new_id()
+            part = os.path.join(ups.incoming, uid + ".part")
+            tmp = ups.tree(uid) + ".tmp"
+            try:
+                got = 0
+                with open(part, "wb") as f:
+                    while got < n:
+                        try:
+                            chunk = self.rfile.read(min(clientdata.CHUNK, n - got))
+                        except OSError:       # the timeout below, or the client went away
+                            chunk = b""
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        got += len(chunk)
+                if got < n:
+                    self.close_connection = True
+                    return self.send_json(400, {"error": "the upload ended after %d of %d bytes"
+                                                % (got, n)})
+                try:
+                    size, files = clientdata.extract(part, tmp, cfg.upload_max, cfg.max_files)
+                except clientdata.ArchiveError as exc:
+                    obj = {"error": exc.message}
+                    if exc.code == 413:
+                        obj["max"] = cfg.upload_max
+                    return self.send_json(exc.code, obj)
+                os.replace(tmp, ups.tree(uid))
+                os.chmod(ups.tree(uid), 0o755)
+                matches = clientdata.find_matches(os.path.realpath(ups.tree(uid)),
+                                                  load_catalog(cfg.core))
+                t = time.time()
+                meta = {"id": uid, "name": clientdata.clean_name(self.headers.get("X-Filename")),
+                        "created": now_iso(t), "last_import": None, "size": size,
+                        "files": files, "archive_size": n, "matches": matches,
+                        "_t": t, "_last": None}
+                ups.save(meta)
+                out = clientdata.public_upload(meta)
+                out["upload"] = uid
+                say("upload %s: %d files, %d bytes" % (uid, files, size))
+                return self.send_json(201, out)
+            finally:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                shutil.rmtree(tmp, ignore_errors=True)
 
         def do_POST(self):
             if not self.authed():
+                self.close_connection = True
                 return
-            if urllib.parse.urlsplit(self.path).path.rstrip("/") != "/api/actions":
+            path = urllib.parse.urlsplit(self.path).path.rstrip("/")
+            if path == "/api/uploads":
+                return self.upload()
+            if path != "/api/actions":
                 return self.send_json(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length") or "0")
@@ -805,13 +1186,34 @@ def make_handler(dep):
             if catalog[game]["kind"] == "core" and action not in CORE_ACTIONS:
                 return self.send_json(400, {"error": "%s is for games; the core takes %s"
                                             % (action, ", ".join(CORE_ACTIONS))})
-            code, obj = dep.start(action, game)
+            if action == "import":
+                code, obj = dep.import_request(body, catalog)
+            else:
+                code, obj = dep.start(action, game)
             self.send_json(code, obj)
+
+        def do_DELETE(self):
+            if not self.authed():
+                return
+            parts = [p for p in urllib.parse.urlsplit(self.path).path.split("/") if p]
+            if len(parts) != 3 or parts[:2] != ["api", "uploads"]:
+                return self.send_json(404, {"error": "not found"})
+            uid = parts[2]
+            if not dep.uploads.load(uid):
+                return self.send_json(404, {"error": "no such upload"})
+            with dep.lock:
+                if dep.current_upload == uid:
+                    return self.send_json(409, {"error": "an import is reading this upload",
+                                                "job": dep.current})
+                dep.uploads.remove(uid)
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def do_PUT(self):
             self.send_json(405, {"error": "method not allowed"})
 
-        do_DELETE = do_PATCH = do_PUT
+        do_PATCH = do_PUT
 
     return Handler
 
@@ -840,9 +1242,10 @@ def main(argv=None):
     def stop(*_):
         threading.Thread(target=srv.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
-    say("version %s listening on %s:%d; checkouts in %s, core %s%s"
+    say("version %s listening on %s:%d; checkouts in %s, core %s%s%s"
         % (VERSION, cfg.host, srv.server_address[1], cfg.root, cfg.core,
-           ", published images" if cfg.ghcr else ""))
+           ", published images" if cfg.ghcr else "",
+           ", client folders in %s" % cfg.clients if cfg.clients else ""))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

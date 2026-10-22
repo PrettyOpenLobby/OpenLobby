@@ -187,3 +187,58 @@ def board(parse=None, markers=(), default="", counted=()):
                 st["source"] += " and live-session marker"
         return st
     return read
+
+
+# -- calendars ---------------------------------------------------------------- #
+# A module's calendar is fn(module, lo, hi) -> [entry]: what the game has scheduled between unix
+# seconds lo and hi. An entry is {"id", "title", "start", "end"} (unix seconds) plus optional
+# "kind" (a short word: cup, campaign, festival...), "about" (a sentence) and "times" (the
+# [start, end] windows inside a long entry, such as a cup's one-hour sessions).
+
+def eventcal(game, kinds=None):
+    """The event calendar the game reads (services/eventcal.py). A season split into sessions
+    becomes one entry carrying its sessions as "times"."""
+    def cal(m, lo, hi):
+        import eventcal as E
+        seasons = {}
+        out = []
+        # wide enough that a season crossing the range's edge keeps all its sessions
+        for w in E.windows(game, lo - 8 * 86400, hi + 8 * 86400):
+            if w.get("season"):
+                s = seasons.get(w["season"])
+                if s is None:
+                    s = seasons[w["season"]] = {
+                        "id": w["season"], "title": _text(w.get("name"), 80) or w["season"],
+                        "start": int(w["season_start"]), "end": int(w["season_end"]),
+                        "kind": (kinds or {}).get(w.get("season_kind"), w.get("season_kind") or "event"),
+                        "times": []}
+                    out.append(s)
+                s["times"].append([int(w["start"]), int(w["end"])])
+                continue
+            out.append({"id": w.get("id") or "%s-%d" % (game, w["start"]),
+                        "title": _text(w.get("name"), 80) or "Event",
+                        "start": int(w["start"]), "end": int(w["end"]),
+                        "kind": (kinds or {}).get(w.get("kind"), w.get("kind") or "event")})
+        return [e for e in out if e["end"] > lo and e["start"] < hi]
+    return cal
+
+
+def kv_calendar(key, kinds=None):
+    """A list a game's own process keeps in the core's live-state store (polcore.kv) as
+    {"at", "events": [{"source", "key", "name", "start", "end", "detail"}]}."""
+    def cal(m, lo, hi):
+        from polcore import kv
+        doc = kv.default().get_json(key) or {}
+        out = []
+        for e in (doc or {}).get("events") or []:
+            try:
+                start, end = int(e["start"]), int(e["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end <= lo or start >= hi:
+                continue
+            src = _text(e.get("source"), 20)
+            out.append({"id": "%s-%s" % (src, _text(e.get("key"), 60)), "title": _text(e.get("name"), 80),
+                        "start": start, "end": end, "kind": (kinds or {}).get(src, src or "event")})
+        return out
+    return cal

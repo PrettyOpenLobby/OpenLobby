@@ -20,8 +20,10 @@ service is built around that:
   empty token the service logs why and exits instead of starting.
 - It runs nothing but `tools/stack.py` (and `git` for an update), with
   argument lists it builds itself from a fixed set of actions and the game
-  keys in `games/*.json`. Nothing from a request reaches a command line
-  except a key that matched the catalog.
+  keys in `games/*.json`, and the client data tools the catalog names for
+  the `import` action. Nothing from a request reaches a command line
+  except a key that matched the catalog and, for an import, the path of a
+  folder the deployer checked itself (see "Importing client data").
 - The admin container never gets the socket. It holds the token and asks.
 
 Anyone who has the token, or who can run code in a container on that
@@ -137,7 +139,117 @@ Fantasy Earth needs the client's data: put fe-fet-area.tsv in ../hippaulring/ser
 
 and its `missing` list has every required file, each with a hint naming the
 tool to make it. Paths are relative to the OpenLobby checkout. Make the
-files on the host as the game's README says, then run the action again.
+files on the host as the game's README says, then run the action again, or
+let the deployer make them with the `import` action below.
+
+## Importing client data
+
+Most of those files are built by a tool in the game's repository from your
+own client install. The `import` action runs that tool for you, on a client
+you hand the deployer in one of two ways:
+
+- Upload an archive (`.zip`, `.tar` or `.tar.gz`) of the install folder.
+  It is unpacked into the `pol-deployer` volume and kept for a day.
+- Keep your client installs in a folder on the host, set
+  `POL_DEPLOY_CLIENTS` to it in `.env`, and pick one from the panel's
+  folder browser. That folder is mounted read-only, at the same path, and
+  nothing outside it can be browsed.
+
+In the panel, a missing item that can be imported has an "Import from
+client" button; the browser highlights the folders that look like the right
+install. The job runs the tool, then `stack.py check --json <game>`, and
+ends `ok` when the item is now present, `needs_data` with the `missing` list
+when it (or another required item) is still absent, and `failed` when the
+tool failed and the item is still missing. A game that already runs keeps
+its old data until you run `enable` again, which rebuilds and restarts it.
+
+Which items can be imported, and from what, is in each data item's `import`
+block in `games/*.json`:
+
+```
+"import": {"label": "game data",
+           "argv": ["python", "tools/fedata_build.py", "--client", "{input}"],
+           "expects": ["DATA/dat.pak"],
+           "hint": "your Fantasy Earth install folder, the one holding DATA/ and FE_Client.dll"}
+```
+
+`argv` is fixed in the catalog. The deployer replaces `{input}` with the
+absolute path of the folder it checked, swaps `python` for its own Python,
+and runs the result with the game's checkout as the working directory. The
+API never shows `argv`. `expects` are one to three paths that must exist in
+the chosen folder before anything runs; they are what tells an install from
+a folder that only looks like one, and what the browser's highlighting
+uses. Paths are matched exactly as written, upper and lower case included,
+the way the tools open them on Linux.
+
+| Game | Item | Tool | The folder to give it |
+| --- | --- | --- | --- |
+| Tetra Master | tmdata | `tools/tmdata_build.py --client` | the TetraMaster install (holds `data/CardPrm.BIN`, `data/PlPrm.BIN`) |
+| Tetra Master | boardart | `tools/tm_boardart_bake.py --client` | the same PC install (holds `data/gW000.dat`, `data/gW101.dat`) |
+| Janhourou | boardfont | `tools/jan_boardfont_build.py --kanji` | the install copied off the PlayStation 2 hard disk (holds `Warashi/font/kanji.bin`) |
+| Fantasy Earth | fedata | `tools/fedata_build.py --client` | the install (holds `DATA/dat.pak` and `FE_Client.dll`) |
+| Front Mission Online | fmodata | `tools/fmodata_build.py --client` | the install (holds `Data/AI/F32/D15.DAT`) |
+| Front Mission Online | boardart | `tools/fmo_boardart_bake.py --client` | the install (holds `Data/AJ/F40/D54.DAT`) |
+| Dirge of Cerberus | arena | `tools/doc_extract_arena.py` | the game data copied off the PlayStation 2 hard disk (holds `data/zone/`) |
+
+Items the catalog marks `build_only`, items with no tool yet, Janhourou's
+menu icon (made from your portal tree, not from a client) and Final
+Fantasy XI (whose world needs no client files) have no `import`.
+
+The tools need Pillow, numpy, fontTools and brotli; the deployer image
+carries pinned versions of all four, so nothing has to be installed on the
+host. Fantasy Earth's `fedata_build.py` recovers its archive key by
+scanning the client DLL, which takes a few minutes. An import tool that
+runs longer than six hours is stopped.
+
+### How an import is kept apart from the socket
+
+The deployer runs as root because it holds the Docker socket. An import
+tool is the game repository's own code reading files you supplied, so it
+never runs with either:
+
+- It runs as the user and group that own the game's checkout, with no
+  supplementary groups. If root owns the checkout it runs as `nobody`
+  (uid 65534). It never runs as root.
+- Before starting it, the deployer checks that this user cannot connect
+  to `/var/run/docker.sock` (or the socket `DOCKER_HOST` names): on a
+  standard install the socket is `root:docker` with mode 660, so a user
+  outside the `docker` group cannot. If the checkout's owner can, for
+  example because the checkout belongs to a group that also owns the
+  socket, or the socket is world-writable, the job refuses to start and
+  says so. Give the checkouts to a user that is not in the `docker` group.
+- Its environment is built from nothing: `PATH`, `HOME` and `TMPDIR` (a
+  scratch folder for the job), the locale and a few Python settings. No
+  `DOCKER_*` or `POL_*` variable and no token reaches it.
+- It reads the client folder read-only (a `POL_DEPLOY_CLIENTS` mount) or
+  from the unpacked upload, and writes into the game's checkout, which its
+  user owns.
+
+With Docker Desktop the checkout can appear owned by root inside the
+container, so imports run as `nobody`, which then needs write access to
+the checkout's data folders.
+
+### How uploads are unpacked
+
+An upload is the raw request body. The deployer refuses it before reading
+when `Content-Length` is missing (411; chunked uploads are not accepted) or
+larger than `POL_DEPLOY_UPLOAD_MAX` (413), streams it to a file in the
+volume, and unpacks it by its content, never by its name: `X-Filename` is
+kept for display only. The archive is refused whole (400) when any member
+has an absolute path, a drive letter or a `..` component, is a symbolic
+link, a hard link, a device file, a FIFO or a sparse file, is encrypted,
+appears twice, or sits under a member that is a file. Before anything is
+written, the sizes the archive declares are added up and the members
+counted; more than `POL_DEPLOY_UPLOAD_MAX` bytes or 200,000 files is a 413.
+While writing, every byte is counted again, so an archive whose headers
+understate its sizes is stopped as well. Files are written with mode 644
+and folders with 755, whatever the archive says. A refused archive leaves
+nothing behind.
+
+Uploads are removed 24 hours after they were made or last imported from,
+whichever is later, when the deployer starts and whenever the uploads are
+listed or a new one arrives. An upload an import is reading is kept until
+the job ends.
 
 ## Jobs and logs
 
@@ -158,7 +270,7 @@ JSON in and out, except the raw log. Every endpoint, `/api/health`
 included, needs the bearer token and answers 401 without it. Errors carry
 an `error` sentence.
 
-`GET /api/health` answers `{"ok": true, "version": "1.0", "busy": false}`;
+`GET /api/health` answers `{"ok": true, "version": "2.0", "busy": false}`;
 `busy` is true while a job runs.
 
 `GET /api/games` lists every game in the catalog:
@@ -182,7 +294,9 @@ an `error` sentence.
   each of its containers.
 - `data_ok`: from `stack.py check --json --all`; `null` for a game that is
   not installed. `missing` lists what it lacks as `{"path", "hint",
-  "required"}`, optional items included.
+  "required", "item"}`, optional items included. `item` is the catalog
+  data item the path belongs to (several paths can share one). When that
+  item can be imported the entry also has `"import": {"hint", "expects"}`.
 - `admin_env`: the two settings the panel needs to reach the game's own
   admin port (services/admingames.py), from `admin_module` upper-cased;
   empty when the game has no admin module.
@@ -209,8 +323,10 @@ the rest newest first, at most 50. Each job is
 
 `state` is `queued`, `running`, `ok`, `failed` or `needs_data`. Times are
 UTC; `started` and `ended` are null until they happen. `exit` is the exit
-code of the command that ended the job. `missing` is `[{"path", "hint"}]`
-for a `needs_data` job, the required items only, and empty otherwise.
+code of the command that ended the job. `missing` is `[{"path", "hint",
+"item"}]` (with `import` as in `/api/games`) for a `needs_data` job, the
+required items only, and empty otherwise. An import job also has `item`
+and `source`, as they were asked for.
 
 `GET /api/jobs/<id>` is the same object plus `log`, the last 64 KB of the
 log, and `log_size`, the number of bytes the job has written in all.
@@ -221,6 +337,72 @@ what came back. The headers say `X-Job-State`, `X-Log-Offset` (the byte the
 answer starts at, which is past `n` when the beginning of a long log was
 dropped) and `X-Log-Size`.
 
+### Client data
+
+`GET /api/browse?path=<folder>` lists a folder under `POL_DEPLOY_CLIENTS`;
+`path` is relative to it and empty for its top.
+
+```
+{"root": "/srv/clients", "path": "FantasyEarth", "parent": "",
+ "dirs": ["DATA", "Model"], "files": [{"name": "FE_Client.dll", "size": 6291456}],
+ "truncated": false,
+ "matches": [{"game": "fe", "item": "fedata", "label": "Fantasy Earth: game data"}]}
+```
+
+`parent` is the folder above (`""` for the top), or null at the top.
+At most 500 entries are listed; past that `truncated` is true. `files` is
+always there, empty or not. Entries that are symbolic links leading out of
+the root are not listed. `matches` are the importable items whose
+`expects` are all in this folder. It answers 400 for a path that is
+absolute, has a `..` component or leads out of the root through a symbolic
+link, 404 for a folder that is not there, and 409 when `POL_DEPLOY_CLIENTS`
+is unset or not mounted.
+
+`POST /api/uploads` takes the archive as the raw body, with
+`Content-Length` and an optional `X-Filename` (percent-encoded UTF-8, for
+display). It answers once the archive is stored, unpacked and listed:
+
+```
+201 {"upload": "20261021T120000-1a2b3c", "id": "20261021T120000-1a2b3c",
+     "name": "FantasyEarth.zip", "created": "2026-10-21T12:00:00Z",
+     "last_import": null, "size": 2147483648, "files": 5120,
+     "matches": [{"game": "fe", "item": "fedata", "label": "Fantasy Earth: game data",
+                  "subdir": "FantasyEarth"}]}
+```
+
+`size` is the unpacked size. An upload's `matches` are searched for in its
+top folder and a few levels below it, each with the `subdir` to import
+from. Errors: 411 without `Content-Length`, 413 `{"error", "max"}` when the
+archive or its contents are over `POL_DEPLOY_UPLOAD_MAX` (`max` is that
+cap in bytes) or it holds too many files, 400 for anything else wrong with
+the archive, 507 when the volume has no room. Upload ids match
+`[0-9]{8}T[0-9]{6}-[0-9a-f]{6}`.
+
+`GET /api/uploads` lists them, newest first, as `{"uploads": [{"id",
+"name", "created", "last_import", "size", "files", "matches"}]}`.
+`DELETE /api/uploads/<id>` removes one and answers 204, 404 for an unknown
+id, and 409 while an import reads it.
+
+`POST /api/actions` with
+
+```
+{"action": "import", "game": "fe", "item": "fedata",
+ "source": {"upload": "<id>", "subdir": "FantasyEarth"}}
+```
+
+or `"source": {"path": "FantasyEarth"}` (a folder under
+`POL_DEPLOY_CLIENTS`) starts an import job (202). Before that it answers
+400 for an unknown item, an item without `import`, a source that is not
+one of those two shapes, a folder that leads outside the upload or the
+clients folder, or an unknown upload; 409 for a `path` source while
+browsing is off, or while another job runs; and 400 with the files the
+folder lacks when it is not the right one:
+
+```
+400 {"error": "This folder is not your Fantasy Earth install folder, ...: it has no DATA/dat.pak.",
+     "missing": [{"path": "DATA/dat.pak", "hint": "your Fantasy Earth install folder, ..."}]}
+```
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -229,6 +411,8 @@ dropped) and `X-Log-Size`.
 | `POL_DEPLOY_ROOT` | (none) | Required. Absolute host path of the directory holding the checkouts. |
 | `POL_DEPLOY_CORE` | `POL_DEPLOY_ROOT/openlobby` | The OpenLobby checkout, when it has another name. |
 | `POL_DEPLOY_GHCR` | empty | `1`: actions use the published images. |
+| `POL_DEPLOY_CLIENTS` | empty | Absolute host path of a folder of client installs to browse for imports, mounted read-only. Empty: uploads only. |
+| `POL_DEPLOY_UPLOAD_MAX` | `8G` | The most an uploaded archive may be, and may unpack to (`K`, `M`, `G` suffixes, powers of 1024). |
 | `POL_DEPLOYER_BIND` | `0.0.0.0:8099` | Address inside the container. Change `POL_DEPLOYER_URL` with it. |
 | `POL_DEPLOYER_URL` | `http://deployer:8099` | Where the admin service finds the deployer. |
 
@@ -237,10 +421,18 @@ dropped) and `X-Log-Size`.
 `services/deployer/Dockerfile` builds on the same Python image as the rest
 of the stack and adds git from Debian, and the official static builds of
 the docker CLI, the compose plugin and buildx, each pinned by version and
-checksum in `services/deployer/fetch_docker.py`. The server is
-`services/deployer/deployer.py`, standard library only. It runs as root
-inside its container: it needs the socket, whose group id differs from host
-to host, and it has to start git as the checkout's owner.
+checksum in `services/deployer/fetch_docker.py`, and pinned Pillow, numpy,
+fontTools and brotli for the import tools. The server is
+`services/deployer/deployer.py` with `clientdata.py` beside it (archives,
+paths and uploads), standard library only. It runs as root inside its
+container: it needs the socket, whose group id differs from host to host,
+and it has to start git and the import tools as the checkout's owner.
+
+The import tools run in the deployer's container rather than in each
+game's image because the game images carry only the server (`services/`)
+and not the repository's `tools/`, and starting another container for them
+would hand a request's folder to the Docker daemon.
 
 `python tools/deployer_test.py` tests it offline, with a stand-in for
-`stack.py`, and needs only Python and git.
+`stack.py` and for an import tool, and needs only Python and git. It
+builds its malicious archives itself.

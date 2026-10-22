@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import accounts  # noqa: E402
 import contentlist  # noqa: E402  -- the shared content-id title table
 import newsgen    # noqa: E402  -- announcements store + every news PML we write
+import admincalendar  # noqa: E402  -- Calendar: what the games have scheduled, and our own entries
 import eventnews  # noqa: E402  -- the event calendar's posts (newsgen adds them)
 import pmleval    # noqa: E402  -- template evaluator for the preview
 import pmlrefs    # noqa: E402  -- which pages reference which files
@@ -1330,7 +1331,8 @@ _GET_PERMS = {
     "/": "any", "/api/content-names": "any", "/api/sessions": "any",
     "/api/gm-calls": "gm", "/api/gm-desk": "gm", "/api/gm-notices": "gm",
     "/api/gm-players": "gm", "/api/face-sheet": "gm",
-    "/api/codes": "codes",
+    "/api/codes": "codes", "/api/calendar": "calendar",
+    "/api/logs": "any",              # checked per group in _logs (owner, or the game's serverlogs)
     "/api/reports": "reports", "/api/issues": "reports", "/api/issue-file": "reports",
     "/api/accounts": "accounts_view", "/api/account-detail": "accounts_view",
     "/api/account-clients": "accounts_manage",
@@ -1350,7 +1352,8 @@ _GET_PERMS = {
 #: pictures in both the PML preview and the news preview.
 _GET_PREFIX_PERMS = {"/art/": ("pml", "news_edit")}
 _POST_PERMS = {
-    "/api/sessions/revoke": "any", "/api/me/password": "any",
+    "/api/sessions/revoke": "any", "/api/me/password": "any", "/api/calendar": "calendar_edit",
+    "/api/logs": "any",
     "/api/codes": "codes", "/api/codes/random": "codes",
     "/api/gm-control": "gm", "/api/gm-say": "gm", "/api/gm-ticket": "gm",
     "/api/gm-notices": "gm", "/api/gm-discord": "gm",
@@ -1379,7 +1382,7 @@ _POST_PERMS = {
 #: (the PML preview and the random-code button change nothing).
 _AUDIT_ACTIONS = {
     "/api/credentials": "changed the owner login",
-    "/api/ops/fix": "ran a server fix",
+    "/api/ops/fix": "ran a server fix", "/api/logs": "read server logs",
     "/api/codes": "made a code", "/api/codes/void": "voided a code",
     "/api/sessions/revoke": "signed out a session",
     "/api/grant": "granted content", "/api/revoke": "revoked content",
@@ -2001,6 +2004,29 @@ class Handler(BaseHTTPRequestHandler):
             st.pop("history", None)
         return self._send(200, st)
 
+    def _logs(self, method):
+        """A service group's recent logs, read by the host runner (pol-ops). The
+        owner sees any group; a moderator a game's, with its serverlogs permission,
+        and with players' addresses masked. POST asks for fresh ones."""
+        if method == "GET":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            group = q.get("group", [""])[0]
+        else:
+            group = self._json_body().get("group")
+        owner = self._is_owner()
+        mod = adminmodules.enabled().get(group) if isinstance(group, str) else None
+        if not owner and not (mod is not None and mod.services
+                              and self._can(mod.perm("serverlogs"))):
+            return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
+        if method == "POST":
+            ok, msg = adminops.logs_request(_DATA, group, self._caller()[0])
+            return self._send(200 if ok else 409, {"ok": ok, "message": msg} if ok else {"error": msg})
+        doc = adminops.logs_read(_DATA, group, owner)
+        st = adminops.ops_status(_DATA)
+        return self._send(200, {"logs": doc, "available": bool(st and not st["stale"]
+                                                               and group in (st.get("logs") or [])),
+                                "addresses": owner})
+
     def _ops_fix(self):
         body = self._json_body()
         ok, msg = adminops.ops_request(_DATA, (body or {}).get("action"), self._caller()[0])
@@ -2276,6 +2302,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/deploy/job":
                 return self._send(*admindeploy.job(jid))
             return self._send(*admindeploy.log(jid, q.get("offset", ["0"])[0]))
+        if path == "/api/deploy/browse":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            return self._send(*admindeploy.browse(q.get("path", [""])[0]))
+        if path == "/api/deploy/uploads":
+            return self._send(*admindeploy.uploads())
+        if path == "/api/logs":
+            return self._logs("GET")
+        if path == "/api/calendar":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            _u, role, _p = self._caller()
+            mdb = adminusers.connect()
+            try:
+                return self._send(*admincalendar.gather(mdb, q.get("from", [""])[0], q.get("to", [""])[0],
+                                                        self._can, role == "owner"))
+            finally:
+                mdb.close()
         if path == "/api/mods":
             return self._mods_list()
         if path == "/api/audit":
@@ -2443,12 +2485,56 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/deploy/action":
             body = self._json_body()
             act, game = body.get("action"), body.get("game")
-            status, out = admindeploy.action(act, game)
+            status, out = admindeploy.action(act, game, body.get("item"), body.get("source"))
             user, role, _p = self._caller()
-            _audit(user, role, "asked the deployer to %s %s" % (act, game), target=str(game)[:32],
+            what = "asked the deployer to %s %s" % (act, game)
+            if act == "import":
+                what += " %s from %s" % (body.get("item"), json.dumps(body.get("source"))[:200])
+            _audit(user, role, what, target=str(game)[:32],
                    detail={"job": out.get("job")}, ok=status == 202, addr=self._addr())
             return self._send(status, out)
+        if path == "/api/logs":
+            return self._logs("POST")
+        if path == "/api/calendar":
+            body = self._json_body()
+            user, role, _p = self._caller()
+            mdb = adminusers.connect()
+            try:
+                status, out = admincalendar.change(mdb, body, user)
+            finally:
+                mdb.close()
+            _audit(user, role, "calendar: %s %s" % (body.get("action"), out.get("title") or body.get("title") or ""),
+                   target=str(out.get("id") or body.get("id") or "")[:40], ok=status == 200, addr=self._addr())
+            return self._send(status, out)
+        if path == "/api/deploy/upload":
+            return self._deploy_upload()
+        if path == "/api/deploy/upload/delete":
+            body = self._json_body()
+            status, out = admindeploy.delete_upload(body.get("upload"))
+            user, role, _p = self._caller()
+            _audit(user, role, "deleted deployer upload %s" % body.get("upload"),
+                   target=str(body.get("upload"))[:32], ok=status == 200, addr=self._addr())
+            return self._send(status, out)
         return self._send(404, {"error": "not found"})
+
+    def _deploy_upload(self):
+        """A client archive for the deployer, owner only: the raw body goes straight on
+        (admindeploy.upload streams it), so it is never read as JSON or held whole."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0:
+            return self._send(411, {"error": "The upload needs a length."})
+        name = self.headers.get("X-Filename") or ""
+        if not re.fullmatch(r"[A-Za-z0-9%._~() !*'-]{1,1024}", name):
+            name = "upload"
+        status, out = admindeploy.upload(self.rfile, n, name)
+        user, role, _p = self._caller()
+        _audit(user, role, "uploaded %s (%d bytes) to the deployer"
+               % (urllib.parse.unquote(name)[:120], n), target=str(out.get("upload") or "")[:32],
+               detail={"files": out.get("files")}, ok=status == 201, addr=self._addr())
+        return self._send(status, out)
 
     # -- games ---------------------------------------------------------------- #
     def _game_tool(self, method):
@@ -2481,8 +2567,6 @@ class Handler(BaseHTTPRequestHandler):
         user, role, _p = self._caller()
         status, headers, data = admingames.forward(key, sub, method, query, body,
                                                    ctype, user)
-        self._send(status, data, dict(headers).get("Content-Type", "text/plain"),
-                   headers=[h for h in headers if h[0] != "Content-Type"])
         if method == "POST":
             try:
                 req = json.loads(body or b"{}")
@@ -2496,6 +2580,9 @@ class Handler(BaseHTTPRequestHandler):
                            and len(str(v)) <= 120})
             _audit(user, role, "used the %s tools" % mod.title,
                    target=key, detail=detail, ok=status < 400, addr=self._addr())
+        # after the audit row: whoever reads the log next must find it
+        self._send(status, data, dict(headers).get("Content-Type", "text/plain"),
+                   headers=[h for h in headers if h[0] != "Content-Type"])
 
     def _module_action(self):
         """{"key", "action", "params": {...}}: run one of a game module's

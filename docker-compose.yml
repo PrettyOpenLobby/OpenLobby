@@ -421,7 +421,12 @@ services:
   # so the paths in the game compose files mean the same to the daemon; the
   # bind is never created when the directory is missing or the variable is
   # unset. Commands it runs leave this profile out, so it never recreates
-  # itself.
+  # itself. POL_DEPLOY_CLIENTS, a folder of client installs the panel may
+  # browse for the import action, is mounted read-only at the same path
+  # (never created when missing). Unset, the deployer's own source folder
+  # stands in at a placeholder path so the container still starts, and
+  # browsing is off. Uploaded archives are kept in the pol-deployer volume,
+  # up to POL_DEPLOY_UPLOAD_MAX unpacked.
   deployer:
     profiles: ["deployer"]
     build: ./services/deployer
@@ -434,11 +439,19 @@ services:
       POL_DEPLOY_ROOT: "${POL_DEPLOY_ROOT:-}"
       POL_DEPLOY_CORE: "${POL_DEPLOY_CORE:-}"
       POL_DEPLOY_GHCR: "${POL_DEPLOY_GHCR:-}"
+      POL_DEPLOY_CLIENTS: "${POL_DEPLOY_CLIENTS:-}"
+      POL_DEPLOY_UPLOAD_MAX: "${POL_DEPLOY_UPLOAD_MAX:-8G}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - type: bind
         source: "${POL_DEPLOY_ROOT:-/POL_DEPLOY_ROOT-is-not-set}"
         target: "${POL_DEPLOY_ROOT:-/POL_DEPLOY_ROOT-is-not-set}"
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${POL_DEPLOY_CLIENTS:-./services/deployer}"
+        target: "${POL_DEPLOY_CLIENTS:-/POL_DEPLOY_CLIENTS-is-not-set}"
+        read_only: true
         bind:
           create_host_path: false
       - pol-deployer:/deployer

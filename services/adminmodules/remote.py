@@ -77,6 +77,29 @@ def _live(m):
     return st
 
 
+def _calendar(m, lo, hi):
+    url, token = m.tool_port()
+    doc = _get(url, token, PREFIX + "calendar.json?from=%d&to=%d" % (int(lo), int(hi)))
+    out = []
+    for e in (doc.get("events") if isinstance(doc, dict) else None) or []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            start, end = int(e["start"]), int(e["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        times = []
+        for t in (e.get("times") or [])[:200]:
+            try:
+                times.append([int(t[0]), int(t[1])])
+            except (TypeError, ValueError, IndexError):
+                pass
+        out.append({"id": _str(e.get("id"), 80) or "%s-%d" % (m.key, start),
+                    "title": _str(e.get("title"), 80) or "Event", "start": start, "end": max(end, start),
+                    "kind": _str(e.get("kind"), 20), "about": _str(e.get("about"), 300), "times": times})
+    return out
+
+
 def build(key, url, token):
     """A Module for the game at `url`. Raises OSError/ValueError when the game
     does not answer or its description does not fit."""
@@ -117,5 +140,7 @@ def build(key, url, token):
     m = Module(key, title, short=_str(doc.get("short"), 16), platform=_str(doc.get("platform"), 40),
                about=_str(doc.get("about"), 200), tools=tools, actions=actions,
                services=services or None, live=_live, content_ids=ids)
+    if doc.get("calendar"):
+        m.calendar = _calendar
     m.remote = True
     return m

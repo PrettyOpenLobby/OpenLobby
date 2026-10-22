@@ -25,46 +25,35 @@ Viewer install (the US 2003-era Viewer is the most tested; JP works). The
 stack uses port 53/udp, 80, 443, 25, 110 and a band of ports from 51200 up;
 `docs/ports.md` lists them all.
 
-1. Get the code and make a settings file:
+On Linux, run the setup script:
 
-   ```
-   git clone https://github.com/PrettyOpenLobby/OpenLobby.git openlobby
-   cd openlobby
-   cp .env.example .env
-   ```
+```
+curl -fsSL https://raw.githubusercontent.com/PrettyOpenLobby/OpenLobby/main/setup.sh | bash
+```
 
-2. In `.env`, set `POL_ADVERTISE` to the address clients will reach this
-   machine on: its LAN address, its VPN address, or its public address. Left
-   empty it is `127.0.0.1`, which only works for a Viewer on the same machine.
+(or `bash setup.sh` from a clone). On Windows, from a clone:
 
-3. Start it:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
 
-   ```
-   docker compose up -d --build
-   ```
+The script offers to install Docker and git if they are missing, asks who
+will play (your network, friends over a VPN, or the internet) and proposes
+the address settings for that, writes `.env` with generated secrets, starts
+the stack and sets the admin panel's password. It ends with the admin
+panel's address and password, the command your players run on their PCs,
+and the ports to open. Run again, it keeps your `.env`. `docs/setup.md`
+explains each step and the options for running it without questions.
 
-   Every service reports healthy within a minute. To skip the build and pull
-   the published images instead, see "Running the published images" below.
+To do the same by hand, follow `docs/setup.md`, "By hand".
 
-4. Give the admin panel a password, then open `http://127.0.0.1:8090` on the
-   server (or over an SSH tunnel, `docs/ports.md`):
-
-   ```
-   docker compose exec admin python admin.py --set-password
-   ```
-
-5. Point a client at the server: the hosts installer in `client/` for a PC
-   Viewer, or the DNS setting for a PlayStation 2. `docs/client.md` walks
-   through both. There are no certificates to install (`docs/client.md`,
-   "HTTPS").
-
-6. Create an account on the admin panel, or a registration code for the
-   in-client sign-up, and log in.
-
-7. If something does not work, run `python tools/doctor.py` on the server.
+Then point a client at the server (`docs/client.md`), create an account on
+the admin panel, and log in. If something does not work, run
+`python tools/doctor.py` on the server.
 
 ## Documentation
 
+- `docs/setup.md` - what the setup scripts do, and the setup by hand
 - `docs/client.md` - pointing a PC Viewer or a PlayStation 2 at the server
 - `docs/ports.md` - every published port, which ones players need, firewalls
 - `docs/configuration.md` - the settings in `.env`, including DNS access and
@@ -86,8 +75,9 @@ docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
 ```
 
-Put `COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml` in `.env` and
-the plain `docker compose up -d` does the same. `OPENLOBBY_TAG` picks a
+Put `COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml` in `.env` (on
+Windows the separator is `;`) and the plain `docker compose up -d` does the
+same. `OPENLOBBY_TAG` picks a
 version (`latest`, a release such as `0.1.0`, or `sha-<commit>`). Needs
 Docker Compose 2.24 or newer. The title repositories have the same override
 and are applied after this one.

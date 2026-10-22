@@ -7,6 +7,7 @@ file is the game side: a small HTTP server, standard library only (Python
 
     GET  /openlobby/module.json     what the game is
     GET  /openlobby/status.json     who is playing now
+    GET  /openlobby/calendar.json   what is scheduled (optional; ?from=&to= unix seconds)
     POST /openlobby/actions/<id>    run one action
 
 and, if the game has them, its own tool pages under any other path.
@@ -27,6 +28,16 @@ and, if the game has them, its own tool pages under any other path.
         return True, "Shown in every lobby."
 
     port.start()          # a daemon thread; port.stop() ends it
+
+A game with a schedule can show it in the panel's calendar:
+
+    @port.calendar
+    def calendar(lo, hi):
+        return [{"id": "gp-20261031", "title": "Halloween Grand Prix", "start": 1793404800,
+                 "end": 1793491200, "kind": "cup", "about": "Pumpkin karts only."}]
+
+Entries touching [lo, hi) in unix seconds; "times" ([[start, end], ...]) may list the
+sessions inside a long one.
 
 An action gets the posted fields (strings) and the name of the panel user who
 asked, and returns (ok, message). One that raises answers {"ok": false} with
@@ -64,6 +75,7 @@ class AdminPort:
         #: [{"name", "containers": [...], "ports": {"7000": "game"}, "warning"}]
         self.services = list(services)
         self._status = None
+        self._calendar = None
         self._actions = {}          # id -> (meta, fn)
         self._tools = []            # (meta, fn), in order
         self._srv = None
@@ -72,6 +84,11 @@ class AdminPort:
     def status(self, fn):
         """Decorator: `fn()` returns the status document (docs/admin-modules.md)."""
         self._status = fn
+        return fn
+
+    def calendar(self, fn):
+        """Decorator: `fn(lo, hi)` returns the entries touching [lo, hi) (unix seconds)."""
+        self._calendar = fn
         return fn
 
     def action(self, id, label, kind="", fields=(), about="", danger=False):
@@ -100,6 +117,7 @@ class AdminPort:
         return {"v": 1, "key": self.key, "title": self.title, "short": self.short,
                 "platform": self.platform, "about": self.about,
                 "content_ids": self.content_ids, "services": self.services,
+                "calendar": self._calendar is not None,
                 "tools": [m for m, _fn in self._tools],
                 "actions": [m for m, _fn in self._actions.values()]}
 
@@ -164,6 +182,16 @@ class AdminPort:
                     except Exception as exc:            # noqa: BLE001 -- say what kind, not what
                         return self._send(200, {"up": None,
                                                 "error": "status failed: %s" % exc.__class__.__name__})
+                if path == PREFIX + "calendar.json" and method == "GET" and port._calendar is not None:
+                    q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+                    try:
+                        lo, hi = int(q.get("from", "0")), int(q.get("to", "0"))
+                    except ValueError:
+                        return self._send(400, {"error": "from and to are unix seconds"})
+                    try:
+                        return self._send(200, {"events": list(port._calendar(lo, hi) or [])})
+                    except Exception as exc:            # noqa: BLE001
+                        return self._send(500, {"error": "calendar failed: %s" % exc.__class__.__name__})
                 if path.startswith(PREFIX + "actions/") and method == "POST":
                     hit = port._actions.get(path[len(PREFIX + "actions/"):])
                     if hit is None:

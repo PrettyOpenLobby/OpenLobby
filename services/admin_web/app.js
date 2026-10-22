@@ -54,6 +54,7 @@ const VIEWS = [
   // PML Preview belongs to the PlayOnline Viewer's module (Games > POL Viewer)
   { id: "pml", group: "games", perm: "pml" },
   { id: "news", group: "news", perm: "news_edit" },
+  { id: "calendar", group: "calendar", perm: "calendar" },
   { id: "security", group: "settings", sub: "account" },
   { id: "mods", group: "settings", tab: "security", sub: "mods", perm: "owner" },
   { id: "alerts", group: "settings", tab: "security", sub: "alerts", perm: "settings" },
@@ -63,7 +64,7 @@ const VIEWS = [
   { id: "activity", group: "settings", tab: "security", sub: "activity", perm: "audit" },
 ];
 const GROUP_TITLE = { overview: "Overview", players: "Players", inbox: "Inbox",
-                      games: "Games", news: "News", settings: "Settings" };
+                      games: "Games", news: "News", calendar: "Calendar", settings: "Settings" };
 const TABS = VIEWS.map((v) => v.id);
 const viewOf = (id) => VIEWS.find((v) => v.id === id);
 const tabOf = (id) => (viewOf(id) || {}).tab || id;
@@ -156,6 +157,7 @@ function loadTab(name, refresh) {
   if (name === "issues") loadIssues().then(() => markSeen("issues"));
   if (name === "gmcalls") { loadGmCalls(); startGmDesk(); renderAlertBtn(); }
   if (name === "news") loadNews();
+  if (name === "calendar") loadCalendar();
   if (name === "games") loadGames(refresh);
   if (name === "bots") loadBots();
   if (name === "modules") loadModules();

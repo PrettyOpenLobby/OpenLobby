@@ -115,12 +115,14 @@ class Service:
 class Module:
     def __init__(self, key, title, short="", platform="", kind="game",
                  tools=(), services=None, live=None, actions=(), content_ids=(),
-                 about="", markers=(), present=None, self_described=False):
+                 about="", markers=(), present=None, self_described=False, calendar=None):
         self.key, self.title, self.short = key, title, short or title
         self.platform, self.kind, self.about = platform, kind, about
         self.tools = list(tools)
         self.services = services
         self.live = live
+        #: fn(module, lo, hi) -> what the game has scheduled (sources.eventcal and friends)
+        self.calendar = calendar
         self.actions = list(actions)
         self.content_ids = list(content_ids)
         #: live-session markers (live_sessions.py) that mean this game runs here
@@ -175,6 +177,8 @@ class Module:
                 out[self.perm(t.id)] = "%s: %s" % (self.title, t.label)
         for a in self.actions:
             out.setdefault(self.perm(a.id), "%s: %s" % (self.title, a.label))
+        if self.services:
+            out[self.perm("serverlogs")] = "%s: its server logs (players' addresses hidden)" % self.title
         return out
 
     def tool_for(self, sub):
@@ -314,6 +318,7 @@ def _remotes(out):
             out.pop(key)
             mod.services = file_mod.services
             mod.markers = file_mod.markers
+            mod.calendar = mod.calendar or file_mod.calendar
         _accept(mod, "the game at %s" % url, out, "game")
 
 
@@ -402,12 +407,13 @@ def all_perms():
 
 
 def expand_legacy(perms):
-    """The old per-game grant `games_<key>` -> every permission of that game."""
+    """The old per-game grant `games_<key>` -> every permission of that game it
+    stood for: not its server logs, which came later and are given on purpose."""
     out = []
     mods = load()
     for p in perms:
         if p.startswith("games_") and p[6:] in mods:
-            out.extend(mods[p[6:]].perms())
+            out.extend(k for k in mods[p[6:]].perms() if not k.endswith(".serverlogs"))
         else:
             out.append(p)
     return out

@@ -109,4 +109,5 @@ MODULE = Module(
     services=[Service(["{core}-jan-1", "{core}-board-holo-1|{core}-janboard-1"], {51272: "tables"},
                       warning="Anyone at a JongHoLow table loses the game.")],
     live=sources.board(_parse, markers=["authsess-jan"]),
+    calendar=sources.eventcal("jan", {"weekly": "cup", "event": "event"}),
 )
