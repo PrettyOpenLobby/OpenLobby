@@ -281,10 +281,9 @@ class _Cal(BaseHTTPRequestHandler):
 import tempfile  # noqa: E402
 CAL_MODS = tempfile.mkdtemp(prefix="calmods-")
 with open(os.path.join(CAL_MODS, "kart.py"), "w") as f:
-    f.write("from adminmodules import Module, sources
-"
-            "MODULE = Module('kart', 'Kart Club', calendar=sources.tool_calendar())
-")
+    f.write("from adminmodules import Module, Tool, sources\n"
+            "MODULE = Module('kart', 'Kart Club', tools=[Tool('laps', 'Lap times', 'laps')],\n"
+            "                calendar=sources.tool_calendar())\n")
 srv = ThreadingHTTPServer(("127.0.0.1", 0), _Cal)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 mods = reload(POL_ADMIN_MODULES_DIR=CAL_MODS, POL_ADMIN_MODULES="kart",

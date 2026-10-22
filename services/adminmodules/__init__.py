@@ -241,7 +241,11 @@ _lock = threading.Lock()
 _ALL = None          # {key: Module}, every module found, in listing order
 _PROBLEMS = []       # files that did not load, for the Modules settings page
 _REMOTE_RETRY = 60.0
+#: a game that describes itself is asked again this often, so a page or action it adds shows
+#: without restarting the panel
+_REDESCRIBE = 300.0
 _remote_failed = {"at": 0.0, "keys": set()}
+_loaded = {"at": 0.0}
 
 
 def _note(msg):
@@ -373,6 +377,7 @@ def load(reload=False):
         _legacy_extras(out)
         _remotes(out)
         _ALL = out
+        _loaded["at"] = time.time()
         return out
 
 
@@ -401,8 +406,11 @@ _AVAIL = {"at": 0.0, "keys": None}
 def enabled():
     """{key: Module} this server shows. An explicit POL_ADMIN_MODULES list is
     taken as it is; "*" keeps the modules that find their game (cached 30 s).
-    A game that did not describe itself is asked again after a minute."""
-    if _remote_failed["keys"] and time.time() - _remote_failed["at"] > _REMOTE_RETRY:
+    A game that did not describe itself is asked again after a minute, and every game that
+    describes itself every five minutes."""
+    stale = (_ALL is not None and time.time() - _loaded["at"] > _REDESCRIBE
+             and any(m.remote for m in _ALL.values()))
+    if stale or (_remote_failed["keys"] and time.time() - _remote_failed["at"] > _REMOTE_RETRY):
         load(reload=True)
         _AVAIL["keys"] = None
     mods = load()

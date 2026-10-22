@@ -118,6 +118,19 @@ chk("the panel's kick reaches the game and reports its failure",
     kart.action("kick").run(kart, {"polid": "ABCD1234", "handles": "Arden"}, "lex"),
     (False, "failed: RuntimeError"))
 
+print("a game that adds an action while the panel runs")
+
+
+@port.action("lights", "Track lights", fields=[{"id": "on", "label": "On"}])
+def lights(params, actor):
+    return True, "Lights set."
+
+
+chk("not before the panel asks the game again", [a.id for a in M.enabled()["kart"].actions], ["banner", "kick"])
+M._loaded["at"] -= M._REDESCRIBE + 1
+chk("...and there after five minutes, without a restart",
+    [a.id for a in M.enabled()["kart"].actions], ["banner", "kick", "lights"])
+
 print("a module file for a game that describes itself")
 import tempfile  # noqa: E402
 mdir = tempfile.mkdtemp(prefix="olport-mods-")
@@ -129,7 +142,7 @@ os.environ["POL_ADMIN_MODULES_DIR"] = mdir
 kart = M.load(reload=True).get("kart")
 chk("the game's own description wins, the file's services stay",
     (kart.title, kart.origin, [a.id for a in kart.actions], [g["containers"] for g in M.service_groups(["kart"])]),
-    ("Kart Club", "game", ["banner", "kick"], [["kartfile-game-1"]]))
+    ("Kart Club", "game", ["banner", "kick", "lights"], [["kartfile-game-1"]]))
 port.stop()
 kart = M.load(reload=True).get("kart")
 chk("with the game down, the file stands in and says why",
