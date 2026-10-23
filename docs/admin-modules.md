@@ -129,6 +129,41 @@ Commits are hex, 7 to 40 digits; times are ISO 8601; `changes` are newest
 first, at most 50 are shown. The key and name are the module's own. A
 report that does not fit this shape is shown as unknown.
 
+A game that can apply its own update also puts these in the object; the
+panel keeps them whatever the rest says (docs/installs.md, "Updates"):
+
+| Field | |
+|---|---|
+| `apply` | `true`: the game takes `POST /openlobby/update`, and the panel shows an Update button while the update is `available` |
+| `state` | `updating` while it works, `failed` when it did not work; left out otherwise |
+| `message` | with `updating`: what it is doing now, shown as it changes |
+| `why` | with `failed`: what went wrong, written to the activity log |
+
+### POST /openlobby/update
+
+Only for a game whose `update` object says `"apply": true`. The panel sends
+it, with the token and `X-Devtool-Actor`, and an empty body, when the owner
+or a moderator with `game.<key>.update` presses Update. Answer at once and
+update afterwards: `202 {"ok": true, "msg": "..."}` when it started, `409
+{"ok": false, "msg": "..."}` while an update already runs, `503 {"ok":
+false, "msg": "..."}` when it cannot update now. The panel shows `msg` as
+it is, then reads `status.json` every 5 seconds until `running.commit`
+equals `latest.commit` with `update` at `current`, or `state` is `failed`.
+
+With `tools/olport.py`, `@port.update` does this: the function gets the
+actor, starts the work (in a thread: the request answers at once) and
+returns `(ok, message)`. `port.update_progress(message)`,
+`port.update_failed(why)` and `port.update_done()` set what the status
+reports; while an update runs a second request gets 409 without calling the
+function.
+
+```python
+@port.update
+def update(actor):
+    threading.Thread(target=run_update, daemon=True).start()
+    return True, "Fetching the new version."
+```
+
 ### GET /openlobby/calendar.json?from=&lt;unix&gt;&to=&lt;unix&gt;
 
 Optional, for a game with a schedule: say `"calendar": true` in module.json

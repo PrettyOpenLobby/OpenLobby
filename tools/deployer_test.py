@@ -34,6 +34,16 @@ compose action before it changes anything. Who clones a game on Docker
 Desktop (nobody, so its imports can write) is checked with a stand-in
 os.stat.
 
+The updater of a paired game (POST /api/updater, docs/deployer.md "Updaters of
+paired games") runs against a stand-in docker CLI that runs the command in
+this process: refused bodies start nothing, Windows and Linux folders become
+the daemon's path, the folder is checked in a throwaway container first, the
+updater runs in the deployer's own image with the folder as its working
+directory, the socket, the command as approved and a minimal environment;
+exit 0, exit 1 (its last line the summary), a silent exit, a missing folder,
+the timeout, no output for 15 minutes (minutes shortened with --minute), one
+job at a time, and a deployer outside a container.
+
 The dev channel (GET and POST /api/channel, docs/deployer.md "Dev channel")
 runs against a stand-in registry on 127.0.0.1 (the registry API's token
 handshake) and a stand-in docker CLI: bad requests and a wrong code are
@@ -838,6 +848,285 @@ def test_paths_server(t, servers):
     ok(hc.returncode == 0 and hc.stdout.strip() == "paths ok", "paths right: --healthcheck prints paths ok")
     j = c.run("restart", "core")
     ok(j["state"] == "ok", "paths right: compose actions run (%s)" % j["summary"])
+    s.stop()
+    os.remove(os.path.join(t.core, "docker-compose.yml"))
+
+
+# ------------------------------------------------- the updater of a paired game
+#
+# A stand-in docker CLI for POST /api/updater. "inspect" names the image; a "run" with
+# --network none is a probe (the start-up check, or the folder check), run here against the
+# folder its --mount names, translated back from Docker Desktop's /run/desktop/mnt/host/<drive>/
+# the way the daemon would read it; any other "run" is the updater itself, run IN this process
+# (so killing it kills it) with the -w folder as its working directory and only the -e
+# variables as its environment. "ps" and "kill" find and stop it by its job label. Every call
+# is kept with the environment the CLI was started with.
+FAKE_UPD_DOCKER = r"""
+import csv, io, json, os, runpy, signal, subprocess, sys
+args = sys.argv[1:]
+d = os.environ["FAKE_UPD_DIR"]
+MNT = "/run/desktop/mnt/host/"
+with open(os.path.join(d, "calls.txt"), "a") as f:
+    f.write(json.dumps({"args": args, "token": os.environ.get("POL_DEPLOYER_TOKEN"),
+                        "pol": sorted(k for k in os.environ if k.startswith("POL_"))}) + "\n")
+
+
+def host(p):
+    if p.startswith(MNT):
+        rest = p[len(MNT):]
+        drive, _, tail = rest.partition("/")
+        return drive + ":/" + tail
+    return p
+
+
+def mounts():
+    out = []
+    for i, a in enumerate(args):
+        if a == "--mount":
+            fields = next(csv.reader(io.StringIO(args[i + 1])))
+            kv = dict(x.split("=", 1) for x in fields if "=" in x)
+            out.append((kv["source"], kv["target"]))
+    return out
+
+
+if args[0] == "inspect":
+    print("sha256:" + "cd" * 32)
+    sys.exit(0)
+if args[0] == "ps":
+    label = args[args.index("--filter") + 1].split("=", 2)
+    want = label[2] if len(label) > 2 else None
+    for n in os.listdir(os.path.join(d, "running")):
+        if want is None or open(os.path.join(d, "running", n)).read().split()[0] == want:
+            print(n)
+    sys.exit(0)
+if args[0] == "kill":
+    for n in args[1:]:
+        p = os.path.join(d, "running", n)
+        try:
+            pid = int(open(p).read().split()[1])
+            os.kill(pid, signal.SIGTERM)
+            os.remove(p)            # --rm: a killed container is gone
+        except (OSError, ValueError, IndexError):
+            pass
+    sys.exit(0)
+if args[0] == "run" and "--network" in args and args[args.index("--network") + 1] == "none":
+    src = host(mounts()[0][0])
+    if not os.path.exists(src):
+        sys.stderr.write('docker: Error response from daemon: invalid mount config for type "bind": '
+                         "bind source path does not exist: " + mounts()[0][0] + "\n")
+        sys.exit(125)
+    code = args[args.index("-c") + 1].replace("'/probe'", repr(src))
+    sys.exit(subprocess.run([sys.executable, "-c", code]).returncode)
+if args[0] == "run":
+    name = args[args.index("--name") + 1]
+    job = [a.split("=", 1)[1] for a in args if a.startswith("org.openlobby.updater.job=")][0]
+    with open(os.path.join(d, "running", name), "w") as f:
+        f.write("%s %d" % (job, os.getpid()))
+    i = args.index("--entrypoint")
+    rest = args[i + 3:]
+    env = {}
+    for j, a in enumerate(args):
+        if a == "-e":
+            k, _, v = args[j + 1].partition("=")
+            env[k] = v
+    for k in ("SYSTEMROOT", "PATH"):
+        if os.environ.get(k):
+            env.setdefault(k, os.environ[k])
+    os.environ.clear()
+    os.environ.update(env)
+    os.chdir(host(args[args.index("-w") + 1]))
+    sys.argv = rest
+    try:
+        if rest[0] == "-c":
+            exec(compile(rest[1], "<updater>", "exec"), {"__name__": "__main__"})
+        else:
+            runpy.run_path(rest[0], run_name="__main__")
+        rc = 0
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    finally:
+        sys.stdout.flush()
+        try:
+            os.remove(os.path.join(d, "running", name))
+        except OSError:
+            pass
+    os._exit(rc)
+sys.exit(2)
+"""
+
+UPD_SCRIPTS = {
+    "ok.py": "import json, os, sys\n"
+             "print('Kart Club: checking for a new version')\n"
+             "print('Kart Club: fetched 9f8e7d6c')\n"
+             "json.dump({'cwd': os.getcwd(), 'argv': sys.argv[1:], 'env': dict(os.environ)},"
+             " open('seen.json', 'w'))\n"
+             "print('The update is done.')\n",
+    "fail.py": "print('Checking free space...')\nprint('Update failed: the disk is full.')\nraise SystemExit(1)\n",
+    "silent.py": "raise SystemExit(2)\n",
+    "slow.py": "import time\nwhile True:\n    print('still building', flush=True)\n    time.sleep(0.1)\n",
+    "quiet.py": "import time\nprint('started', flush=True)\ntime.sleep(60)\n",
+}
+
+
+def updater_tree(t):
+    """(stand-in docker, its folder, the game's folder with the scripts)."""
+    d = os.path.join(t.tmp, "upddocker")
+    os.makedirs(os.path.join(d, "running"), exist_ok=True)
+    dock = os.path.join(d, "docker.py")
+    with open(dock, "w") as f:
+        f.write(FAKE_UPD_DOCKER)
+    game = os.path.join(t.tmp, "Kart Club, the game")       # a space and a comma in the path
+    os.makedirs(game, exist_ok=True)
+    for n, code in UPD_SCRIPTS.items():
+        with open(os.path.join(game, n), "w") as f:
+            f.write(code)
+    return dock, d, game
+
+
+def upd_calls(d):
+    try:
+        with open(os.path.join(d, "calls.txt")) as f:
+            return [json.loads(l) for l in f if l.strip()]
+    except OSError:
+        return []
+
+
+def test_updater_unit():
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import gameupdater as gu
+    for folder, seen in (("C:\\Users\\x\\Game", "/run/desktop/mnt/host/c/Users/x/Game"),
+                         ("D:/Games//Kart Club\\", "/run/desktop/mnt/host/d/Games/Kart Club"),
+                         ("/srv/kart/", "/srv/kart"), ("/srv//kart", "/srv/kart"),
+                         ("/run/desktop/mnt/host/c/Games/Kart", "/run/desktop/mnt/host/c/Games/Kart")):
+        ok(gu.daemon_path(folder) == seen, "updater path: %s -> %s (%s)" % (folder, seen, gu.daemon_path(folder)))
+    rec, bad = gu.check({"folder": "/srv/kart", "command": ["python3", "u.py"]})
+    ok(bad is None and rec["timeout_minutes"] == 60, "updater check: the timeout defaults to 60")
+    for what, block in (("argv", {"folder": "/srv/kart", "command": ["python"], "argv": ["sh"]}),
+                        ("sh", {"folder": "/srv/kart", "command": ["sh", "-c", "x"]}),
+                        ("a system folder", {"folder": "/usr/lib/kart", "command": ["python"]}),
+                        ("..", {"folder": "C:\\Games\\..\\Windows", "command": ["python"]})):
+        ok(gu.check(block)[1] is not None, "updater check: %s refused" % what)
+    ok(gu.shown(["python", "setup.py", "--name", "Kart Club", "it's"]) ==
+       "python setup.py --name 'Kart Club' 'it'\"'\"'s'", "updater: the command shell-quoted for showing")
+
+
+def test_updater(t, servers):
+    """POST /api/updater: the job that runs a paired game's updater in a container of the
+    deployer's own image, against the stand-in docker."""
+    test_updater_unit()
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import gameupdater as gu
+    dock, d, game = updater_tree(t)
+    with open(os.path.join(t.core, "docker-compose.yml"), "w") as f:
+        f.write("services: {}  # Kart Club\n")
+    s = Server(t, extra_env={"FAKE_UPD_DIR": d},
+               args=["--container", "c0ffee", "--docker", dock, "--minute", "0.2"])
+    servers.append(s)
+    c = s.start()
+    seen = gu.daemon_path(game)
+
+    def run(command, timeout=60, folder=game, title="Kart Club"):
+        code, r = c.call("POST", "/api/updater", {"game": "kart", "title": title, "updater": {
+            "folder": folder, "command": command, "timeout_minutes": timeout}})
+        if code != 202:
+            return {"state": "http %d" % code, "summary": str(r), "log": "", "exit": None}
+        return c.wait(r["job"], timeout=90)
+
+    for what, body in (("an unknown field", {"game": "kart", "title": "Kart Club", "argv": ["sh"],
+                                             "updater": {"folder": game, "command": ["python", "ok.py"]}}),
+                       ("a command that is not python", {"game": "kart", "updater": {"folder": game,
+                                                                                    "command": ["sh", "ok.py"]}}),
+                       ("an updater field the rules do not know", {"game": "kart", "updater": {
+                           "folder": game, "command": ["python", "ok.py"], "image": "alpine"}}),
+                       ("a relative folder", {"game": "kart", "updater": {"folder": "kart", "command": ["python"]}}),
+                       ("a key that does not fit", {"game": "Kart!", "updater": {"folder": game,
+                                                                                "command": ["python"]}}),
+                       ("a timeout of 300", {"game": "kart", "updater": {"folder": game, "command": ["python"],
+                                                                        "timeout_minutes": 300}})):
+        code, r = c.call("POST", "/api/updater", body)
+        ok(code == 400 and r.get("error"), "updater: %s: 400 (%s)" % (what, r.get("error")))
+    ok(c.call("POST", "/api/updater", {"game": "kart"}, token="wrong")[0] == 401, "updater: the token is needed")
+    ok(not [x for x in upd_calls(d) if x["args"][0] == "run" and "--network" not in x["args"]],
+       "updater: nothing refused reached docker run")
+
+    before = len(upd_calls(d))
+    j = run(["python", "ok.py", "--yes"], timeout=60)
+    ok(j["state"] == "ok" and j["summary"] == "The updater of Kart Club finished." and j["exit"] == 0,
+       "updater: exit 0: done (%s, %s)" % (j["state"], j["summary"]))
+    ok("Kart Club: fetched 9f8e7d6c" in j["log"] and "The update is done." in j["log"],
+       "updater: its output is in the job log")
+    code, pub = c.get("/api/jobs/" + j["id"])
+    ok(pub["action"] == "updater" and pub["game"] == "kart" and pub["title"] == "Kart Club",
+       "updater: the job says updater, kart, Kart Club")
+    calls = upd_calls(d)[before:]
+    probe = [x["args"] for x in calls if x["args"][0] == "run" and "--network" in x["args"]]
+    runs = [x["args"] for x in calls if x["args"][0] == "run" and "--network" not in x["args"]]
+    ok(calls[0]["args"][:3] == ["inspect", "--format", "{{.Image}}"] and calls[0]["args"][-1] == "c0ffee",
+       "updater: asks Docker for the deployer's own image")
+    ok(len(probe) == 1 and probe[0][probe[0].index("--network") + 1] == "none" and "--rm" in probe[0]
+       and probe[0][probe[0].index("--pull") + 1] == "never"
+       and probe[0][probe[0].index("--mount") + 1] == 'type=bind,"source=%s","target=/probe",readonly' % seen,
+       "updater: the folder checked first in a throwaway container, read-only, as the daemon sees it (%s)"
+       % (probe[0][probe[0].index("--mount") + 1] if probe else None))
+    ok(len(runs) == 1, "updater: one container run")
+    a = runs[0] if runs else ["run"]
+    mounts = [a[i + 1] for i, x in enumerate(a) if x == "--mount"]
+    image_at = a.index("--entrypoint") + 2 if "--entrypoint" in a else 0
+    ok("--rm" in a and a[a.index("--pull") + 1] == "never" and a[a.index("--name") + 1] == "openlobby-updater-" + j["id"]
+       and "org.openlobby.updater.job=" + j["id"] in a and "org.openlobby.updater.game=kart" in a,
+       "updater: --rm, its own name and labels")
+    ok(mounts == ['type=bind,"source=%s","target=%s"' % (seen, seen),
+                  'type=bind,"source=/var/run/docker.sock","target=/var/run/docker.sock"']
+       and a[a.index("-w") + 1] == seen,
+       "updater: the folder mounted at the path the daemon sees, the working directory, and the socket (%s)" % mounts)
+    ok(a[a.index("--entrypoint") + 1] == "python" and a[image_at] == "sha256:" + "cd" * 32
+       and a[image_at + 1:] == ["ok.py", "--yes"],
+       "updater: its own image, the approved command as it is (%s)" % a[a.index("--entrypoint"):])
+    envs = [a[i + 1] for i, x in enumerate(a) if x == "-e"]
+    ok(envs == ["HOME=/tmp", "LANG=C.UTF-8", "PYTHONUNBUFFERED=1", "PYTHONIOENCODING=utf-8"],
+       "updater: a minimal environment, nothing of the deployer's (%s)" % envs)
+    ok("-i" not in a and "-t" not in a and "--interactive" not in a, "updater: stdin closed (no -i)")
+    ok(all(x["token"] is None for x in calls), "updater: the token is in no docker CLI's environment")
+    rec = json.load(open(os.path.join(game, "seen.json")))
+    ok(os.path.normcase(os.path.abspath(rec["cwd"])) == os.path.normcase(os.path.abspath(game)) and rec["argv"] == ["--yes"],
+       "updater: it ran in the game's folder (%s)" % rec["cwd"])
+    ok(not any(k.startswith("POL_") or TOKEN in v for k, v in rec["env"].items()),
+       "updater: no POL_ variable or token reached it")
+    ok(TOKEN not in j["log"], "updater: the token is not in the log")
+
+    j = run(["python", "fail.py"])
+    ok(j["state"] == "failed" and j["summary"] == "Update failed: the disk is full." and j["exit"] == 1,
+       "updater: exit 1: failed, the last line as the summary (%s, %s)" % (j["summary"], j["exit"]))
+    j = run(["python", "silent.py"])
+    ok(j["state"] == "failed" and j["exit"] == 2 and "exited with code 2 and printed nothing" in j["summary"],
+       "updater: exit 2 and no output: said so (%s)" % j["summary"])
+    j = run(["python", "ok.py"], folder=os.path.join(t.tmp, "not there"))
+    ok(j["state"] == "failed" and "Docker does not see the folder" in j["summary"]
+       and "bind source path does not exist" in j["summary"],
+       "updater: a folder Docker does not see: failed before it runs (%s)" % j["summary"])
+
+    code, r = c.call("POST", "/api/updater", {"game": "kart", "title": "Kart Club", "updater": {
+        "folder": game, "command": ["python", "slow.py"], "timeout_minutes": 5}})
+    time.sleep(0.5)
+    busy = c.call("POST", "/api/updater", {"game": "kart", "updater": {"folder": game, "command": ["python", "ok.py"]}})
+    ok(busy[0] == 409 and busy[1].get("job") == r.get("job"), "updater: one job at a time (409)")
+    j = c.wait(r["job"], timeout=60)
+    ok(j["state"] == "failed" and "stopped after 5 minutes" in j["summary"] and "still building" in j["log"],
+       "updater: past its timeout: stopped (%s)" % j["summary"])
+    kills = [x["args"] for x in upd_calls(d) if x["args"][0] == "kill"]
+    ok(kills and kills[-1] == ["kill", "openlobby-updater-" + r["job"]], "updater: its container killed (%s)" % kills[-1:])
+    j = run(["python", "quiet.py"], timeout=240)
+    ok(j["state"] == "failed" and "no output for 15 minutes" in j["summary"],
+       "updater: no output for 15 minutes: stopped (%s)" % j["summary"])
+    ok(not os.listdir(os.path.join(d, "running")), "updater: no container left running")
+    s.stop()
+
+    s = Server(t, extra_env={"FAKE_UPD_DIR": d}, args=["--docker", dock, "--minute", "0.2"])
+    servers.append(s)
+    c = s.start()
+    j = run(["python", "ok.py"])
+    ok(j["state"] == "failed" and "not running in a container" in j["summary"],
+       "updater: a deployer outside a container says it cannot (%s)" % j["summary"])
     s.stop()
     os.remove(os.path.join(t.core, "docker-compose.yml"))
 
@@ -2319,6 +2608,7 @@ def main():
         test_updates_images(t, servers)
         test_check_paths(t)
         test_paths_server(t, servers)
+        test_updater(t, servers)
         test_channel(t, servers)
         hits = scan_for_token(t, servers)
         ok(not hits, "the token is in no job file or server log (%s)" % hits)

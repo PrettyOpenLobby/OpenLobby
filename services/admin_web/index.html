@@ -819,6 +819,34 @@
     .upd-changes li .s { min-width: 0; overflow-wrap: anywhere; }
     @media (max-width: 560px) { .pair-code { font-size: 28px; } .upd-changes li { flex-direction: column; gap: 0; } }
     #ovAttention li.upd-note .t1 b { color: var(--accent); }
+    .upd-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+    .upd-act .muted { font-size: 12.5px; }
+    .upd-why.bad, .upd-live.bad { color: var(--bad); }
+    .upd-live { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 8px; }
+    .upd-live .spin { width: 12px; height: 12px; flex: none; border-radius: 50%;
+      border: 2px solid var(--line); border-top-color: var(--accent); animation: updspin 1s linear infinite; }
+    .upd-live.bad .spin { display: none; }
+    @keyframes updspin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .upd-live .spin { animation: none; } }
+    /* Settings > Modules: a paired game's updater, under its row */
+    tr.has-upd td { border-bottom: 0; }
+    .ga-upd-box { border-left: 3px solid var(--warn); background: var(--panel2); border-radius: 0 8px 8px 0;
+      padding: 8px 12px; font-size: 13px; min-width: 0; }
+    .ga-upd-box.ok { border-left-color: var(--good); }
+    .ga-upd-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-weight: 600; }
+    .ga-upd-head .muted { font-weight: 400; font-size: 12.5px; }
+    .ga-upd-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 6px 0 0; }
+    .ga-upd-grid dt { color: var(--muted); }
+    .ga-upd-grid dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .ga-upd-grid code.mono { font-size: 12px; padding: 0; background: none; }
+    .ga-upd-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 8px; }
+    .ga-upd-acts .muted { font-size: 12.5px; }
+    @media (max-width: 700px) {
+      table.cards tr.has-upd { margin-bottom: 0; border-bottom: 0; border-radius: 9px 9px 0 0; }
+      table.cards tr.ga-upd { border-top: 0; border-radius: 0 0 9px 9px; padding-top: 0; }
+      .ga-upd-grid { grid-template-columns: minmax(0, 1fr); }
+      .ga-upd-grid dd { margin-bottom: 4px; }
+    }
     /* Install games > Update channel (games.js) */
     .pill.dev { background: rgba(229,166,62,.16); color: var(--warn); }
     .chan-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 4px 0 10px; }

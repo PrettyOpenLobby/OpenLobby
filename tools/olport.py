@@ -17,6 +17,7 @@ file is the game side: a small HTTP server, standard library only (Python
                                     ?polid=&handles=&members=)
     GET  /openlobby/players.json    find players by name or id (optional; ?q=&limit=)
     POST /openlobby/actions/<id>    run one action
+    POST /openlobby/update          start updating itself (optional; see @port.update)
 
 and, if the game has them, its own tool pages under any other path.
 
@@ -72,6 +73,28 @@ the exception's type, never its text. A kind of "announce" is used by the
 panel's maintenance warning, "kick" by an account's Kick (sent {"polid",
 "handles"}).
 
+A game that can update itself (docs/installs.md, "Updates", the game-applied update) offers
+the panel's Update button with @port.update: fn(actor) is called on POST /openlobby/update,
+starts the update (in a thread of its own: the request must answer at once) and returns
+(ok, message). True answers 202 and the port reports "updating" with that message; False
+answers 503 (it cannot update now) with the message. While an update runs, a second request
+answers 409 without calling fn. The status's "update" object then carries "apply": true and,
+while working, "state": "updating" with "message", or "state": "failed" with "why":
+
+    @port.update
+    def update(actor):
+        threading.Thread(target=run_update, daemon=True).start()
+        return True, "Fetching the new version."
+
+    def run_update():
+        port.update_progress("Building the new image.")    # shown live in the panel
+        if not build():
+            port.update_failed("The build failed; the old version still runs.")
+            return
+        port.update_done()        # then restart; the panel sees running.commit == latest.commit
+
+A game whose status has no "update" object still gets one while an update runs or failed.
+
 The token is checked on every request (X-Devtool-Token). Bound anywhere but
 loopback, the port refuses to start without one.
 """
@@ -125,6 +148,9 @@ class AdminPort:
         self._players = None
         self._actions = {}          # id -> (meta, fn)
         self._tools = []            # (meta, fn), in order
+        self._update = None
+        self._upd_state = {}        # {} or {"state": "updating", "message"} / {"state": "failed", "why"}
+        self._upd_lock = threading.Lock()
         self._srv = None
 
     # -- what the game offers ------------------------------------------------ #
@@ -151,6 +177,69 @@ class AdminPort:
         """Decorator: `fn(q, limit)` -> [{"id", "label", "detail", "online"}] for the picker."""
         self._players = fn
         return fn
+
+    def update(self, fn):
+        """Decorator: `fn(actor)` starts an update and returns (ok, message) (see above)."""
+        self._update = fn
+        return fn
+
+    def update_progress(self, message=""):
+        """Report that an update is running, with what it is doing now."""
+        with self._upd_lock:
+            self._upd_state = {"state": "updating", "message": str(message or "")[:300]}
+
+    def update_failed(self, why):
+        """Report that the update failed, and why (the panel writes it to its activity log)."""
+        with self._upd_lock:
+            self._upd_state = {"state": "failed", "why": str(why or "")[:300]}
+
+    def update_done(self):
+        """The update is over (or the new version runs): nothing more to report."""
+        with self._upd_lock:
+            self._upd_state = {}
+
+    def updating(self):
+        with self._upd_lock:
+            return self._upd_state.get("state") == "updating"
+
+    def _with_update(self, doc):
+        """The status document with this port's update fields in its "update" object."""
+        if self._update is None or not isinstance(doc, dict):
+            return doc
+        with self._upd_lock:
+            extra = dict(self._upd_state)
+        upd = doc.get("update")
+        if isinstance(upd, dict):
+            upd = dict(upd)
+        elif extra:
+            upd = {"running": {}, "latest": {}, "update": "unknown"}
+        else:
+            return doc
+        if extra:
+            upd.pop("state", None)
+            upd.pop("message", None)
+            upd.update(extra)
+        upd["apply"] = True
+        return dict(doc, update=upd)
+
+    def _start_update(self, actor):
+        """(HTTP status, answer) for POST /openlobby/update."""
+        with self._upd_lock:
+            if self._upd_state.get("state") == "updating":
+                return 409, {"ok": False, "msg": "%s is already updating." % self.title}
+            self._upd_state = {"state": "updating", "message": ""}
+        try:
+            ok, msg = self._update(actor)
+        except Exception as exc:                        # noqa: BLE001 -- say what kind, not what
+            ok, msg = False, "The update did not start (%s)." % exc.__class__.__name__
+        msg = str(msg or "")[:500]
+        with self._upd_lock:
+            if not ok:
+                if self._upd_state == {"state": "updating", "message": ""}:
+                    self._upd_state = {}
+            elif self._upd_state.get("state") == "updating" and not self._upd_state.get("message"):
+                self._upd_state = {"state": "updating", "message": msg[:300]}
+        return (202, {"ok": True, "msg": msg}) if ok else (503, {"ok": False, "msg": msg})
 
     def action(self, id, label, kind="", fields=(), about="", danger=False):
         """Decorator: `fn(params, actor)` -> (ok, message)."""
@@ -263,11 +352,13 @@ class AdminPort:
                 q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
                 if path == PREFIX + "module.json" and method == "GET":
                     return self._send(200, port.manifest())
+                if path == PREFIX + "update" and method == "POST" and port._update is not None:
+                    return self._send(*port._start_update(self._actor()))
                 if path == PREFIX + "status.json" and method == "GET":
                     if port._status is None:
-                        return self._send(200, {"up": True})
+                        return self._send(200, port._with_update({"up": True}))
                     try:
-                        return self._send(200, port._status())
+                        return self._send(200, port._with_update(port._status()))
                     except Exception as exc:            # noqa: BLE001 -- say what kind, not what
                         return self._send(200, {"up": None,
                                                 "error": "status failed: %s" % exc.__class__.__name__})

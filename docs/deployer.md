@@ -23,7 +23,10 @@ service is built around that:
   keys in `games/*.json`, and the client data tools the catalog names for
   the `import` action. Nothing from a request reaches a command line
   except a key that matched the catalog and, for an import, the path of a
-  folder the deployer checked itself (see "Importing client data").
+  folder the deployer checked itself (see "Importing client data"). The
+  one exception is the updater of a game paired with the panel, a python
+  command the panel's owner approved, which runs with the socket (see
+  "Updaters of paired games").
 - The admin container never gets the socket. It holds the token and asks.
 
 Anyone who has the token, or who can run code in a container on that
@@ -350,6 +353,74 @@ The token is removed from the environment of every command the deployer
 starts, and any occurrence of it in their output is replaced with
 `[token]` before it is written, so it never reaches a log.
 
+## Updaters of paired games
+
+A game installed by its own setup program and paired with the panel
+(docs/installs.md, "Pairing") is not in the catalog, so the deployer has no
+`update` action for it. Its setup program may name an updater instead: an
+install folder, a python command and a timeout (docs/installs.md,
+"Updates"). The panel keeps it, and the owner approves it in Settings,
+Modules. When the owner presses Update, the panel sends the deployer the
+record it stored and the owner approved:
+
+    POST /api/updater
+    {"game": "kart", "title": "Kart Club",
+     "updater": {"folder": "C:\\Users\\you\\Kart Club",
+                 "command": ["python", "setup.py", "--update", "--yes"],
+                 "timeout_minutes": 60}}
+
+The browser sends only the game's key; the folder, command and timeout come
+from the panel's database. The deployer checks every field again with the
+same rules (`services/deployer/gameupdater.py`, shared with the panel): no
+other fields, the command an argument list starting with `python` or
+`python3`, at most 16 items under 200 characters each, no NUL, a full path
+that is not a drive root or a system folder, and a timeout of 5 to 240
+minutes. Anything else is a 400 and starts nothing. A good request starts a
+job (`"action": "updater"`, with `title`), one at a time like every other
+job: 202 `{"job"}`, or 409 while another runs.
+
+The job:
+
+1. asks Docker for the deployer's own image (`docker inspect` of its own
+   container) and stops any updater container an earlier deployer left
+   running;
+2. turns the folder into the path the Docker daemon sees: a Windows path
+   `C:\Users\you\Kart Club` becomes `/run/desktop/mnt/host/c/Users/you/Kart Club`
+   (Docker Desktop), a Linux path stays as it is;
+3. checks, as the start-up check does ("Where Docker sees the checkouts"),
+   that Docker sees a folder there: a throwaway container of its image, no
+   network, the folder mounted read-only. A folder Docker does not see fails
+   the job with Docker's own line;
+4. runs `docker run --rm` of its own image, named `openlobby-updater-<job>`
+   and labelled `org.openlobby.updater.job=<job>` and
+   `org.openlobby.updater.game=<key>`, with the folder mounted at that same
+   path as the working directory, `/var/run/docker.sock` mounted, the first
+   item of the command as the entrypoint and the rest as its arguments. No
+   `-i`, so stdin is closed. Its environment is the image's own plus
+   `HOME=/tmp`, `LANG=C.UTF-8`, `PYTHONUNBUFFERED=1` and
+   `PYTHONIOENCODING=utf-8`: none of the deployer's settings, and no token.
+   Its output goes into the job log as it comes.
+
+Exit 0 ends the job `ok` ("The updater of Kart Club finished."); any other
+exit ends it `failed`, with the last line the command printed as the
+summary. The deployer kills the container (`docker kill`, by its label)
+after `timeout_minutes` ("stopped after 60 minutes") or when it has printed
+nothing for 15 minutes ("no output for 15 minutes"), so an updater should
+print a line now and then while it waits on something slow.
+
+What approving one means: the deployer's own container mounts only the
+checkouts, so the updater runs in a container of its own, and that container
+gets the Docker socket, because a game's update builds images and restarts
+its containers. A command with the socket can start a container that mounts
+the host's root filesystem, so an approved updater has full Docker
+access, which is root on the host, exactly like the deployer itself. The
+command is fixed when you approve it (any change from the setup program
+makes it wait for your approval again), but the files it runs are the
+game's: whoever can change the scripts in that folder, or the release the
+game's update fetches, can run code as root through it. Approve an updater
+only for a game whose source you trust as you trust OpenLobby's, and revoke
+it when you stop trusting it.
+
 ## HTTP API
 
 JSON in and out, except the raw log. Every endpoint, `/api/health`
@@ -401,6 +472,10 @@ or game, or `core` with `install`, `enable` or `disable`, and 409 `{"job":
 "<id of the running job>"}` while another job runs. Problems found while
 the job runs (a game not installed, a dirty checkout, a failed build) are
 not HTTP errors: the job ends `failed` with a sentence in `summary`.
+
+`POST /api/updater` starts the updater of a paired game (body and checks in
+"Updaters of paired games" above): 202 `{"job"}`, 400 for a body that does
+not fit, 409 while another job runs.
 
 `GET /api/jobs?limit=20` lists jobs: queued and running ones first, then
 the rest newest first, at most 50. Each job is

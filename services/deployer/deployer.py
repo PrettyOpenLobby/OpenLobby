@@ -15,6 +15,10 @@ API and how to run it.
 It is the only container that holds the Docker socket, so it accepts
 nothing but a fixed set of actions on game keys from the catalog, each run
 as a fixed argument list (never a shell), and only with the bearer token.
+The one exception is the updater of a game paired with the panel (POST
+/api/updater): a python command the panel's owner approved, run in a
+container of this image with the game's folder and the socket (see
+docs/deployer.md, "Updaters of paired games").
 
 Settings (environment, or the options of the same meaning):
 
@@ -64,6 +68,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import clientdata  # noqa: E402
 import devchannel  # noqa: E402
+import gameupdater  # noqa: E402
 import updatecheck  # noqa: E402
 
 VERSION = "2.0"
@@ -85,6 +90,9 @@ REFRESH_GAP = 60.0         # at most one forced update check this often
 GIT_TIMEOUT = 60           # a git fetch for the update check is stopped after this long
 COMPOSING = ("enable", "disable", "update", "restart")   # the actions that run docker compose
 PROBE_TIMEOUT = 120        # the start-up check that Docker sees the checkout where we do
+UPDATER_IDLE = 15          # minutes a paired game's updater may print nothing before it is stopped
+UPDATER_BODY = 16384       # the most a POST /api/updater may hold
+UPDATER_LABEL = "org.openlobby.updater.job"   # on an updater's container: its job id
 
 JOB_ID = re.compile(r"^[0-9]{8}T[0-9]{6}-[0-9a-f]{6}$")
 ACTIVE = ("queued", "running")
@@ -143,6 +151,10 @@ class Config:
         # (check_paths): "ok", "wrong" or "unchecked", and the sentence for it
         self.paths = "unchecked"
         self.paths_note = "not checked"
+        # the container this deployer runs in (its image runs the updaters of paired games),
+        # "" outside a container; and how many seconds an updater's minute is (tests shorten it)
+        self.container = ""
+        self.minute = 60.0
         # the dev channel (docs/deployer.md, "Dev channel"); the code itself is in
         # STATE/channel, never in the environment
         self.dev_registry = None
@@ -183,6 +195,8 @@ def parse_args(argv):
     ap.add_argument("--container", default="",
                     help="the container to check the checkout paths from (default: this one, "
                          "when running in a container; tests name one their docker stand-in knows)")
+    ap.add_argument("--minute", type=float, default=60.0,
+                    help="seconds in a minute of a game updater's timeouts (tests lower it)")
     ap.add_argument("--healthcheck", action="store_true",
                     help="ask the local server for /api/health and exit 0 if it answers and "
                          "Docker sees the checkouts where the deployer does")
@@ -234,6 +248,7 @@ def make_config(args):
             sys.exit(2)
     cfg.max_files = max(1, args.max_files)
     cfg.refresh_gap = max(0.0, args.refresh_gap)
+    cfg.minute = max(0.01, args.minute)
     if args.docker:
         cfg.docker = ([cfg.python] if args.docker.endswith(".py") else []) + [args.docker]
     api = os.environ.get("POL_DEPLOY_GITHUB_API", "").strip()
@@ -616,6 +631,8 @@ def public(job):
     if job.get("action") == "import":
         out["item"] = job.get("item")
         out["source"] = job.get("source")
+    if job.get("action") == "updater":
+        out["title"] = job.get("title")
     return out
 
 
@@ -1286,6 +1303,190 @@ ACT = {"install": act_install, "enable": act_enable, "disable": act_disable,
        "update": act_update, "restart": act_restart, "check": act_check}
 
 
+# ------------------------------------------------ the updater of a paired game
+#
+# A game installed by its own setup program and paired with the panel may name an updater
+# (docs/installs.md, "Updates"): a python command to run in its install folder. The panel
+# sends the record its owner approved (POST /api/updater); everything in it is checked again
+# here (gameupdater.check). The deployer's own container mounts only its checkouts, so the
+# updater runs in a new container of the deployer's image, the install folder mounted at the
+# path the Docker daemon sees it at and made the working directory, with the Docker socket
+# (a game's update builds and restarts its containers): see docs/deployer.md, "Updaters of
+# paired games", for what approving one means.
+
+FOLDER_CODE = ("import os, sys\n"
+               "sys.exit(0 if os.path.isdir('/probe') else 3)\n")
+
+
+def mount_arg(source, target, readonly=False):
+    """A --mount value; quoted CSV fields keep a comma in a path."""
+    q = lambda f: '"%s"' % f.replace('"', '""')     # noqa: E731
+    return "type=bind,%s,%s%s" % (q("source=" + source), q("target=" + target),
+                                  ",readonly" if readonly else "")
+
+
+def own_image(r):
+    """The image of the container the deployer runs in, or JobFailed."""
+    if not r.cfg.container:
+        raise JobFailed("The deployer is not running in a container here, so it cannot start a "
+                        "container of its own image for the updater.")
+    rc, out = r.capture(r.cfg.docker + ["inspect", "--format", "{{.Image}}", r.cfg.container],
+                        timeout=PROBE_TIMEOUT)
+    image = out.strip()
+    if rc != 0 or not image:
+        raise JobFailed("Docker did not say which image the deployer runs (exit %d); the log has "
+                        "its output." % rc, rc)
+    return image
+
+
+def updater_folder_check(r, image, folder, seen):
+    """A throwaway container of the deployer's image with the folder mounted where the daemon
+    sees it (read-only, no network), the start-up check's way: fails the job with a sentence
+    when Docker does not see a folder there."""
+    argv = r.cfg.docker + ["run", "--rm", "--pull", "never", "--network", "none",
+                           "--entrypoint", "python", "--mount", mount_arg(seen, "/probe", True),
+                           image, "-c", FOLDER_CODE]
+    r.log.line("checking that Docker sees %s as %s" % (folder, seen))
+    r.log.line("$ " + r.show(argv))
+    try:
+        p = subprocess.run(argv, cwd=r.cfg.core, env=r.child_env(), stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=PROBE_TIMEOUT)
+    except FileNotFoundError:
+        raise JobFailed("docker is not installed in the deployer image")
+    except subprocess.TimeoutExpired:
+        raise JobFailed("The folder check did not finish within %d seconds." % PROBE_TIMEOUT)
+    err = p.stderr.decode("utf-8", "replace")
+    if err.strip():
+        r.log.write(err if err.endswith("\n") else err + "\n")
+    r.log.line("(exit %d)" % p.returncode)
+    if p.returncode == 0:
+        return
+    lines = [l.strip() for l in err.splitlines() if l.strip()]
+    hit = [l for l in lines if any(m in l.lower() for m in MOUNT_MISSING)]
+    if p.returncode == 3 or hit:
+        raise JobFailed("Docker does not see the folder %s (as %s)%s. Is the game installed there?"
+                        % (folder, seen, ": %s" % hit[0] if hit else ""), p.returncode)
+    raise JobFailed("The folder check container did not run (%s)." % ((lines or ["exit %d" % p.returncode])[0]),
+                    p.returncode)
+
+
+def stop_updaters(r, job_id=None):
+    """docker kill the updater containers (of one job, or every one left over)."""
+    label = UPDATER_LABEL + ("=" + job_id if job_id else "")
+    try:
+        p = subprocess.run(r.cfg.docker + ["ps", "-q", "--filter", "label=" + label], env=r.child_env(),
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+        ids = p.stdout.decode("utf-8", "replace").split() if p.returncode == 0 else []
+        if ids:
+            subprocess.run(r.cfg.docker + ["kill"] + ids, env=r.child_env(), stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=60)
+        return ids
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def run_watched(r, argv, total, idle, job_id):
+    """Run argv with its output streamed into the log. Stopped (its container killed) after
+    `total` seconds, or after `idle` seconds without a byte of output. (exit code, "timeout" |
+    "idle" | None, the last line it printed)."""
+    r.log.line("$ " + r.show(argv))
+    kw = {"start_new_session": True} if os.name != "nt" else {}
+    try:
+        p = subprocess.Popen(argv, cwd=r.cfg.core, env=r.child_env(), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kw)
+    except FileNotFoundError:
+        raise JobFailed("docker is not installed in the deployer image")
+    st = {"last": time.time(), "why": None, "line": ""}
+    done = threading.Event()
+
+    def dog():
+        start = time.time()
+        while not done.wait(min(1.0, idle / 10.0)):
+            now = time.time()
+            if now - start >= total:
+                st["why"] = "timeout"
+            elif now - st["last"] >= idle:
+                st["why"] = "idle"
+            else:
+                continue
+            stop_updaters(r, job_id)
+            if done.wait(10):
+                return
+            try:
+                if os.name != "nt":
+                    os.killpg(p.pid, signal.SIGKILL)
+                else:
+                    p.kill()
+            except OSError:
+                pass
+            return
+    threading.Thread(target=dog, daemon=True).start()
+    for chunk in iter(p.stdout.readline, b""):
+        st["last"] = time.time()
+        r.log.write(chunk)
+        text = chunk.decode("utf-8", "replace").strip()
+        if text:
+            st["line"] = text
+    p.stdout.close()
+    rc = p.wait()
+    done.set()
+    r.last_rc = rc
+    r.log.line("(exit %d)" % rc)
+    return rc, st["why"], st["line"]
+
+
+def act_updater(r, job):
+    rec, bad = gameupdater.check(job.get("updater"))
+    if bad:
+        raise JobFailed("The updater the panel sent does not fit: %s" % bad)
+    key = job["game"]
+    title = job.get("title") or key
+    minutes = rec["timeout_minutes"]
+    seen = gameupdater.daemon_path(rec["folder"])
+    r.log.line("updater of %s: %s in %s, at most %d minutes" % (title, gameupdater.shown(rec["command"]),
+                                                                rec["folder"], minutes))
+    image = own_image(r)
+    left = stop_updaters(r)
+    if left:
+        r.log.line("stopped %d updater container(s) an earlier deployer left running" % len(left))
+    updater_folder_check(r, image, rec["folder"], seen)
+    argv = r.cfg.docker + [
+        "run", "--rm", "--pull", "never", "--name", "openlobby-updater-" + job["id"],
+        "--label", UPDATER_LABEL + "=" + job["id"], "--label", "org.openlobby.updater.game=" + key,
+        "--mount", mount_arg(seen, seen), "-w", seen,
+        "--mount", mount_arg("/var/run/docker.sock", "/var/run/docker.sock"),
+        "-e", "HOME=/tmp", "-e", "LANG=C.UTF-8", "-e", "PYTHONUNBUFFERED=1",
+        "-e", "PYTHONIOENCODING=utf-8",
+        "--entrypoint", rec["command"][0], image] + rec["command"][1:]
+    rc, why, last = run_watched(r, argv, minutes * r.cfg.minute, UPDATER_IDLE * r.cfg.minute, job["id"])
+    if why == "timeout":
+        raise JobFailed("The updater of %s was stopped after %d minutes." % (title, minutes), rc)
+    if why == "idle":
+        raise JobFailed("The updater of %s was stopped: no output for %d minutes." % (title, UPDATER_IDLE), rc)
+    if rc != 0:
+        last = last.replace(r.cfg.token, "[token]") if r.cfg.token else last
+        raise JobFailed(last[:300] if last else "The updater of %s exited with code %d and printed "
+                                                "nothing." % (title, rc), rc)
+    return "ok", "The updater of %s finished." % title, []
+
+
+def updater_request(body):
+    """(None, (game, title, record)) for a POST /api/updater body that fits, else (error, None).
+    Only {"game", "title", "updater"}, and the updater checked with the panel's own rules."""
+    extra = sorted(set(body) - {"game", "title", "updater"})
+    if extra:
+        return "unknown fields: %s" % ", ".join(str(k)[:40] for k in extra[:5]), None
+    game = body.get("game")
+    if not isinstance(game, str) or not re.fullmatch(r"[a-z0-9]{1,16}", game):
+        return "game must be the paired game's key, 1 to 16 of a-z and 0-9", None
+    title = body.get("title")
+    title = " ".join(title.split())[:80] if isinstance(title, str) else ""
+    rec, bad = gameupdater.check(body.get("updater"))
+    if bad:
+        return bad, None
+    return None, (game, title or game, rec)
+
+
 # --------------------------------------------------------------- updates
 
 class Updates:
@@ -1708,6 +1909,8 @@ class Deployer:
                                                   ", dev channel" if r.dev() else ""))
             if job["action"] == "channel":
                 state, summary, missing = act_channel(r, job, secret)
+            elif job["action"] == "updater":
+                state, summary, missing = act_updater(r, job)
             elif job["action"] == "import":
                 log.line("importing %s from %s" % (job["item"], json.dumps(job["source"])))
                 state, summary, missing = act_import(r, job["game"], job)
@@ -2079,13 +2282,14 @@ def make_handler(dep):
             path = urllib.parse.urlsplit(self.path).path.rstrip("/")
             if path == "/api/uploads":
                 return self.upload()
-            if path not in ("/api/actions", "/api/channel"):
+            if path not in ("/api/actions", "/api/channel", "/api/updater"):
                 return self.send_json(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length") or "0")
             except ValueError:
                 n = -1
-            if n < 0 or n > MAX_BODY:
+            if n < 0 or n > (UPDATER_BODY if path == "/api/updater" else MAX_BODY):
+                self.close_connection = True
                 return self.send_json(400, {"error": "the body must be a small JSON object"})
             try:
                 body = json.loads(self.rfile.read(n) or b"{}")
@@ -2095,6 +2299,13 @@ def make_handler(dep):
                 return self.send_json(400, {"error": "the body must be a JSON object"})
             if path == "/api/channel":
                 return self.send_json(*dep.channel_request(body))
+            if path == "/api/updater":
+                # a paired game's updater, as the panel's owner approved it; checked again here
+                bad, got = updater_request(body)
+                if bad:
+                    return self.send_json(400, {"error": bad})
+                game, title, rec = got
+                return self.send_json(*dep.start("updater", game, {"title": title, "updater": rec}))
             action, game = body.get("action"), body.get("game")
             if action not in ACTIONS:
                 return self.send_json(400, {"error": "unknown action %r; one of %s"
@@ -2211,7 +2422,8 @@ def main(argv=None):
     if args.channel:
         return channel_cli(args)
     cfg = make_config(args)
-    cfg.paths, cfg.paths_note = check_paths(cfg, args.container or own_container())
+    cfg.container = args.container or own_container()
+    cfg.paths, cfg.paths_note = check_paths(cfg, cfg.container)
     say(("paths: " if cfg.paths != "wrong" else "") + cfg.paths_note)
     dep = Deployer(cfg)
     srv = ThreadingHTTPServer((cfg.host, cfg.port), make_handler(dep))

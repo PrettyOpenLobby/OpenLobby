@@ -8,7 +8,10 @@ A made-up game serves its description, its status, two actions and a tool
 page through olport; the panel's module registry is pointed at it by URL and
 token alone, and must list it, read who is playing, run its actions (with the
 panel user's name), refuse without the token, and never let a tool path reach
-the protocol. No database, no Docker.
+the protocol. A second game offers @port.update: POST /openlobby/update answers
+202, 409 while it runs, 503 when it cannot, and the status reports apply, state,
+message and why as update_progress, update_failed and update_done set them. No
+database, no Docker.
 """
 import json
 import os
@@ -197,6 +200,101 @@ os.environ["POL_ADMIN_GAME_KART_TOKEN"] = "wrong"
 M.load(reload=True)
 chk("the game is not listed, and the reason is", (
     "kart" in M.load(), any("kart" in p for p in M.problems())), (False, True))
+
+print("a game that updates itself (@port.update)")
+gp = olport.AdminPort("derby", "Derby Night", token=TOKEN)
+STARTED = []
+ANSWER = {"ok": True}
+
+
+def post_update(base, token=TOKEN, actor="op"):
+    req = urllib.request.Request(base + "/openlobby/update", data=b"", method="POST",
+                                 headers={"X-Devtool-Token": token, "X-Devtool-Actor": actor})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def get_status(base):
+    req = urllib.request.Request(base + "/openlobby/status.json", headers={"X-Devtool-Token": TOKEN})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+
+_h, gnum = gp.start()
+gbase = "http://127.0.0.1:%d" % gnum
+chk("without @port.update: no /openlobby/update", post_update(gbase)[0], 404)
+chk("  and no update fields in the status", get_status(gbase), {"up": True})
+gp.stop()
+REPORT = {"running": {"commit": "1a2b3c4d"}, "latest": {"commit": "9f8e7d6c"}, "update": "available"}
+SHOW = {"report": REPORT}
+
+
+@gp.status
+def gstatus():
+    doc = {"up": True}
+    if SHOW["report"] is not None:
+        doc["update"] = dict(SHOW["report"])
+    return doc
+
+
+@gp.update
+def gupdate(actor):
+    if not ANSWER["ok"]:
+        return False, "A race is on; try after it."
+    if ANSWER.get("raise"):
+        raise RuntimeError("secret detail")
+    STARTED.append(actor)
+    return True, "Fetching the new version."
+
+
+_h, gnum = gp.start()
+gbase = "http://127.0.0.1:%d" % gnum
+upd = get_status(gbase)["update"]
+chk("the status's update object says apply, nothing running", (upd.get("apply"), "state" in upd, upd["update"]),
+    (True, False, "available"))
+chk("the wrong token: 403, not started", (post_update(gbase, token="wrong")[0], STARTED), (403, []))
+ANSWER["ok"] = False
+chk("fn says it cannot: 503 with its message", post_update(gbase), (503, {"ok": False, "msg": "A race is on; try after it."}))
+chk("  nothing reported", "state" in get_status(gbase)["update"], False)
+ANSWER["ok"] = True
+ANSWER["raise"] = True
+code, r = post_update(gbase)
+chk("fn raises: 503, the kind and not the text", (code, r["msg"], "secret" in r["msg"]),
+    (503, "The update did not start (RuntimeError).", False))
+ANSWER["raise"] = False
+chk("fn starts it: 202 with its message, called with the actor", (post_update(gbase, actor="mod_upd"), STARTED),
+    ((202, {"ok": True, "msg": "Fetching the new version."}), ["mod_upd"]))
+upd = get_status(gbase)["update"]
+chk("  the status says updating, with that message", (upd.get("apply"), upd.get("state"), upd.get("message")),
+    (True, "updating", "Fetching the new version."))
+chk("  a second request while it runs: 409, fn not called", (post_update(gbase), STARTED),
+    ((409, {"ok": False, "msg": "Derby Night is already updating."}), ["mod_upd"]))
+gp.update_progress("Building the new image.")
+chk("update_progress: the message changes", get_status(gbase)["update"].get("message"), "Building the new image.")
+SHOW["report"] = None
+upd = get_status(gbase).get("update") or {}
+chk("  a status with no update object still gets one", (upd.get("update"), upd.get("apply"), upd.get("state")),
+    ("unknown", True, "updating"))
+SHOW["report"] = REPORT
+gp.update_failed("The build failed; the old version still runs.")
+upd = get_status(gbase)["update"]
+chk("update_failed: state failed with why", (upd.get("state"), upd.get("why"), "message" in upd),
+    ("failed", "The build failed; the old version still runs.", False))
+chk("  a new request is taken again", post_update(gbase)[0], 202)
+gp.update_done()
+upd = get_status(gbase)["update"]
+chk("update_done: nothing more reported", ("state" in upd, upd.get("apply")), (False, True))
+chk("  the game's own report is left as it was", REPORT, {"running": {"commit": "1a2b3c4d"},
+                                                           "latest": {"commit": "9f8e7d6c"}, "update": "available"})
+import adminupdates  # noqa: E402
+gp.update_progress("Restarting.")
+it = adminupdates.clean_item(get_status(gbase)["update"], key="derby", name="Derby Night")
+chk("the panel's cleaning keeps what olport reports", (it.get("apply"), it.get("state"), it.get("message")),
+    (True, "updating", "Restarting."))
+gp.stop()
 
 print("the copy the services import")
 CRLF, LF = bytes((13, 10)), bytes((10,))

@@ -235,7 +235,7 @@ function renderGame(key, toolId) {
   // the status redraw keeps the action forms as they are, with what was typed and picked
   const kept = $("#gamesMain .gx-acts");
   $("#gamesMain").innerHTML = head + `<div class="gx-stats">${statHtml}</div>`
-    + `<div class="gx-layout">${playersHtml}${actHtml}${roomsHtml}${svcHtml}${about}</div>`;
+    + `<div class="gx-layout">${gameUpdateBox(g)}${playersHtml}${actHtml}${roomsHtml}${svcHtml}${about}</div>`;
   const fresh = $("#gamesMain .gx-acts");
   if (kept && fresh && kept.dataset.sig === fresh.dataset.sig) fresh.replaceWith(kept);
   else mountGamePickers(g);
@@ -447,18 +447,58 @@ async function loadModules() {
 }
 
 // ---- Settings > Modules: games added here, by hand or by their setup program (adminpair.py) ----
+// a paired game's updater (docs/installs.md, "Updates"): what its setup program asks the
+// deployer to run, and the owner's Approve or Revoke
+function updaterRow(g) {
+  const u = g.updater;
+  if (!u) return "";
+  const ok = u.state === "approved";
+  const when = ok ? (u.approved_at ? `Approved by ${u.approved_by || "the owner"}, ${ago(u.approved_at * 1000)}` : "Approved")
+    : (u.requested_at ? `Sent by its setup program ${ago(u.requested_at * 1000)}` : "Sent by its setup program");
+  const noDeployer = !(DEPLOY && DEPLOY.available)
+    ? `<span class="muted">No deployer is set up on this server, so it cannot run yet.</span>` : "";
+  return `<tr class="ga-upd"><td colspan="5" data-label=""><div class="ga-upd-box${ok ? " ok" : ""}">`
+    + `<div class="ga-upd-head">Updater <span class="pill ${ok ? "live" : "wait"}">${ok ? "Approved" : "Waiting for your approval"}</span>`
+    + `<span class="muted">${esc(when)}</span></div>`
+    + `<dl class="ga-upd-grid"><dt>Folder</dt><dd><code class="mono">${esc(u.folder)}</code></dd>`
+    + `<dt>Command</dt><dd><code class="mono">${esc(u.shown)}</code></dd>`
+    + `<dt>Timeout</dt><dd>${esc(u.timeout_minutes)} minutes</dd></dl>`
+    + `<div class="ga-upd-acts">${ok
+      ? `<button class="ghost sm" data-ga-revoke="${esc(g.key)}">Revoke</button>`
+      : `<button class="act sm" data-ga-approve="${esc(g.key)}">Approve</button>`}`
+    + `<span class="muted">An approved updater runs with full Docker access.</span>${noDeployer}</div>`
+    + `</div></td></tr>`;
+}
+
+async function gaUpdater(key, approve) {
+  const g = ADDED.find((x) => x.key === key);
+  const u = g && g.updater;
+  if (!u) return;
+  const sure = approve
+    ? confirm(`This runs ${u.shown} in ${u.folder} with full Docker access when you press Update. Approve?`)
+    : confirm(`Revoke the updater of ${g.title}?\n\nThe Update button stops running it until you approve it again.`);
+  if (!sure) return;
+  try {
+    await api("/api/modules/game", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(approve ? { action: "approve_updater", key, id: u.id } : { action: "revoke_updater", key }) });
+    toast(approve ? `The updater of ${g.title} is approved` : `The updater of ${g.title} is revoked`);
+  } catch (e) { toast(e.message, true); }
+  loadModules();
+}
+
 function renderAdded() {
   $("#addedBody").innerHTML = ADDED.map((g) => {
     const how = g.how === "paired" && g.paired ? "Paired by its setup program" : "Added by hand";
     const when = g.added_at ? ago(g.added_at * 1000) : "";
-    return `<tr><td class="strong">${esc(g.title)}<div class="muted mono">${esc(g.key)}</div></td>`
+    return `<tr${g.updater ? ' class="has-upd"' : ""}><td class="strong">${esc(g.title)}<div class="muted mono">${esc(g.key)}</div></td>`
       + `<td><span class="mono">${esc(g.url)}</span>`
       + `${g.env ? `<div class="patch-why">The environment also sets POL_ADMIN_GAME_${esc(g.key.toUpperCase())}_URL, and it wins.</div>` : ""}</td>`
       + `<td>${esc(how)}<div class="muted">${esc([g.added_by, when].filter(Boolean).join(", "))}</div></td>`
       + `<td>${g.token_set ? "set" : '<span class="muted">none</span>'}</td>`
       + `<td><div class="deploy-acts"><button class="ghost sm" data-ga-edit="${esc(g.key)}">Change</button>`
       + `${g.paired ? `<button class="ghost sm" data-ga-unpair="${esc(g.key)}">Unpair</button>` : ""}`
-      + `<button class="danger sm" data-ga-remove="${esc(g.key)}">Remove</button></div></td></tr>`;
+      + `<button class="danger sm" data-ga-remove="${esc(g.key)}">Remove</button></div></td></tr>`
+      + updaterRow(g);
   }).join("") || `<tr><td colspan="5" class="muted">None yet. Games set up in the environment are listed below.</td></tr>`;
 }
 
@@ -600,6 +640,10 @@ document.addEventListener("click", (e) => {
   if (rm) return gaAct("remove", rm.dataset.gaRemove);
   const up = t.closest("[data-ga-unpair]");
   if (up) return gaAct("unpair", up.dataset.gaUnpair);
+  const ap = t.closest("[data-ga-approve]");
+  if (ap) return gaUpdater(ap.dataset.gaApprove, true);
+  const rv = t.closest("[data-ga-revoke]");
+  if (rv) return gaUpdater(rv.dataset.gaRevoke, false);
 });
 
 // ---- Updates: the core and each game (adminupdates.py), owner only ----
@@ -630,13 +674,22 @@ function updItem(it) {
     lat.commit ? `Newest <code class="mono">${esc(short12(lat.commit))}</code>${lat.date ? ` from ${esc(updDate(lat.date))}` : ""}` : ""]
     .filter(Boolean).map((s) => `<span>${s}</span>`).join("");
   let tail = "";
-  if (it.update === "available") {
-    tail = updByDeployer(it.key)
-      ? `<div class="upd-act"><button class="act sm" data-upd-go="${esc(it.key)}">Update</button></div>`
+  const running = it.state === "updating" || it.applying || APPLY[it.key];
+  if (running) {
+    // the game is applying its own update: its message, live (applyFollow)
+    tail = `<div class="upd-live" data-upd-live="${esc(it.key)}"><span class="spin" aria-hidden="true"></span>`
+      + `<span>${esc(applyLine(it.key, it.name, it.message))}</span></div>`;
+  } else if (it.update === "available") {
+    const btn = (attr, how) => `<div class="upd-act"><button class="act sm" ${attr}="${esc(it.key)}">Update</button>`
+      + `${how ? `<span class="muted">${how}</span>` : ""}</div>`;
+    tail = updByDeployer(it.key) ? btn("data-upd-go", "")
+      : it.via === "game" ? btn("data-upd-apply", "The game updates itself.")
+      : it.via === "updater" && DEPLOY && DEPLOY.available ? btn("data-upd-run", "The deployer runs its approved updater.")
       : (it.how ? `<div class="upd-how">${esc(it.how)}</div>` : "");
-  } else if (it.update === "unknown" && it.why) {
+  } else if (it.update === "unknown" && it.why && it.state !== "failed") {
     tail = `<div class="upd-why">${esc(it.why)}</div>`;
   }
+  if (it.state === "failed" && !running) tail = `<div class="upd-why bad">Update failed: ${esc(it.why || "")}</div>` + tail;
   const ch = it.changes || [];
   const li = (c) => `<li><span class="s">${esc(c.subject)}</span><span class="d">${esc(updDate(c.date))}</span></li>`;
   const news = ch.length ? `<details${ch.length <= 3 ? " open" : ""}><summary>What's new (${ch.length})</summary>`
@@ -647,6 +700,103 @@ function updItem(it) {
     + `<span class="pill ${cls}">${esc(word)}</span>${it.channel === "dev" ? '<span class="pill dev">dev build</span>' : ""}`
     + `${behind ? `<span class="muted">${esc(behind)}</span>` : ""}</div>`
     + `${vers ? `<div class="upd-vers">${vers}</div>` : ""}${tail}${news}</div>`;
+}
+
+// ---- a game that applies its own update (path B): the Update button, then its status every 5 s ----
+const APPLY = {};   // key -> { name, message, lost, timer } while the panel follows an update
+
+function applyLine(key, name, message) {
+  const st = APPLY[key];
+  if (st && st.lost) return st.message;
+  const m = (st && st.message) || message;
+  return m ? `Updating: ${m}` : `${name || key} is updating...`;
+}
+
+function paintApply(key) {
+  const st = APPLY[key];
+  document.querySelectorAll(`[data-upd-live="${CSS.escape(key)}"]`).forEach((el) => {
+    el.lastElementChild.textContent = applyLine(key, st && st.name, "");
+    el.classList.toggle("bad", !!(st && st.lost));
+  });
+}
+
+function applyEnded(key) {
+  delete APPLY[key];
+  if (isOwner()) loadUpdates(false);
+  if (CUR_TAB === "games") fetchGames(true).then(() => { const [k, tool] = (GAME_TOOL || "").split("/"); if (k && !tool) renderGame(k); });
+}
+
+function applyFollow(key, name) {
+  if (APPLY[key] && APPLY[key].timer) return;
+  const st = APPLY[key] = Object.assign(APPLY[key] || {}, { name: name || key });
+  const tick = async () => {
+    st.timer = null;
+    if (APPLY[key] !== st) return;
+    let r = null;
+    try { r = await api("/api/updates/state?key=" + encodeURIComponent(key)); } catch (e) { /* the panel restarting */ }
+    if (r) {
+      if (r.state === "updating" && r.message) st.message = r.message;
+      if (r.done) { toast(`${st.name} is up to date`); return applyEnded(key); }
+      if (r.state === "failed") { toast(`${st.name}: update failed: ${r.why || ""}`, true); return applyEnded(key); }
+      if (r.lost) { st.lost = true; st.message = r.message; paintApply(key); return; }
+      if (r.reachable && r.state !== "updating" && !r.applying) return applyEnded(key);
+    }
+    paintApply(key);
+    st.timer = setTimeout(tick, 5000);
+  };
+  st.timer = setTimeout(tick, 5000);
+}
+
+async function applyStart(key) {
+  const it = ((UPD || {}).items || []).find((x) => x.key === key);
+  const g = GAMES.find((x) => x.key === key);
+  const name = (it && it.name) || (g && g.title) || key;
+  if (!confirm(`Everyone playing ${name} is disconnected while it updates.`)) return;
+  let r;
+  try {
+    r = await api("/api/updates/apply", { method: "POST", headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ key }) });
+  } catch (e) { toast(e.message, true); return; }
+  toast(r.msg || `${name} is updating`);
+  APPLY[key] = { name, message: "" };
+  applyFollow(key, name);
+  if (UPD && (CUR_TAB === "deploy" || CUR_TAB === "modules")) renderUpdates();
+  if (CUR_TAB === "games") renderGame(key);
+}
+
+async function updaterStart(key) {
+  const it = ((UPD || {}).items || []).find((x) => x.key === key) || { name: key };
+  const name = it.name || key;
+  if (!confirm(`Update ${name}?\n\nThe deployer runs the updater you approved for ${name}, with full Docker access. `
+    + "Everyone playing it may be disconnected.")) return;
+  try {
+    const r = await api("/api/updates/run", { method: "POST", headers: { "Content-Type": "application/json" },
+                                              body: JSON.stringify({ key }) });
+    toast(`Update ${name}: started`);
+    await probeDeploy(); renderDeploy();
+    followJob(r.job);
+  } catch (e) { toast(e.message, true); }
+}
+
+// the game's page: its own Update box, for the owner and a moderator with game.<key>.update
+function gameUpdateBox(g) {
+  const u = (g.live || {}).update;
+  if (!u || u.apply !== true || !can(`game.${g.key}.update`)) return "";
+  const running = u.state === "updating" || APPLY[g.key];
+  if (running && !APPLY[g.key]) applyFollow(g.key, g.title);
+  let body;
+  if (running) {
+    body = `<div class="upd-live${APPLY[g.key] && APPLY[g.key].lost ? " bad" : ""}" data-upd-live="${esc(g.key)}">`
+      + `<span class="spin" aria-hidden="true"></span><span>${esc(applyLine(g.key, g.title, u.message))}</span></div>`;
+  } else if (u.update === "available") {
+    const n = typeof u.behind === "number" ? `${u.behind} change${u.behind === 1 ? "" : "s"} behind. ` : "";
+    body = `<div class="upd-act"><button class="act sm" data-upd-apply="${esc(g.key)}">Update</button>`
+      + `<span class="muted">${esc(n)}The game updates itself.</span></div>`;
+  } else {
+    body = `<p class="muted">${u.update === "current" ? "Up to date." : esc(u.why || "It cannot tell whether it is up to date.")}</p>`;
+  }
+  if (u.state === "failed" && !running) body = `<div class="upd-why bad">Update failed: ${esc(u.why || "")}</div>` + body;
+  return `<section class="panel gx-wide gx-upd"><h3>Update</h3>${body}</section>`;
 }
 
 function renderUpdates() {
@@ -661,6 +811,8 @@ function renderUpdates() {
     + `${r.channel === "dev" ? ' <span class="pill dev">dev channel</span>' : ""}</h2>`
     + `<div class="toolbar"><button class="ghost sm" data-upd-check${r.checking ? " disabled" : ""}>Check now</button></div>`
     + `<div class="upd-list">${items.map(updItem).join("") || '<p class="hint">Nothing reports its version yet.</p>'}</div>`;
+  // an update a game applies itself, started here or before a reload: follow it
+  for (const it of items) if ((it.state === "updating" || it.applying) && !APPLY[it.key]) applyFollow(it.key, it.name);
 }
 
 async function loadUpdates(refresh) {
@@ -703,6 +855,10 @@ document.addEventListener("click", async (e) => {
     all.remove();
     return;
   }
+  const ap = t.closest("[data-upd-apply]");
+  if (ap) return applyStart(ap.dataset.updApply);
+  const ru = t.closest("[data-upd-run]");
+  if (ru) return updaterStart(ru.dataset.updRun);
   const go = t.closest("[data-upd-go]");
   if (!go) return;
   const key = go.dataset.updGo;
@@ -743,7 +899,7 @@ function deployState(g) {
   return ["good", g.running ? "Running" : "On", ["restart", "update", "disable", "check"]];
 }
 const ACT_WORD = { install: "Install", enable: "Turn on", disable: "Turn off", update: "Update",
-                   restart: "Restart", check: "Check" };
+                   restart: "Restart", check: "Check", updater: "Update" };
 
 function renderDeploy() {
   const d = DEPLOY || {};
@@ -783,7 +939,7 @@ function renderDeploy() {
   }).join("");
   $("#deployJobs").innerHTML = (d.jobs || []).map((j) =>
     `<li data-job="${esc(j.id)}"><span class="t1">${j.action === "channel" ? "Update channel"
-      : `${esc(ACT_WORD[j.action] || j.action)} ${esc(j.game)}`}: `
+      : `${esc(ACT_WORD[j.action] || j.action)} ${esc(j.title || j.game)}`}: `
     + `${esc(JOB_WORD[j.state] || j.state)}${j.summary ? " - " + esc(j.summary) : ""}</span>`
     + `<span class="t2">${esc(jobWhen(j))}</span></li>`).join("")
     || '<li class="empty">No jobs yet.</li>';
@@ -1031,7 +1187,7 @@ async function showJob(id) {
   try { j = await api("/api/deploy/job?id=" + encodeURIComponent(id)); } catch (e) { return; }
   DEPLOY_JOB = id;
   $("#deployJobPanel").hidden = false;
-  $("#deployJobTitle").textContent = `${ACT_WORD[j.action] || j.action} ${j.game}`;
+  $("#deployJobTitle").textContent = `${ACT_WORD[j.action] || j.action} ${j.title || j.game}`;
   $("#deployJobState").textContent = JOB_WORD[j.state] || j.state;
   $("#deployJobSummary").textContent = j.summary || "";
   // new client data reaches a game that is already on only when it is turned on again
@@ -1068,6 +1224,7 @@ async function followJob(id) {
       await probeDeploy();
       renderDeploy();
       if (j.action === "channel") { loadChannel(); loadUpdates(false); }
+      if (j.action === "updater") loadUpdates(false);
       if (String(j.action || "").startsWith("patch_") || PATCHES) loadPatches();
     }
   }, 1500);

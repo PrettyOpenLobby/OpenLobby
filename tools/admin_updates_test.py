@@ -320,6 +320,30 @@ chk("no usable key: dropped", (U.clean_item(good), U.clean_item(dict(good, key="
 c = U.clean_item({"running": {}, "latest": {}, "update": "unknown"}, key="kart", name="Kart Club")
 chk("unknown without a why gets one", (c["update"], c["why"]), ("unknown", "Kart Club cannot tell whether it is up to date."))
 
+print("a game that applies its own update (path B) keeps its fields")
+c = U.clean_item(dict(good, apply=True, state="updating", message="  Building  the new image. " + "x" * 400),
+                 key="kart", name="Kart Club")
+chk("apply, state updating and its message (trimmed, capped)",
+    (c.get("apply"), c.get("state"), c["message"][:24], len(c["message"]), c["update"]),
+    (True, "updating", "Building the new image. ", 300, "available"))
+c = U.clean_item(dict(good, apply=True, state="failed", why="The build failed."), key="kart", name="Kart Club")
+chk("state failed with its why", (c.get("apply"), c.get("state"), c["why"]), (True, "failed", "The build failed."))
+c = U.clean_item(dict(good, apply=True, state="failed", why=None), key="kart", name="Kart Club")
+chk("  failed without a why gets one", c["why"], "Kart Club says its update failed, without saying why.")
+c = U.clean_item(dict(good, running="abc1234", apply=True, state="updating", message="Restarting."),
+                 key="kart", name="Kart Club")
+chk("  kept on a report that does not fit the shape", (c["update"], c.get("apply"), c.get("state"), c.get("message")),
+    ("unknown", True, "updating", "Restarting."))
+c = U.clean_item({"running": {}, "latest": {}, "update": "unknown", "apply": True, "state": "updating"},
+                 key="kart", name="Kart Club")
+chk("  and on an unknown report", (c.get("apply"), c.get("state"), c.get("message")), (True, "updating", None))
+c = U.clean_item(dict(good, apply="yes", state="busy", message="m"), key="kart", name="Kart Club")
+chk("apply not true, a state it does not know: left out", ("apply" in c, "state" in c, "message" in c),
+    (False, False, False))
+chk("the status JSON passes them on", sources.generic({"update": {"update": "current", "apply": True,
+                                                                  "state": "updating", "message": "m"}}).get("update"),
+    {"update": "current", "apply": True, "state": "updating", "message": "m"})
+
 print("the status JSON carries the report as it came")
 chk("an object", sources.generic({"update": {"update": "current"}}).get("update"), {"update": "current"})
 chk("not an object: left out", "update" in sources.generic({"update": "current"}), False)

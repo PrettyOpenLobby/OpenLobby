@@ -13,7 +13,11 @@ POL_ADMIN_MODULES is an explicit list), that its token never comes back to the b
 every change is in the activity log. Then pairing (docs/installs.md): the owner's one-time code,
 POST /api/pair with no login (a wrong, used or expired code; a game that calls itself something
 else; the happy path, where only the secret's hash is kept), POST /api/pair/update with the right
-and a wrong secret and an unknown key, and unpairing, which ends the secret. A moderator gets 403
+and a wrong secret and an unknown key, and unpairing, which ends the secret. Then a paired game's
+updater (docs/installs.md, "Updates"): every rule of the "updater" block refused with a sentence,
+stored as requested, shown on the Modules page, approved only by the owner and only as shown,
+requested again when its folder, command or timeout changes, revoked, taken away with null, and
+gone with an unpair or a remove, each step in the activity log. A moderator gets 403
 for everything here, /api/updates included. Then the rate limit (five tries a minute from one
 address, then 429) on a panel with the default, and a panel without the PlayOnline core
 (POL_ADMIN_CORE=none) pairing the same way. Throwaway PostgreSQL (tools/pgtest.py); the panels run
@@ -298,10 +302,147 @@ def pairing(owner, mod, anon, kport, dport):
     kart.token = TOKEN
 
 
+UPDATER = {"folder": "C:\\Users\\kart\\Kart Club", "command": ["python", "setup.py", "--update", "--yes"],
+           "timeout_minutes": 180}
+
+
+def updater_row():
+    rows = sql("SELECT * FROM admin_game_updater WHERE key = 'kart'")
+    return rows[0] if rows else None
+
+
+def added_updater(owner):
+    added = {a["key"]: a for a in modules_of(owner)[1].get("added", [])}
+    return (added.get("kart") or {}).get("updater")
+
+
+def updaters(owner, mod, anon, kport):
+    """A paired game's updater (docs/installs.md, "Updates", the deployer-run updater)."""
+    kurl = "http://127.0.0.1:%d" % kport
+    print("a paired game's updater")
+    pc = owner.call("api/pair/code", {})[1]["code"]
+    body = {"code": pc, "key": "kart", "title": "Kart Club", "url": kurl, "token": TOKEN}
+    long_arg = "x" * 200
+    for what, upd, said in (
+            ("not an object", ["python"], "updater must be an object"),
+            ("an unknown field", dict(UPDATER, env={"A": "1"}), "updater has fields the panel does not know: env."),
+            ("a command that is a string", dict(UPDATER, command="python setup.py"), "must be a list of arguments"),
+            ("an empty command", dict(UPDATER, command=[]), "must be a list of arguments"),
+            ("a command that is not python", dict(UPDATER, command=["sh", "-c", "x"]), 'must start with "python"'),
+            ("python with a path", dict(UPDATER, command=["/usr/bin/python3", "x"]), 'must start with "python"'),
+            ("17 items", dict(UPDATER, command=["python"] + ["a"] * 16), "more than 16 items"),
+            ("an item of 200 characters", dict(UPDATER, command=["python", long_arg]), "under 200 characters"),
+            ("a NUL", dict(UPDATER, command=["python", "a\x00b"]), "NUL"),
+            ("a number in the command", dict(UPDATER, command=["python", 3]), "must be a string"),
+            ("a timeout of 4", dict(UPDATER, timeout_minutes=4), "from 5 to 240"),
+            ("a timeout of 241", dict(UPDATER, timeout_minutes=241), "from 5 to 240"),
+            ("a timeout of true", dict(UPDATER, timeout_minutes=True), "from 5 to 240"),
+            ("a timeout as text", dict(UPDATER, timeout_minutes="60"), "from 5 to 240"),
+            ("a relative folder", dict(UPDATER, folder="Kart Club"), "must be a full path"),
+            ("a drive root", dict(UPDATER, folder="C:\\"), "not the root of a drive"),
+            ("the Linux root", dict(UPDATER, folder="/"), "not the root of a drive"),
+            ("a folder with ..", dict(UPDATER, folder="/srv/kart/../etc"), "must not have . or .."),
+            ("a system folder", dict(UPDATER, folder="/etc/kart"), "system folder"),
+            ("a folder with a control character", dict(UPDATER, folder="/srv/ka\nrt"), "control character"),
+            ("a Windows name with a colon", dict(UPDATER, folder="C:\\Kart:Club"), "Windows does not allow")):
+        code, r = anon.call("api/pair", dict(body, updater=upd))
+        chk("updater with %s: 400 with a sentence" % what, (code, said in r.get("error", "")), (400, True))
+    chk("  nothing paired, the code still good", (sql("SELECT count(*) AS n FROM admin_game")[0]["n"],
+                                                   owner.call("api/pair/code?code=" + pc)[1].get("state")), (0, "waiting"))
+
+    n = audit_top()
+    code, r = anon.call("api/pair", dict(body, updater=UPDATER))
+    secret = r.get("pairing") or ""
+    chk("pairing with an updater: 200, updater requested", (code, r.get("updater")), (200, "requested"))
+    row = updater_row() or {}
+    chk("  stored as sent, requested", (row.get("folder"), json.loads(row.get("command") or "null"),
+                                        row.get("timeout_minutes"), row.get("state"), row.get("approved_by")),
+        (UPDATER["folder"], UPDATER["command"], 180, "requested", None))
+    u = added_updater(owner) or {}
+    chk("  the Modules page shows it, the command shell-quoted",
+        (u.get("folder"), u.get("command"), u.get("shown"), u.get("timeout_minutes"), u.get("state"), len(u.get("id") or "")),
+        (UPDATER["folder"], UPDATER["command"], "python setup.py --update --yes", 180, "requested", 16))
+    chk("  in the activity log", [a[1] for a in audit_since(n)],
+        ["paired Kart Club through its setup program",
+         "Kart Club asked to update itself with python setup.py --update --yes"])
+
+    print("approving it")
+    chk("a moderator cannot approve", mod.call("api/modules/game", {"action": "approve_updater", "key": "kart",
+                                                                   "id": u.get("id")})[0], 403)
+    chk("...nor run it", mod.call("api/updates/run", {"key": "kart"})[0], 403)
+    code, r = owner.call("api/updates/run", {"key": "kart"})
+    chk("a requested updater does not run", (code, r.get("error")), (404, "That game has no approved updater."))
+    code, r = owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": "0" * 16})
+    chk("approving another updater than the one shown: 409", (code, "changed since" in r.get("error", ""),
+                                                             updater_row()["state"]), (409, True, "requested"))
+    n = audit_top()
+    code, r = owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": u["id"]})
+    row = updater_row()
+    chk("the owner approves it", (code, r.get("state"), row["state"], row["approved_by"], bool(row["approved_at"])),
+        (200, "approved", "approved", OWNER, True))
+    chk("  in the activity log", audit_since(n), [(OWNER, "approved the updater of Kart Club", True)])
+
+    print("the setup program sends it again")
+    upd = {"key": "kart", "pairing": secret, "token": TOKEN}
+    n = audit_top()
+    code, r = anon.call("api/pair/update", dict(upd, updater=UPDATER))
+    chk("the same updater: stays approved", (code, r.get("updater"), updater_row()["state"]), (200, "approved", "approved"))
+    same = dict(UPDATER, folder="c:/Users/kart/Kart Club/")
+    for _ in range(3):
+        code, r = anon.call("api/pair/update", dict(upd, updater=same))
+    chk("  sent again and again, the folder written another way: still approved",
+        (code, r.get("updater"), updater_row()["state"], updater_row()["folder"]),
+        (200, "approved", "approved", UPDATER["folder"]))
+    chk("  and no activity log row for an identical re-send", audit_since(n), [])
+    code, r = anon.call("api/pair/update", upd)
+    chk("no updater in the request: no change", (code, r, updater_row()["state"]), (200, {"ok": True}, "approved"))
+    code, r = anon.call("api/pair/update", dict(upd, updater=dict(UPDATER, command=["python3", "setup.py", "--update"])))
+    chk("a changed command: requested again", (code, r.get("updater"), updater_row()["state"],
+                                               updater_row()["approved_by"]), (200, "requested", "requested", None))
+    chk("  and in the activity log, the change only", [a[1] for a in audit_since(n)],
+        ["Kart Club asked to update itself with python3 setup.py --update"])
+    for what, change in (("folder", {"folder": "/srv/kart"}), ("timeout", {"timeout_minutes": 30})):
+        u = added_updater(owner)
+        owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": u["id"]})
+        code, r = anon.call("api/pair/update", dict(upd, updater=dict(UPDATER, command=["python3", "setup.py", "--update"],
+                                                                      **change)))
+        chk("a changed %s: requested again" % what, (code, r.get("updater"), updater_row()["state"]),
+            (200, "requested", "requested"))
+    code, r = anon.call("api/pair/update", dict(upd, updater={"folder": "/srv/kart", "command": ["python", "u.py"]}))
+    chk("no timeout: 60 minutes", (code, updater_row()["timeout_minutes"]), (200, 60))
+    code, r = anon.call("api/pair/update", dict(upd, updater={"folder": "/srv/kart", "command": "x"}))
+    chk("a bad updater on pair/update: 400, nothing changed",
+        (code, json.loads(updater_row()["command"])), (400, ["python", "u.py"]))
+    u = added_updater(owner)
+    owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": u["id"]})
+    pc2 = owner.call("api/pair/code", {})[1]["code"]
+    code, r = anon.call("api/pair", dict(body, code=pc2, updater={"folder": "/srv/kart", "command": ["python", "u.py"]}))
+    chk("pairing again with the same updater: still approved", (code, r.get("updater"), updater_row()["state"]),
+        (200, "approved", "approved"))
+    secret = r.get("pairing") or secret
+    upd["pairing"] = secret
+
+    n = audit_top()
+    chk("a moderator cannot revoke", mod.call("api/modules/game", {"action": "revoke_updater", "key": "kart"})[0], 403)
+    code, r = owner.call("api/modules/game", {"action": "revoke_updater", "key": "kart"})
+    chk("the owner revokes it", (code, updater_row()["state"]), (200, "requested"))
+    chk("  in the activity log", audit_since(n), [(OWNER, "revoked the updater of Kart Club", True)])
+    code, r = anon.call("api/pair/update", dict(upd, updater=None))
+    chk("updater null: taken away", (code, updater_row()), (200, None))
+    anon.call("api/pair/update", dict(upd, updater=UPDATER))
+    code, r = owner.call("api/modules/game", {"action": "unpair", "key": "kart"})
+    chk("unpairing removes it", (code, updater_row(), added_updater(owner)), (200, None, None))
+    owner.call("api/modules/game", {"action": "remove", "key": "kart"})
+    pc3 = owner.call("api/pair/code", {})[1]["code"]
+    anon.call("api/pair", dict(body, code=pc3, updater=UPDATER))
+    code, r = owner.call("api/modules/game", {"action": "remove", "key": "kart"})
+    chk("removing the game removes it", (code, updater_row()), (200, None))
+
+
 def updates(owner):
     print("update notices")
     code, r = owner.call("api/updates")
-    chk("the owner reads them", (code, sorted(r)), (200, ["checked_at", "checking", "items"]))
+    chk("the owner reads them", (code, sorted(r)), (200, ["channel", "checked_at", "checking", "items"]))
     core = next((i for i in r.get("items", []) if i["key"] == "core"), {})
     chk("  the core's own check, GitHub out of reach: unknown", core.get("update"), "unknown")
 
@@ -321,6 +462,7 @@ def main():
         chk("moderator signs in", mod.login("mod_set", "pass for mod_set"), 200)
         hand_added(owner, mod, kport, dport, dead)
         pairing(owner, mod, anon, kport, dport)
+        updaters(owner, mod, anon, kport)
         updates(owner)
     finally:
         stop(proc)

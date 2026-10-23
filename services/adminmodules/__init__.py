@@ -236,6 +236,9 @@ class Module:
             out.setdefault(self.perm("help"), "%s: answer players' help requests" % self.title)
         if self.services:
             out[self.perm("serverlogs")] = "%s: its server logs (players' addresses hidden)" % self.title
+        if self.remote:
+            # a game that applies its own updates (docs/installs.md, "Updates")
+            out.setdefault(self.perm("update"), "%s: update it, when it can update itself" % self.title)
         return out
 
     def tool_for(self, sub):
@@ -389,6 +392,17 @@ def _ports():
         if key not in seen:
             out.append((key, _STORED[key][0].strip(), _STORED[key][1].strip()))
     return out
+
+
+def port_of(key):
+    """(url, token) of the game `key`'s admin port, the environment's or the stored one, even
+    while the game does not answer (it may be restarting to update itself); None when it has
+    none."""
+    _read_store()
+    for k, url, token in _ports():
+        if k == key:
+            return url.rstrip("/"), token
+    return None
 
 
 def _remotes(out):

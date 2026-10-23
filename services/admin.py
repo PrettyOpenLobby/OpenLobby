@@ -1363,6 +1363,8 @@ _GET_PERMS = {
     "/api/games": "any", "/api/modules": "any",
     # the player picker: checked per game (adminmodules.can_see)
     "/api/games/players": "any",
+    # a game updating itself: checked per game (game.<key>.update)
+    "/api/updates/state": "any",
     # People (adminpeople.py): the PlayOnline parts still need accounts_view
     "/api/people": "people", "/api/person": "people", "/api/person/games": "people",
     "/api/people/logins": "people_link",
@@ -1396,6 +1398,8 @@ _POST_PERMS = {
     "/api/alerts": "settings",
     # each action checks its own game.<key>.<id> permission
     "/api/modules/action": "any",
+    # a game that updates itself: game.<key>.update, checked in _update_apply
+    "/api/updates/apply": "any",
     "/api/person": "people_link",
 }
 
@@ -2428,6 +2432,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._modules()
         if path == "/api/games/players":
             return self._game_players()
+        if path == "/api/updates/state":
+            # a game updating itself: the owner, or a moderator with game.<key>.update
+            key = self._query().get("key", "")
+            if not self._can("game.%s.update" % key):
+                return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
+            status, out = adminupdates.apply_state(key)
+            self._audit_update_events()
+            return self._send(status, out)
         if path == "/api/people":
             return self._people_list()
         if path == "/api/person":
@@ -2467,7 +2479,9 @@ class Handler(BaseHTTPRequestHandler):
         # update notices (adminupdates.py) and a pairing code's state: owner only, as above
         if path == "/api/updates":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            return self._send(200, adminupdates.overview(q.get("refresh", [""])[0] == "1"))
+            out = adminupdates.overview(q.get("refresh", [""])[0] == "1")
+            self._audit_update_events()
+            return self._send(200, out)
         if path == "/api/pair/code":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._send(*adminpair.code_state(q.get("code", [""])[0]))
@@ -2665,6 +2679,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._news_render()
         if path == "/api/modules/action":
             return self._module_action()
+        if path == "/api/updates/apply":
+            return self._update_apply()
+        if path == "/api/updates/run":
+            return self._update_run()
         if path == "/api/deploy/action":
             body = self._json_body()
             act, game = body.get("action"), body.get("game")
@@ -2747,7 +2765,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stored_game(self):
         """Settings > Modules: {"action": "save" | "remove" | "unpair", "key", "url", "token"}
-        for a game stored in the panel (adminpair). Owner only; every change is audited."""
+        for a game stored in the panel (adminpair), or {"action": "approve_updater", "key",
+        "id"} / {"action": "revoke_updater", "key"} for a paired game's updater (id: the one the
+        page showed). Owner only; every change is audited."""
         body = self._json_body()
         act, key = body.get("action"), body.get("key")
         user, role, _p = self._caller()
@@ -2764,11 +2784,54 @@ class Handler(BaseHTTPRequestHandler):
         elif act == "unpair":
             status, out = adminpair.unpair(key)
             what, detail = "unpaired %s" % (out.get("title") or key), None
+        elif act in ("approve_updater", "revoke_updater"):
+            approve = act == "approve_updater"
+            status, out = adminpair.set_updater_state(key, approve, body.get("id"), user)
+            what = ("approved the updater of %s" if approve else "revoked the updater of %s") \
+                % (out.get("title") or key)
+            detail = {"command": out["shown"][:300]} if out.get("shown") else None
         else:
             return self._send(400, {"error": "Unknown action."})
         if status >= 400 and out.get("error"):
             detail = dict(detail or {}, error=out["error"])
         _audit(user, role, what, target=str(key)[:32], detail=detail, ok=status == 200, addr=self._addr())
+        return self._send(status, out)
+
+    # -- updating a paired game (docs/installs.md, "Updates") ----------------- #
+    def _audit_update_events(self):
+        """The failures games reported since the last look (adminupdates.take_events)."""
+        for actor, what, key in adminupdates.take_events():
+            _audit(actor, "game", what, target=key, ok=False, addr=self._addr())
+
+    def _update_apply(self):
+        """{"key"}: the game updates itself (path B): POST /openlobby/update on its admin port.
+        The owner, or a moderator with game.<key>.update."""
+        key = str(self._json_body().get("key") or "")
+        if not self._can("game.%s.update" % key):
+            return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
+        user, role, _p = self._caller()
+        status, out = adminupdates.apply(key, user)
+        if status != 404:
+            _audit(user, role, "updated %s" % (out.get("title") or key), target=key[:32],
+                   detail=None if status == 200 else {"error": str(out.get("msg") or "")[:300]},
+                   ok=status == 200, addr=self._addr())
+        out.pop("title", None)
+        return self._send(status, out)
+
+    def _update_run(self):
+        """{"key"}: the deployer runs the paired game's approved updater (path A), owner only.
+        Only the key comes from the browser: the folder, command and timeout are the record the
+        owner approved, read here and sent to the deployer, which checks them again."""
+        key = str(self._json_body().get("key") or "")
+        user, role, _p = self._caller()
+        got = adminpair.approved_updater(key)
+        if got is None:
+            return self._send(404, {"error": "That game has no approved updater."})
+        title, rec = got
+        status, out = admindeploy.run_updater(key, title, rec)
+        _audit(user, role, "asked the deployer to update %s with its updater" % title, target=key[:32],
+               detail={"job": out.get("job"), "command": adminpair.gameupdater.shown(rec["command"])[:300]},
+               ok=status == 202, addr=self._addr())
         return self._send(status, out)
 
     def _pair(self, path):
@@ -2789,8 +2852,10 @@ class Handler(BaseHTTPRequestHandler):
             status, out, aud = adminpair.pair_update(body)
         if aud is not None:
             url = adminpair.clean_url(body.get("url"))
-            _audit("setup program", "setup", aud[0], target=str(body.get("key") or "")[:32],
-                   detail={"url": url} if url else None, ok=aud[1], addr=self._addr())
+            for one in (aud if isinstance(aud, list) else [aud]):
+                detail = dict({"url": url} if url else {}, **(one[2] if len(one) > 2 else {}))
+                _audit("setup program", "setup", one[0], target=str(body.get("key") or "")[:32],
+                       detail=detail or None, ok=one[1], addr=self._addr())
         return self._send(status, out)
 
     def _deploy_upload(self):

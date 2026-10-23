@@ -223,6 +223,25 @@ def action(act, game, item=None, source=None):
     return status, out
 
 
+def run_updater(key, title, rec):
+    """Ask the deployer to run a paired game's updater (docs/deployer.md, "Updaters of paired
+    games"). `rec` is the panel's stored record the owner approved, never anything a browser
+    sent; the deployer checks every field of it again with the same rules."""
+    if not isinstance(key, str) or not _KEY.match(key):
+        return 400, {"error": "Unknown game."}
+    body = {"game": key, "title": str(title or key)[:80],
+            "updater": {"folder": rec["folder"], "command": list(rec["command"]),
+                        "timeout_minutes": rec["timeout_minutes"]}}
+    status, out = _call("POST", "/api/updater", body)
+    if status == 409:
+        out.setdefault("error", "Another job is still running; it is shown below.")
+    elif status == 404:
+        out = {"error": "This deployer cannot run game updaters yet; update the core first, then try again."}
+    elif status == 400:
+        out.setdefault("error", "The deployer refused that updater.")
+    return status, out
+
+
 def job(job_id):
     if not isinstance(job_id, str) or not _JOB.match(job_id):
         return 400, {"error": "Unknown job."}
