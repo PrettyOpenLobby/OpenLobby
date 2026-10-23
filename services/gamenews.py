@@ -234,9 +234,13 @@ def items(now=None, lists=None):
 # --------------------------------------------------------------------------- #
 
 def beats(events):
-    """Every moment an event is worth a post: (at, kind, event); kind is soon or closing."""
+    """Every moment an event is worth a post: (at, kind, event); kind is coming (as it
+    enters the news, GAME_NEWS_LEAD_H ahead: a tournament's sign-ups open then), soon
+    or closing."""
     out = []
     for ev in events:
+        if lead_s() > soon_s() + GROUP_S:
+            out.append((ev["start"] - lead_s(), "coming", ev))
         out.append((ev["start"] - soon_s(), "soon", ev))
         if ev["end"] - ev["start"] >= LONG_S:
             out.append((ev["end"] - closing_s(), "closing", ev))
@@ -272,6 +276,8 @@ def due(game, now=None, events=None):
 def _beat_title(kind, ev, now):
     if kind == "closing":
         return "%s: last days" % ev["title"]
+    if kind == "coming":
+        return "%s: %s" % (ev["title"], _clock(ev["start"]) + " UTC")
     return "%s %s" % (ev["title"], "is on" if ev["start"] <= now else "starts soon")
 
 
@@ -363,12 +369,18 @@ def _selftest():
     # Discord
     ps = posts("fmo", evs)
     check([[(k, e["id"][:6]) for _a, k, e in p["beats"]] for p in ps]
-          == [[("soon", "coi-S0")], [("closing", "coi-S0")], [("soon", "event-")],
-              [("closing", "event-")]],
-          "a day before each start, and last days before each event of six days or more")
-    check(due("fmo", utc(2026, 11, 11, 13), evs)[0]["beats"][0][2]["id"] == "coi-S01",
-          "Nov 11 13:00: the season's post is due")
-    check(due("fmo", utc(2026, 11, 10), evs) == [], "Nov 10: nothing yet")
+          == [[("coming", "coi-S0")], [("soon", "coi-S0")], [("closing", "coi-S0")],
+              [("coming", "event-")], [("soon", "event-")], [("closing", "event-")]],
+          "a week ahead (when a cup's sign-ups open), a day before each start, and last "
+          "days before each event of six days or more")
+    check(due("fmo", utc(2026, 11, 11, 13), evs)[0]["beats"][0][1] == "soon",
+          "Nov 11 13:00: the season's 'starts soon' post is due")
+    d = due("fmo", utc(2026, 11, 6), evs)
+    check(d and d[0]["beats"][0][1] == "coming"
+          and message(d[0], utc(2026, 11, 6))[0]["title"]
+          == "Clash of Iron S01: Two-Guns Shootout: Thu. Nov. 12 12:00 UTC",
+          "Nov 6: the week-ahead post names the start")
+    check(due("fmo", utc(2026, 11, 4), evs) == [], "Nov 4: nothing yet")
     m = message(due("fmo", utc(2026, 11, 11, 13), evs)[0], utc(2026, 11, 11, 13))
     check(m[0]["title"] == "Clash of Iron S01: Two-Guns Shootout starts soon" and "<t:" in m[0]["description"],
           "the post names the event and carries Discord timestamps  --  %r" % m[0]["title"])

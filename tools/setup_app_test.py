@@ -431,6 +431,29 @@ class SetupAppTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.folder, "What to tell players.txt")))
         self.assertNotIn("OpenLobby is running.", out)
 
+    def test_busy_port_is_named_with_its_holder(self):
+        mod = load()
+        log = os.path.join(self.tmp, "busy.log")
+        for line, want in (
+                ("Error response from daemon: ports are not available: exposing port UDP "
+                 "192.0.2.20:53 -> 127.0.0.1:0: listen udp4 192.0.2.20:53: bind: Only one usage "
+                 "of each socket address", "UDP port 53 on 192.0.2.20 is already in use by dnsd (process 4242)"),
+                ("Error response from daemon: driver failed programming external connectivity on "
+                 "endpoint x: Bind for 0.0.0.0:80 failed: port is already allocated",
+                 "TCP port 80 on 0.0.0.0 is already in use by dnsd (process 4242)")):
+            with open(log, "w", encoding="utf-8") as f:
+                f.write("  Container openlobby-login-1 Started\n" + line + "\n")
+            buf = io.StringIO()
+            with mock.patch.object(mod, "port_holder", return_value="dnsd (process 4242)"), \
+                    contextlib.redirect_stdout(buf):
+                self.assertTrue(mod.explain_busy_port(log))
+            self.assertIn(want, buf.getvalue())
+            self.assertIn("then run OpenLobby Setup again", buf.getvalue())
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("setup.ps1: docker compose up failed\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(mod.explain_busy_port(log))
+
     def test_other_game_is_mentioned_not_changed(self):
         self.put("containers", [self.kart_club()])
         out = self.install()

@@ -710,7 +710,10 @@ def run_script(inst, cmd, what):
         f.flush()
         kw = {}
         if os.name == "nt":
-            kw["creationflags"] = 0x00000008 | 0x00000200     # DETACHED_PROCESS, NEW_PROCESS_GROUP
+            # CREATE_NO_WINDOW, NEW_PROCESS_GROUP: a hidden console of its own, so closing
+            # this window does not stop it. Not DETACHED_PROCESS: PowerShell with no console
+            # at all exits 0 at once and runs nothing.
+            kw["creationflags"] = 0x08000000 | 0x00000200
         else:
             kw["start_new_session"] = True
         try:
@@ -818,6 +821,73 @@ def players_text(inst, summary):
     return "\n".join(lines).rstrip() + "\n"
 
 
+_PORT_BUSY = re.compile(r"ports are not available: exposing port (UDP|TCP) ([0-9.]+):(\d+)"
+                        r"|Bind for ([0-9.]+):(\d+) failed: port is already allocated"
+                        r"|listen (udp|tcp)4? ([0-9.]+):(\d+): bind: address already in use", re.I)
+
+_PORT_WHAT = {53: "Consoles use this computer as their DNS server, so OpenLobby needs UDP port 53.",
+              80: "The PlayOnline web pages need TCP port 80.",
+              443: "The PlayOnline secure pages need TCP port 443."}
+
+
+def port_holder(proto, addr, port):
+    """The name of the program holding proto addr:port on this computer, or None."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano", "-p", proto], capture_output=True,
+                                 text=True, timeout=20).stdout
+            pids = {ln.split()[-1] for ln in out.splitlines()
+                    if re.search(r"\s(%s|0\.0\.0\.0):%d\s" % (re.escape(addr), port), ln)}
+            for pid in sorted(p for p in pids if p.isdigit() and p != "0"):
+                row = subprocess.run(["tasklist", "/FI", "PID eq %s" % pid, "/FO", "CSV", "/NH"],
+                                     capture_output=True, text=True, timeout=20).stdout.strip()
+                if row.startswith('"'):
+                    return "%s (process %s)" % (row.split('","')[0].strip('"'), pid)
+        elif shutil.which("ss"):
+            out = subprocess.run(["ss", "-lnp", "-u" if proto == "UDP" else "-t"],
+                                 capture_output=True, text=True, timeout=20).stdout
+            for ln in out.splitlines():
+                if re.search(r"[:.]%d\s" % port, ln):
+                    m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', ln)
+                    return "%s (process %s)" % m.groups() if m else "another program"
+        elif shutil.which("lsof"):
+            out = subprocess.run(["lsof", "-nP", "-i", "%s:%d" % (proto, port)],
+                                 capture_output=True, text=True, timeout=20).stdout.splitlines()
+            if len(out) > 1:
+                cols = out[1].split()
+                return "%s (process %s)" % (cols[0], cols[1])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def explain_busy_port(log):
+    """When Docker could not take a port, say which, who has it and what to do. True if said."""
+    try:
+        with open(log, encoding="utf-8", errors="replace") as f:
+            m = _PORT_BUSY.search(f.read())
+    except OSError:
+        return False
+    if not m:
+        return False
+    g = m.groups()
+    proto, addr, port = ((g[0], g[1], g[2]) if g[0] else ("TCP", g[3], g[4]) if g[3]
+                         else (g[5], g[6], g[7]))
+    proto, port = proto.upper(), int(port)
+    holder = port_holder(proto, addr, port)
+    say()
+    say("OpenLobby could not start: %s port %d on %s is already in use%s."
+        % (proto, port, addr, " by " + holder if holder else ""))
+    if port in _PORT_WHAT:
+        say(_PORT_WHAT[port])
+    say("Stop %s or move it to another port, then run %s again; it carries on where it "
+        "stopped." % ("that program" if holder else "the program using it", NAME))
+    if holder and holder.lower().startswith("svchost") and port == 53:
+        say("On Windows that is usually Internet Connection Sharing or the Mobile hotspot: "
+            "turn it off in Settings, Network and internet.")
+    return True
+
+
 def finish(inst, code, log, url, wait=120):
     """After the script: its result, the panel, the players file. True when it worked."""
     try:
@@ -826,6 +896,9 @@ def finish(inst, code, log, url, wait=120):
         pass
     summary = summary_of(log)
     if code != 0 or summary is None:
+        if explain_busy_port(log):
+            say("The whole log: %s" % log)
+            return False
         say()
         say("Setup stopped before the end. Its last lines:")
         say(log_tail(log))

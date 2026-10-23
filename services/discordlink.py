@@ -38,6 +38,20 @@ REPLY_TTL = int(os.environ.get("POL_DISCORD_REPLY_TTL", str(14 * 86400)))
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_LEN = 8
 
+#: How long a stored Discord avatar is trusted before the bridge rechecks it.
+AVATAR_TTL = int(os.environ.get("POL_DISCORD_AVATAR_TTL", str(24 * 3600)))
+
+
+def avatar_url(discord_id, avatar_hash, size=64):
+    """The Discord CDN URL for a linked user's avatar, or None when there is no
+    stored avatar. `avatar_hash` is the "avatar" field of GET /users/{id}; an
+    animated avatar (hash starting a_) is served as a still .png too. The one
+    place the URL is built, so the bridge and the admin panel agree."""
+    if not discord_id or not avatar_hash:
+        return None
+    return ("https://cdn.discordapp.com/avatars/%s/%s.png?size=%d"
+            % (discord_id, avatar_hash, int(size)))
+
 
 def connect(path=None):
     """A connection for the functions below (the kind accounts.connect()
@@ -61,16 +75,18 @@ def format_code(code):
     return f"{code[:4]}-{code[4:]}" if len(code) == CODE_LEN else code
 
 
-def new_code(conn, discord_id, discord_name=None, now=None):
-    """A fresh code for this Discord user. Any older code of theirs is void."""
+def new_code(conn, discord_id, discord_name=None, avatar=None, now=None):
+    """A fresh code for this Discord user. Any older code of theirs is void.
+    `avatar` is the user's current avatar hash, carried onto the link they redeem
+    so the picture is there at once."""
     now = time.time() if now is None else now
     conn.execute("DELETE FROM discord_code WHERE discord_id = %s OR created_at < %s",
                  (str(discord_id), now - CODE_TTL))
     while True:
         code = "".join(secrets.choice(ALPHABET) for _ in range(CODE_LEN))
         try:
-            conn.execute("INSERT INTO discord_code (code, discord_id, discord_name, created_at)"
-                         " VALUES (%s,%s,%s,%s)", (code, str(discord_id), discord_name, now))
+            conn.execute("INSERT INTO discord_code (code, discord_id, discord_name, avatar, created_at)"
+                         " VALUES (%s,%s,%s,%s,%s)", (code, str(discord_id), discord_name, avatar, now))
             break
         except accounts.db.IntegrityError:
             continue
@@ -98,9 +114,13 @@ def redeem(conn, code, member_id, now=None):
         return None
     conn.execute("DELETE FROM discord_link WHERE member_id = %s OR discord_id = %s",
                  (int(member_id), row["discord_id"]))
-    conn.execute("INSERT INTO discord_link (discord_id, member_id, discord_name, linked_at)"
-                 " VALUES (%s,%s,%s,%s)",
-                 (row["discord_id"], int(member_id), row["discord_name"], now))
+    avatar = row["avatar"]
+    conn.execute("INSERT INTO discord_link (discord_id, member_id, discord_name, avatar,"
+                 " avatar_at, linked_at) VALUES (%s,%s,%s,%s,%s,%s)",
+                 (row["discord_id"], int(member_id), row["discord_name"], avatar,
+                  now if avatar else None, now))
+    if avatar:
+        _store_avatar(conn, row["discord_id"], avatar, now)
     conn.commit()
     return link_by_member(conn, member_id)
 
@@ -139,6 +159,62 @@ def set_dm_channel(conn, discord_id, channel_id):
     conn.execute("UPDATE discord_link SET dm_channel = %s WHERE discord_id = %s",
                  (str(channel_id) if channel_id else None, str(discord_id)))
     conn.commit()
+
+
+def _store_avatar(conn, discord_id, avatar, now):
+    """Upsert one avatar into the discord_avatar cache (no commit)."""
+    conn.execute("INSERT INTO discord_avatar (discord_id, avatar, avatar_at) VALUES (%s,%s,%s)"
+                 " ON CONFLICT (discord_id) DO UPDATE SET avatar = excluded.avatar,"
+                 " avatar_at = excluded.avatar_at",
+                 (str(discord_id), avatar, now))
+
+
+def set_avatar(conn, discord_id, avatar, now=None):
+    """Record a Discord user's current avatar hash (None = they have none now)
+    and stamp when it was checked, for the admin panel to show."""
+    now = time.time() if now is None else now
+    _store_avatar(conn, discord_id, avatar, now)
+    conn.commit()
+
+
+def defer_avatar(conn, discord_id, now=None):
+    """Mark an avatar as checked without changing it: Discord could not be read
+    this time, so keep the picture we have and wait a full AVATAR_TTL before the
+    next try rather than hammering an unreachable user every sweep."""
+    now = time.time() if now is None else now
+    conn.execute("INSERT INTO discord_avatar (discord_id, avatar, avatar_at) VALUES (%s,NULL,%s)"
+                 " ON CONFLICT (discord_id) DO UPDATE SET avatar_at = excluded.avatar_at",
+                 (str(discord_id), now))
+    conn.commit()
+
+
+def avatars_stale(conn, limit=20, now=None):
+    """Discord ids whose avatar has not been checked within AVATAR_TTL -- the
+    bridge's refresh sweep works through these a few at a time. Covers every id
+    the panel might show a picture for: both the bot links (discord_link) and the
+    moderator-made ones (person_link, system='discord')."""
+    now = time.time() if now is None else now
+    ids = {r["discord_id"] for r in conn.execute("SELECT discord_id FROM discord_link")}
+    try:
+        ids |= {r["key"] for r in conn.execute(
+            "SELECT key FROM person_link WHERE system = 'discord'")}
+    except Exception:                       # noqa: BLE001 -- no person table (core off)
+        conn.rollback()
+    if not ids:
+        return []
+    fresh = {r["discord_id"] for r in conn.execute(
+        "SELECT discord_id FROM discord_avatar WHERE avatar_at >= %s", (now - AVATAR_TTL,))}
+    return [i for i in ids if i not in fresh][:int(limit)]
+
+
+def avatars_for(conn, discord_ids):
+    """{discord_id: avatar_hash} for the ids that have a picture, from the cache."""
+    ids = [str(x) for x in discord_ids if x]
+    if not ids:
+        return {}
+    return {r["discord_id"]: r["avatar"] for r in conn.execute(
+        "SELECT discord_id, avatar FROM discord_avatar"
+        " WHERE discord_id = ANY(%s) AND avatar IS NOT NULL", (ids,))}
 
 
 # --------------------------------------------------------------------------- #

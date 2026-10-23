@@ -53,8 +53,12 @@ async function loadPeopleList() {
     });
     if (maybe.length) sub = (sub ? sub + "<br>" : "") + `<span class="pp-maybe">${maybe.join("<br>")}</span>`;
     const accts = p.accounts.map((a) => esc(a.title) + (a.staff && core ? "*" : "")).join(", ") || "-";
-    return `<tr><td data-label="Person"><a class="pp-name" href="${href}">${esc(p.name)}</a>`
-      + (sub ? `<div class="pp-sub">${sub}</div>` : "") + `</td>`
+    const face = p.avatar
+      ? `<img class="pp-lava" src="${esc(p.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+      : `<div class="pp-lava mono" aria-hidden="true">${esc((p.name || "?").slice(0, 1).toUpperCase())}</div>`;
+    return `<tr><td data-label="Person"><div class="pp-prow">${face}<div class="pp-pwho">`
+      + `<a class="pp-name" href="${href}">${esc(p.name)}</a>`
+      + (sub ? `<div class="pp-sub">${sub}</div>` : "") + `</div></div></td>`
       + `<td data-label="Accounts" class="muted">${accts}</td>`
       + `<td data-label="Playing now" class="pp-core">${p.online ? '<span class="dot ok" aria-hidden="true"></span> PlayOnline' : '<span class="muted">-</span>'}</td>`
       + `<td data-label="Last seen" class="muted pp-core">${esc(ppSeen(p))}</td>`
@@ -133,17 +137,23 @@ function renderPerson() {
   else if (p.last_seen) status += ` Last signed in ${esc(ago(isoMs(p.last_seen)))}.`;
   else if (core && !p.pol) status += " No PlayOnline account.";
   const pill = (l) => l.how === "staff" ? '<span class="pp-how staff">Linked by staff</span>' : '<span class="pp-how">Proven</span>';
-  const cards = p.links.map((l) => `<div class="pp-card"><div class="pp-card-h"><b>${esc(l.title)}</b>${pill(l)}</div>`
-    + `<div class="pp-card-d">${linkLine(l)}</div>`
-    + (l.how === "staff" && p.can_link ? `<button class="pp-mini" data-unlink="${l.id}" data-what="${esc(l.title + " " + (l.name || l.key))}">Unlink</button>` : "")
-    + `</div>`).join("") || `<div class="muted">No logins linked yet.</div>`;
+  const cards = p.links.map((l) => {
+    const cava = l.avatar ? `<img class="pp-cava" src="${esc(l.avatar)}" alt="" referrerpolicy="no-referrer">` : "";
+    return `<div class="pp-card"><div class="pp-card-h"><b>${cava}${esc(l.title)}</b>${pill(l)}</div>`
+      + `<div class="pp-card-d">${linkLine(l)}</div>`
+      + (l.how === "staff" && p.can_link ? `<button class="pp-mini" data-unlink="${l.id}" data-what="${esc(l.title + " " + (l.name || l.key))}">Unlink</button>` : "")
+      + `</div>`;
+  }).join("") || `<div class="muted">No logins linked yet.</div>`;
   const verb = (a) => a.kind === "ban" ? `Ban in ${a.title}...` : `Kick from ${a.title}`;
   const acts = p.actions.map((a, i) => `<button class="${a.kind === "ban" ? "pp-btn bad" : "pp-btn"}" data-act="${i}" title="${esc(a.label)}">${esc(verb(a))}</button>`).join("");
   const games = (p.games || []).map((g) => `<a href="#games/${esc(g.key)}">${esc(g.title)} page</a>`).join(" · ");
+  const headAva = p.avatar
+    ? `<img class="pp-ava" src="${esc(p.avatar)}" alt="Discord avatar" referrerpolicy="no-referrer">`
+    : `<div class="pp-ava" aria-hidden="true">${esc((p.name || "?").slice(0, 1).toUpperCase())}</div>`;
   $("#ppPageView").innerHTML = `
     <div class="pp-crumb"><a href="#people">People</a> / ${esc(p.name)}</div>
     <div class="pp-head">
-      <div class="pp-ava" aria-hidden="true">${esc((p.name || "?").slice(0, 1).toUpperCase())}</div>
+      ${headAva}
       <div class="pp-title"><h2>${esc(p.name)}</h2><div class="muted">${status}</div></div>
       <div class="pp-grow"></div>
       ${p.polid && can("accounts_view") ? `<button class="ghost" id="ppAcct">PlayOnline account</button>` : ""}
@@ -427,6 +437,7 @@ function openLoginLinkDialog(lg, after) {
     search: (q) => api(`/api/people?q=${encodeURIComponent(q)}`).then((r) => [{ id: "new:", label: `A new person named ${lg.name || lg.key}`,
       detail: "Made now, with this login", online: null }].concat((r.people || []).slice(0, 19).map((x) => ({
         id: x.id ? "id:" + x.id : "pol:" + x.polid, label: x.name, online: x.online === null ? null : !!x.online,
+        avatar: x.avatar || null,
         detail: [x.polid || "", x.accounts.map((a) => a.title).join(", ")].filter(Boolean).join(". ") })))),
     onpick: (row) => { PP.link.person = row; linkWarn(); },
   });
@@ -493,6 +504,7 @@ function openMergeDialog() {
     search: (q) => api(`/api/people?q=${encodeURIComponent(q)}`).then((r) => (r.people || [])
       .filter((x) => x.id !== p.id).slice(0, 20)
       .map((x) => ({ id: x.id ? "id:" + x.id : "pol:" + x.polid, label: x.name, online: x.online === null ? null : !!x.online,
+                     avatar: x.avatar || null,
                      detail: [x.polid || (x.pol ? "PlayOnline account" : p.core !== false ? "no PlayOnline account" : ""),
                               x.accounts.map((a) => a.title).join(", ")].filter(Boolean).join(". ") }))),
   });

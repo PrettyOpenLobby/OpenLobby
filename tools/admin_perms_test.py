@@ -92,6 +92,12 @@ def main():
             mods["news_edit"].call("api/news/publish", {"dry_run": False})[0], 403)
         chk("...but can see what a publish would change",
             mods["news_edit"].call("api/news/publish", {"dry_run": True})[0] != 403, True)
+        item = {"title": "Lap times", "date": "2026/10/22", "body": "Kart Club's grand prix"}
+        code, got = mods["news_edit"].call("api/news/render", {"view": "snews", "items": [item]})
+        chk("a news writer's preview renders, not a server error (%s)" % str(got)[:120],
+            code != 500 and "error" not in got, True)
+        chk("...and a view that does not exist is a 400",
+            mods["news_edit"].call("api/news/render", {"view": "nope", "items": [item]})[0], 400)
         chk("a writer who may publish gets past the permission check",
             mods["news_both"].call("api/news/publish", {"dry_run": False})[0] != 403, True)
         chk("the PML moderator can load a page's art path",

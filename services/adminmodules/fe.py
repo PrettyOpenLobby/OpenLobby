@@ -47,6 +47,37 @@ def _war(m, params, actor):
     return admingames.call("fe", "admin/war", {"area": area, "nation": nation}, actor)
 
 
+def _players(m, q, limit):
+    """The player picker: the world's own search over its stored characters, online first
+    (hippaulring world/devtool.py, admin/players.json)."""
+    import urllib.parse
+    import admingames
+    status, doc = admingames.get_json("fe", "admin/players.json",
+                                      urllib.parse.urlencode({"q": q, "limit": int(limit)}), "panel")
+    if status != 200:
+        raise OSError(doc.get("error") or doc.get("msg") or "HTTP %d" % status)
+    return [p for p in doc.get("players") or [] if isinstance(p, dict)]
+
+
+def _rings(m, params, actor):
+    import admingames
+    name = " ".join(str(params.get("name") or "").split())
+    if not name:
+        return False, "Pick a character."
+    amount = _number(params.get("amount"), 999)
+    if amount is None:
+        return False, "Give between 1 and 999 Rings."
+    return admingames.call("fe", "admin/rings", {"name": name, "amount": amount}, actor)
+
+
+def _testmode(m, params, actor):
+    import admingames
+    on = str(params.get("on") or "").strip().lower()
+    if on not in ("on", "off"):
+        return False, "Write on or off."
+    return admingames.call("fe", "admin/testmode", {"on": on}, actor)
+
+
 MODULE = Module(
     "fe", "Fantasy Earth", platform="PlayOnline: PC", content_ids=[11],
     markers=["felobby", "feworld"],
@@ -60,7 +91,21 @@ MODULE = Module(
                     about="Puts the field into War Prep with that nation attacking, under the "
                           "same rules as a keep vote: the field must border the nation's land "
                           "and neither side may already be at war. Players in the field are "
-                          "shown War Prep straight away.")],
+                          "shown War Prep straight away."),
+             Action("rings", "Give Rings", _rings,
+                    fields=[{"id": "name", "label": "Character", "type": "player"},
+                            {"id": "amount", "label": "Rings (1-999)", "type": "text"}],
+                    about="Adds Rings to the character's balance, the way a war's reward does. "
+                          "Rings otherwise come only from wars; this is for testing the Ring "
+                          "Shop and the Dragon feast's Ruby. A character in the world sees the "
+                          "new balance at their next purchase or field change."),
+             Action("testmode", "Summon test mode", _testmode, danger=True,
+                    fields=[{"id": "on", "label": "on or off", "type": "text"}],
+                    about="For trying summons on a quiet server: one vote declares a war, "
+                          "summons cost nothing, and a player holding the Dragon item rises as "
+                          "the Dragon on every death. It changes the running world only; "
+                          "turn it off after the test (a restart of the world also does).")],
+    players=_players,
     services=[Service(["{core}-felobby-1", "{core}-feworld-1", "{core}-fellb-1"], {54848: "lobby"},
                       warning="Everyone in Fantasy Earth is disconnected.")],
     live=sources.board(_parse, markers=["felobby", "feworld"]),

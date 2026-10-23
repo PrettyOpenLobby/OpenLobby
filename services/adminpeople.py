@@ -24,10 +24,18 @@ PeopleError with a sentence the panel shows as it is.
 import time
 
 import adminmodules
+import adminusers
+import discordlink
 
 POL, DISCORD = "pol", "discord"
 NAME_MAX, WHY_MAX, NOTE_MAX, KEY_MAX = 80, 300, 2000, 128
 LIST_MAX = 100
+
+#: Accounts kept off the People list by default: the health-check probes that
+#: sign in on a loop and otherwise sit at the top of the list for ever. The
+#: admin_setting 'people_hidden' overrides this (a comma/newline list of names,
+#: handles or PlayOnline IDs); an empty setting shows everything.
+HIDE_DEFAULT = "MailProbe, GateProbe"
 
 
 class PeopleError(ValueError):
@@ -375,6 +383,10 @@ def page(db, person, can, owner):
                           "title": system_title(r["system"], mods), "key": r["key"], "name": r["name"],
                           "how": r["how"], "source": r["source"], "by": r.get("by"),
                           "why": r.get("why") or "", "at": r.get("at")})
+    dmap = discordlink.avatars_for(db, [l["key"] for l in out_links if l["system"] == DISCORD])
+    for l in out_links:
+        if l["system"] == DISCORD:
+            l["avatar"] = discordlink.avatar_url(l["key"], dmap.get(l["key"]), 256)
     actions, games = [], []
     for m in adminmodules.enabled().values():
         sysk = getattr(m, "accounts", "") or m.key
@@ -407,13 +419,43 @@ def page(db, person, can, owner):
             targets.append({"game": m.key, "system": getattr(m, "accounts", "") or m.key,
                             "title": m.title, "search": True})
     targets.append({"game": "", "system": DISCORD, "title": "Discord", "search": False})
+    avatar = next((l["avatar"] for l in out_links if l["system"] == DISCORD and l.get("avatar")), None)
     return {"id": person["id"], "name": person["name"], "created_at": person["created_at"],
-            "created_by": person["created_by"], "pol": bool(pol),
+            "created_by": person["created_by"], "pol": bool(pol), "avatar": avatar,
             "polid": pol if see_pol else None, "handles": handles if see_pol else [],
             "online": online, "last_seen": seen, "links": out_links, "games": games,
             "actions": actions, "link_targets": targets, "notes": notes(db, person),
             "history": history(db, person, pol if see_pol else None),
             "core": _core()}
+
+
+def _hidden_tokens(db):
+    """Lowercased names/handles/PlayOnline IDs kept off the People list, from the
+    admin_setting 'people_hidden' (or HIDE_DEFAULT when it was never set)."""
+    try:
+        raw = adminusers.get_setting(db, "people_hidden")
+    except Exception:                       # noqa: BLE001 -- no settings table: hide nothing
+        db.rollback()
+        return set()
+    if raw is None:
+        raw = HIDE_DEFAULT
+    return {t.strip().lower() for t in raw.replace("\n", ",").split(",") if t.strip()}
+
+
+def _drop_hidden(out, hidden, q):
+    """Remove hidden accounts from a result list, unless the query names one (so
+    they stay findable when an operator searches for them on purpose)."""
+    ql = (q or "").strip().lower()
+    kept = []
+    for r in out:
+        toks = {str(r.get("name") or "").lower(), str(r.get("polid") or "").lower()}
+        toks |= {str(h).lower() for h in (r.get("handles") or [])}
+        toks.discard("")
+        hit = toks & hidden
+        if hit and not (len(ql) >= 3 and any(ql in t for t in hit)):
+            continue
+        kept.append(r)
+    return kept
 
 
 def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX, dupes_only=False):
@@ -477,6 +519,7 @@ def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX, dupes_only=Fa
                 by_pol[r["polid"]] = dict(r)
     pols = list(by_pol)
     handles, proven = {}, {}
+    pol_did = {}                            # polid -> the account's Discord id (bot link)
     if pols:
         for r in db.execute("SELECT m.polid, h.handle_name FROM handle h JOIN member m ON m.id = h.member_id"
                             " WHERE m.polid = ANY(%s) ORDER BY h.is_primary DESC, h.id", (pols,)):
@@ -488,9 +531,10 @@ def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX, dupes_only=Fa
         except Exception:                   # noqa: BLE001
             db.rollback()
         try:
-            for r in db.execute("SELECT m.polid FROM discord_link d JOIN member m ON m.id = d.member_id"
-                                " WHERE m.polid = ANY(%s)", (pols,)):
+            for r in db.execute("SELECT m.polid, d.discord_id FROM discord_link d"
+                                " JOIN member m ON m.id = d.member_id WHERE m.polid = ANY(%s)", (pols,)):
                 proven.setdefault(r["polid"], set()).add(DISCORD)
+                pol_did.setdefault(r["polid"], r["discord_id"])
         except Exception:                   # noqa: BLE001
             db.rollback()
     persons_of_pol = {r["polid"]: r for r in people.values() if r["polid"]}
@@ -501,10 +545,19 @@ def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX, dupes_only=Fa
             persons_of_pol.setdefault(r["polid"], dict(r))
             people.setdefault(r["id"], dict(r))
     staff = {}
+    person_did = {}                         # person id -> a Discord id a moderator linked by hand
     if people:
-        for r in db.execute("SELECT person_id, system, how FROM person_link WHERE person_id = ANY(%s)"
+        for r in db.execute("SELECT person_id, system, how, key FROM person_link WHERE person_id = ANY(%s)"
                             " AND system <> %s ORDER BY at, id", (list(people), POL)):
             staff.setdefault(r["person_id"], []).append((r["system"], r["how"]))
+            if r["system"] == DISCORD:
+                person_did.setdefault(r["person_id"], r["key"])
+    dmap = discordlink.avatars_for(db, set(pol_did.values()) | set(person_did.values()))
+    ava_by_pol = {p: discordlink.avatar_url(d, dmap.get(d), 64) for p, d in pol_did.items()}
+    ava_by_person = {p: discordlink.avatar_url(d, dmap.get(d), 64) for p, d in person_did.items()}
+
+    def avatar_for(pid, pol):
+        return (pid and ava_by_person.get(pid)) or (pol and ava_by_pol.get(pol)) or None
     out = []
 
     def accounts_of(pid, pol):
@@ -530,6 +583,7 @@ def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX, dupes_only=Fa
         out.append({"id": p["id"] if p else None, "polid": pol if see_pol else None, "pol": True,
                     "name": p["name"] if p else (hs[0] if hs else pol), "handles": hs if see_pol else [],
                     "accounts": accounts_of(p["id"] if p else None, pol),
+                    "avatar": avatar_for(p["id"] if p else None, pol),
                     "online": bool(r["online"]), "last_seen": r["seen"]})
         if p:
             done.add(p["id"])
@@ -541,9 +595,13 @@ def search(db, q, online_only=False, see_pol=True, limit=LIST_MAX, dupes_only=Fa
         out.append({"id": pid, "polid": (r["polid"] if see_pol else None), "pol": bool(r["polid"]),
                     "name": r["name"], "handles": [], "accounts": accounts_of(pid, None) if not r["polid"]
                     else [{"system": POL, "title": "PlayOnline", "staff": False}] + accounts_of(pid, None),
+                    "avatar": avatar_for(pid, r["polid"]),
                     "online": None, "last_seen": None, "created_at": r["created_at"]})
     if online_only:
         out = [r for r in out if r["online"]]
+    hidden = _hidden_tokens(db)
+    if hidden:
+        out = _drop_hidden(out, hidden, q)
     out.sort(key=lambda r: (r["online"] is not True, -(_ts(r["last_seen"]) or 0), -(r["id"] or 0)))
     out = out[:limit]
     dup = duplicates(db)
@@ -560,11 +618,14 @@ def _dupe_rows(db, dup, see_pol, limit):
     for r in db.execute("SELECT person_id, system, key, how FROM person_link WHERE person_id = ANY(%s)"
                         " ORDER BY (system = %s) DESC, at, id", (list(dup), POL)):
         rows.setdefault(r["person_id"], []).append(r)
+    dids = [x["key"] for ln in rows.values() for x in ln if x["system"] == DISCORD]
+    dmap = discordlink.avatars_for(db, dids)
     out = []
     for r in db.execute("SELECT id, name, created_at FROM person WHERE id = ANY(%s) ORDER BY lower(name), id",
                         (list(dup),)):
         ln = rows.get(r["id"], [])
         pol = next((x["key"] for x in ln if x["system"] == POL), None)
+        did = next((x["key"] for x in ln if x["system"] == DISCORD), None)
         acc, seen = [], set()
         for x in ln:
             if x["system"] in seen:
@@ -574,6 +635,7 @@ def _dupe_rows(db, dup, see_pol, limit):
                         "staff": x["how"] == "staff"})
         out.append({"id": r["id"], "polid": pol if see_pol else None, "pol": bool(pol), "name": r["name"],
                     "handles": [], "accounts": acc, "online": None, "last_seen": None,
+                    "avatar": discordlink.avatar_url(did, dmap.get(did), 64),
                     "created_at": r["created_at"], "maybe": dup[r["id"]]})
     return out[:limit]
 

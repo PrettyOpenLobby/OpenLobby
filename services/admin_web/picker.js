@@ -48,11 +48,12 @@ function makePicker(opts) {
   };
   const dot = (on) => on === true ? `<span class="pk-dot on" title="Online"></span>`
     : on === false ? `<span class="pk-dot off" title="Offline"></span>` : `<span class="pk-dot"></span>`;
+  const face = (r) => r.avatar ? `<img class="pk-ava" src="${escp(r.avatar)}" alt="" referrerpolicy="no-referrer">` : "";
   const draw = () => {
     if (!st.rows.length) return show(`<div class="pk-note">${box.value.trim() ? "No player matches." : "No one is online."}</div>`);
     show(st.rows.map((r, i) =>
       `<div class="pk-row${i === st.active ? " on" : ""}" role="option" id="${uid}-${i}" data-i="${i}"` +
-      ` aria-selected="${i === st.active}">${dot(r.online)}<span class="pk-who"><b>${escp(r.label || r.id)}</b>` +
+      ` aria-selected="${i === st.active}">${dot(r.online)}${face(r)}<span class="pk-who"><b>${escp(r.label || r.id)}</b>` +
       (r.detail ? `<span class="pk-det">${escp(r.detail)}</span>` : "") + `</span></div>`).join(""));
     if (st.active >= 0) {
       box.setAttribute("aria-activedescendant", `${uid}-${st.active}`);

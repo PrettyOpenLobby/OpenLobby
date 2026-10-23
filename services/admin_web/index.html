@@ -990,6 +990,7 @@
     .pk-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; }
     .pk-dot.on { background: var(--good); }
     .pk-dot.off { border: 1.5px solid var(--muted); }
+    .pk-ava { width: 24px; height: 24px; flex: 0 0 24px; border-radius: 50%; object-fit: cover; }
     .pk-note { padding: 8px 10px; color: var(--muted); }
     .pk-note.bad { color: var(--bad); }
     .gx > * { min-width: 0; }
@@ -1212,8 +1213,19 @@
     #tab-people .pp-crumb a { color: var(--muted); }
     .pp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-bottom: 18px; }
     .pp-ava { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center;
-      justify-content: center; font-size: 22px; font-weight: 600; flex: none;
+      justify-content: center; font-size: 22px; font-weight: 600; flex: none; overflow: hidden;
       background: color-mix(in srgb, var(--accent) 25%, var(--panel2)); }
+    img.pp-ava { object-fit: cover; }
+    /* a person's picture (Discord, or a letter monogram) beside their name in the
+       People list, filling the row height, with the name/sub stacked next to it */
+    .pp-prow { display: flex; align-items: center; gap: 11px; }
+    .pp-pwho { min-width: 0; }
+    .pp-lava { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex: none; }
+    .pp-lava.mono { display: flex; align-items: center; justify-content: center; font-weight: 600;
+      font-size: 16px; color: var(--text); background: color-mix(in srgb, var(--accent) 25%, var(--panel2)); }
+    /* a small Discord picture on a linked-account card header */
+    .pp-cava { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; flex: none;
+      vertical-align: -4px; margin-right: 6px; }
     .pp-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     .pp-title h2 { margin: 0; font-size: 24px; font-weight: 600; }
     .pp-title .muted { font-size: 13px; }

@@ -5174,6 +5174,16 @@ class Handler(BaseHTTPRequestHandler):
             "pending": self._news_pending(items),
         })
 
+    #: The pages a player sees the news on, as SE wrote them. Each reads the
+    #: files newsgen writes, so rendering them with those files swapped in
+    #: shows a publish before it happens.
+    _NEWS_VIEWS = {
+        "ticker": "wh000.pol.com/pml/main/index.pml",       # the main menu ticker
+        "info": "wh000.pol.com/pml/info/index.pml",         # the Information section
+        "story": "wh000.pol.com/pml/info/index2.pml",       # one story's page
+        "snews": "info.playonline.com/snews/en-US/index.pml",   # our Information page
+    }
+
     def _news_render(self):
         """Render a news page from UNSAVED announcements: {items, view, serial,
         cnt} -> {text, path}. Nothing is written; the files a publish would

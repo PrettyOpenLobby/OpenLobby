@@ -395,8 +395,10 @@ def scan_once(now=None, min_age=None):
             for name in names:
                 if discordlink.is_notified(ldb, name):
                     continue
-                if now - stored[name] < min_age:
+                if min_age > 0 and now - stored[name] < min_age:
                     continue                     # still being written; next pass
+                # (min_age 0 = take it at once: a file stamped a millisecond past
+                # `now` by the filesystem clock is not "still being written")
                 path = rs._mail_path_of(name)
                 meta = rs._mail_meta(path) if path else None
                 if not meta or int(meta.get("kind") or 0) != rs.MAIL_KIND_MESSAGE:
@@ -460,6 +462,36 @@ def watch():
         except Exception as e:                   # noqa: BLE001 -- never die
             log("watcher error (%r) -- still running" % e)
         time.sleep(max(1.0, float(ARGS.poll)))
+
+
+def avatar_watch():
+    """Keep linked users' stored Discord avatars fresh for the admin panel.
+
+    Every POL_BRIDGE_AVATAR_POLL seconds it looks for linked Discord ids it has
+    not fetched yet, or whose avatar is older than discordlink.AVATAR_TTL, and
+    fetches a few. So a newly linked account -- including one a moderator just
+    linked by hand in the panel -- gets its picture within one poll, while an
+    unchanged one is only re-read once past the TTL. The pass is cheap: a couple
+    of small queries, and a Discord call only for an id that actually needs one,
+    so a short poll adds almost nothing. A read that fails leaves the old picture
+    and only defers the next try."""
+    poll = max(10.0, float(os.environ.get("POL_BRIDGE_AVATAR_POLL", "20")))
+    batch = max(1, int(os.environ.get("POL_BRIDGE_AVATAR_BATCH", "20")))
+    while True:
+        try:
+            ldb = discordlink.connect()
+            try:
+                for uid in discordlink.avatars_stale(ldb, batch):
+                    prof = _profile(uid)
+                    if prof is None:
+                        discordlink.defer_avatar(ldb, uid)
+                    else:
+                        discordlink.set_avatar(ldb, uid, prof.get("avatar"))
+            finally:
+                ldb.close()
+        except Exception as e:                   # noqa: BLE001 -- never die
+            log("avatar sweep error (%r) -- still running" % e)
+        time.sleep(poll)
 
 
 # --------------------------------------------------------------------------- #
@@ -528,10 +560,10 @@ def _profile(uid):
     st, data = api("GET", "/users/%s" % uid)
     prof = None
     if st == 200 and isinstance(data, dict) and data.get("id"):
-        prof = {"username": str(data.get("global_name") or data.get("username") or "")[:80]}
+        prof = {"username": str(data.get("global_name") or data.get("username") or "")[:80],
+                "avatar": data.get("avatar") or None}
         if data.get("avatar"):
-            prof["avatar_url"] = ("https://cdn.discordapp.com/avatars/%s/%s.png?size=256"
-                                  % (data["id"], data["avatar"]))
+            prof["avatar_url"] = discordlink.avatar_url(data["id"], data["avatar"], 256)
     _PROFILES[uid] = (now, prof)
     return prof
 
@@ -981,6 +1013,13 @@ def _user(data):
     return str(u.get("id") or ""), (u.get("global_name") or u.get("username") or "")
 
 
+def _user_avatar(data):
+    """The avatar hash of the user who sent an interaction, or None -- taken from
+    the payload so linking needs no extra API call."""
+    u = (data.get("member") or {}).get("user") or data.get("user") or {}
+    return u.get("avatar") or None
+
+
 def _member_label(member_id):
     """'Lex (POL ID 87-...)' for a status line -- best effort."""
     rs = R()
@@ -1115,7 +1154,7 @@ def on_command(data):
     try:
         link = discordlink.link_by_discord(ldb, uid)
         if sub == "link":
-            code = discordlink.new_code(ldb, uid, uname)
+            code = discordlink.new_code(ldb, uid, uname, _user_avatar(data))
             mins = max(1, discordlink.CODE_TTL // 60)
             again = ("\nThis will replace your current link (%s)." % _member_label(link["member_id"])
                      if link else "")
@@ -1496,6 +1535,8 @@ def main(argv=None):
         threading.Thread(target=register_commands, name="polbridge-commands",
                          daemon=True).start()
         threading.Thread(target=watch, name="polbridge-watch", daemon=True).start()
+        threading.Thread(target=avatar_watch, name="polbridge-avatars",
+                         daemon=True).start()
         threading.Thread(target=gm_relay_watch, name="polbridge-gm-relay",
                          daemon=True).start()
         import svcwatch
