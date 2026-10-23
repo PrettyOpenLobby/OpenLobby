@@ -579,6 +579,32 @@ class SetupAppTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.folder, "openlobby")))
         self.assertTrue(os.path.isdir(clients))
 
+    def _game_folders(self):
+        games = os.path.join(self.folder, "openlobby", "games")
+        os.makedirs(games, exist_ok=True)
+        for key, sub in (("kart", "kartclub"), ("bowl", "bowlnight"), ("core", "openlobby")):
+            with open(os.path.join(games, key + ".json"), "w", encoding="utf-8") as f:
+                json.dump({"key": key, "kind": "core" if key == "core" else "game", "checkout": sub}, f)
+        os.makedirs(os.path.join(self.folder, "kartclub", ".git"))       # cloned by the deployer
+        os.makedirs(os.path.join(self.folder, "bowlnight"))              # same name, not a checkout
+        os.makedirs(os.path.join(self.folder, "mine", ".git"))           # not in the catalog
+
+    def test_uninstall_with_data_takes_the_games_the_panel_installed(self):
+        self.install()
+        self._game_folders()
+        out = self.main("--dir", self.folder, "--uninstall", "--delete-data", "--yes")
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "kartclub")))
+        self.assertTrue(os.path.isdir(os.path.join(self.folder, "bowlnight")))
+        self.assertTrue(os.path.isdir(os.path.join(self.folder, "mine")))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "openlobby")))
+        self.assertIn("its data and its games are gone", out)
+
+    def test_uninstall_keeping_data_keeps_the_games(self):
+        self.install()
+        self._game_folders()
+        self.main("--dir", self.folder, "--uninstall", "--yes")
+        self.assertTrue(os.path.isdir(os.path.join(self.folder, "kartclub", ".git")))
+
     def test_start_over_keeps_a_copy_of_the_settings(self):
         self.install()
         open(self.log, "w").close()

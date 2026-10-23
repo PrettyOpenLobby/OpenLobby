@@ -1102,11 +1102,36 @@ def start(inst, args):
     return 0
 
 
-def remove(inst, delete_data):
+def game_checkouts(inst):
+    """The game checkouts the deployer cloned beside this install's checkout: each
+    catalog entry's folder in the install folder, when it is a git checkout. Read
+    from the catalog before the core checkout is deleted."""
+    out = []
+    folder = os.path.join(inst.checkout, "games")
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                entry = json.load(f)
+        except (OSError, ValueError):
+            continue
+        sub = entry.get("checkout") if isinstance(entry, dict) else None
+        if (entry.get("kind") == "core" or not isinstance(sub, str)
+                or not re.match(r"^[A-Za-z0-9._-]+$", sub) or sub in (".", "..")):
+            continue
+        path = os.path.join(inst.folder, sub)
+        if path != inst.checkout and os.path.isdir(os.path.join(path, ".git")) and path not in out:
+            out.append(path)
+    return out
+
+
+def remove(inst, delete_data, games=False):
     """Take this install's containers away, and with delete_data its volumes and
-    files. Never the openlobby network, never another install's containers, never
-    the dns and http containers while another install uses them, never the
-    client installs folder."""
+    files, and with games the game checkouts the deployer cloned beside it. Never
+    the openlobby network, never another install's containers, never the dns and
+    http containers while another install uses them, never the client installs
+    folder."""
     kept = shared_kept(inst)
     kept_ids = {c["id"] for c in kept}
     gone = [c["id"] for c in project_containers(inst) if c["id"] not in kept_ids]
@@ -1137,7 +1162,7 @@ def remove(inst, delete_data):
             say("    Kept %s: the shared DNS and port 80 still use it." % vol)
         else:
             docker("volume", "rm", vol)
-    for path in (inst.checkout, inst.logs):
+    for path in (game_checkouts(inst) if games else []) + [inst.checkout, inst.logs]:
         if os.path.isdir(path):
             shutil.rmtree(path, onerror=_force_remove)
     for path in (inst.state_path, inst.players_path):
@@ -1161,18 +1186,20 @@ def uninstall(inst, args):
     say("'%s' stays, since other installs use it." % NETWORK)
     delete = args.delete_data
     if not delete and not Answers.yes:
-        delete = ask_yes("Also delete the data: accounts, settings and the database? This cannot be"
-                         " undone.", False)
+        delete = ask_yes("Also delete the data: accounts, settings, the database and the games"
+                         " installed from the panel? This cannot be undone.", False)
     if delete and not Answers.yes:
         if ask("To delete everything, type delete") != "delete":
             say("Not deleting the data.")
             delete = False
     if not confirm("Uninstall OpenLobby now?", args.uninstall):
         return 0
-    if not remove(inst, delete):
+    if not remove(inst, delete, games=delete):
         return 1
     if delete:
-        say("OpenLobby and its data are gone from %s." % inst.folder)
+        say("OpenLobby, its data and its games are gone from %s." % inst.folder)
+        if os.path.isdir(os.path.join(inst.folder, "clients")):
+            say("Your client files are kept in %s." % os.path.join(inst.folder, "clients"))
     else:
         say("OpenLobby is uninstalled. Its settings and data are kept in %s and in Docker;" % inst.folder)
         say("run %s again to start it with them." % NAME)

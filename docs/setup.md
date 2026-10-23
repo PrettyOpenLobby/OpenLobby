@@ -37,8 +37,10 @@ proven for it, the deployer is left off.
 Every later run starts with the server's state and address, then offers
 Update, Change settings, Stop (or Start), Show what to tell players, Start
 over and Uninstall. Uninstall removes the containers and keeps the data unless
-you ask (and type `delete`); Start over keeps a copy of the old `.env` in
-`backups`. Neither removes the `openlobby` network, and when another install's
+you ask (and type `delete`); deleting the data also deletes the games the panel
+installed beside it, and keeps the client files folder. Start over keeps a copy
+of the old `.env` in `backups`, and the installed games. Neither removes the
+`openlobby` network, and when another install's
 game server is on this machine, this install's `dns` and `http` services stay,
 since that game uses them (`docs/installs.md`). Game servers it finds there
 are named, with how to pair them with the panel; it does not change them.
