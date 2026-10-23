@@ -611,6 +611,24 @@ if ($NoStart) {
 
 # ------------------------------------------------------------------ start
 
+# Enabled games (one key per line in .games, # comments) start through tools\stack.py, so
+# their compose files come along and login keeps their title plugins; a plain docker
+# compose up would rebuild login without them.
+$Games = @()
+$gamesFile = Join-Path $Checkout '.games'
+if (Test-Path -LiteralPath $gamesFile) {
+    $Games = @(Get-Content -LiteralPath $gamesFile | ForEach-Object { ($_ -replace '#.*$', '').Trim() } | Where-Object { $_ })
+}
+$py = Find-Python
+if ($Games.Count -gt 0 -and $py) {
+    # The data some games keep in Docker volumes (FFXI's maps): created and filled once,
+    # left alone when it is already there (docs/games.md, "Volumes").
+    Step 'Game data'
+    if ((Run $py @((Join-Path $Checkout 'tools\stack.py'), 'volumes')) -ne 0) {
+        Warn 'some game data could not be set up (the lines above say why); those games will not start until it is. Run this script again to retry.'
+    }
+}
+
 Step 'Starting the stack'
 if (-not $DryRun) { Set-Location -LiteralPath $Checkout }
 # The network every install on this PC shares (docs/installs.md); the admin panel joins
@@ -629,15 +647,6 @@ if ($UseDeployer) {
         Warn 'the deployer did not start; docker compose --profile deployer logs deployer says why'
     }
 }
-# Enabled games (one key per line in .games, # comments) start through tools\stack.py, so
-# their compose files come along and login keeps their title plugins; a plain docker
-# compose up would rebuild login without them.
-$Games = @()
-$gamesFile = Join-Path $Checkout '.games'
-if (Test-Path -LiteralPath $gamesFile) {
-    $Games = @(Get-Content -LiteralPath $gamesFile | ForEach-Object { ($_ -replace '#.*$', '').Trim() } | Where-Object { $_ })
-}
-$py = Find-Python
 $started = $true
 if ($Games.Count -gt 0 -and -not $py) {
     Warn ('games are enabled (' + ($Games -join ', ') + ') and starting them needs Python 3 for tools\stack.py, which is not installed, so the stack was left as it is')

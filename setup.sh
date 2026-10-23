@@ -767,6 +767,18 @@ fi
 
 # ------------------------------------------------------------------ start
 
+local HAVE_PY=""
+command -v python3 >/dev/null 2>&1 && HAVE_PY=1
+local GAMES=""
+[ -s "$CHECKOUT/.games" ] && GAMES="$(tr '\n' ' ' <"$CHECKOUT/.games")"
+if [ -n "$GAMES" ] && [ -n "$HAVE_PY" ]; then
+    # The data some games keep in Docker volumes (FFXI's maps): created and filled once,
+    # left alone when it is already there (docs/games.md, "Volumes").
+    step "Game data"
+    run python3 "$CHECKOUT/tools/stack.py" volumes \
+        || warn "some game data could not be set up (the lines above say why); those games will not start until it is. Run this script again to retry."
+fi
+
 step "Starting the stack"
 cd "$CHECKOUT" 2>/dev/null || { [ -n "$DRY" ] || die "cannot enter $CHECKOUT"; }
 # The network every install on this machine shares (docs/installs.md); the admin panel
@@ -776,10 +788,6 @@ if ! docker network inspect openlobby >/dev/null 2>&1; then
     run docker network create openlobby || docker network inspect openlobby >/dev/null 2>&1 \
         || die "could not create the Docker network openlobby"
 fi
-local HAVE_PY=""
-command -v python3 >/dev/null 2>&1 && HAVE_PY=1
-local GAMES=""
-[ -s "$CHECKOUT/.games" ] && GAMES="$(tr '\n' ' ' <"$CHECKOUT/.games")"
 local -a DC=(docker compose)
 if [ -n "$GAMES" ]; then
     [ -n "$HAVE_PY" ] || die "games are enabled ($GAMES) and starting them needs python3 (tools/stack.py)"

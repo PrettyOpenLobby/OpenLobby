@@ -11,6 +11,12 @@ two games define the same service. Then the command assembly is checked for
 several sets of games. With docker on PATH, `docker compose config` is run
 on two sets and the merged login service is checked; without it that part
 is reported SKIP. Nothing is started.
+
+The volume routine (stack.py volumes) runs against a stand-in docker CLI
+that keeps its volumes and images in a JSON file: a missing volume is
+created and filled, an empty one filled, one with files left alone, and a
+failed download, a full disk and a catalog entry that cannot be used each
+end in a plain sentence with nothing written.
 """
 import ast
 import json
@@ -94,6 +100,14 @@ def check_catalog(catalog, root, parent):
         if e["admin_module"] is not None and akeys is not None:
             ok(e["admin_module"] in akeys, "%s: admin_module %r is an adminmodules key"
                % (key, e["admin_module"]))
+        for vol in e["volumes"]:
+            ok(isinstance(vol.get("setup"), list) and vol["setup"],
+               "%s: volume %s has its by-hand setup commands" % (key, vol.get("name")))
+            if "fill" in vol:
+                why = stack.fill_problem(vol)
+                ok(why is None, "%s: volume %s fill block: %s" % (key, vol.get("name"), why))
+            elif vol.get("required"):
+                skip("%s: required volume %s has no fill block (set up by hand)" % (key, vol.get("name")))
         for item in e["data"]:
             imp = item.get("import")
             if imp is None:
@@ -328,6 +342,205 @@ def check_report_and_ps(catalog):
     ok(p["games"]["jan"] == {"running": False, "services": {}}, "ps_report: no containers")
 
 
+# The stand-in docker CLI for the volume routine. FAKE_DOCKER_STATE is a JSON
+# file: {"volumes": {name: {"files": [...], "labels": {...}}},
+#        "images": [ref, ...], "content": {ref: {path: [files]}},
+#        "pull_error": text, "run_error": text}; every call is appended to
+# "calls".
+FAKE_DOCKER = r"""
+import json, os, sys
+p = os.environ["FAKE_DOCKER_STATE"]
+st = json.load(open(p))
+a = sys.argv[1:]
+st.setdefault("calls", []).append(a)
+def done(rc=0, out="", err=""):
+    json.dump(st, open(p, "w"))
+    sys.stdout.write(out)
+    sys.stderr.write(err)
+    sys.exit(rc)
+vols = st.setdefault("volumes", {})
+if a[:2] == ["volume", "inspect"]:
+    if a[2] in vols:
+        done(0, "[{}]")
+    done(1, "", "Error response from daemon: get %s: no such volume\n" % a[2])
+if a[:2] == ["image", "inspect"]:
+    if a[2] in st.get("images", []):
+        done(0, "[{}]")
+    done(1, "", "Error: No such image: %s\n" % a[2])
+if a[0] == "pull":
+    if st.get("pull_error"):
+        done(1, "", st["pull_error"])
+    st.setdefault("images", []).append(a[1])
+    done(0, "latest: Pulling from x\n")
+if a[:2] == ["volume", "create"]:
+    labels = dict(x.split("=", 1) for x in a[3:-1:2])
+    vols[a[-1]] = {"files": [], "labels": labels}
+    done(0, a[-1] + "\n")
+if a[0] == "run":
+    if "--mount" in a:
+        m = dict(kv.split("=", 1) for kv in a[a.index("--mount") + 1].split(",") if "=" in kv)
+        assert "readonly" in a[a.index("--mount") + 1] and "volume-nocopy" in a[a.index("--mount") + 1]
+        done(0, "".join(f + "\n" for f in vols[m["source"]]["files"]))
+    name, path = a[a.index("-v") + 1].split(":", 1)
+    image = a[a.index("-v") + 2]
+    if st.get("run_error"):
+        done(125, "", st["run_error"])
+    v = vols.setdefault(name, {"files": [], "labels": {}})
+    if not v["files"]:
+        v["files"] = list(st.get("content", {}).get(image, {}).get(path, []))
+    done(0)
+done(2, "", "fake docker: unexpected %s\n" % a)
+"""
+
+KART = {"key": "kart", "kind": "game", "name": "Kart Club", "order": 10, "volumes": [
+    {"name": "kart_tracks", "required": True, "description": "Tracks.", "setup": ["by hand"],
+     "fill": {"image": "ghcr.io/example/kart-data:1", "path": "/tracks", "expect": "*.trk",
+              "size_mb": 300, "what": "track data"}},
+    {"name": "kart_cars", "required": True, "description": "Cars.", "setup": ["by hand"],
+     "fill": {"image": "ghcr.io/example/kart-data:1", "path": "/cars", "expect": "*.car",
+              "size_mb": 100, "what": "track data"}},
+    {"name": "kart_replays", "required": False, "description": "Optional.", "setup": ["by hand"]}]}
+CONTENT = {"ghcr.io/example/kart-data:1": {"/tracks": ["a.trk", "b.trk", "c.trk"],
+                                           "/cars": ["x.car", "y.car"]}}
+
+
+def check_volumes():
+    tmp = tempfile.mkdtemp(prefix="stacktest-")
+    try:
+        fake = os.path.join(tmp, "docker.py")
+        with open(fake, "w") as f:
+            f.write(FAKE_DOCKER)
+        state = os.path.join(tmp, "docker.json")
+        dock = [sys.executable, fake]
+        cat = {"core": {"key": "core", "kind": "core", "name": "core", "order": 0}, "kart": KART}
+        old = os.environ.get("FAKE_DOCKER_STATE")
+        os.environ["FAKE_DOCKER_STATE"] = state
+
+        def run(st, keys=("kart",), catalog=cat):
+            with open(state, "w") as f:
+                json.dump(st, f)
+            lines = []
+            res = stack.ensure_volumes(catalog, list(keys), docker=dock, say=lines.append)
+            with open(state) as f:
+                return res, lines, json.load(f)
+
+        try:
+            # nothing here: the image is downloaded once, both volumes created and filled
+            res, lines, st = run({"content": CONTENT})
+            ok([(r["volume"], r["state"], r["files"]) for r in res]
+               == [("kart_tracks", "filled", 3), ("kart_cars", "filled", 2)],
+               "volumes: missing ones are created and filled (%s)" % res)
+            ok(sum(1 for c in st["calls"] if c[0] == "pull") == 1, "volumes: the image is pulled once")
+            ok(lines[0] == "Downloading the track data for Kart Club: about 400 MB, only this once. "
+               "This can take a while...", "volumes: the download line (%s)" % lines[0])
+            ok("kart_tracks: 3 files, ready." in lines and "kart_cars: 2 files, ready." in lines,
+               "volumes: a files line per volume (%s)" % lines)
+            ok(st["volumes"]["kart_tracks"]["labels"] == {"org.openlobby.game": "kart",
+                                                          "org.openlobby.fill": "ghcr.io/example/kart-data:1"},
+               "volumes: created with the game's labels")
+            fills = [c for c in st["calls"] if c[0] == "run" and "-v" in c]
+            ok(fills and fills[0] == ["run", "--rm", "--network", "none", "-v", "kart_tracks:/tracks",
+                                      "ghcr.io/example/kart-data:1", "true"],
+               "volumes: the fill is docker run --rm -v NAME:PATH IMAGE true (%s)" % fills[:1])
+            ok("kart_replays" not in st["volumes"], "volumes: an optional volume is not set up")
+
+            # one empty (created by hand), one full: the empty one is filled, the full one untouched
+            res, lines, st = run({"content": CONTENT, "images": ["ghcr.io/example/kart-data:1"],
+                                  "volumes": {"kart_tracks": {"files": [], "labels": {}},
+                                              "kart_cars": {"files": ["mine.car", "z.car"], "labels": {}}}})
+            ok([(r["state"], r["files"]) for r in res] == [("filled", 3), ("present", 2)],
+               "volumes: empty one filled, full one present (%s)" % res)
+            ok(not any(c[0] == "pull" for c in st["calls"]), "volumes: an image already here is not pulled")
+            ok(not any(c[:2] == ["volume", "create"] for c in st["calls"]),
+               "volumes: an existing volume is not created again")
+            ok(not any(c[0] == "run" and "-v" in c and c[c.index("-v") + 1].startswith("kart_cars")
+                       for c in st["calls"]),
+               "volumes: a volume with files is never mounted to be filled")
+            ok(st["volumes"]["kart_cars"]["files"] == ["mine.car", "z.car"], "  and keeps its files")
+            ok("kart_cars: 2 files, already in place." in lines, "volumes: says it was in place (%s)" % lines)
+
+            # a volume with files of another kind: left alone, with a note
+            res, lines, st = run({"content": CONTENT, "images": ["ghcr.io/example/kart-data:1"],
+                                  "volumes": {"kart_tracks": {"files": ["notes.txt"], "labels": {}},
+                                              "kart_cars": {"files": ["x.car"], "labels": {}}}})
+            ok(res[0]["state"] == "present" and st["volumes"]["kart_tracks"]["files"] == ["notes.txt"]
+               and any("none of them *.trk; it was left as it is" in l for l in lines),
+               "volumes: other files are left alone, with a note (%s)" % lines)
+
+            # a download that cannot reach the registry: a plain sentence, nothing created
+            res, lines, st = run({"content": CONTENT, "pull_error":
+                                  "Error response from daemon: Get \"https://ghcr.io/v2/\": dial tcp: "
+                                  "lookup ghcr.io: no such host\n"})
+            ok([r["state"] for r in res] == ["failed", "failed"] and not st["volumes"],
+               "volumes: pull failure fails both, creates nothing (%s)" % res)
+            ok("could not reach ghcr.io" in res[0]["why"] and "dial tcp" not in res[0]["why"]
+               and res[0]["why"].startswith("Downloading the track data for Kart Club failed."),
+               "volumes: pull failure is a plain sentence (%s)" % res[0]["why"])
+            ok(sum(1 for c in st["calls"] if c[0] == "pull") == 1, "  tried once for the shared image")
+            ok(lines[-1].startswith("kart_cars: not set up. Downloading"), "  and said per volume")
+            res, _, st = run({"content": CONTENT, "pull_error": "Error response from daemon: denied\n"})
+            ok("refused" in res[0]["why"] and "ghcr.io/example/kart-data:1" in res[0]["why"],
+               "volumes: a refused download names the image (%s)" % res[0]["why"])
+
+            # the disk fills up while copying
+            res, _, st = run({"content": CONTENT, "images": ["ghcr.io/example/kart-data:1"],
+                              "run_error": "docker: Error response from daemon: write /var/lib/docker/"
+                                           "volumes/x: no space left on device.\n"})
+            ok(res[0]["state"] == "failed" and "not enough free disk space" in res[0]["why"],
+               "volumes: a full disk is a plain sentence (%s)" % res[0]["why"])
+
+            # Docker is not running
+            res, _, st = run({"volumes": {}, "images": [], "pull_error": ""}, keys=["kart"],
+                             catalog=dict(cat, kart=dict(KART, volumes=KART["volumes"][:1])))
+            with open(state, "w") as f:
+                json.dump({}, f)
+            down = [sys.executable, "-c", "import sys; sys.stderr.write('Cannot connect to the Docker "
+                    "daemon at unix:///var/run/docker.sock. Is the docker daemon running?'); sys.exit(1)"]
+            lines = []
+            res = stack.ensure_volumes(cat, ["kart"], docker=down, say=lines.append)
+            ok(res[0]["why"] == "Docker is not running. Start it, then try again.",
+               "volumes: Docker not running (%s)" % res[0]["why"])
+
+            # a catalog entry that cannot be used reaches no docker command
+            for field, bad in (("image", "-v/:/host"), ("image", "Example/Kart"), ("path", "tracks"),
+                               ("path", "/a/../etc"), ("expect", "*.trk;rm"), ("size_mb", "400"),
+                               ("unknown", 1)):
+                v = json.loads(json.dumps(KART["volumes"][0]))
+                v["fill"][field] = bad
+                ok(stack.fill_problem(v), "fill_problem refuses %s=%r" % (field, bad))
+                res, _, st = run({}, catalog=dict(cat, kart=dict(KART, volumes=[v])))
+                ok(res[0]["state"] == "failed" and not st.get("calls"),
+                   "  and nothing ran for it (%s)" % st.get("calls"))
+            v = json.loads(json.dumps(KART["volumes"][0]))
+            v["name"] = "kart tracks:/x"
+            ok(stack.fill_problem(v), "fill_problem refuses a name that is not a volume name")
+            ok(stack.fill_problem(KART["volumes"][0]) is None, "fill_problem accepts a good block")
+
+            # nothing to fill
+            res, lines, st = run({}, catalog=dict(cat, kart=dict(KART, volumes=[])))
+            ok(res == [] and lines == ["No data to set up for Kart Club."] and not st.get("calls"),
+               "volumes: a game with none says so and runs nothing (%s)" % lines)
+
+            # stack.py check names the routine for a volume it can fill
+            with open(state, "w") as f:
+                json.dump({}, f)
+            os.makedirs(os.path.join(tmp, "kart"))
+            g = dict(KART, checkout="kart", compose=[], compose_ghcr=[], data=[])
+            rows, missing = stack.check_game(g, root=os.path.join(tmp, "core"), parent=tmp, docker=dock)
+            ok(any("stack.py volumes kart sets it up" in t for _, t in rows),
+               "check: a fillable volume names stack.py volumes (%s)" % rows)
+            ok(missing[0]["fill"] is True and "sets it up by itself" in missing[0]["hint"]
+               and missing[2]["fill"] is False and "Create it with" in missing[2]["hint"],
+               "check: missing says which volumes fill themselves (%s)" % missing)
+        finally:
+            if old is None:
+                os.environ.pop("FAKE_DOCKER_STATE", None)
+            else:
+                os.environ["FAKE_DOCKER_STATE"] = old
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def check_docker(catalog, root, parent):
     docker = shutil.which("docker")
     if not docker or subprocess.run([docker, "info"], stdout=subprocess.DEVNULL,
@@ -372,6 +585,7 @@ def main():
     check_plan(catalog, root, parent)
     check_env_and_state()
     check_report_and_ps(catalog)
+    check_volumes()
     check_docker(catalog, root, parent)
     print("stack_test: %d failed, %d skipped" % (len(FAILS), len(SKIPS)))
     return 1 if FAILS else 0

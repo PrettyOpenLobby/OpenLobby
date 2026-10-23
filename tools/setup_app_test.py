@@ -658,6 +658,31 @@ class SetupAppTest(unittest.TestCase):
         for flag in flags:
             self.assertRegex(ps1, r"\]\$%s\b" % flag[1:], flag)
 
+    def test_game_data_lines_are_shown(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for line in ("== Settings (.env)", "wrote .env", "", "== Game data",
+                         "Downloading the track data for Kart Club: about 400 MB, only this once. "
+                         "This can take a while...", "kart_tracks: 3 files, ready.",
+                         "== Starting the stack", "Enabled games: kart"):
+                self.mod.show_line(line)
+        text = out.getvalue()
+        self.assertIn("Getting the games' data", text)
+        self.assertIn("    Downloading the track data for Kart Club", text)
+        self.assertIn("    kart_tracks: 3 files, ready.", text)
+        self.assertNotIn("wrote .env", text)
+        self.assertNotIn("Enabled games", text)
+
+    def test_scripts_set_up_game_data_before_starting(self):
+        for name, call in (("setup.sh", '"$CHECKOUT/tools/stack.py" volumes'),
+                           ("setup.ps1", "'tools\\stack.py'), 'volumes'")):
+            with open(os.path.join(ROOT, name), encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn(call, text, name)
+            self.assertIn("Game data", self.mod.STEPS)
+            self.assertLess(text.index("Game data"), text.index("Starting the stack"), name)
+            self.assertLess(text.index(call), text.index("Starting the stack"), name)
+
     def test_program_is_ascii(self):
         with open(PROGRAM, "rb") as f:
             raw = f.read()

@@ -118,11 +118,32 @@ elif cmd == "ps":
 elif cmd == "add":
     os.makedirs(os.path.join(os.path.dirname(core), cat[args[1]]["checkout"]), exist_ok=True)
 elif cmd == "enable":
+    keys = sorted(set(state()) | {args[1]})       # read before "w" empties the file
     with open(os.path.join(core, ".games"), "w") as f:
-        f.write("\n".join(sorted(set(state()) | {args[1]})) + "\n")
+        f.write("\n".join(keys) + "\n")
 elif cmd == "disable":
+    keys = [k for k in state() if k != args[1]]
     with open(os.path.join(core, ".games"), "w") as f:
-        f.write("\n".join(k for k in state() if k != args[1]) + "\n")
+        f.write("\n".join(keys) + "\n")
+elif cmd == "volumes":
+    keys = args[1].split(",")
+    report = args[args.index("--report") + 1]
+    fail = os.path.join(d, "volumes_fail")
+    why = open(fail).read() if os.path.exists(fail) else ""
+    res = []
+    for k in keys:
+        for v in cat[k].get("volumes", []):
+            if not (v.get("required") and v.get("fill")):
+                continue
+            if why:
+                print(v["name"] + ": not set up. " + why)
+                res.append({"game": k, "volume": v["name"], "state": "failed", "files": 0, "why": why})
+            else:
+                print(v["name"] + ": 304 files, ready.")
+                res.append({"game": k, "volume": v["name"], "state": "filled", "files": 304, "why": ""})
+    if not os.path.exists(os.path.join(d, "volumes_noreport")):
+        json.dump({"ok": not why, "volumes": res}, open(report, "w"))
+    sys.exit(1 if why else 0)
 elif cmd == "compose":
     if os.path.exists(os.path.join(d, "hold")):
         t = time.time()
@@ -526,6 +547,102 @@ def test_games(c, t):
        "core running, options")
     t.flag("ps.json", on=False)
     t.flag("check.json", on=False)
+
+
+def test_volumes(c, t):
+    """A game with volumes the catalog says how to fill: install and enable
+    run stack.py volumes first; a failure stops the enable with a plain
+    sentence and leaves a button-free note on the games list; a success
+    clears it."""
+    os.makedirs(os.path.join(t.root, "hippaulbridge"), exist_ok=True)
+    t.clear_calls()
+    j = c.run("enable", "ffxi")
+    calls = t.calls()
+    vi = next((i for i, a in enumerate(calls) if a[0] == "volumes"), None)
+    ok(j["state"] == "ok" and vi is not None and calls[vi][1] == "ffxi" and "--report" in calls[vi],
+       "enable ffxi: stack.py volumes ffxi --report runs (%s)" % calls)
+    ok(vi is not None and vi < calls.index(["enable", "ffxi"]) < max(
+        i for i, a in enumerate(calls) if a[0] == "compose"),
+       "  before stack.py enable and compose up")
+    ok("lsb_navmeshes: 304 files, ready." in j["log"] and "lsb_ximeshes: 304 files, ready." in j["log"],
+       "  its lines are in the job log")
+    ok(not [n for n in os.listdir(t.state) if n.startswith("volumes-")], "  its report file is removed")
+    t.clear_calls()
+    c.run("disable", "ffxi")
+    j = c.run("enable", "tm")
+    ok(j["state"] == "ok" and not any(a[0] == "volumes" for a in t.calls()),
+       "enable tm (no volumes to fill): stack.py volumes is not run")
+
+    why = ("Downloading the map data for Final Fantasy XI failed. This computer could not reach "
+           "ghcr.io. Check its internet connection, then try again.")
+    t.flag("volumes_fail", text=why)
+    t.clear_calls()
+    j = c.run("enable", "ffxi")
+    ok(j["state"] == "failed" and why in j["summary"] and "not turned on" in j["summary"],
+       "fill failing: enable fails with the plain reason (%s)" % j["summary"])
+    ok(not any(a[0] in ("enable", "compose") for a in t.calls()), "  and nothing was enabled or started")
+    ok([m["path"] for m in j["missing"]] == ["volume lsb_navmeshes", "volume lsb_ximeshes"]
+       and all(why in m["hint"] and "import" not in m for m in j["missing"]),
+       "  the job lists both volumes with the reason and no import: %s" % j["missing"])
+    ok("lsb_navmeshes: not set up. " + why in j["log"], "  the log has the routine's line")
+    ffxi = json.load(open(os.path.join(t.core, "games", "ffxi.json")))
+    setup = " && ".join(ffxi["volumes"][0]["setup"])
+    missing = {"ok": False, "warnings": [], "games": [{
+        "key": "ffxi", "name": ffxi["name"], "installed": True, "enabled": False, "data_ok": False,
+        "rows": [["fail", "ffxi: volume lsb_navmeshes missing"]],
+        "missing": [{"id": "lsb_navmeshes", "path": "volume lsb_navmeshes", "hint": "sets itself up",
+                     "required": True, "source": "docker volume", "tool": setup, "fill": True}]}]}
+    t.flag("check.json", text=json.dumps(missing))
+    time.sleep(5.2)  # past the /api/games cache
+    by = {x["key"]: x for x in c.get("/api/games")[1]["games"]}
+    m = by["ffxi"]["missing"]
+    ok(len(m) == 1 and m[0]["hint"].startswith("Setting it up by itself failed: " + why)
+       and setup in m[0]["hint"] and "import" not in m[0],
+       "games list: the failed volume's note says why, with the commands by hand (%s)" % m)
+    t.flag("volumes_fail", on=False)
+    t.flag("check.json", on=False)
+    t.clear_calls()
+    j = c.run("install", "ffxi")
+    ok(j["state"] == "ok" and any(a[0] == "volumes" for a in t.calls()),
+       "install ffxi (already cloned): fills its volumes (%s)" % j["summary"])
+    t.flag("check.json", text=json.dumps(missing))
+    time.sleep(5.2)
+    by = {x["key"]: x for x in c.get("/api/games")[1]["games"]}
+    ok(by["ffxi"]["missing"][0]["hint"] == "sets itself up",
+       "  after a fill that worked the note is stack.py's own again")
+
+    t.flag("volumes_fail", text="x")
+    t.flag("volumes_noreport")
+    j = c.run("enable", "ffxi")
+    ok(j["state"] == "failed" and "stopped (exit 1)" in j["summary"],
+       "stack.py volumes with no report: failed, said so (%s)" % j["summary"])
+    t.flag("volumes_noreport", on=False)
+    t.flag("volumes_fail", on=False)
+    t.flag("check.json", on=False)
+    if t.git:
+        # update: a game whose new version needs a volume gets it before the restart
+        bridge = os.path.join(t.root, "hippaulbridge")
+        shutil.rmtree(bridge)
+        git("clone", "-q", os.path.join(t.tmp, "origin.git"), bridge)
+        c.run("enable", "ffxi")
+        t.flag("volumes_fail", text=why)
+        t.clear_calls()
+        j = c.run("update", "ffxi")
+        calls = t.calls()
+        ok(j["state"] == "failed" and "updated but not restarted" in j["summary"] and why in j["summary"]
+           and any(a[0] == "volumes" for a in calls) and not any(a[0] == "compose" for a in calls),
+           "update ffxi with the fill failing: not restarted, says why (%s)" % j["summary"])
+        t.flag("volumes_fail", on=False)
+        t.clear_calls()
+        j = c.run("update", "ffxi")
+        calls = [a[0] for a in t.calls()]
+        ok(j["state"] == "ok" and "volumes" in calls and calls.index("volumes") < calls.index("compose"),
+           "update ffxi: volumes, then compose up (%s)" % calls)
+    else:
+        SKIPS.append("update ffxi fills its volumes (no git)")
+        print("SKIP update ffxi fills its volumes (no git)")
+    c.run("disable", "ffxi")
+    shutil.rmtree(os.path.join(t.root, "hippaulbridge"), onerror=lambda f, p, e: (os.chmod(p, 0o700), f(p)))
 
 
 # ------------------------------------------------------------ update checks
@@ -1042,7 +1159,7 @@ def test_logs_and_token(c, t):
     t.flag("big")
     j = c.run("restart", "tm")
     t.flag("big", on=False)
-    ok(j["state"] == "ok", "a job with 1.3 MB of output: ok")
+    ok(j["state"] == "ok", "a job with 1.3 MB of output: ok (%s)" % j["summary"])
     size = j["log_size"]
     path = os.path.join(t.state, "jobs", j["id"] + ".log")
     ok(size > 1300000 and os.path.getsize(path) <= 1 << 20,
@@ -1662,6 +1779,7 @@ def main():
         test_update(c, t)
         test_updates_checkout(c, t)
         test_games(c, t)
+        test_volumes(c, t)
         big = test_logs_and_token(c, t)
         code, j = c.get("/api/jobs/" + c.get("/api/jobs?limit=50")[1]["jobs"][-1]["id"])
         ok("echo before [token] after" in j["log"] and "token in env: <absent>" in j["log"],

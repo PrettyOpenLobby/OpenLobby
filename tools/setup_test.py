@@ -423,10 +423,14 @@ class SetupShTest(unittest.TestCase):
     def test_enabled_games_start_through_stack_py(self):
         with open(os.path.join(self.checkout, ".games"), "w") as f:
             f.write("tm\n")
-        self.run_sh("--yes", "--reach", "lan")
+        out = self.run_sh("--yes", "--reach", "lan")
         calls = self.calls()
         self.assertIn("python3 tools/stack.py compose --ghcr up -d", calls)
         self.assertNotIn("docker compose pull", calls)
+        # the games' data volumes are set up first, under a step of their own
+        vol = [i for i, c in enumerate(calls) if c.startswith("python3 ") and c.endswith("/tools/stack.py volumes")]
+        self.assertTrue(vol and vol[0] < calls.index("python3 tools/stack.py compose --ghcr up -d"), calls)
+        self.assertLess(out.index("== Game data"), out.index("== Starting the stack"))
 
     def test_dry_run_changes_nothing(self):
         out = self.run_sh("--yes", "--dry-run", "--reach", "vpn", "--no-ps2")
@@ -724,8 +728,11 @@ class SetupPs1Test(unittest.TestCase):
         self.assertNotIn("docker compose pull", log)
         with open(calls) as f:
             self.assertEqual(f.read().splitlines(), [
+                "volumes",
                 "compose --ghcr pull --ignore-buildable --ignore-pull-failures",
                 "compose --ghcr up -d"])
+        # the games' data volumes are set up first, under a step of their own
+        self.assertLess(out.index("== Game data"), out.index("== Starting the stack"))
         self.assertIn("== Done", out)
 
 

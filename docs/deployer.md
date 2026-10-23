@@ -157,10 +157,10 @@ Every command runs with the OpenLobby checkout as its working directory.
 
 | Action | Games | What it does |
 | --- | --- | --- |
-| install | a game | `stack.py add <key> --yes` (git clone beside openlobby), then `stack.py check --json <key>` |
-| enable | a game | `stack.py check --json <key>`; if the game's required data is there, `stack.py enable <key>`, then `compose up -d --build` |
+| install | a game | `stack.py add <key> --yes` (git clone beside openlobby), then `stack.py volumes <key>` for a game with volumes to fill, then `stack.py check --json <key>` |
+| enable | a game | `stack.py volumes <key>` for a game with volumes to fill; `stack.py check --json <key>`; if the game's required data is there, `stack.py enable <key>`, then `compose up -d --build` |
 | disable | a game | `stack.py disable <key>`, then `compose up -d --build --remove-orphans` |
-| update | a game or `core` | refuses when the checkout has uncommitted changes to tracked files, otherwise `git -C <checkout> pull --ff-only`, then for an enabled game a data check and `compose up -d --build` |
+| update | a game or `core` | refuses when the checkout has uncommitted changes to tracked files, otherwise `git -C <checkout> pull --ff-only`, then for an enabled game `stack.py volumes <key>` (when it has volumes to fill), a data check and `compose up -d --build`; for `core`, `stack.py volumes` for the enabled games that have them, since the new catalog may list a new one |
 | restart | an enabled game or `core` | `compose --no-prebuild up -d --force-recreate <its services>` |
 | check | a game or `core` | `stack.py check --json` for that game, or for every enabled game with `core`; changes nothing |
 
@@ -170,6 +170,20 @@ A few details that follow from those commands:
   game's title plugin; `stack.py disable` gives the same advice.
 - `enable` checks the data first. A game that lacks a required file is not
   enabled, so its containers never start and fail over and over.
+- The data volumes a game's catalog entry says how to fill (FFXI's maps;
+  docs/games.md, "Volumes") are created and filled by the job itself,
+  with `stack.py volumes`, whose lines go into the job's log: the download
+  the first time, then a file count per volume. A volume that already
+  holds files is left alone, so after the first time this takes a second
+  or two. The images come only from the catalog, which the deployer
+  already trusts for everything else it runs.
+- When that fails (no internet, a full disk) the job ends `failed` with
+  the reason as its summary, the game is not turned on, and the job's
+  `missing` lists the volumes. The games list then shows each one with
+  "Setting it up by itself failed:" and the reason, followed by the
+  commands to do it by hand. There is no button: run the action again
+  once the cause is fixed. Until then a missing volume is shown with a
+  note that turning the game on sets it up.
 - With published images, `update` runs `compose pull --ignore-buildable
   --ignore-pull-failures` before `up`, since without `--build` nothing else
   would fetch a newer image.
@@ -401,7 +415,8 @@ the rest newest first, at most 50. Each job is
 UTC; `started` and `ended` are null until they happen. `exit` is the exit
 code of the command that ended the job. `missing` is `[{"path", "hint",
 "item"}]` (with `import` as in `/api/games`) for a `needs_data` job, the
-required items only, and empty otherwise. An import job also has `item`
+required items only, the volumes it could not set up for a job that failed
+there (`path` is `volume <name>`, `hint` the reason), and empty otherwise. An import job also has `item`
 and `source`, as they were asked for.
 
 `GET /api/jobs/<id>` is the same object plus `log`, the last 64 KB of the

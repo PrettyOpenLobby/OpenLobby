@@ -55,11 +55,15 @@
     {"name": "lsb_navmeshes", "required": true,
      "description": "LandSandBoat's pathfinding meshes (with lsb_ximeshes about 570 MB). External, so down -v never removes it.",
      "setup": ["docker volume create lsb_navmeshes",
-               "docker run --rm -v lsb_navmeshes:/navmeshes ghcr.io/landsandboat/ximeshes:latest sh -c 'echo pathfinding mesh files: $(ls /navmeshes | wc -l)'"]},
+               "docker run --rm -v lsb_navmeshes:/navmeshes ghcr.io/landsandboat/ximeshes:latest sh -c 'echo pathfinding mesh files: $(ls /navmeshes | wc -l)'"],
+     "fill": {"image": "ghcr.io/landsandboat/ximeshes:latest", "path": "/navmeshes",
+              "expect": "*.nav", "size_mb": 420, "what": "map data"}},
     {"name": "lsb_ximeshes", "required": true,
      "description": "LandSandBoat's zone geometry; the map server aborts at start without it.",
      "setup": ["docker volume create lsb_ximeshes",
-               "docker run --rm -v lsb_ximeshes:/ximeshes ghcr.io/landsandboat/ximeshes:latest sh -c 'echo zone geometry files: $(ls /ximeshes | wc -l)'"]}
+               "docker run --rm -v lsb_ximeshes:/ximeshes ghcr.io/landsandboat/ximeshes:latest sh -c 'echo zone geometry files: $(ls /ximeshes | wc -l)'"],
+     "fill": {"image": "ghcr.io/landsandboat/ximeshes:latest", "path": "/ximeshes",
+              "expect": "*.ximesh", "size_mb": 150, "what": "map data"}}
   ],
   "ports": [
     {"port": "54001", "protocol": "tcp", "service": "bridge", "host": "0.0.0.0"},

@@ -16,14 +16,17 @@ chain the title plugins need. docs/games.md explains the design.
     python tools/stack.py check                  checkouts and data present
     python tools/stack.py check --json --all     the same for every game, as JSON
     python tools/stack.py ps [--json]            which games have running containers
+    python tools/stack.py volumes [ffxi|--all]   create and fill the games' data volumes
     python tools/stack.py compose up -d --build  run docker compose
     python tools/stack.py compose --dry-run up -d --build   print, run nothing
 
 Standard library only. Works from any directory.
 """
+import fnmatch
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -317,7 +320,7 @@ def check_game(g, ghcr=False, root=ROOT, parent=PARENT, docker=None):
     """(rows, missing) for one game. rows are (level, text) as check()
     returns them; missing lists what the game still needs, one entry per
     absent path or volume: {"id", "path", "hint", "required", "source",
-    "tool"}.
+    "tool"}, and for a volume "fill": whether ensure_volumes() sets it up.
     A path is relative to the OpenLobby checkout (../<checkout>/...)."""
     rows, missing = [], []
     k = g["key"]
@@ -359,19 +362,28 @@ def check_game(g, ghcr=False, root=ROOT, parent=PARENT, docker=None):
             rows.append(("warn", "%s: volume %s not checked (no docker on PATH)"
                          % (k, vol["name"])))
             continue
-        r = subprocess.run([docker, "volume", "inspect", vol["name"]],
+        r = subprocess.run(_docker_argv(docker) + ["volume", "inspect", vol["name"]],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if r.returncode == 0:
             rows.append(("ok", "%s: volume %s present" % (k, vol["name"])))
         else:
             level = "fail" if vol.get("required") else "warn"
             setup = " && ".join(vol["setup"])
-            rows.append((level, "%s: volume %s missing; create it with: %s"
-                         % (k, vol["name"], setup)))
+            fill = vol.get("fill") if vol.get("required") and not fill_problem(vol) else None
+            if fill:
+                how = ("python tools/stack.py volumes %s sets it up (a download of about %d MB "
+                       "the first time); by hand: %s" % (k, fill_size(g, fill["image"]), setup))
+                hint = ("%s Installing, turning on or updating the game sets it up by itself "
+                        "(a download of about %d MB the first time)."
+                        % (vol.get("description", ""), fill_size(g, fill["image"])))
+            else:
+                how = "create it with: %s" % setup
+                hint = "%s Create it with: %s" % (vol.get("description", ""), setup)
+            rows.append((level, "%s: volume %s missing; %s" % (k, vol["name"], how)))
             missing.append({"id": vol["name"], "path": "volume " + vol["name"],
-                            "hint": "%s Create it with: %s" % (vol.get("description", ""), setup),
+                            "hint": hint,
                             "required": bool(vol.get("required")), "source": "docker volume",
-                            "tool": setup})
+                            "tool": setup, "fill": bool(fill)})
     return rows, missing
 
 
@@ -442,6 +454,237 @@ def ps_report(catalog, rows):
         games[key] = {"running": any(v == "running" for v in mine.values()), "services": mine}
     core = games.pop("core")
     return {"ok": True, "services": states, "core": core, "games": games}
+
+
+# ---------------------------------------------------------------- volumes
+#
+# A required volume with a "fill" block is created and filled here: Docker
+# copies an image's files into an empty named volume the first time a
+# container mounts it at a path the image has content in, so mounting it at
+# fill.path in a container of fill.image that runs `true` is the whole fill.
+# Every docker call is an argument list; the image, the path and the name
+# come from the catalog and are checked by fill_problem() before any reaches
+# docker. A volume that already holds files is never written to: the copy
+# only happens into an empty one, and this code only mounts it to fill it
+# when it found it empty or created it.
+
+_VOLUME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_IMAGE_REF = re.compile(
+    r"^(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?/)?"            # registry host[:port]/
+    r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"                        # repository path
+    r"(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*"
+    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?"                      # :tag
+    r"(?:@sha256:[0-9a-f]{64})?$")                                  # @digest
+_IMAGE_PATH = re.compile(r"^(?:/[A-Za-z0-9_.-]+)+$")
+_EXPECT = re.compile(r"^[A-Za-z0-9_.*?-]{1,64}$")
+_FILL_KEYS = {"image", "path", "expect", "size_mb", "what"}
+
+#: where the file count mounts a volume (read only, never filled from the image)
+_LOOK = "/openlobby-look"
+
+PULL_TIMEOUT = 3600
+FILL_TIMEOUT = 1800
+LOOK_TIMEOUT = 300
+
+
+def fill_problem(vol):
+    """None when a catalog volume's "fill" block can be used, else why not."""
+    name = vol.get("name")
+    if not isinstance(name, str) or not _VOLUME_NAME.match(name):
+        return "volume name %r is not a Docker volume name" % (name,)
+    f = vol.get("fill")
+    if not isinstance(f, dict):
+        return "fill is not an object"
+    extra = set(f) - _FILL_KEYS
+    if extra:
+        return "fill has unknown fields: %s" % ", ".join(sorted(extra))
+    image = f.get("image")
+    if not isinstance(image, str) or not _IMAGE_REF.match(image) or len(image) > 255:
+        return "fill.image %r is not an image reference (registry/name:tag)" % (image,)
+    path = f.get("path")
+    if (not isinstance(path, str) or not _IMAGE_PATH.match(path)
+            or any(p in (".", "..") for p in path.split("/"))):
+        return "fill.path %r is not an absolute path in the image" % (path,)
+    if not isinstance(f.get("expect"), str) or not _EXPECT.match(f["expect"]):
+        return "fill.expect %r is not a file name pattern such as *.dat" % (f.get("expect"),)
+    size = f.get("size_mb")
+    if not isinstance(size, int) or isinstance(size, bool) or not 0 < size < 1000000:
+        return "fill.size_mb %r is not a whole number of megabytes" % (size,)
+    what = f.get("what", "data")
+    if not isinstance(what, str) or not re.match(r"^[A-Za-z0-9 ,'()-]{1,40}$", what):
+        return "fill.what %r is not a short plain phrase" % (what,)
+    return None
+
+
+def fill_size(g, image):
+    """Megabytes the required volumes of game `g` filled from `image` hold
+    together: about what downloading that image costs."""
+    return sum(v["fill"].get("size_mb", 0) for v in g.get("volumes", [])
+               if v.get("required") and isinstance(v.get("fill"), dict)
+               and v["fill"].get("image") == image)
+
+
+def _docker_argv(docker):
+    return [docker] if isinstance(docker, str) else list(docker)
+
+
+def _call(dock, args, timeout=LOOK_TIMEOUT):
+    """(exit code, stdout, stderr) of one docker command; never raises."""
+    try:
+        r = subprocess.run(dock + list(args), stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=timeout)
+    except OSError as exc:
+        return 127, "", str(exc)
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out after %d seconds" % timeout
+    return (r.returncode, r.stdout.decode("utf-8", "replace"),
+            r.stderr.decode("utf-8", "replace"))
+
+
+def _last_line(text):
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    return lines[-1] if lines else "no message"
+
+
+def docker_trouble(text):
+    """A plain sentence for the failures anyone can fix (no Docker, a full
+    disk), else None."""
+    t = (text or "").lower()
+    if "no space left on device" in t or "not enough space" in t or "disk quota" in t:
+        return ("There is not enough free disk space for it. Free some space (on Docker "
+                "Desktop, or give Docker more in its Settings, Resources), then try again.")
+    if ("cannot connect to the docker daemon" in t or "error during connect" in t
+            or "is the docker daemon running" in t or "docker desktop is not running" in t
+            or "the system cannot find the file specified" in t and "pipe" in t):
+        return "Docker is not running. Start it, then try again."
+    return None
+
+
+def pull_trouble(text, image):
+    """Why a download failed, as a sentence."""
+    plain = docker_trouble(text)
+    if plain:
+        return plain
+    t = (text or "").lower()
+    host = image.split("/", 1)[0] if "/" in image and ("." in image.split("/", 1)[0]
+                                                       or ":" in image.split("/", 1)[0]) \
+        else "Docker Hub"
+    if any(s in t for s in ("denied", "unauthorized", "manifest unknown", "not found",
+                            "no such image", "does not exist")):
+        return ("The download was refused: the image %s is not available (the game's "
+                "catalog entry may name one that has moved)." % image)
+    if any(s in t for s in ("timeout", "timed out", "no such host", "dial tcp", "tls handshake",
+                            "connection refused", "network is unreachable", "lookup ",
+                            "connection reset", "unexpected eof")):
+        return ("This computer could not reach %s. Check its internet connection, then try "
+                "again." % host)
+    return "Docker said: %s" % _last_line(text)
+
+
+def _look(dock, name, image):
+    """(file names at the top of volume `name`, None) or (None, why). The
+    volume is mounted read only with volume-nocopy, so looking never fills
+    it."""
+    mount = "type=volume,source=%s,target=%s,readonly,volume-nocopy" % (name, _LOOK)
+    rc, out, err = _call(dock, ["run", "--rm", "--network", "none", "--mount", mount,
+                                image, "ls", "-A", _LOOK])
+    if rc != 0:
+        return None, docker_trouble(err) or "Docker could not look inside it: %s" % _last_line(err)
+    return [l.strip() for l in out.splitlines() if l.strip()], None
+
+
+def ensure_volumes(catalog, keys, docker=None, say=None):
+    """Create and fill the required volumes with a "fill" block of the games
+    in `keys`. A volume that is missing is created, one that exists but is
+    empty is filled, one that holds files is left alone. Returns one result
+    per volume: {"game", "volume", "state": "present" | "filled" | "failed",
+    "files", "why"}. `say` gets the progress lines (default print)."""
+    if say is None:
+        def say(text):
+            print(text, flush=True)
+    if docker is None:
+        docker = shutil.which("docker")
+        if not docker:
+            raise StackError("Docker is not installed (there is no docker command), so the "
+                             "games' data cannot be set up.")
+    dock = _docker_argv(docker)
+    results = []
+    images = {}          # image -> None once present here, or why it could not be
+    for k in ordered(keys, catalog):
+        g = catalog[k]
+        for vol in g.get("volumes", []):
+            if vol.get("required") and vol.get("fill") is not None:
+                results.append(_ensure_volume(g, vol, dock, images, say))
+    if not results:
+        say("No data to set up for %s." % (", ".join(catalog[k]["name"] for k in keys)
+                                          if keys else "the core"))
+    return results
+
+
+def _ensure_volume(g, vol, dock, images, say):
+    name = vol.get("name")
+    res = {"game": g["key"], "volume": name, "state": "failed", "files": 0, "why": ""}
+
+    def fail(why):
+        res["why"] = why
+        say("%s: not set up. %s" % (name, why))
+        return res
+
+    why = fill_problem(vol)
+    if why:
+        return fail("The game's catalog entry cannot be used: %s." % why)
+    f = vol["fill"]
+    image, what = f["image"], "the %s for %s" % (f.get("what", "data"), g["name"])
+    rc, _, err = _call(dock, ["volume", "inspect", name])
+    exists = rc == 0
+    if not exists and not re.search(r"no such volume|not found", err, re.I):
+        return fail(docker_trouble(err) or "Docker said: %s" % _last_line(err))
+    if image not in images:
+        rc, _, err = _call(dock, ["image", "inspect", image])
+        if rc == 0:
+            images[image] = None
+        elif docker_trouble(err):
+            images[image] = docker_trouble(err)
+        else:
+            say("Downloading %s: about %d MB, only this once. This can take a while..."
+                % (what, fill_size(g, image)))
+            rc, out, err = _call(dock, ["pull", image], timeout=PULL_TIMEOUT)
+            images[image] = None if rc == 0 else \
+                "Downloading %s failed. %s" % (what, pull_trouble(err + "\n" + out, image))
+    if images[image]:
+        return fail(images[image])
+    if exists:
+        files, why = _look(dock, name, image)
+        if why:
+            return fail(why)
+        if files:
+            res.update(state="present", files=len(files))
+            if not any(fnmatch.fnmatch(x, f["expect"]) for x in files):
+                say("%s: %d files, none of them %s; it was left as it is. If the game fails "
+                    "to start, remove that volume and set it up again." % (name, len(files),
+                                                                          f["expect"]))
+            else:
+                say("%s: %d files, already in place." % (name, len(files)))
+            return res
+    else:
+        rc, _, err = _call(dock, ["volume", "create", "--label", "org.openlobby.game=" + g["key"],
+                                  "--label", "org.openlobby.fill=" + image, name])
+        if rc != 0:
+            return fail(docker_trouble(err) or "Docker could not create it: %s" % _last_line(err))
+    say("Copying %s into %s..." % (what, name))
+    rc, _, err = _call(dock, ["run", "--rm", "--network", "none", "-v", "%s:%s" % (name, f["path"]),
+                              image, "true"], timeout=FILL_TIMEOUT)
+    if rc != 0:
+        return fail(docker_trouble(err) or "Docker could not copy the files: %s" % _last_line(err))
+    files, why = _look(dock, name, image)
+    if why:
+        return fail(why)
+    if not any(fnmatch.fnmatch(x, f["expect"]) for x in files):
+        return fail("It holds %d files after the copy and none of them is %s, so %s does not "
+                    "hold them at %s any more." % (len(files), f["expect"], image, f["path"]))
+    res.update(state="filled", files=len(files))
+    say("%s: %d files, ready." % (name, len(files)))
+    return res
 
 
 # -------------------------------------------------------------- commands
@@ -605,9 +848,40 @@ def cmd_compose(catalog, args):
     return 0
 
 
+def cmd_volumes(catalog, args):
+    """volumes [KEYS|--all] [--report FILE]: create and fill the data volumes
+    of the named games (the enabled ones by default). --report writes the
+    results as JSON for the deployer. Exit 1 when one could not be set up."""
+    args = list(args)
+    report = None
+    if "--report" in args:
+        i = args.index("--report")
+        if i + 1 >= len(args):
+            raise StackError("--report needs a file name")
+        report = args[i + 1]
+        del args[i:i + 2]
+    named = [a for a in args if a != "--all"]
+    if "--all" in args:
+        keys = [g["key"] for g in games_of(catalog)]
+    elif named:
+        keys = ordered(parse_keys(named, catalog), catalog)
+    else:
+        keys = enabled(catalog)
+    results = ensure_volumes(catalog, keys)
+    failed = [r for r in results if r["state"] == "failed"]
+    if report:
+        with open(report, "w", encoding="utf-8") as f:
+            json.dump({"ok": not failed, "volumes": results}, f, indent=1)
+    if failed:
+        print("stack.py: some game data could not be set up (the lines above say why); "
+              "the games that need it will not start until it is. Run this again to retry.",
+              file=sys.stderr, flush=True)
+    return 1 if failed else 0
+
+
 COMMANDS = {"list": cmd_list, "add": cmd_add, "enable": cmd_enable,
             "disable": cmd_disable, "check": cmd_check, "ps": cmd_ps,
-            "compose": cmd_compose}
+            "compose": cmd_compose, "volumes": cmd_volumes}
 
 
 def main(argv=None):

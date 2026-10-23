@@ -65,6 +65,7 @@ STEPS = {
     "Getting OpenLobby": "Getting OpenLobby",
     "Who will play on this server?": None,
     "Settings (.env)": "Writing the settings",
+    "Game data": "Getting the games' data (the first time can download several hundred MB)",
     "Starting the stack": "Starting OpenLobby (the first start downloads it, a few minutes)",
     "Admin panel password": "Setting the admin panel's password",
     "Checking the setup (tools/doctor.py)": "Checking the setup",
@@ -752,15 +753,23 @@ def follow(proc, log):
             time.sleep(0.3)
 
 
+#: the script steps whose every line is shown, not only their heading and warnings
+SHOW_ALL = {"Game data"}
+_current = {"step": None}
+
+
 def show_line(line):
     if line.startswith("== "):
         title = line[3:].strip()
+        _current["step"] = title
         shown = STEPS.get(title, title)
         if shown:
             step(shown)
     elif re.match(r"^(Warning|WARNING): ", line):
         say("    Note: " + line.split(": ", 1)[1])
     elif line.startswith("Dry run:") or line.startswith("  would run"):
+        say("    " + line.strip())
+    elif _current["step"] in SHOW_ALL and line.strip():
         say("    " + line.strip())
 
 

@@ -751,6 +751,37 @@ class Runner:
                                 "would recreate the deployer mid-job; remove it from there."
                                 % src)
 
+    def fill_volumes(self, keys, catalog=None):
+        """Create and fill the data volumes of `keys` that the catalog says how
+        to fill (stack.py volumes), streaming its lines into the log, and keep
+        what failed for the games list. Games with none are skipped without a
+        word. Returns the failed results ({"volume", "why", ...})."""
+        catalog = catalog or self.catalog
+        keys = [k for k in keys if fillable(catalog, k)]
+        if not keys:
+            return []
+        report = os.path.join(self.cfg.state, "volumes-%s.json" % secrets.token_hex(6))
+        try:
+            rc = self.stack(["volumes", ",".join(keys), "--report", report])
+            try:
+                with open(report, encoding="utf-8") as f:
+                    results = json.load(f).get("volumes", [])
+            except (OSError, ValueError, AttributeError):
+                results = None
+        finally:
+            try:
+                os.remove(report)
+            except OSError:
+                pass
+        if results is None:
+            why = ("stack.py volumes stopped (exit %d) before it said what it did; the log has "
+                   "its output." % rc)
+            results = [{"game": k, "volume": v["name"], "state": "failed", "why": why}
+                       for k in keys for v in catalog[k].get("volumes", [])
+                       if v.get("required") and v.get("fill")]
+        record_fills(self.cfg.state, results)
+        return [x for x in results if x.get("state") == "failed"]
+
     def need_git(self):
         if not shutil.which("git"):
             raise JobFailed("git is not installed in the deployer image")
@@ -774,6 +805,69 @@ class Runner:
 
     def name(self, key):
         return self.catalog[key]["name"]
+
+
+def fillable(catalog, key):
+    """Whether game `key` has a required volume the catalog says how to fill."""
+    e = catalog.get(key) or {}
+    return any(v.get("required") and v.get("fill") for v in e.get("volumes", []))
+
+
+FILLS_FILE = "volume-fills.json"
+
+
+def read_fills(state):
+    """{volume: {"why", "when"}}: the volumes whose last automatic fill failed."""
+    try:
+        with open(os.path.join(state, FILLS_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_fills(state, results):
+    """Keep the failures of a fill run and forget the volumes it set up."""
+    fills = read_fills(state)
+    for x in results:
+        name = x.get("volume")
+        if not isinstance(name, str):
+            continue
+        if x.get("state") == "failed":
+            fills[name] = {"why": str(x.get("why") or "")[:600], "when": now_iso()}
+        else:
+            fills.pop(name, None)
+    path = os.path.join(state, FILLS_FILE)
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(fills, f)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+
+
+def fill_missing(failed):
+    """A failed fill as "missing" rows: what the panel shows, no button."""
+    return [{"path": "volume %s" % x.get("volume"), "item": x.get("volume"),
+             "hint": "Setting it up by itself failed: %s" % x.get("why", "")} for x in failed]
+
+
+def fill_sentence(name, failed):
+    s = "%s's data could not be set up: %s" % (name, failed[0].get("why", ""))
+    if len(failed) > 1 and any(x.get("why") != failed[0].get("why") for x in failed[1:]):
+        s += " (and %d more; the log has each)" % (len(failed) - 1)
+    return s
+
+
+def fill_note(entry, m, fills):
+    """A missing volume the deployer sets up by itself: when its last try
+    failed, the row says why (with the commands to do it by hand)."""
+    if m.get("source") == "docker volume" and m.get("fill"):
+        failed = fills.get(m.get("id"))
+        if failed:
+            entry["hint"] = "Setting it up by itself failed: %s By hand: %s" % (
+                failed.get("why", ""), m.get("tool", ""))
+    return entry
 
 
 def missing_entry(catalog, key, m, required=False):
@@ -809,7 +903,10 @@ def evaluate(catalog, report, done):
 def needs_sentence(name, req):
     m = req[0]
     path = m["path"]
-    if m.get("source") == "docker volume":
+    if m.get("source") == "docker volume" and m.get("fill"):
+        s = "%s's data (the volume %s) is not set up yet; turning the game on sets it up" % (
+            name, path[len("volume "):])
+    elif m.get("source") == "docker volume":
         s = "%s needs the docker volume %s: %s" % (name, path[len("volume "):], m.get("tool", ""))
     elif str(m.get("source", "")).startswith("none"):
         s = "%s needs generated files: %s (make them with %s)" % (name, path, m.get("tool", ""))
@@ -830,12 +927,20 @@ def act_install(r, key):
         raise JobFailed("Cloning %s failed; the log has git's message." % r.name(key), r.last_rc)
     if not os.path.isdir(r.checkout(key)):
         raise JobFailed("%s was not cloned to %s." % (r.name(key), r.checkout(key)))
+    failed = r.fill_volumes([key])
+    if failed:
+        return "failed", "%s is installed, but its data could not be set up: %s Turning it on " \
+            "tries again." % (r.name(key), failed[0].get("why", "")), fill_missing(failed)
     return evaluate(r.catalog, r.check_report([key]), "%s is installed; enable it to start it." % r.name(key))
 
 
 def act_enable(r, key):
     if not os.path.isdir(r.checkout(key)):
         raise JobFailed("%s is not installed; install it first." % r.name(key))
+    failed = r.fill_volumes([key])
+    if failed:
+        return "failed", "%s It was not turned on." % fill_sentence(r.name(key), failed), \
+            fill_missing(failed)
     state, summary, missing = evaluate(r.catalog, r.check_report([key]), "")
     if state != "ok":
         return state, summary + (". It was not enabled." if state == "needs_data" else ""), missing
@@ -871,12 +976,25 @@ def act_update(r, key):
         if key not in r.enabled():
             return evaluate(r.catalog, r.check_report([key]),
                             "%s is updated; it is not enabled, so nothing was restarted." % r.name(key))
+        # the update may have changed the volumes the game needs
+        failed = r.fill_volumes([key])
+        if failed:
+            return "failed", "%s It was updated but not restarted." % fill_sentence(r.name(key), failed), \
+                fill_missing(failed)
         state, summary, missing = evaluate(r.catalog, r.check_report([key]), "")
         if state != "ok":
             return state, summary + (". It was updated but not restarted." if state == "needs_data" else ""), missing
+        failed = []
+    else:
+        # the core's update brings the catalog: an enabled game may need a new volume
+        catalog = load_catalog(r.cfg.core)
+        failed = r.fill_volumes([k for k in r.enabled() if k in catalog], catalog)
     if r.cfg.ghcr:
         r.compose(["pull", "--ignore-buildable", "--ignore-pull-failures"], prebuild=False)
     r.up()
+    if failed:
+        return "failed", "%s is updated and restarted, but some game data could not be set " \
+            "up: %s" % (r.name(key), failed[0].get("why", "")), fill_missing(failed)
     if key == "core":
         return evaluate(r.catalog, r.check_report([]), "%s is updated and restarted." % r.name(key))
     return "ok", "%s is updated and restarted." % r.name(key), []
@@ -1371,6 +1489,7 @@ class Deployer:
         by_key = {x["key"]: x for x in report.get("games", [])}
         ps_ok = ps.get("ok") is True
         on = Runner(self.cfg, catalog, None).enabled()
+        fills = read_fills(self.cfg.state)
         games = []
         for key, e in sorted(catalog.items(), key=lambda kv: (kv[1].get("order", 0), kv[0])):
             if e["kind"] != "game":
@@ -1385,7 +1504,7 @@ class Deployer:
                 "running": psg.get("running") if ps_ok else None,
                 "services": psg.get("services", {}) if ps_ok else {},
                 "data_ok": c["data_ok"] if c and installed else None,
-                "missing": [missing_entry(catalog, key, m, required=True)
+                "missing": [fill_note(missing_entry(catalog, key, m, required=True), m, fills)
                             for m in (c or {}).get("missing", [])],
                 "admin_env": (["POL_ADMIN_GAME_%s_URL" % mod.upper(),
                                "POL_ADMIN_GAME_%s_TOKEN" % mod.upper()] if mod else []),

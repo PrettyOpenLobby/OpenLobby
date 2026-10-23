@@ -51,6 +51,7 @@ python tools/stack.py disable jan
 python tools/stack.py check                checkouts, data files and volumes of the enabled games
 python tools/stack.py check --json --all   the same for every game in the catalog, as JSON
 python tools/stack.py ps                   which games have running containers (--json too)
+python tools/stack.py volumes              set up the data volumes of the enabled games (ffxi, --all)
 python tools/stack.py compose up -d --build
 python tools/stack.py compose --dry-run up -d --build
 python tools/stack.py compose --ghcr up -d
@@ -85,6 +86,40 @@ stays in the database and volumes.
 `stack.py check` exits non-zero when an enabled game is missing its
 checkout, a compose file, a required data file or a required volume, and
 warns about optional data and missing `.env` files.
+
+### Volumes
+
+Some games keep data that comes from a published image in an external
+Docker volume (FFXI's maps, about 570 MB, from LandSandBoat's ximeshes
+image). External means `docker compose down -v` never removes it. Nobody
+has to make these by hand: `stack.py volumes` does it, and the admin
+panel's deployer and the setup scripts run it for you before they start a
+game.
+
+```
+python tools/stack.py volumes              the enabled games
+python tools/stack.py volumes ffxi         one game, enabled or not
+python tools/stack.py volumes --all        every game in the catalog
+```
+
+For each required volume whose catalog entry has a `fill` block it
+
+- creates the volume when it is missing, labelled `org.openlobby.game=<key>`;
+- downloads the image the first time (`docker pull`), saying how big it is;
+- fills an empty volume by running `docker run --rm -v <name>:<path> <image> true`,
+  since Docker copies an image's files into an empty volume the first time
+  a container mounts it there;
+- counts the files (a read-only look that cannot fill anything) and prints
+  `lsb_ximeshes: 299 files, ready.`
+
+A volume that already holds files is left as it is and never written to,
+so running it again costs a second or two. When something goes wrong it
+says why in a sentence (no internet, the disk full, Docker not running)
+and exits 1. Every docker call is an argument list built from the catalog,
+and `stack.py` refuses a `fill` block whose image, path or file pattern
+does not look like one before anything runs.
+
+The catalog's `setup` lines stay the way to do the same by hand.
 
 ## Deploying games from the admin panel
 
@@ -204,7 +239,7 @@ alone.
 | Front Mission Online | `fmo` | 4 | PC, PS2 | cipher tables (no client needed; the published image has them) | `tools/gen_blowfish_tables.py` | the image does not build |
 | | | | | game tables (`services/fmodata/`) | `tools/fmodata_build.py --client <install>` | runs with gaps |
 | Dirge of Cerberus | `doc` | 10 | PS2 (Japanese disc) | arena data (optional) | `tools/doc_extract_arena.py <game data>` | missions have no enemy spawns |
-| FFXI | `ffxi` | 1 | PC, PS2 | nothing; two mesh volumes from LandSandBoat's image | the `docker volume create` and `docker run` lines in its README | the map server does not start |
+| FFXI | `ffxi` | 1 | PC, PS2 | nothing; two mesh volumes from LandSandBoat's image, set up by the panel, the setup scripts or `stack.py volumes ffxi` | by hand: the `docker volume create` and `docker run` lines in its README | the map server does not start |
 
 Each tool runs on the host, in that game's checkout, with Python 3.10 or
 newer. `stack.py check` reports which of these are present.
@@ -252,7 +287,7 @@ are relative to the game's checkout.
 | `profiles` | object | Optional services by compose profile, `{"board": ["tmboard"]}`. |
 | `env` | list | Settings its compose files read: `name`, `default` (an empty string where the default is in the code), `description`. |
 | `data` | list | Files to produce from your own copy: `id`, `description`, `source`, `tool`, `paths` (glob patterns; empty when the result is not in the checkout), `required`, and `build_only` (needed only when building, not with published images). |
-| `volumes` | list | External Docker volumes to create first: `name`, `description`, `required`, `setup` (the commands). |
+| `volumes` | list | External Docker volumes to create first: `name`, `description`, `required`, `setup` (the commands to make it by hand), and `fill` when `stack.py volumes` can make it: `image` (the image whose files fill it), `path` (the absolute path of those files in the image), `expect` (a file name pattern the filled volume must hold, such as `*.ximesh`), `size_mb` (about how big the data is) and `what` (a short phrase for the messages, such as `map data`). See "Volumes" above. |
 | `ports` | list | Published ports: `port` (a number or a range, as a string), `protocol`, `service`, `host` (the bind address), and `profile` when the service is optional. |
 | `admin_module` | string or null | The admin panel module for the game (a module key in `services/adminmodules/`, which also names the `game.<key>` permissions and the `POL_ADMIN_GAME_<KEY>_URL` setting; see `docs/admin-modules.md`), or null when the game has none. An installed game whose module is enabled shows up in the panel's Games page. |
 | `notes` | string | Anything else a person installing it should know. |

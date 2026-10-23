@@ -116,7 +116,11 @@ What it does, in order:
    `docker compose --profile deployer up -d deployer`, and waits up to three
    minutes for every service to report healthy. When games are enabled in
    `.games`, it starts them through `python3 tools/stack.py compose` instead,
-   so their title plugins stay in `login`.
+   so their title plugins stay in `login`, and before that runs
+   `python3 tools/stack.py volumes`, which creates and fills the data
+   volumes those games need (FFXI's maps, a download of about 570 MB the
+   first time; `docs/games.md`, "Volumes"). When that fails the script says
+   why and starts the rest anyway.
 10. It sets the admin panel's password. It asks
     `docker compose exec -T admin python admin.py --show-admin` whether one
     is stored; if not, it generates 20 letters and digits and passes them on
@@ -132,7 +136,8 @@ What it does, in order:
     add games (on the admin panel, Settings > Install games); and the ports
     to open for your case (`docs/ports.md`).
 
-The script never stops or removes containers and never deletes a volume.
+The script never stops or removes containers and never deletes a volume
+(nor writes into one that already holds files).
 
 ### Who plays
 
