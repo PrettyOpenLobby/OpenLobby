@@ -819,6 +819,16 @@
     .upd-changes li .s { min-width: 0; overflow-wrap: anywhere; }
     @media (max-width: 560px) { .pair-code { font-size: 28px; } .upd-changes li { flex-direction: column; gap: 0; } }
     #ovAttention li.upd-note .t1 b { color: var(--accent); }
+    /* Install games > Update channel (games.js) */
+    .pill.dev { background: rgba(229,166,62,.16); color: var(--warn); }
+    .chan-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 4px 0 10px; }
+    .chan-top .seg button { padding: 6px 16px; font-size: 13px; }
+    .chan-warn { color: var(--bad); }
+    .chan-img { font-size: 12.5px; }
+    #chanBody td { vertical-align: top; }
+    #chanGaps code { white-space: nowrap; }
+    .chan-what { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .chan-src { margin-top: 10px; }
     .perm-edit { display: flex; flex-direction: column; gap: 8px; }
     .perm-edit label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
     .perm-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -1974,6 +1984,39 @@
       <div class="panel" id="deployOff" hidden>
         <h2>Install games</h2>
         <p class="hint" id="deployWhy"></p>
+      </div>
+      <!-- Update channel: stable, or the dev builds with an access code (games.js, docs/deployer.md "Dev channel"). -->
+      <div class="panel" id="chanPanel" hidden>
+        <h2>Update channel <span class="pill env" id="chanPill">Stable</span></h2>
+        <div class="chan-top">
+          <div class="seg" id="chanSeg" role="group" aria-label="Update channel">
+            <button type="button" data-chan="stable">Stable</button><button type="button" data-chan="dev">Dev</button>
+          </div>
+          <button class="ghost sm" id="chanNewCode" hidden>Enter a new access code</button>
+        </div>
+        <p class="hint" id="chanHint"></p>
+        <p class="hint chan-warn" id="chanWarn" hidden></p>
+        <div class="ga-box" id="chanForm" hidden>
+          <h3>Switch to Dev</h3>
+          <p class="hint" style="margin-top:0">The developers give you a registry and an access code. The panel
+            hands the code to the deployer, which checks it with the registry and keeps it; it is not stored
+            here and never shown again. Switching pulls the dev images and restarts what runs them.</p>
+          <div class="row">
+            <div style="flex:2 1 240px"><label for="chanReg">Dev registry</label>
+              <input type="text" id="chanReg" class="mono" maxlength="300" autocomplete="off" spellcheck="false" placeholder="registry.example.org/team"></div>
+            <div style="flex:2 1 220px"><label for="chanCode">Access code</label>
+              <input type="password" id="chanCode" class="mono" maxlength="512" autocomplete="off" spellcheck="false"></div>
+          </div>
+          <div class="ga-result bad" id="chanResult" role="alert" hidden></div>
+          <div class="toolbar" style="margin-top:12px">
+            <button class="act sm" id="chanGo">Switch to Dev</button>
+            <button class="ghost sm" id="chanCancel">Cancel</button>
+          </div>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Runs</th><th>Stable image</th>
+          <th>On Dev</th><th>Source</th></tr></thead><tbody id="chanBody"></tbody></table></div>
+        <p class="hint chan-src" id="chanGaps" hidden></p>
+        <p class="hint chan-src" id="chanSource" hidden></p>
       </div>
       <div class="panel upd-panel" id="updDeploy" hidden></div>
       <div class="panel" id="deployPanel" hidden>

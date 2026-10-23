@@ -2452,6 +2452,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(*admindeploy.browse(q.get("path", [""])[0]))
         if path == "/api/deploy/uploads":
             return self._send(*admindeploy.uploads())
+        if path == "/api/deploy/channel":
+            return self._send(*admindeploy.channel())
         # update notices (adminupdates.py) and a pairing code's state: owner only, as above
         if path == "/api/updates":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -2708,6 +2710,21 @@ class Handler(BaseHTTPRequestHandler):
                    if body.get("region") else None,
                    detail=dict({k: body.get(k) for k in ("to", "version", "source") if body.get(k)}, job=out.get("job")),
                    ok=status == 202, addr=self._addr())
+            return self._send(status, out)
+        if path == "/api/deploy/channel":
+            # The access code goes to the deployer only. This path is not in _AUDIT_ACTIONS on
+            # purpose: the automatic audit would make a body's "code" the row's target.
+            body = self._json_body()
+            status, out = admindeploy.set_channel(body)
+            user, role, _p = self._caller()
+            want = "dev" if body.get("channel") == "dev" else "stable"
+            detail = {"job": out.get("job")}
+            if status != 202:
+                detail["error"] = str(out.get("error") or "")[:300]
+            _audit(user, role, ("switched to the %s channel" if status == 202 else
+                                "tried to switch to the %s channel") % want,
+                   detail=detail, ok=status == 202, addr=self._addr())
+            self._jb = {}
             return self._send(status, out)
         if path == "/api/deploy/upload/delete":
             body = self._json_body()

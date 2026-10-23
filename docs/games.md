@@ -283,6 +283,7 @@ are relative to the game's checkout.
 | `env_example` | string | The settings template to copy to `.env`. |
 | `title` | object or null | The title plugin: `module` (its `POL_TITLES` name), `compose` (the file that swaps it into `login` and `authsess`), `image` (the local tag it builds), `ghcr_image` and `ghcr_tag_var` (the published title image and its version variable, or null). |
 | `images` | list | Images the game builds: `name`, `context` and `dockerfile` (relative to the checkout), `ghcr` and `tag_var` (or null). |
+| `dev` | list, optional | The dev channel's builds that replace a stable image: `replaces` (the stable image, no tag), `image` and `tag` (its name under the dev registry), `services` (every service that runs it), `source` (its repository under the dev source address), `license`, `what` and `back`. See docs/deployer.md, "Dev channel". |
 | `services` | list | Services the game adds (beyond `login` and `authsess`). |
 | `profiles` | object | Optional services by compose profile, `{"board": ["tmboard"]}`. |
 | `env` | list | Settings its compose files read: `name`, `default` (an empty string where the default is in the code), `description`. |

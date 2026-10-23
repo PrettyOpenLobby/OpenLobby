@@ -7,6 +7,10 @@ API and how to run it.
     python deployer.py                 serve (settings from the environment)
     python deployer.py --healthcheck   exit 0 when the local server answers (and
                                        Docker sees the checkouts where it does)
+    python deployer.py --channel dev [--registry HOST/PATH]
+                                       switch the running deployer to the dev channel,
+                                       the access code read from stdin (setup scripts)
+    python deployer.py --channel stable
 
 It is the only container that holds the Docker socket, so it accepts
 nothing but a fixed set of actions on game keys from the catalog, each run
@@ -26,10 +30,16 @@ Settings (environment, or the options of the same meaning):
     POL_DEPLOY_UPLOAD_MAX  the most an upload may hold, unpacked (default 8G)
     POL_DEPLOY_GITHUB_API  the GitHub API the update check asks (default
                          https://api.github.com; tests point it at a stand-in)
+    POL_DEV_REGISTRY     the dev channel's registry, host/path (no default: the panel
+                         then asks for it with the access code)
+    POL_DEV_SOURCE       where the dev images' source is (default https://<registry>)
+    POL_DEV_USER         the user name a bare access code signs in under (default dev)
+    POL_DEV_REGISTRY_HTTP  1: the registry speaks plain http (tests, a registry on the LAN)
 
 Standard library only.
 """
 import argparse
+import getpass
 import glob
 import hashlib
 import hmac
@@ -52,6 +62,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import clientdata  # noqa: E402
+import devchannel  # noqa: E402
 import updatecheck  # noqa: E402
 
 VERSION = "2.0"
@@ -131,6 +142,12 @@ class Config:
         # (check_paths): "ok", "wrong" or "unchecked", and the sentence for it
         self.paths = "unchecked"
         self.paths_note = "not checked"
+        # the dev channel (docs/deployer.md, "Dev channel"); the code itself is in
+        # STATE/channel, never in the environment
+        self.dev_registry = None
+        self.dev_source = None
+        self.dev_user = devchannel.DEFAULT_USER
+        self.dev_scheme = "https"
 
 
 def parse_args(argv):
@@ -168,6 +185,11 @@ def parse_args(argv):
     ap.add_argument("--healthcheck", action="store_true",
                     help="ask the local server for /api/health and exit 0 if it answers and "
                          "Docker sees the checkouts where the deployer does")
+    ap.add_argument("--channel", choices=devchannel.CHANNELS,
+                    help="ask the running deployer to switch channel; for dev the access code "
+                         "is read from stdin (a hidden prompt on a terminal)")
+    ap.add_argument("--registry", default="",
+                    help="with --channel dev: the dev registry (default POL_DEV_REGISTRY)")
     return ap.parse_args(argv)
 
 
@@ -218,6 +240,24 @@ def make_config(args):
             say("POL_DEPLOY_GITHUB_API must be an http(s) URL (got %r)" % api)
             sys.exit(2)
         cfg.github_api = api.rstrip("/")
+    reg = os.environ.get("POL_DEV_REGISTRY", "").strip()
+    if reg:
+        if devchannel.REGISTRY.match(reg):
+            cfg.dev_registry = reg
+        else:
+            say("POL_DEV_REGISTRY must look like registry.example.org/team (got %r); the panel "
+                "asks for the registry instead" % reg)
+    src = os.environ.get("POL_DEV_SOURCE", "").strip()
+    if src:
+        if devchannel.SOURCE.match(src):
+            cfg.dev_source = src.rstrip("/")
+        else:
+            say("POL_DEV_SOURCE must be an http(s) URL (got %r); ignored" % src)
+    user = os.environ.get("POL_DEV_USER", "").strip()
+    if user and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user):
+        cfg.dev_user = user
+    if truthy(os.environ.get("POL_DEV_REGISTRY_HTTP")):
+        cfg.dev_scheme = "http"
     clients = args.clients.strip()
     if clients:
         if not os.path.isabs(clients):
@@ -578,17 +618,26 @@ def public(job):
 
 
 class JobLog:
-    """Appends to a job's log, with the token blanked out and the file kept
-    under LOG_CAP by dropping its head."""
+    """Appends to a job's log, with the token and any access code blanked out
+    and the file kept under LOG_CAP by dropping its head."""
 
-    def __init__(self, store, job, token):
+    def __init__(self, store, job, token, secrets=()):
         self.store, self.job, self.token = store, job, token.encode("utf-8")
+        self.secrets = []
+        for sec in secrets:
+            if sec:
+                self.secrets.append(sec.encode("utf-8"))
+                # a "name:secret" code: its secret part alone as well
+                if ":" in sec and sec.split(":", 1)[1]:
+                    self.secrets.append(sec.split(":", 1)[1].encode("utf-8"))
         self.path = store.log_path(job["id"])
 
     def write(self, text):
         data = text.encode("utf-8", "replace") if isinstance(text, str) else text
         if self.token:
             data = data.replace(self.token, b"[token]")
+        for sec in self.secrets:
+            data = data.replace(sec, b"[access code]")
         with open(self.path, "ab") as f:
             f.write(data)
             size = f.tell()
@@ -628,12 +677,21 @@ class Runner:
     def __init__(self, cfg, catalog, log):
         self.cfg, self.catalog, self.log = cfg, catalog, log
         self.last_rc = None
+        self.channel = devchannel.read_channel(cfg.core)
+        self.chstore = devchannel.Store(cfg.state)
+
+    def dev(self):
+        return self.channel.get("channel") == "dev"
 
     def child_env(self, as_owner=False):
         env = {k: v for k, v in os.environ.items()
                if k != "POL_DEPLOYER_TOKEN" and v != self.cfg.token}
         if as_owner:
             env["HOME"] = "/tmp"
+        # on the dev channel every docker command signs in with the deployer's own
+        # client config (STATE/channel/docker), never the host's
+        if self.dev() and os.path.isdir(self.chstore.docker_dir):
+            env["DOCKER_CONFIG"] = self.chstore.docker_dir
         return env
 
     def show(self, argv):
@@ -785,6 +843,65 @@ class Runner:
     def need_git(self):
         if not shutil.which("git"):
             raise JobFailed("git is not installed in the deployer image")
+
+    # ---- the dev channel
+
+    def dev_rows(self, keys=None):
+        """The image rows of the core and `keys` (the enabled games by default) on the
+        channel this job started on."""
+        keys = [k for k in self.enabled() if k in self.catalog] if keys is None else keys
+        return devchannel.image_rows(self.catalog, self.channel, self.cfg.ghcr, keys=keys)
+
+    def dev_gate(self, strict):
+        """On the dev channel, before anything pulls: the stored access code must still
+        read the dev images this stack runs. A refused code fails the job with the
+        sentence the panel shows; a registry that does not answer fails it only when
+        `strict` (an update), else the job goes on with the images it has."""
+        if not self.dev():
+            return
+        code = self.chstore.code()
+        if not code:
+            raise JobFailed(devchannel.NO_CODE)
+        res = devchannel.check_access(self.channel["registry"], code,
+                                      devchannel.probes_of(self.dev_rows()),
+                                      scheme=self.cfg.dev_scheme, user=self.cfg.dev_user)
+        host = devchannel.registry_host(self.channel["registry"])
+        if res["state"] == "ok":
+            self.log.line("dev channel: the access code still reads %s" % host)
+            return
+        self.log.line("dev channel: %s" % res["why"])
+        if res["state"] in ("wrong", "denied"):
+            raise JobFailed(devchannel.REVOKED)
+        if strict:
+            raise JobFailed("%s Nothing was updated." % res["why"])
+        self.log.line("WARN the job goes on with the images this host already has")
+
+    def docker_login(self, host, user, secret):
+        """docker login to the dev registry into the deployer's own client config, the
+        secret on stdin: never in an argument, the environment or the log."""
+        argv = self.cfg.docker + ["login", "--username", user, "--password-stdin", host]
+        self.log.line("$ " + self.show(argv))
+        env = self.child_env()
+        env["DOCKER_CONFIG"] = self.chstore.docker_config()
+        try:
+            r = subprocess.run(argv, cwd=self.cfg.core, env=env, input=(secret + "\n").encode("utf-8"),
+                               capture_output=True, timeout=120)
+        except FileNotFoundError:
+            raise JobFailed("docker is not installed in the deployer image")
+        except subprocess.TimeoutExpired:
+            raise JobFailed("docker login did not finish within 120 seconds")
+        self.log.write(r.stdout + r.stderr)
+        self.log.line("(exit %d)" % r.returncode)
+        self.last_rc = r.returncode
+        return r.returncode
+
+    def docker_logout(self, host):
+        if not os.path.isdir(self.chstore.docker_dir):
+            return 0
+        argv = self.cfg.docker + ["logout", host]
+        env = self.child_env()
+        env["DOCKER_CONFIG"] = self.chstore.docker_dir
+        return self.run(argv, env=env, kw={})
 
     def enabled(self):
         path = os.path.join(self.cfg.core, ".games")
@@ -944,6 +1061,7 @@ def act_enable(r, key):
     state, summary, missing = evaluate(r.catalog, r.check_report([key]), "")
     if state != "ok":
         return state, summary + (". It was not enabled." if state == "needs_data" else ""), missing
+    r.dev_gate(strict=False)
     if r.stack(["enable", key], owner=r.cfg.core) != 0:
         raise JobFailed("stack.py enable %s failed; the log has its message." % key, r.last_rc)
     r.up()
@@ -963,6 +1081,7 @@ def act_update(r, key):
     if not os.path.isdir(d):
         raise JobFailed("%s is not installed; install it first." % r.name(key))
     r.need_git()
+    r.dev_gate(strict=True)
     rc, out = r.capture(["git", "-C", d, "status", "--porcelain", "--untracked-files=no"], owner=d)
     if rc != 0:
         raise JobFailed("%s is not a git checkout, so it cannot be updated from here." % rel, rc)
@@ -989,7 +1108,9 @@ def act_update(r, key):
         # the core's update brings the catalog: an enabled game may need a new volume
         catalog = load_catalog(r.cfg.core)
         failed = r.fill_volumes([k for k in r.enabled() if k in catalog], catalog)
-    if r.cfg.ghcr:
+    if r.cfg.ghcr or r.dev():
+        # on the dev channel a dev image keeps its tag while it moves, so it is pulled
+        # even when the rest is built here
         r.compose(["pull", "--ignore-buildable", "--ignore-pull-failures"], prebuild=False)
     r.up()
     if failed:
@@ -1084,6 +1205,60 @@ def act_import(r, key, job):
     return "ok", "Imported %s's %s. %s%s" % (r.name(key), what, then, note), []
 
 
+def act_channel(r, job, code):
+    """Switch the stack to the dev channel (sign in, write .channel, pull, restart) or
+    back to stable (write .channel, sign out, forget the code, pull, restart)."""
+    want, reg = job.get("channel"), job.get("registry")
+    before = r.channel
+    if want == "dev":
+        if not code:
+            raise JobFailed("The access code did not reach the job; switch to Dev again.")
+        host = devchannel.registry_host(reg)
+        user, secret = devchannel.split_code(code, r.cfg.dev_user)
+        r.log.line("switching to the dev channel: registry %s, signing in as %s" % (reg, user))
+        if r.docker_login(host, user, secret) != 0:
+            raise JobFailed("Docker could not sign in to %s with the access code; the log has its "
+                            "message. Nothing was changed." % host, r.last_rc)
+        r.chstore.save_code(code)
+        args = ["channel", "dev", "--registry", reg]
+        if r.cfg.dev_source:
+            args += ["--source", r.cfg.dev_source]
+        if r.stack(args, owner=r.cfg.core) != 0:
+            raise JobFailed("stack.py channel dev failed; the log has its message.", r.last_rc)
+        r.channel = devchannel.read_channel(r.cfg.core)
+        if not r.dev():
+            raise JobFailed("stack.py did not record the dev channel in %s." % devchannel.CHANNEL_FILE)
+    else:
+        r.log.line("switching to the stable channel")
+        if r.stack(["channel", "stable"], owner=r.cfg.core) != 0:
+            raise JobFailed("stack.py channel stable failed; the log has its message.", r.last_rc)
+        if before.get("channel") == "dev":
+            r.docker_logout(devchannel.registry_host(before["registry"]))
+        r.chstore.forget()
+        r.log.line("the access code and the registry sign-in are removed")
+        r.channel = devchannel.read_channel(r.cfg.core)
+    rows = devchannel.image_rows(r.catalog, r.channel if want == "dev" else before, r.cfg.ghcr,
+                                 keys=[k for k in r.enabled() if k in r.catalog])
+    swapped = [x for x in rows if x["applies"] and x["dev"]]
+    r.compose(["pull", "--ignore-buildable", "--ignore-pull-failures"], prebuild=False)
+    r.up()
+    if want == "dev":
+        if not swapped:
+            return "ok", ("On the dev channel. Nothing this server runs has a dev build yet, so "
+                          "the published images stay; a game installed later follows its dev "
+                          "image when it has one."), []
+        return "ok", "On the dev channel: %s now run%s the dev image%s (%s)." % (
+            ", ".join(sorted(set(x["name"] for x in swapped))), "s" if len(swapped) == 1 else "",
+            "" if len(swapped) == 1 else "s", ", ".join(x["dev_image"] for x in swapped)), []
+    note = ""
+    backs = [d.get("back") for k in set(x["key"] for x in swapped)
+             for d in devchannel.dev_entries(r.catalog.get(k, {})) if isinstance(d.get("back"), str)]
+    if backs:
+        note = " " + " ".join(sorted(set(backs)))
+    return "ok", ("On the stable channel: the published images run again, and the access code "
+                  "is forgotten.%s" % note), []
+
+
 ACT = {"install": act_install, "enable": act_enable, "disable": act_disable,
        "update": act_update, "restart": act_restart, "check": act_check}
 
@@ -1172,9 +1347,11 @@ class Updates:
                 catalog = load_catalog(self.cfg.core)
                 have = self.installed(catalog)
                 vals = self.env_values(catalog, have)
+                dev = self.dev_state(catalog, have)
                 for key in have if keys is None else [k for k in have if k in keys]:
                     try:
                         it = self.check_one(key, catalog[key], vals, force, fetch)
+                        self.dev_one(it, key, dev)
                     except Exception as exc:  # one item's fault is its own
                         say("update check of %s: %s" % (key, traceback.format_exc()))
                         it = updatecheck.unknown(updatecheck.item(key, catalog[key]["name"]),
@@ -1215,11 +1392,74 @@ class Updates:
                 if key != "core":
                     it["module"] = catalog[key].get("admin_module")
             out.append(it)
-        ans = {"checked_at": checked, "checking": busy, "items": out}
+        ans = {"checked_at": checked, "checking": busy, "items": out,
+               "channel": devchannel.read_channel(self.cfg.core)["channel"]}
         if limited:
             ans["limited"] = True
             ans["retry_after"] = wait
         return ans
+
+    # ---- the dev channel
+
+    def dev_state(self, catalog, have):
+        """None on the stable channel; else the swapped rows of the installed items and
+        what the registry says of them (devchannel.check_access), asked once per check."""
+        ch = devchannel.read_channel(self.cfg.core)
+        if ch["channel"] != "dev":
+            return None
+        rows = [r for r in devchannel.image_rows(catalog, ch, self.cfg.ghcr, keys=have)
+                if r["applies"] and r["dev"]]
+        code = devchannel.Store(self.cfg.state).code()
+        if not rows:
+            res = {"state": "ok", "why": None, "digests": {}}
+        elif not code:
+            res = {"state": "nocode", "why": devchannel.NO_CODE, "digests": {}}
+        else:
+            res = devchannel.check_access(ch["registry"], code, devchannel.probes_of(rows),
+                                          scheme=self.cfg.dev_scheme, user=self.cfg.dev_user)
+            if res["state"] in ("wrong", "denied"):
+                res["why"] = devchannel.REVOKED
+        return {"rows": rows, "res": res}
+
+    def local_digests(self, ref):
+        """The registry digests (sha256:...) the image `ref` has on this host."""
+        env = {k: v for k, v in os.environ.items()
+               if k != "POL_DEPLOYER_TOKEN" and v != self.cfg.token}
+        try:
+            r = subprocess.run(self.cfg.docker + ["image", "inspect", ref], env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+            doc = json.loads(r.stdout.decode("utf-8", "replace")) if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            doc = None
+        if not isinstance(doc, list) or not doc or not isinstance(doc[0], dict):
+            return []
+        return [d.split("@", 1)[1] for d in doc[0].get("RepoDigests") or []
+                if isinstance(d, str) and "@" in d]
+
+    def dev_one(self, it, key, dev):
+        """Fold the dev images of item `key` into its update check: a dev image whose
+        registry digest this host does not have is an update."""
+        if not dev:
+            return
+        rows = [r for r in dev["rows"] if r["key"] == key]
+        if not rows:
+            return
+        it["channel"] = "dev"
+        res = dev["res"]
+        if res["state"] != "ok":
+            updatecheck.unknown(it, res["why"])
+            return
+        newer = [r for r in rows if res["digests"].get(r["dev_image"])
+                 and res["digests"][r["dev_image"]] not in self.local_digests(r["dev"])]
+        if not newer:
+            return
+        what = "A newer dev build is published: %s." % ", ".join(r["dev_image"] for r in newer)
+        if it["update"] == "available":
+            it["why"] = " ".join(x for x in (it.get("why"), what) if x)
+        else:
+            it.update(update="available", behind=None, changes=[], why=what)
+        it["how"] = ("Update it from Settings > Install games; the deployer pulls the dev images "
+                     "and restarts it.")
 
     # ---- one item
 
@@ -1352,6 +1592,7 @@ class Deployer:
         self.current = None
         self.current_game = None
         self.current_upload = None    # the upload the running import reads
+        self.secrets = {}             # job id -> the access code a channel job signs in with
         self.games_cache = (0.0, None)
         self.uploads = clientdata.Uploads(cfg.state)
         shutil.rmtree(os.path.join(cfg.state, "imports"), ignore_errors=True)
@@ -1365,8 +1606,9 @@ class Deployer:
     def expire_uploads(self):
         self.uploads.expire(keep=[self.current_upload] if self.current_upload else [])
 
-    def start(self, action, game, extra=None):
-        """(202, {"job"}) or (409, {"job": running id})."""
+    def start(self, action, game, extra=None, secret=None):
+        """(202, {"job"}) or (409, {"job": running id}). `secret` (an access code) is
+        handed to the job in memory; it is never part of the job's file."""
         upload = ((extra or {}).get("source") or {}).get("upload")
         with self.lock:
             if self.current:
@@ -1375,6 +1617,8 @@ class Deployer:
             self.current = job["id"]
             self.current_game = game
             self.current_upload = upload
+            if secret:
+                self.secrets[job["id"]] = secret
         if upload:
             self.uploads.touch(upload, now_iso())
         self.store.prune()
@@ -1425,15 +1669,20 @@ class Deployer:
                                            "_input": folder, "_input_root": root})
 
     def _run(self, job):
-        log = JobLog(self.store, job, self.cfg.token)
+        secret = self.secrets.pop(job["id"], None)
+        log = JobLog(self.store, job, self.cfg.token,
+                     secrets=[secret, devchannel.Store(self.cfg.state).code()])
         r = Runner(self.cfg, load_catalog(self.cfg.core), log)
         try:
             job["state"] = "running"
             job["started"] = now_iso()
             self.store.save(job)
-            log.line("deployer %s: %s %s%s" % (VERSION, job["action"], job["game"],
-                                                " (published images)" if self.cfg.ghcr else ""))
-            if job["action"] == "import":
+            log.line("deployer %s: %s %s%s%s" % (VERSION, job["action"], job["game"],
+                                                  " (published images)" if self.cfg.ghcr else "",
+                                                  ", dev channel" if r.dev() else ""))
+            if job["action"] == "channel":
+                state, summary, missing = act_channel(r, job, secret)
+            elif job["action"] == "import":
                 log.line("importing %s from %s" % (job["item"], json.dumps(job["source"])))
                 state, summary, missing = act_import(r, job["game"], job)
             else:
@@ -1457,6 +1706,8 @@ class Deployer:
         # counted as running before anyone can see the job finished
         if job["action"] in ("install", "update") and state in ("ok", "needs_data"):
             self.updates.kick(keys=[job["game"]], fetch=False)
+        elif job["action"] == "channel":
+            self.updates.kick(fetch=False)
         # one step, so whoever sees the job finished can start the next one
         with self.lock:
             try:
@@ -1515,6 +1766,7 @@ class Deployer:
                "core": {"running": ps["core"]["running"] if ps_ok else None,
                         "services": ps["core"].get("services", {}) if ps_ok else {}},
                "options": {"ghcr": self.cfg.ghcr,
+                           "channel": devchannel.read_channel(self.cfg.core)["channel"],
                            "problem": self.cfg.paths_note if self.cfg.paths == "wrong" else None}}
         if not report:
             out["error"] = "stack.py check did not answer; data_ok is unknown"
@@ -1523,6 +1775,65 @@ class Deployer:
         with self.lock:
             self.games_cache = (time.time(), out)
         return out
+
+    # ---- the dev channel (docs/deployer.md, "Dev channel")
+
+    def channel_info(self):
+        """GET /api/channel: the channel, its registry, and what each image of the core
+        and the installed games is on it. Never the access code."""
+        catalog = load_catalog(self.cfg.core)
+        ch = devchannel.read_channel(self.cfg.core)
+        installed = [k for k, e in catalog.items() if e["kind"] == "game"
+                     and os.path.isdir(os.path.join(self.cfg.root, e["checkout"]))]
+        on = Runner(self.cfg, catalog, None).enabled()
+        rows = devchannel.image_rows(catalog, ch, self.cfg.ghcr, keys=installed,
+                                     registry=self.cfg.dev_registry)
+        for row in rows:
+            row["enabled"] = row["key"] == "core" or row["key"] in on
+            row.pop("services", None)
+        dev = ch["channel"] == "dev"
+        return {"channel": ch["channel"], "registry": ch.get("registry"),
+                "source": ch.get("source") if dev else None, "since": ch.get("since"),
+                "registry_default": self.cfg.dev_registry,
+                "code_stored": bool(devchannel.Store(self.cfg.state).code()) if dev else False,
+                "ghcr": self.cfg.ghcr, "problem": ch.get("problem"), "images": rows}
+
+    def channel_request(self, body):
+        """POST /api/channel: (status, answer). {"channel": "dev", "code", "registry"?}
+        checks the code against the registry first and answers 400 with the sentence when
+        it does not read it; then, as {"channel": "stable"}, starts the channel job."""
+        want = body.get("channel")
+        if want not in devchannel.CHANNELS:
+            return 400, {"error": "channel must be stable or dev"}
+        if set(body) - {"channel", "code", "registry"}:
+            return 400, {"error": "unknown fields: %s" % ", ".join(sorted(set(body) - {
+                "channel", "code", "registry"}))}
+        if self.current:
+            return 409, {"job": self.current, "error": "another job is running"}
+        if want == "stable":
+            return self.start("channel", "core", {"channel": "stable"})
+        code = body.get("code")
+        code = code.strip() if isinstance(code, str) else ""
+        if not devchannel.CODE.match(code):
+            return 400, {"error": "The access code is 8 to 512 characters, with no spaces."}
+        reg = body.get("registry")
+        reg = (reg.strip() if isinstance(reg, str) else "") or self.cfg.dev_registry or ""
+        if not reg:
+            return 400, {"error": "No dev registry is set: give it with the code, or set "
+                                  "POL_DEV_REGISTRY for the deployer."}
+        if not devchannel.REGISTRY.match(reg):
+            return 400, {"error": "The dev registry must look like registry.example.org/team."}
+        catalog = load_catalog(self.cfg.core)
+        rows = devchannel.image_rows(catalog, {"channel": "dev", "registry": reg}, self.cfg.ghcr)
+        installed = set(Updates.installed(self.updates, catalog))
+        mine = [r for r in rows if r["key"] in installed]
+        probes = devchannel.probes_of(mine) or devchannel.probes_of(rows)[:1]
+        res = devchannel.check_access(reg, code, probes, scheme=self.cfg.dev_scheme,
+                                      user=self.cfg.dev_user)
+        if res["state"] != "ok":
+            say("dev channel: the access code was refused (%s)" % res["state"])
+            return (502 if res["state"] == "unreachable" else 400), {"error": res["why"]}
+        return self.start("channel", "core", {"channel": "dev", "registry": reg}, secret=code)
 
     def jobs(self, limit):
         jobs = self.store.all()
@@ -1578,6 +1889,8 @@ def make_handler(dep):
             if parts == ["api", "updates"]:
                 return self.send_json(200, dep.updates.answer(
                     truthy((q.get("refresh") or [""])[0])))
+            if parts == ["api", "channel"]:
+                return self.send_json(200, dep.channel_info())
             if parts == ["api", "jobs"]:
                 try:
                     limit = int((q.get("limit") or ["20"])[0])
@@ -1715,7 +2028,7 @@ def make_handler(dep):
             path = urllib.parse.urlsplit(self.path).path.rstrip("/")
             if path == "/api/uploads":
                 return self.upload()
-            if path != "/api/actions":
+            if path not in ("/api/actions", "/api/channel"):
                 return self.send_json(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length") or "0")
@@ -1729,6 +2042,8 @@ def make_handler(dep):
                 return self.send_json(400, {"error": "the body is not JSON"})
             if not isinstance(body, dict):
                 return self.send_json(400, {"error": "the body must be a JSON object"})
+            if path == "/api/channel":
+                return self.send_json(*dep.channel_request(body))
             action, game = body.get("action"), body.get("game")
             if action not in ACTIONS:
                 return self.send_json(400, {"error": "unknown action %r; one of %s"
@@ -1790,10 +2105,60 @@ def healthcheck(args):
     return 0 if h.get("ok") else 1
 
 
+def channel_cli(args):
+    """--channel: hand the running deployer a channel switch, as the panel does, and
+    follow the job. The access code comes from stdin (a hidden prompt on a terminal),
+    so it is in no argument; setup.sh runs this with docker compose exec -T."""
+    token = os.environ.get("POL_DEPLOYER_TOKEN", "").strip()
+    base = "http://127.0.0.1:%s" % (args.bind.rpartition(":")[2] or "8099")
+    hdrs = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    body = {"channel": args.channel}
+    if args.channel == "dev":
+        if sys.stdin.isatty():
+            code = getpass.getpass("Access code: ")
+        else:
+            code = sys.stdin.readline()
+        body["code"] = code.strip()
+        if args.registry.strip():
+            body["registry"] = args.registry.strip()
+
+    def call(method, path, data=None, timeout=60):
+        req = urllib.request.Request(base + path, method=method, headers=hdrs,
+                                     data=None if data is None else json.dumps(data).encode())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.load(e)
+            except ValueError:
+                return e.code, {}
+        except (OSError, ValueError) as exc:
+            return None, {"error": "the deployer is not answering (%s)" % exc}
+
+    code, out = call("POST", "/api/channel", body)
+    body.pop("code", None)
+    if code != 202:
+        print(out.get("error") or "the deployer answered HTTP %s" % code)
+        return 1
+    print("switching to the %s channel (job %s)..." % (args.channel, out["job"]), flush=True)
+    t = time.time()
+    while time.time() - t < 3 * 3600:
+        st, j = call("GET", "/api/jobs/" + out["job"])
+        if st == 200 and j.get("state") not in ACTIVE:
+            print(j.get("summary") or j.get("state"))
+            return 0 if j.get("state") == "ok" else 1
+        time.sleep(2)
+    print("the job is still running; Settings > Install games follows it")
+    return 1
+
+
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.healthcheck:
         return healthcheck(args)
+    if args.channel:
+        return channel_cli(args)
     cfg = make_config(args)
     cfg.paths, cfg.paths_note = check_paths(cfg, args.container or own_container())
     say(("paths: " if cfg.paths != "wrong" else "") + cfg.paths_note)
@@ -1805,10 +2170,12 @@ def main(argv=None):
     def stop(*_):
         threading.Thread(target=srv.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
-    say("version %s listening on %s:%d; checkouts in %s, core %s%s%s"
+    ch = devchannel.read_channel(cfg.core)
+    say("version %s listening on %s:%d; checkouts in %s, core %s%s%s%s"
         % (VERSION, cfg.host, srv.server_address[1], cfg.root, cfg.core,
            ", published images" if cfg.ghcr else "",
-           ", client folders in %s" % cfg.clients if cfg.clients else ""))
+           ", client folders in %s" % cfg.clients if cfg.clients else "",
+           ", dev channel (%s)" % ch["registry"] if ch["channel"] == "dev" else ""))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

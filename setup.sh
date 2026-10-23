@@ -37,6 +37,10 @@ local DEPLOYER="${OPENLOBBY_DEPLOYER:-}"
 local LOOKUP="${OPENLOBBY_LOOKUP_PUBLIC:-}"
 local INSTALL_OK="${OPENLOBBY_INSTALL_DOCKER:-}"
 local ADMIN_USER_OPT="${OPENLOBBY_ADMIN_USER:-}"
+local CHANNEL="${OPENLOBBY_CHANNEL:-}"
+local DEV_REGISTRY="${OPENLOBBY_DEV_REGISTRY:-}"
+local CODE_FILE="${OPENLOBBY_DEV_CODE_FILE:-}"
+local DEV_CODE=""
 local START=1
 local CHANGE_ADDRESS=""
 
@@ -69,6 +73,11 @@ panel's password. Running it again keeps the existing .env.
                         games (default: on; off with Docker Desktop unless
                         --deployer is given)
   --clients DIR|none    folder of your own client installs for the deployer
+  --channel stable|dev  the update channel (docs/deployer.md, "Dev channel"):
+                        dev follows the developers' preview builds and asks
+                        for an access code (hidden); needs the deployer
+  --registry HOST/PATH  the dev registry (kept in .env as POL_DEV_REGISTRY)
+  --code-file FILE      with --yes: read the access code from FILE's first line
   --admin-user NAME     the admin panel's user name on a new .env
                         (default: admin)
   --change-address      on an existing .env, redo the address questions
@@ -80,7 +89,8 @@ Every option can also be given as an environment variable: OPENLOBBY_YES=1,
 OPENLOBBY_DIR, OPENLOBBY_REPO, OPENLOBBY_REACH, OPENLOBBY_ADDRESS,
 OPENLOBBY_PUBLIC_ADDRESS, OPENLOBBY_LOOKUP_PUBLIC=1, OPENLOBBY_PS2=yes|no,
 OPENLOBBY_IMAGES, OPENLOBBY_DEPLOYER=yes|no, OPENLOBBY_CLIENTS,
-OPENLOBBY_INSTALL_DOCKER=1, OPENLOBBY_ADMIN_USER. Options win over the environment.
+OPENLOBBY_INSTALL_DOCKER=1, OPENLOBBY_ADMIN_USER, OPENLOBBY_CHANNEL,
+OPENLOBBY_DEV_REGISTRY, OPENLOBBY_DEV_CODE_FILE. Options win over the environment.
 EOF
 }
 
@@ -110,6 +120,12 @@ while [ $# -gt 0 ]; do
         --admin-user) ADMIN_USER_OPT="${2:-}"; shift ;;
         --admin-user=*) ADMIN_USER_OPT="${1#*=}" ;;
         --change-address) CHANGE_ADDRESS=1 ;;
+        --channel) CHANNEL="${2:-}"; shift ;;
+        --channel=*) CHANNEL="${1#*=}" ;;
+        --registry) DEV_REGISTRY="${2:-}"; shift ;;
+        --registry=*) DEV_REGISTRY="${1#*=}" ;;
+        --code-file) CODE_FILE="${2:-}"; shift ;;
+        --code-file=*) CODE_FILE="${1#*=}" ;;
         --install-docker) INSTALL_OK=1 ;;
         --no-start) START="" ;;
         -h|--help) usage; return 0 ;;
@@ -120,6 +136,11 @@ done
 
 case "$REACH" in ""|lan|vpn|internet) ;; *) echo "setup.sh: --reach is lan, vpn or internet" >&2; return 2 ;; esac
 case "$IMAGES" in ""|published|build) ;; *) echo "setup.sh: --images is published or build" >&2; return 2 ;; esac
+case "$CHANNEL" in ""|stable|dev) ;; *) echo "setup.sh: --channel is stable or dev" >&2; return 2 ;; esac
+case "$DEV_REGISTRY" in
+    "") ;;
+    *[!a-z0-9./:_-]*|/*|*//*) echo "setup.sh: --registry looks like registry.example.org/team" >&2; return 2 ;;
+esac
 case "$PS2" in ""|yes|no|1|0) ;; *) echo "setup.sh: OPENLOBBY_PS2 is yes or no" >&2; return 2 ;; esac
 case "$ADMIN_USER_OPT" in
     "") ;;
@@ -738,6 +759,34 @@ if [ -n "$USE_DEPLOYER" ]; then
     fi
 fi
 
+# The update channel (docs/deployer.md, "Dev channel"). The deployer signs in to the dev
+# registry and keeps the access code; this script only hands it over, on stdin.
+if [ "$CHANNEL" = dev ]; then
+    [ -n "$USE_DEPLOYER" ] || die "the dev channel is run by the deployer; run with --deployer"
+    [ -n "$DEV_REGISTRY" ] && env_set "$WORK" POL_DEV_REGISTRY "$DEV_REGISTRY"
+    if [ -z "$(env_get POL_DEV_REGISTRY "$WORK")" ]; then
+        [ -n "$YES" ] && die "--channel dev needs --registry (the developers give it with the access code)"
+        ask "Dev registry (the developers give it with the access code)" ""
+        case "$REPLY" in
+            ""|*[!a-z0-9./:_-]*|/*|*//*) die "the dev registry looks like registry.example.org/team" ;;
+        esac
+        env_set "$WORK" POL_DEV_REGISTRY "$REPLY"
+    fi
+    if [ -n "$CODE_FILE" ]; then
+        [ -r "$CODE_FILE" ] || die "cannot read the access code file $CODE_FILE"
+        IFS= read -r DEV_CODE <"$CODE_FILE" || true
+    elif [ -n "$YES" ] || [ -n "$DRY" ]; then
+        [ -n "$DRY" ] || die "--channel dev with --yes needs --code-file (the access code is not taken on the command line)"
+    else
+        [ -n "$HAVE_TTY" ] || die "no terminal to ask for the access code on; use --code-file"
+        printf 'Access code (not shown): ' >/dev/tty
+        IFS= read -rs DEV_CODE </dev/tty || true
+        printf '\n' >/dev/tty
+    fi
+    DEV_CODE="$(printf '%s' "$DEV_CODE" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -n "$DRY" ] || [ -n "$DEV_CODE" ] || die "no access code was given"
+fi
+
 # Show and write
 if [ -n "$DRY" ]; then
     say ""
@@ -789,7 +838,9 @@ if ! docker network inspect openlobby >/dev/null 2>&1; then
         || die "could not create the Docker network openlobby"
 fi
 local -a DC=(docker compose)
-if [ -n "$GAMES" ]; then
+local ON_DEV=""
+grep -q '"channel": "dev"' "$CHECKOUT/.channel" 2>/dev/null && ON_DEV=1
+if [ -n "$GAMES" ] || { [ -n "$ON_DEV" ] && [ -n "$HAVE_PY" ]; }; then
     [ -n "$HAVE_PY" ] || die "games are enabled ($GAMES) and starting them needs python3 (tools/stack.py)"
     DC=(python3 tools/stack.py compose)
     [ -n "$PUBLISHED" ] && DC+=(--ghcr)
@@ -818,6 +869,29 @@ if [ -z "$DRY" ]; then
         fi
         sleep 5; waited=$((waited + 5))
     done
+fi
+
+# The update channel: switched by the deployer, the access code handed to it on stdin
+if [ "$CHANNEL" = dev ] || { [ "$CHANNEL" = stable ] && [ -n "$ON_DEV" ]; }; then
+    step "Update channel: $CHANNEL"
+    local -a CH=(docker compose --profile deployer exec -T deployer python /app/deployer.py --channel "$CHANNEL")
+    if [ -n "$DRY" ]; then
+        say "  would run: ${CH[*]}$([ "$CHANNEL" = dev ] && printf ' (the access code on stdin)')"
+    elif [ -z "$USE_DEPLOYER" ]; then
+        warn "the update channel is switched by the deployer, which is not set up here (--deployer)"
+    else
+        local tries=0 chout chrc
+        while :; do
+            chout="$(printf '%s\n' "$DEV_CODE" | "${CH[@]}" 2>&1)"; chrc=$?
+            tries=$((tries + 1))
+            # the deployer may still be starting: it answers within a minute
+            case "$chout" in *"not answering"*|*"is not running"*) [ "$tries" -lt 12 ] && { sleep 5; continue; } ;; esac
+            break
+        done
+        printf '%s\n' "$chout" | sed 's/^/  /'
+        [ "$chrc" -eq 0 ] || warn "the switch to the $CHANNEL channel did not finish; Settings > Install games > Update channel shows why and can try again"
+    fi
+    DEV_CODE=""
 fi
 
 # ------------------------------------------------------------------ admin

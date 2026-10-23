@@ -83,6 +83,8 @@ def clean_item(raw, key=None, name=None):
         return updatecheck.unknown(it, bad)
     if isinstance(raw.get("module"), str) and _KEY.match(raw["module"]):
         it["module"] = raw["module"]
+    if raw.get("channel") == "dev":
+        it["channel"] = "dev"
     run, lat, upd = raw.get("running"), raw.get("latest"), raw.get("update")
     if upd not in UPDATES or not isinstance(run, dict) or not isinstance(lat, dict):
         return updatecheck.unknown(it, bad)
@@ -202,6 +204,7 @@ def overview(refresh=False):
     deployer, or GitHub for the panel's own check, again (at most once a minute)."""
     items, keys, modules = [], set(), set()
     checked_at, checking, from_deployer = None, False, False
+    channel = "stable"
     if admindeploy.configured() is not None:
         st, body = admindeploy.updates(refresh)
         if st == 200 and isinstance(body, dict) and isinstance(body.get("items"), list):
@@ -215,6 +218,7 @@ def overview(refresh=False):
                 items.append(it)
             checked_at = updatecheck.to_iso(body.get("checked_at"))
             checking = body.get("checking") is True
+            channel = "dev" if body.get("channel") == "dev" else "stable"
     if ("core" not in keys and not _core_off()
             and os.environ.get("POL_ADMIN_UPDATE_REPO", "").strip().lower() != "off"):
         items.insert(0, self_check(refresh))
@@ -230,4 +234,5 @@ def overview(refresh=False):
             items.append(it)
     for it in items:
         it.pop("module", None)
-    return {"checked_at": checked_at or updatecheck.iso(), "checking": checking, "items": items}
+    return {"checked_at": checked_at or updatecheck.iso(), "checking": checking, "items": items,
+            "channel": channel}

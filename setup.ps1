@@ -43,6 +43,10 @@ param(
     [switch]$Deployer,
     [switch]$NoDeployer,
     [string]$Clients = '',
+    [ValidateSet('', 'stable', 'dev')]
+    [string]$Channel = '',
+    [string]$Registry = '',
+    [string]$CodeFile = '',
     [switch]$InstallTools,
     [switch]$InstallClient,
     [switch]$NoClient,
@@ -83,6 +87,11 @@ Options:
   -Clients DIR|none folder of your own client installs for the deployer
                     to import game data from (default: clients beside the
                     checkout; none: uploads only)
+  -Channel stable|dev  the update channel (docs/deployer.md, "Dev channel"):
+                    dev follows the developers' preview builds and asks for
+                    an access code (not shown); needs the deployer
+  -Registry HOST/PATH  the dev registry (kept in .env as POL_DEV_REGISTRY)
+  -CodeFile FILE    with -Yes: read the access code from FILE's first line
   -InstallTools    with -Yes, allow installing git and Docker Desktop
   -InstallClient / -NoClient  run (or skip) the hosts installer for this PC
   -NoFirewall       leave Windows Firewall alone (by default setup lets
@@ -93,6 +102,11 @@ Options:
 }
 
 if ($Reach -or $Address) { $ChangeAddress = $true }
+$RegistryPattern = '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$'
+if ($Registry -and $Registry -cnotmatch $RegistryPattern) {
+    Write-Host 'setup.ps1: -Registry looks like registry.example.org/team' -ForegroundColor Red
+    exit 2
+}
 
 # ------------------------------------------------------------------ helpers
 
@@ -624,6 +638,33 @@ if ($UseDeployer) {
     }
 }
 
+# The update channel (docs/deployer.md, "Dev channel"). The deployer signs in to the dev
+# registry and keeps the access code; this script only hands it over, on stdin.
+$DevCode = ''
+if ($Channel -eq 'dev') {
+    if (-not $UseDeployer) { Fail 'the dev channel is run by the deployer; run with -Deployer' }
+    if ($Registry) { Set-EnvValue $lines 'POL_DEV_REGISTRY' $Registry }
+    if (-not (Get-EnvValue $lines 'POL_DEV_REGISTRY')) {
+        if ($Yes) { Fail '-Channel dev needs -Registry (the developers give it with the access code)' }
+        $r = (Ask 'Dev registry (the developers give it with the access code)' '').Trim()
+        if ($r -cnotmatch $RegistryPattern) { Fail 'the dev registry looks like registry.example.org/team' }
+        Set-EnvValue $lines 'POL_DEV_REGISTRY' $r
+    }
+    if ($CodeFile) {
+        if (-not (Test-Path -LiteralPath $CodeFile -PathType Leaf)) { Fail "cannot read the access code file $CodeFile" }
+        $DevCode = [string](Get-Content -LiteralPath $CodeFile -TotalCount 1)
+    } elseif ($Yes -or $DryRun) {
+        if (-not $DryRun) { Fail '-Channel dev with -Yes needs -CodeFile (the access code is not taken on the command line)' }
+    } else {
+        $sec = Read-Host 'Access code (not shown)' -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+        try { $DevCode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    }
+    $DevCode = $DevCode.Trim()
+    if (-not $DryRun -and -not $DevCode) { Fail 'no access code was given' }
+}
+
 $text = ($lines -join "`n") + "`n"
 if ($DryRun) {
     Say ''
@@ -748,6 +789,32 @@ if ($UseDeployer -and -not $DryRun) {
         Warn ('the deployer is not ready: ' + $dh)
         Say 'docker compose --profile deployer logs deployer says more (docs/deployer.md).'
     }
+}
+
+# The update channel: switched by the deployer, the access code handed to it on stdin
+$onDev = $false
+$chFile = Join-Path $Checkout '.channel'
+if (Test-Path -LiteralPath $chFile) { $onDev = [bool](Select-String -LiteralPath $chFile -Pattern '"channel": "dev"' -Quiet) }
+if ($Channel -eq 'dev' -or ($Channel -eq 'stable' -and $onDev)) {
+    Step "Update channel: $Channel"
+    $chArgs = @('compose', '--profile', 'deployer', 'exec', '-T', 'deployer', 'python', '/app/deployer.py', '--channel', $Channel)
+    if ($DryRun) {
+        $how = ''; if ($Channel -eq 'dev') { $how = ' (the access code on stdin)' }
+        Say ('  would run: docker ' + ($chArgs -join ' ') + $how)
+    } elseif (-not $UseDeployer) {
+        Warn 'the update channel is switched by the deployer, which is not set up here (-Deployer)'
+    } else {
+        $chOut = ''
+        for ($i = 0; $i -lt 12; $i++) {
+            $chOut = ($DevCode | docker @chArgs 2>&1 | Out-String).Trim()
+            $chRc = $LASTEXITCODE
+            if ($chOut -notmatch 'not answering|is not running') { break }
+            Start-Sleep -Seconds 5
+        }
+        foreach ($l in ($chOut -split "`r?`n")) { Say "  $l" }
+        if ($chRc -ne 0) { Warn "the switch to the $Channel channel did not finish; Settings > Install games > Update channel shows why and can try again" }
+    }
+    $DevCode = ''
 }
 
 # ------------------------------------------------------------------ admin

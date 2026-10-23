@@ -644,7 +644,8 @@ function updItem(it) {
     + (ch.length > 10 ? `<button class="ghost sm" data-upd-all="${esc(it.key)}" style="margin-top:6px">Show all ${ch.length}</button>` : "")
     + `</details>` : "";
   return `<div class="upd-item" data-upd="${esc(it.key)}"><div class="upd-head"><span class="nm">${esc(it.name || it.key)}</span>`
-    + `<span class="pill ${cls}">${esc(word)}</span>${behind ? `<span class="muted">${esc(behind)}</span>` : ""}</div>`
+    + `<span class="pill ${cls}">${esc(word)}</span>${it.channel === "dev" ? '<span class="pill dev">dev build</span>' : ""}`
+    + `${behind ? `<span class="muted">${esc(behind)}</span>` : ""}</div>`
     + `${vers ? `<div class="upd-vers">${vers}</div>` : ""}${tail}${news}</div>`;
 }
 
@@ -656,7 +657,8 @@ function renderUpdates() {
   const items = r.items || [];
   box.hidden = false;
   const when = r.checking ? "checking now..." : (r.checked_at ? "checked " + ago(Date.parse(r.checked_at)) : "");
-  box.innerHTML = `<h2>Updates <span class="h2sub">${esc(when)}</span></h2>`
+  box.innerHTML = `<h2>Updates <span class="h2sub">${esc(when)}</span>`
+    + `${r.channel === "dev" ? ' <span class="pill dev">dev channel</span>' : ""}</h2>`
     + `<div class="toolbar"><button class="ghost sm" data-upd-check${r.checking ? " disabled" : ""}>Check now</button></div>`
     + `<div class="upd-list">${items.map(updItem).join("") || '<p class="hint">Nothing reports its version yet.</p>'}</div>`;
 }
@@ -780,11 +782,158 @@ function renderDeploy() {
         + `data-deploy="${esc(a)}" data-game="${esc(g.key)}"${busy ? " disabled" : ""}>${esc(ACT_WORD[a])}</button>`).join("")}</div></td></tr>`;
   }).join("");
   $("#deployJobs").innerHTML = (d.jobs || []).map((j) =>
-    `<li data-job="${esc(j.id)}"><span class="t1">${esc(ACT_WORD[j.action] || j.action)} ${esc(j.game)}: `
+    `<li data-job="${esc(j.id)}"><span class="t1">${j.action === "channel" ? "Update channel"
+      : `${esc(ACT_WORD[j.action] || j.action)} ${esc(j.game)}`}: `
     + `${esc(JOB_WORD[j.state] || j.state)}${j.summary ? " - " + esc(j.summary) : ""}</span>`
     + `<span class="t2">${esc(jobWhen(j))}</span></li>`).join("")
     || '<li class="empty">No jobs yet.</li>';
+  if (CHAN) renderChannel();
 }
+
+// ---- Install games > Update channel (owner): stable, or the dev builds with an access code ----
+// The code goes from the form to the deployer (admindeploy.set_channel) and is cleared from the
+// page at once; the deployer keeps it and no answer carries it back.
+let CHAN = null;
+
+async function loadChannel() {
+  if (!isOwner()) return;
+  try { CHAN = await api("/api/deploy/channel"); } catch (e) { CHAN = { available: false, why: e.message }; }
+  renderChannel();
+}
+
+function chanForm(open) {
+  $("#chanForm").hidden = !open;
+  $("#chanResult").hidden = true;
+  $("#chanCode").value = "";
+  if (open) {
+    const c = CHAN || {};
+    if (!$("#chanReg").value) $("#chanReg").value = c.registry || c.registry_default || "";
+    ($("#chanReg").value ? $("#chanCode") : $("#chanReg")).focus();
+  }
+}
+
+function renderChannel() {
+  const box = $("#chanPanel");
+  const c = CHAN;
+  if (!(DEPLOY && DEPLOY.available) || !c) { box.hidden = true; return; }
+  box.hidden = false;
+  const dev = c.channel === "dev";
+  const busy = (DEPLOY.jobs || []).some((j) => !JOB_DONE.has(j.state));
+  $("#chanPill").className = "pill " + (dev ? "dev" : "env");
+  $("#chanPill").textContent = dev ? "Dev" : "Stable";
+  $("#chanSeg").hidden = c.available === false;
+  $("#chanSeg").querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.chan === (dev ? "dev" : "stable"));
+    b.setAttribute("aria-pressed", String(b.dataset.chan === (dev ? "dev" : "stable")));
+    b.disabled = busy;
+  });
+  $("#chanNewCode").hidden = !dev || c.available === false;
+  $("#chanNewCode").disabled = busy;
+  $("#chanGo").disabled = busy;
+  if (c.available === false) {
+    $("#chanHint").textContent = c.why || "The deployer did not say which channel it is on.";
+    $("#chanWarn").hidden = true;
+    $("#chanBody").innerHTML = "";
+    $("#chanSource").hidden = true;
+    $("#chanGaps").hidden = true;
+    return;
+  }
+  const since = c.since ? updDate(c.since) : "";
+  $("#chanHint").textContent = dev
+    ? `This server follows the dev builds in ${c.registry}${since ? " since " + since : ""}. Updates and installs `
+      + "use the dev image wherever there is one; everything else stays on the published images."
+    : "Stable follows the published releases. Dev follows the developers' preview builds before they are "
+      + "released; they give you access with an access code.";
+  const warn = c.problem || (dev && !c.code_stored
+    ? "No access code is stored here, so the dev images cannot be updated. Enter a new access code, or switch back to Stable." : "");
+  $("#chanWarn").hidden = !warn;
+  $("#chanWarn").textContent = warn;
+  const rows = (c.images || []);
+  const devRows = rows.filter((r) => r.dev_image);
+  const gaps = rows.filter((r) => !r.dev_image);
+  // an image name breaks only after a slash
+  const img = (ref) => `<code class="mono chan-img">${esc(ref).replace(/\//g, "/<wbr>")}</code>`;
+  const who = (r) => (r.key === "core" ? "OpenLobby (this server)" : r.name || r.key);
+  $("#chanBody").innerHTML = devRows.map((r) => {
+    const onDev = (r.applies ? img(r.dev || r.dev_image) : `<span class="muted">${esc(r.note || "")}</span>`)
+      + (r.what ? `<span class="chan-what">${esc(r.what)}</span>` : "");
+    const src = r.source
+      ? `<a href="${esc(r.source)}" target="_blank" rel="noopener noreferrer" class="mono chan-img">`
+        + `${esc(r.source.replace(/^https?:\/\//, "")).replace(/\//g, "/<wbr>")}</a>`
+        + (r.license ? `<span class="chan-what">${esc(r.license)}</span>` : "")
+      : '<span class="muted">-</span>';
+    return `<tr><td class="strong" data-label="Runs">${esc(who(r))}</td>`
+      + `<td data-label="Stable image">${img(r.stable)}</td>`
+      + `<td data-label="On Dev"><div>${onDev}</div></td><td data-label="Source"><div>${src}</div></td></tr>`;
+  }).join("") || '<tr><td colspan="4" class="muted">Nothing installed here has a dev build yet.</td></tr>';
+  const gapNames = [...new Set(gaps.map((r) => r.stable.split("/").pop()))];
+  $("#chanGaps").hidden = !gapNames.length;
+  $("#chanGaps").innerHTML = `No dev build yet, so ${dev ? "these stay" : "these would stay"} on the published images: `
+    + gapNames.map((n) => `<code class="mono">${esc(n)}</code>`).join(", ") + ".";
+  const anySrc = devRows.some((r) => r.source);
+  $("#chanSource").hidden = !anySrc;
+  $("#chanSource").textContent = dev
+    ? "The source of each dev image is at its link, under the licence named beside it. The same access code "
+      + "reads it: use the code as the password when git asks, with any user name."
+    : "On Dev, the source of each dev image is at its link, and the access code reads it as well.";
+}
+
+async function chanSwitch(body) {
+  try {
+    const r = await api("/api/deploy/channel", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                 body: JSON.stringify(body) });
+    chanForm(false);
+    toast(body.channel === "dev" ? "Switching to Dev: started" : "Switching to Stable: started");
+    await probeDeploy(); renderDeploy(); renderChannel();
+    followJob(r.job);
+    return true;
+  } catch (err) {
+    if (body.channel === "dev") {
+      $("#chanResult").hidden = false;
+      $("#chanResult").textContent = err.message;
+    } else toast(err.message, true);
+    return false;
+  }
+}
+
+document.addEventListener("click", async (e) => {
+  const t = e.target;
+  const seg = t.closest("#chanSeg [data-chan]");
+  if (seg) {
+    const want = seg.dataset.chan, dev = (CHAN || {}).channel === "dev";
+    if (want === "dev" && !dev) return chanForm($("#chanForm").hidden);
+    if (want === "stable" && dev) {
+      const backs = "Back to Stable?\n\nThe deployer pulls the published images, restarts what ran a dev image, "
+        + "signs out of the dev registry and forgets the access code.";
+      const ffxi = ((CHAN || {}).images || []).some((r) => r.key === "ffxi" && r.applies && r.enabled);
+      if (!confirm(backs + (ffxi ? "\n\nFFXI's world database keeps what the dev world server changed in it; to go back "
+        + "exactly, restore the backup you took before switching to Dev (docs/deployer.md)." : ""))) return;
+      return chanSwitch({ channel: "stable" });
+    }
+    if (want === "stable") chanForm(false);
+    return;
+  }
+  if (t.closest("#chanNewCode")) return chanForm($("#chanForm").hidden);
+  if (t.closest("#chanCancel")) return chanForm(false);
+  if (t.closest("#chanGo")) {
+    const code = $("#chanCode").value.trim(), registry = $("#chanReg").value.trim();
+    $("#chanCode").value = "";
+    if (!code) { $("#chanResult").hidden = false; $("#chanResult").textContent = "Type the access code."; return; }
+    t.closest("#chanGo").disabled = true;
+    $("#chanResult").hidden = true;
+    const btn = t.closest("#chanGo");
+    btn.textContent = "Checking the code...";
+    await chanSwitch({ channel: "dev", code, registry });
+    btn.textContent = "Switch to Dev";
+    btn.disabled = false;
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.target.id === "chanCode" || e.target.id === "chanReg")) {
+    e.preventDefault();
+    $("#chanGo").click();
+  }
+});
 
 // job times are ISO strings (or epoch seconds from an older deployer), null until set
 function jobWhen(j) {
@@ -873,7 +1022,8 @@ async function loadDeploy() {
   await probeDeploy();
   renderDeploy();
   loadPatches();
-  if (!DEPLOY || !DEPLOY.available) return;
+  if (!DEPLOY || !DEPLOY.available) { renderChannel(); return; }
+  loadChannel();
   loadUpdates(false);
   const live = (DEPLOY.jobs || []).find((j) => !JOB_DONE.has(j.state));
   if (live && live.id !== DEPLOY_JOB) followJob(live.id);
@@ -921,6 +1071,7 @@ async function followJob(id) {
       await showJob(id);
       await probeDeploy();
       renderDeploy();
+      if (j.action === "channel") { loadChannel(); loadUpdates(false); }
       if (String(j.action || "").startsWith("patch_") || PATCHES) loadPatches();
     }
   }, 1500);

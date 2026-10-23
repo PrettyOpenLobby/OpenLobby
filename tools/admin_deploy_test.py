@@ -8,7 +8,10 @@ Checks that the owner sees the catalog and the jobs, that a moderator cannot rea
 that an action goes to the deployer with the panel's token and lands in the activity log, that a
 busy deployer's 409 comes back with a sentence, that a job's log is read from an offset, that a
 wrong token and an unreachable deployer read as "not available", and that with no deployer set
-up the page is simply off. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
+up the page is simply off. The update channel: the owner reads it, a moderator can neither read
+nor switch it, an access code goes to the deployer and nowhere else (not the activity log, not
+the panel's own output), a code that does not fit never leaves the panel, the deployer's refusal
+comes back with its sentence, and a deployer without channels reads as such. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
 subprocess on a loopback port.
 """
 import hashlib
@@ -43,6 +46,15 @@ STATE = {"busy": False}
 LOG = b"cloning kart...\nok\nenabling kart\n"
 UPLOADS = []
 UPLOAD_CAP = 3 << 20
+CHANNEL = {"on": True}
+CODE = "kart-dev-7Qm2x9Lp4Vb8"
+CHANNEL_ANSWER = {"channel": "stable", "registry": None, "source": None, "since": None,
+                  "registry_default": "registry.example.org/kart", "code_stored": False, "ghcr": True,
+                  "problem": None, "images": [
+                      {"key": "kart", "name": "Kart Club", "stable": "ghcr.io/example/kart", "dev_image": "kart:main",
+                       "dev": "registry.example.org/kart/kart:main", "applies": True, "source":
+                       "https://registry.example.org/kart/kart", "what": None, "license": "AGPL-3.0-or-later",
+                       "note": None, "enabled": True}]}
 
 
 def chk(what, got, want):
@@ -110,6 +122,10 @@ class Deployer(BaseHTTPRequestHandler):
         if self.path == "/api/uploads":
             return self._reply(200, {"uploads": [{"id": "u1", "name": "kart.zip", "created": "2026-10-21T22:00:00Z",
                                                   "last_import": None, "size": 9, "files": 1, "matches": []}]})
+        if self.path == "/api/channel":
+            if not CHANNEL["on"]:
+                return self._reply(404, {"error": "not found"})
+            return self._reply(200, CHANNEL_ANSWER)
         if self.path.startswith("/api/jobs/j2/log?offset="):
             off = int(self.path.rsplit("=", 1)[1])
             return self._reply(200, LOG[off:], "text/plain", [("X-Job-State", "running"),
@@ -148,6 +164,12 @@ class Deployer(BaseHTTPRequestHandler):
         SEEN.append(("BODY", body))
         if STATE["busy"]:
             return self._reply(409, {"job": "j2"})
+        if self.path == "/api/channel":
+            SEEN.append(("CHANNEL", body))
+            if body.get("channel") == "dev" and body.get("code") != CODE:
+                return self._reply(400, {"error": "The dev registry registry.example.org did not accept "
+                                                  "the access code. Check it, or ask for a new one."})
+            return self._reply(202, {"job": "j7"})
         if str(body.get("action", "")).startswith("patch_"):
             if body.get("action") in ("patch_rollback", "patch_remove") and body.get("product") != "0007":
                 return self._reply(404, {})
@@ -311,8 +333,64 @@ def main():
         chk("...not one of them", [s for s in SEEN[n:] if s[0] == "BODY"], [])
         rows = owner.call("api/audit")[1].get("rows") or []
         chk("patch actions are in the activity log", any("rolled a patch bundle back" in json.dumps(r) for r in rows), True)
+
+        print("update channel")
+        code, ch = owner.call("api/deploy/channel")
+        chk("the owner reads the channel and its images",
+            (code, ch.get("available"), ch.get("channel"), [r["dev"] for r in ch.get("images", [])]),
+            (200, True, "stable", ["registry.example.org/kart/kart:main"]))
+        n = len(SEEN)
+        chk("a moderator with every permission can neither read nor switch it",
+            (gm.call("api/deploy/channel")[0],
+             gm.call("api/deploy/channel", {"channel": "dev", "code": CODE})[0],
+             gm.call("api/deploy/channel", {"channel": "stable"})[0]), (403, 403, 403))
+        chk("...and nothing they sent reached the deployer", [s for s in SEEN[n:] if s[0] == "CHANNEL"], [])
+        n = len(SEEN)
+        chk("a channel or code that does not fit never reaches the deployer",
+            [owner.call("api/deploy/channel", x)[0] for x in (
+                {"channel": "beta"}, {"channel": "dev"}, {"channel": "dev", "code": "short"},
+                {"channel": "dev", "code": "has spaces in it"},
+                {"channel": "dev", "code": CODE, "registry": "Not A Registry"},
+                {"channel": "dev", "code": CODE, "registry": 7})],
+            [400] * 6)
+        chk("...not one of them", [s for s in SEEN[n:] if s[0] == "CHANNEL"], [])
+        n = len(SEEN)
+        code, out = owner.call("api/deploy/channel", {"channel": "dev", "code": " " + CODE + " ",
+                                                      "registry": "registry.example.org/kart"})
+        chk("switching to Dev starts the deployer's job", (code, out), (202, {"job": "j7"}))
+        chk("...the code and registry reach the deployer as sent, trimmed",
+            [s[1] for s in SEEN[n:] if s[0] == "CHANNEL"],
+            [{"channel": "dev", "code": CODE, "registry": "registry.example.org/kart"}])
+        chk("...with the panel's token", all(a == "Bearer " + TOKEN for m, pth, a in
+                                             [x for x in SEEN[n:] if len(x) == 3]), True)
+        code, out = owner.call("api/deploy/channel", {"channel": "dev", "code": "kart-wrong-code-0000"})
+        chk("a code the deployer refuses comes back with its sentence",
+            (code, "did not accept" in (out.get("error") or "")), (400, True))
+        code, out = owner.call("api/deploy/channel", {"channel": "stable"})
+        chk("switching back to Stable", (code, out), (202, {"job": "j7"}))
+        rows = owner.call("api/audit")[1].get("rows") or []
+        text = json.dumps(rows)
+        chk("the switches are in the activity log",
+            ("switched to the dev channel" in text, "switched to the stable channel" in text,
+             "tried to switch to the dev channel" in text), (True, True, True))
+        chk("...and the access code is nowhere in it", CODE in text or "kart-wrong-code-0000" in text, False)
+        STATE["busy"] = True
+        code, out = owner.call("api/deploy/channel", {"channel": "stable"})
+        chk("a busy deployer: 409 with a sentence", (code, "still running" in (out.get("error") or "")), (409, True))
+        STATE["busy"] = False
+        CHANNEL["on"] = False
+        code, ch = owner.call("api/deploy/channel")
+        chk("a deployer without channels reads as such", (code, ch.get("available"), "update the core" in
+                                                          (ch.get("why") or "")), (200, False, True))
+        CHANNEL["on"] = True
     finally:
         stop(proc)
+    logs = []
+    for name in os.listdir(tmp):
+        if name.startswith("admin-") and name.endswith(".log"):
+            with open(os.path.join(tmp, name), encoding="utf-8", errors="replace") as fh:
+                logs.append(fh.read())
+    chk("the access code is not in the panel's own output", any(CODE in x for x in logs), False)
     for name, extra in (("a wrong token", {"POL_DEPLOYER_TOKEN": "wrong"}),
                         ("an unreachable deployer", {"POL_DEPLOYER_URL": "http://127.0.0.1:%d" % free_port()}),
                         ("no deployer set up", {"POL_DEPLOYER_URL": ""})):

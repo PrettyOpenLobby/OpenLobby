@@ -7,7 +7,8 @@ For each permission the owner can tick -- account management and deletion,
 voiding codes, writing and publishing news, PML Preview, the activity log,
 service status, alert/check settings -- a moderator holding ONLY that
 permission may use its endpoints and is refused the others. Moderator
-management and the owner sign-in stay the owner's whatever is ticked.
+management, the owner sign-in and the update channel stay the owner's
+whatever is ticked.
 
 The browser side (which tabs each moderator sees) is not driven here.
 
@@ -119,6 +120,10 @@ def main():
             sorted(p for p, c in mods.items()
                    if c.call("api/bots")[0] != 403
                    or c.call("api/bots", {"bot": "tm", "action": "delete"})[0] != 403), [])
+        chk("no moderator can read or switch the update channel",
+            sorted(p for p, c in mods.items()
+                   if c.call("api/deploy/channel")[0] != 403
+                   or c.call("api/deploy/channel", {"channel": "stable"})[0] != 403), [])
         _code, sess = mods["pml"].call("api/session")
         chk("the session lists the new permission's label",
             "PML Preview" in json.dumps(sess.get("perm_labels", {})), True)

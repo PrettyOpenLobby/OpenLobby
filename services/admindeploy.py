@@ -14,11 +14,19 @@ import http.client
 import json
 import os
 import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+if os.path.join(HERE, "deployer") not in sys.path:
+    # the dev channel's checks are the deployer's own (services/deployer/devchannel.py)
+    sys.path.append(os.path.join(HERE, "deployer"))
+import devchannel  # noqa: E402
+
 TIMEOUT = 8.0
+CHANNEL_TIMEOUT = 45.0      # a switch to Dev waits for the deployer to ask the registry
 ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import")
 _KEY = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _JOB = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -33,7 +41,7 @@ def configured():
     return (url, tok) if url and tok else None
 
 
-def _call(method, path, body=None, raw=False):
+def _call(method, path, body=None, raw=False, timeout=TIMEOUT):
     conf = configured()
     if conf is None:
         return 503, {"error": "No deployer is set up on this server (POL_DEPLOYER_URL)."}
@@ -43,7 +51,7 @@ def _call(method, path, body=None, raw=False):
                                  headers={"Authorization": "Bearer " + tok,
                                           "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             data, status, state = r.read(MAX_LOG + 1), r.status, r.headers.get("X-Job-State", "")
             log_at = r.headers.get("X-Log-Offset")
     except urllib.error.HTTPError as e:
@@ -86,6 +94,51 @@ def updates(refresh=False):
     "checking", "items"}). refresh asks it to check again now; it does that at most once a
     minute and answers at once either way, with "checking" true while the check runs."""
     return _call("GET", "/api/updates" + ("?refresh=1" if refresh else ""))
+
+
+OLD_DEPLOYER = "This deployer has no update channels yet; update the core first, then try again."
+
+
+def channel():
+    """The update channel (docs/deployer.md, "Dev channel"): which one, the dev registry, and
+    each image of the core and the installed games on it, with where its source is."""
+    st, out = _call("GET", "/api/channel")
+    if st == 404:
+        return 200, {"available": False, "why": OLD_DEPLOYER}
+    if st == 200:
+        out["available"] = True
+    return st, out
+
+
+def set_channel(body):
+    """Pass a channel switch on to the deployer. The access code goes there and nowhere else:
+    it is not stored, logged or sent back here, and a request that does not fit never leaves."""
+    want = body.get("channel")
+    if want not in devchannel.CHANNELS:
+        return 400, {"error": "Pick Stable or Dev."}
+    out = {"channel": want}
+    if want == "dev":
+        code = body.get("code")
+        code = code.strip() if isinstance(code, str) else ""
+        if not devchannel.CODE.match(code):
+            return 400, {"error": "The access code is 8 to 512 characters, with no spaces."}
+        out["code"] = code
+        reg = body.get("registry")
+        if isinstance(reg, str) and reg.strip():
+            if not devchannel.REGISTRY.match(reg.strip()):
+                return 400, {"error": "The dev registry must look like registry.example.org/team."}
+            out["registry"] = reg.strip()
+        elif reg not in (None, ""):
+            return 400, {"error": "The dev registry must look like registry.example.org/team."}
+    status, got = _call("POST", "/api/channel", out, timeout=CHANNEL_TIMEOUT)
+    out.pop("code", None)
+    if status == 409:
+        got.setdefault("error", "Another job is still running; switch when it has finished.")
+    elif status == 404:
+        got = {"error": OLD_DEPLOYER}
+    elif status == 400:
+        got.setdefault("error", "The deployer refused that.")
+    return status, got
 
 
 def _rel(path):

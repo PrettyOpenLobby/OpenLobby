@@ -19,6 +19,9 @@ chain the title plugins need. docs/games.md explains the design.
     python tools/stack.py volumes [ffxi|--all]   create and fill the games' data volumes
     python tools/stack.py compose up -d --build  run docker compose
     python tools/stack.py compose --dry-run up -d --build   print, run nothing
+    python tools/stack.py channel [--json]       which update channel this install follows
+    python tools/stack.py channel dev --registry HOST/PATH [--source URL]
+    python tools/stack.py channel stable
 
 Standard library only. Works from any directory.
 """
@@ -31,9 +34,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARENT = os.path.dirname(ROOT)
+
+# The dev channel's image map is shared with the deployer, whose image holds only
+# services/deployer/ (docs/deployer.md, "Dev channel").
+sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+import devchannel  # noqa: E402
 CATALOG_DIR = os.path.join(ROOT, "games")
 STATE_FILE = os.path.join(ROOT, ".games")
 
@@ -206,26 +215,37 @@ def _with_tag(image, tag_var, vals):
 
 
 def plan(catalog, keys, compose_args, ghcr=False, root=ROOT, parent=PARENT,
-         environ=None, prebuild=True):
+         environ=None, prebuild=True, channel=None, override_path=None):
     """Everything `stack.py compose` would run, as data:
 
       {"files": [...], "env_files": [...], "titles": "tmtitle,...",
        "base": "<image the last title link builds on>",
+       "override": "<the dev channel's compose file, or empty>",
        "steps": [{"argv": [...], "env": {...}, "why": "..."}, ...]}
 
     The last step is the command asked for; any before it build the core
-    image and the title chain it stands on.
+    image and the title chain it stands on. On the dev channel (`channel`,
+    as devchannel.read_channel gives it) a swapped image is also the title
+    chain's base where it replaces one, and "override" sets it for the
+    services that run it; that file goes last in the -f list, at
+    override_path (the caller writes it there).
     """
     keys = ordered(keys, catalog)
     core = catalog["core"]
     games = [catalog[k] for k in keys]
     efiles = env_files(catalog, keys, root, parent)
     vals = env_values(efiles, environ)
+    swap, override = {}, ""
+    if channel and channel.get("channel") == "dev":
+        rows = devchannel.image_rows(catalog, channel, ghcr, keys=keys)
+        swap = devchannel.applied(rows)
+        override = devchannel.override_text(rows)
 
     core_files = [os.path.join(root, f) for f in core["compose"]]
     if ghcr:
         core_files += [os.path.join(root, f) for f in core["compose_ghcr"]]
-        base0 = _with_tag(core["images"][0]["ghcr"], core["images"][0]["tag_var"], vals)
+        base0 = swap.get(core["images"][0]["ghcr"]) or \
+            _with_tag(core["images"][0]["ghcr"], core["images"][0]["tag_var"], vals)
     else:
         base0 = vals.get("OPENLOBBY_IMAGE") or "openlobby:latest"
 
@@ -238,7 +258,7 @@ def plan(catalog, keys, compose_args, ghcr=False, root=ROOT, parent=PARENT,
     for i, g in enumerate(links):
         t = g["title"]
         if ghcr and i == 0 and t.get("ghcr_image"):
-            image = _with_tag(t["ghcr_image"], t["ghcr_tag_var"], vals)
+            image = swap.get(t["ghcr_image"]) or _with_tag(t["ghcr_image"], t["ghcr_tag_var"], vals)
         else:
             image = t["image"]
             if i < len(links) - 1:
@@ -259,6 +279,8 @@ def plan(catalog, keys, compose_args, ghcr=False, root=ROOT, parent=PARENT,
             if g.get("title") and g["title"].get("ghcr_image") and g is not links[0]:
                 continue
             files += [os.path.join(d, f) for f in g["compose_ghcr"]]
+    if override:
+        files.append(override_path or os.path.join(root, ".channel-compose.yml"))
 
     head = ["docker", "compose", "--project-directory", root]
     for path in efiles:
@@ -291,7 +313,7 @@ def plan(catalog, keys, compose_args, ghcr=False, root=ROOT, parent=PARENT,
         env["POL_TITLE_BASE_IMAGE"] = final_base
     steps.append({"argv": argv, "env": env, "why": "the command asked for"})
     return {"files": files, "env_files": efiles, "titles": titles,
-            "base": final_base, "steps": steps}
+            "base": final_base, "override": override, "steps": steps}
 
 
 def _subcommand(args):
@@ -828,23 +850,92 @@ def cmd_compose(catalog, args):
     for k in keys:
         if not os.path.isdir(checkout_of(catalog[k])):
             raise StackError("%s is enabled but not cloned (stack.py add %s)" % (k, k))
-    p = plan(catalog, keys, args, ghcr=ghcr, environ=dict(os.environ), prebuild=prebuild)
-    for w in env_warnings(p["env_files"]):
-        print("stack.py: warning: " + w, file=sys.stderr)
-    if dry:
+    channel = read_channel()
+    over = None
+    if channel["channel"] == "dev" and not dry:
+        fd, over = tempfile.mkstemp(prefix="openlobby-channel-", suffix=".yml")
+        os.close(fd)
+    try:
+        p = plan(catalog, keys, args, ghcr=ghcr, environ=dict(os.environ), prebuild=prebuild,
+                 channel=channel, override_path=over)
+        for w in env_warnings(p["env_files"]):
+            print("stack.py: warning: " + w, file=sys.stderr)
+        if dry:
+            if p["override"]:
+                print("# the dev channel's images (.channel-compose.yml, written for the command)")
+                print(p["override"].rstrip("\n"))
+            for step in p["steps"]:
+                print("# " + step["why"])
+                print(show(step))
+            return 0
+        if not shutil.which("docker"):
+            raise StackError("docker is not on PATH")
+        if p["override"]:
+            with open(over, "w", encoding="utf-8", newline="\n") as f:
+                f.write(p["override"])
+            print("stack.py: dev channel (%s)" % channel["registry"], file=sys.stderr)
         for step in p["steps"]:
-            print("# " + step["why"])
-            print(show(step))
+            print("stack.py: %s" % step["why"], file=sys.stderr)
+            env = dict(os.environ)
+            env.update(step["env"])
+            rc = subprocess.run(step["argv"], env=env).returncode
+            if rc != 0:
+                return rc
         return 0
-    if not shutil.which("docker"):
-        raise StackError("docker is not on PATH")
-    for step in p["steps"]:
-        print("stack.py: %s" % step["why"], file=sys.stderr)
-        env = dict(os.environ)
-        env.update(step["env"])
-        rc = subprocess.run(step["argv"], env=env).returncode
-        if rc != 0:
-            return rc
+    finally:
+        if over:
+            try:
+                os.remove(over)
+            except OSError:
+                pass
+
+
+def read_channel(root=ROOT):
+    ch = devchannel.read_channel(root)
+    if ch.get("problem"):
+        print("stack.py: warning: " + ch["problem"], file=sys.stderr)
+    return ch
+
+
+def cmd_channel(catalog, args):
+    """channel [--json] [--ghcr] | channel dev --registry HOST/PATH [--source URL] |
+    channel stable: show or set the update channel (docs/deployer.md, "Dev channel").
+    Setting it only writes .channel; the next compose command uses it. Signing in to the
+    registry is the deployer's job (or docker login's): no access code passes through here."""
+    args = list(args)
+    as_json = "--json" in args
+    ghcr = "--ghcr" in args
+    args = [a for a in args if a not in ("--json", "--ghcr")]
+    opts = {}
+    for name in ("--registry", "--source"):
+        if name in args:
+            i = args.index(name)
+            if i + 1 >= len(args):
+                raise StackError("%s needs a value" % name)
+            opts[name] = args[i + 1]
+            del args[i:i + 2]
+    if len(args) > 1 or (args and args[0] not in devchannel.CHANNELS):
+        raise StackError("channel takes stable or dev (got %s)" % " ".join(args))
+    try:
+        if args and args[0] == "dev":
+            if not opts.get("--registry"):
+                raise StackError("channel dev needs --registry HOST/PATH")
+            devchannel.write_channel(ROOT, "dev", opts["--registry"], opts.get("--source"))
+        elif args:
+            devchannel.write_channel(ROOT, "stable")
+    except (devchannel.ChannelError, OSError) as exc:
+        raise StackError(str(exc))
+    ch = read_channel()
+    rows = devchannel.image_rows(catalog, ch, ghcr, keys=enabled(catalog))
+    if as_json:
+        print(json.dumps(dict(ch, images=rows), indent=1))
+        return 0
+    if ch["channel"] == "stable":
+        print("channel: stable (the published images)")
+        return 0
+    print("channel: dev, registry %s, source %s" % (ch["registry"], ch["source"]))
+    for r in rows:
+        print("  %-5s %s -> %s" % (r["key"], r["stable"], r["dev"] if r["applies"] else r["note"]))
     return 0
 
 
@@ -881,7 +972,7 @@ def cmd_volumes(catalog, args):
 
 COMMANDS = {"list": cmd_list, "add": cmd_add, "enable": cmd_enable,
             "disable": cmd_disable, "check": cmd_check, "ps": cmd_ps,
-            "compose": cmd_compose, "volumes": cmd_volumes}
+            "compose": cmd_compose, "volumes": cmd_volumes, "channel": cmd_channel}
 
 
 def main(argv=None):

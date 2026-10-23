@@ -33,6 +33,17 @@ refuses the mount, and a deployer whose check failed must refuse every
 compose action before it changes anything. Who clones a game on Docker
 Desktop (nobody, so its imports can write) is checked with a stand-in
 os.stat.
+
+The dev channel (GET and POST /api/channel, docs/deployer.md "Dev channel")
+runs against a stand-in registry on 127.0.0.1 (the registry API's token
+handshake) and a stand-in docker CLI: bad requests and a wrong code are
+refused before any job or docker command, a good code signs in once with
+the secret on stdin into the deployer's own DOCKER_CONFIG, is kept mode
+600, writes .channel, pulls and restarts with DOCKER_CONFIG set; the update
+check compares the dev image's digest with the registry's; a revoked code
+fails the next update and enable with the sentence the panel shows;
+switching back signs out and forgets the code; --channel does the same for
+the setup scripts. The code is in no argument, job file, log or answer.
 """
 import http.client
 import io
@@ -85,6 +96,8 @@ args = sys.argv[1:]
 with open(os.path.join(d, "calls.txt"), "a") as f:
     f.write(json.dumps(args) + "\n")
 err = sys.stderr
+with open(os.path.join(d, "envs.txt"), "a") as f:
+    f.write(json.dumps({"args": args, "docker_config": os.environ.get("DOCKER_CONFIG")}) + "\n")
 err.write("fake stack.py " + " ".join(args) + "\n")
 err.write("token in env: " + os.environ.get("POL_DEPLOYER_TOKEN", "<absent>") + "\n")
 if os.environ.get("FAKE_ECHO"):
@@ -125,6 +138,16 @@ elif cmd == "disable":
     keys = [k for k in state() if k != args[1]]
     with open(os.path.join(core, ".games"), "w") as f:
         f.write("\n".join(keys) + "\n")
+elif cmd == "channel":
+    p = os.path.join(core, ".channel")
+    if args[1] == "dev":
+        reg = args[args.index("--registry") + 1]
+        src = args[args.index("--source") + 1] if "--source" in args else "https://" + reg
+        with open(p, "w") as f:
+            json.dump({"channel": "dev", "registry": reg, "source": src,
+                       "since": "2026-10-23T08:00:00Z"}, f)
+    elif os.path.exists(p):
+        os.remove(p)
 elif cmd == "volumes":
     keys = args[1].split(",")
     report = args[args.index("--report") + 1]
@@ -543,7 +566,7 @@ def test_games(c, t):
     ok(by["fe"]["data_ok"] is False and by["fe"]["missing"][0]["path"].endswith("fe-fet-area.tsv")
        and set(by["fe"]["missing"][0]) >= {"path", "hint"}, "fe: data_ok false with missing")
     ok(not by["fmo"]["installed"] and by["fmo"]["data_ok"] is None, "fmo: not installed, data_ok None")
-    ok(g["core"]["running"] is True and g["options"] == {"ghcr": False, "problem": None},
+    ok(g["core"]["running"] is True and g["options"] == {"ghcr": False, "channel": "stable", "problem": None},
        "core running, options")
     t.flag("ps.json", on=False)
     t.flag("check.json", on=False)
@@ -1760,6 +1783,368 @@ def run_import_tests(t, servers):
     s3.stop()
 
 
+# ------------------------------------------------------------- the dev channel
+
+class FakeRegistry:
+    """The registry API as docker uses it: /v2/ asks for a bearer token, /v2/token hands
+    one out for a known password (any user name, as Forgejo does for a token), and a
+    manifest answers with its digest while the password that got the token is still
+    valid. Records each request's path."""
+
+    def __init__(self):
+        self.valid = set()
+        self.tokens = {}
+        self.denied = set()
+        self.images = {"kart/lsb-server:stock": "sha256:" + "1" * 64}
+        self.paths = []
+        reg = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def answer(self, code, body=b"", headers=()):
+                self.send_response(code)
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+
+            def do_GET(self):
+                reg.paths.append(self.path)
+                u = urllib.parse.urlsplit(self.path)
+                auth = self.headers.get("Authorization") or ""
+                if u.path == "/v2/":
+                    return self.answer(401, b"{}", [("WWW-Authenticate",
+                        'Bearer realm="http://127.0.0.1:%d/v2/token",service="container_registry",scope="*"'
+                        % reg.port)])
+                if u.path == "/v2/token":
+                    pw = None
+                    if auth.startswith("Basic "):
+                        import base64
+                        pw = base64.b64decode(auth[6:]).decode().split(":", 1)[1]
+                    if pw in reg.valid:
+                        tok = "tok-%d" % len(reg.tokens)
+                        reg.tokens[tok] = pw
+                        return self.answer(200, json.dumps({"token": tok}).encode())
+                    return self.answer(401, b'{"errors":[{"code":"UNAUTHORIZED"}]}')
+                m = re.match(r"^/v2/(.+)/manifests/([^/]+)$", u.path)
+                if m:
+                    tok = auth[7:] if auth.startswith("Bearer ") else ""
+                    if reg.tokens.get(tok) not in reg.valid:
+                        return self.answer(401)
+                    if m.group(1) in reg.denied:
+                        return self.answer(403)
+                    dig = reg.images.get("%s:%s" % m.groups())
+                    if not dig:
+                        return self.answer(404)
+                    return self.answer(200, b"{}", [("Docker-Content-Digest", dig)])
+                self.answer(404)
+
+            do_HEAD = do_GET
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+# The stand-in docker CLI for the dev channel: login checks the password it reads from
+# stdin against FAKE_CH_DIR/valid and (as no real docker does) prints it, so the job log
+# must blank it; logout; image inspect from inspect.json. Each call is recorded with its
+# DOCKER_CONFIG and the sha256 of what came on stdin.
+FAKE_CH_DOCKER = r"""
+import base64, hashlib, json, os, sys
+d = os.environ["FAKE_CH_DIR"]
+args = sys.argv[1:]
+rec = {"args": args, "docker_config": os.environ.get("DOCKER_CONFIG")}
+pw = ""
+if "--password-stdin" in args:
+    pw = sys.stdin.read().strip()
+    rec["stdin_sha"] = hashlib.sha256(pw.encode()).hexdigest()
+with open(os.path.join(d, "calls.txt"), "a") as f:
+    f.write(json.dumps(rec) + "\n")
+if args[0] == "login":
+    valid = open(os.path.join(d, "valid")).read().split()
+    if pw in valid:
+        cfg = os.path.join(os.environ["DOCKER_CONFIG"], "config.json")
+        user = args[args.index("--username") + 1]
+        json.dump({"auths": {args[-1]: {"auth": base64.b64encode((user + ":" + pw).encode()).decode()}}},
+                  open(cfg, "w"))
+        print("debug: signed in with " + pw)
+        print("Login Succeeded")
+        sys.exit(0)
+    sys.stderr.write('Error response from daemon: Get "http://%s/v2/": unauthorized\n' % args[-1])
+    sys.exit(1)
+if args[0] == "logout":
+    print("Removing login credentials for " + args[-1])
+    sys.exit(0)
+if args[:2] == ["image", "inspect"]:
+    p = os.path.join(d, "inspect.json")
+    images = json.load(open(p)) if os.path.exists(p) else {}
+    if args[2] not in images:
+        sys.stderr.write("Error: No such image: " + args[2] + "\n")
+        sys.exit(1)
+    print(json.dumps([images[args[2]]]))
+    sys.exit(0)
+sys.exit(0)
+"""
+
+CH_CODE = "kart-dev-7Qm2x9Lp4Vb8"
+CH_CODE2 = "kartclub:kart-dev-second-55Zr"
+
+
+def test_channel_unit(reg):
+    """devchannel.check_access against the stand-in registry, each outcome."""
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import devchannel
+    registry = "127.0.0.1:%d/kart" % reg.port
+    reg.valid = {CH_CODE}
+    probe = [("lsb-server", "stock")]
+    r = devchannel.check_access(registry, CH_CODE, probe, scheme="http")
+    ok(r["state"] == "ok" and r["digests"] == {"lsb-server:stock": "sha256:" + "1" * 64},
+       "check_access: a good code reads the manifest and its digest (%s)" % r)
+    r = devchannel.check_access(registry, "someone:" + CH_CODE, probe, scheme="http")
+    ok(r["state"] == "ok", "check_access: name:code signs in under that name")
+    r = devchannel.check_access(registry, "kart-wrong-code-0000", probe, scheme="http")
+    ok(r["state"] == "wrong" and "did not accept" in r["why"], "check_access: a wrong code: wrong (%s)" % r["why"])
+    reg.denied = {"kart/lsb-server"}
+    r = devchannel.check_access(registry, CH_CODE, probe, scheme="http")
+    ok(r["state"] == "denied" and "may not read" in r["why"], "check_access: no read access: denied")
+    reg.denied = set()
+    r = devchannel.check_access(registry, CH_CODE, [("nothing", "stock")], scheme="http")
+    ok(r["state"] == "missing" and "no image nothing:stock" in r["why"], "check_access: no such image: missing")
+    r = devchannel.check_access("127.0.0.1:%d/kart" % free_port(), CH_CODE, probe, scheme="http", timeout=3)
+    ok(r["state"] == "unreachable" and "did not answer" in r["why"], "check_access: nobody there: unreachable")
+    ok(not any(CH_CODE in x for x in reg.paths), "check_access: the code is in no request path")
+    ok(devchannel.split_code("a:b") == ("a", "b") and devchannel.split_code("abc", "dev") == ("dev", "abc")
+       and devchannel.split_code(":abc", "dev") == ("dev", ":abc"), "split_code: name:secret and bare codes")
+
+
+def test_channel(t, servers):
+    reg = FakeRegistry()
+    try:
+        test_channel_unit(reg)
+        _test_channel(t, servers, reg)
+    finally:
+        reg.stop()
+
+
+def _test_channel(t, servers, reg):
+    import hashlib as _h
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import devchannel
+    chdir = os.path.join(t.tmp, "chdocker")
+    os.makedirs(chdir, exist_ok=True)
+    dock = os.path.join(chdir, "docker.py")
+    with open(dock, "w") as f:
+        f.write(FAKE_CH_DOCKER)
+
+    def set_valid(*secrets):
+        reg.valid = set(secrets)
+        with open(os.path.join(chdir, "valid"), "w") as f:
+            f.write("\n".join(secrets) + "\n")
+
+    def dcalls():
+        try:
+            return [json.loads(l) for l in open(os.path.join(chdir, "calls.txt")) if l.strip()]
+        except OSError:
+            return []
+
+    def senvs():
+        try:
+            return [json.loads(l) for l in open(os.path.join(t.fakedir, "envs.txt")) if l.strip()]
+        except OSError:
+            return []
+
+    def clear():
+        for p in (os.path.join(chdir, "calls.txt"), os.path.join(t.fakedir, "envs.txt")):
+            if os.path.exists(p):
+                os.remove(p)
+        t.clear_calls()
+
+    registry = "127.0.0.1:%d/kart" % reg.port
+    ref = registry + "/lsb-server:stock"
+    state = os.path.join(t.tmp, "state-channel")
+    chstate = os.path.join(state, "channel")
+    bridge = os.path.join(t.root, "hippaulbridge")
+    os.makedirs(bridge, exist_ok=True)
+    games = os.path.join(t.core, ".games")
+    saved = open(games).read() if os.path.exists(games) else None
+    with open(games, "w") as f:
+        f.write("ffxi\ntm\n")
+    chfile = os.path.join(t.core, ".channel")
+    set_valid(CH_CODE)
+    clear()
+    env = {"POL_DEV_REGISTRY": registry, "POL_DEV_REGISTRY_HTTP": "1", "FAKE_CH_DIR": chdir}
+    s = Server(t, extra_env=env, args=["--state", state, "--docker", dock, "--refresh-gap", "0"])
+    servers.append(s)
+    try:
+        c = s.start()
+        code, ch = c.get("/api/channel")
+        ok(code == 200 and ch["channel"] == "stable" and ch["registry_default"] == registry
+           and ch["code_stored"] is False, "channel: stable at first, the registry from POL_DEV_REGISTRY")
+        ff = [r for r in ch["images"] if r["key"] == "ffxi" and r["dev_image"]]
+        ok(ff and ff[0]["dev"] == ref and ff[0]["applies"] and ff[0]["enabled"]
+           and ff[0]["source"] == "https://%s/lsb-server" % registry and ff[0]["license"],
+           "channel: FFXI's world server has a dev image, with its source (%s)" % (ff[:1],))
+        ok(any(r["key"] == "core" and r["dev_image"] is None and "No dev build" in r["note"]
+               for r in ch["images"]), "channel: the core's images say they have no dev build")
+        absent = [k for k in ("fe", "fmo", "doc", "jan")
+                  if not os.path.isdir(os.path.join(t.root, json.load(open(os.path.join(
+                      t.core, "games", k + ".json")))["checkout"]))]
+        ok(absent and not any(r["key"] in absent for r in ch["images"]),
+           "channel: games not installed are left out (%s)" % absent)
+        ok(c.get("/api/games")[1]["options"]["channel"] == "stable", "games: options.channel stable")
+
+        for body, want in (({"channel": "beta"}, "stable or dev"),
+                           ({"channel": "dev", "code": "short"}, "8 to 512"),
+                           ({"channel": "dev", "code": "has a space in it"}, "8 to 512"),
+                           ({"channel": "dev", "code": CH_CODE, "extra": 1}, "unknown fields"),
+                           ({"channel": "dev", "code": CH_CODE, "registry": "Not A Registry"},
+                            "registry.example.org")):
+            st, r = c.call("POST", "/api/channel", body)
+            ok(st == 400 and want in (r or {}).get("error", ""), "channel: %s refused (%s)" % (body, r))
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "kart-wrong-code-0000"})
+        ok(st == 400 and "did not accept" in r.get("error", ""), "channel: a wrong code refused at once (%s)" % r)
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": CH_CODE,
+                                                "registry": "127.0.0.1:%d/kart" % free_port()})
+        ok(st == 502 and "did not answer" in r.get("error", ""), "channel: a registry nobody answers: 502 (%s)" % r)
+        ok(not dcalls() and not os.path.exists(chfile) and not c.get("/api/jobs")[1]["jobs"],
+           "channel: refused requests ran no docker command, wrote no .channel, started no job")
+
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": CH_CODE})
+        ok(st == 202 and r.get("job"), "channel: a good code starts the switch (%s)" % r)
+        j = c.wait(r["job"], 60)
+        ok(j["state"] == "ok" and "lsb-server:stock" in j["summary"] and j["action"] == "channel",
+           "channel dev job: ok (%s)" % j["summary"])
+        logins = [x for x in dcalls() if x["args"][0] == "login"]
+        ok(len(logins) == 1 and logins[0]["args"] == ["login", "--username", "dev", "--password-stdin",
+                                                     "127.0.0.1:%d" % reg.port],
+           "channel: one docker login, the code on no argument (%s)" % (logins[:1],))
+        ok(logins and logins[0].get("stdin_sha") == _h.sha256(CH_CODE.encode()).hexdigest(),
+           "channel: the code went to docker login on stdin")
+        ok(logins and logins[0]["docker_config"] == os.path.join(chstate, "docker"),
+           "channel: docker login writes the deployer's own DOCKER_CONFIG, not the host's")
+        doc = json.load(open(chfile))
+        ok(doc["channel"] == "dev" and doc["registry"] == registry and CH_CODE not in json.dumps(doc),
+           "channel: .channel says dev and holds no code")
+        cp = os.path.join(chstate, "code")
+        ok(open(cp).read() == CH_CODE, "channel: the code is kept in the deployer's state")
+        if os.name != "nt":
+            ok(stat.S_IMODE(os.stat(cp).st_mode) == 0o600 and stat.S_IMODE(os.stat(chstate).st_mode) == 0o700,
+               "channel: code file 600, its folder 700")
+        comp = [e for e in senvs() if e["args"][0] == "compose"]
+        ok(len(comp) == 2 and comp[0]["args"][1:4] == ["--no-prebuild", "pull", "--ignore-buildable"]
+           and comp[1]["args"][1:3] == ["up", "-d"]
+           and all(e["docker_config"] == os.path.join(chstate, "docker") for e in comp),
+           "channel: pulled and restarted, docker signed in through DOCKER_CONFIG (%s)" % comp)
+        ok(any(e["args"][:2] == ["channel", "dev"] and registry in e["args"] for e in senvs()),
+           "channel: stack.py channel dev wrote .channel")
+        ok("[access code]" in j["log"] and CH_CODE not in j["log"],
+           "channel: the code a tool printed is blanked in the job log")
+        code, ch = c.get("/api/channel")
+        ok(ch["channel"] == "dev" and ch["code_stored"] is True and ch["since"]
+           and CH_CODE not in json.dumps(ch), "channel: GET says dev, a code is stored, never shows it")
+        ok(c.get("/api/games")[1]["options"]["channel"] == "dev", "games: options.channel dev")
+
+        # the update check: the dev image's digest against the registry's
+        inspect = os.path.join(chdir, "inspect.json")
+
+        def local(digest):
+            with open(inspect, "w") as f:
+                json.dump({ref: {"RepoDigests": [registry + "/lsb-server@" + digest],
+                                 "Config": {"Labels": {}, "Env": []}}}, f)
+        local("sha256:" + "0" * 64)
+        code, u, _ = updates(c, refresh=True)
+        it = by_key(u).get("ffxi") or {}
+        ok(u.get("channel") == "dev" and it.get("channel") == "dev" and it.get("update") == "available"
+           and "newer dev build" in (it.get("why") or "") and shape_ok(it),
+           "updates: an older dev image here: available on the dev channel (%s)" % it.get("why"))
+        ok("dev images" in (it.get("how") or ""), "  how: %s" % it.get("how"))
+        local(reg.images["kart/lsb-server:stock"])
+        time.sleep(0.05)
+        code, u, _ = updates(c, refresh=True)
+        it = by_key(u).get("ffxi") or {}
+        ok(it.get("update") != "available", "updates: the registry's digest here: no dev update (%s)" % it.get("why"))
+        ok(by_key(u).get("tm", {}).get("channel") is None, "updates: a game with no dev image is not marked dev")
+
+        # the code is revoked
+        set_valid()
+        clear()
+        j = c.run("update", "ffxi")
+        ok(j["state"] == "failed" and j["summary"] == devchannel.REVOKED,
+           "revoked: update fails with the sentence (%s)" % j["summary"])
+        ok(not [e for e in senvs() if e["args"][0] == "compose"] and "$ git" not in j.get("log", ""),
+           "revoked: nothing was pulled or fetched")
+        j = c.run("enable", "tm")
+        ok(j["state"] == "failed" and j["summary"] == devchannel.REVOKED, "revoked: enable fails the same way")
+        code, u, _ = updates(c, refresh=True)
+        it = by_key(u).get("ffxi") or {}
+        ok(it.get("update") == "unknown" and it.get("why") == devchannel.REVOKED,
+           "revoked: the update list says so for the dev item")
+
+        # back to stable
+        clear()
+        st, r = c.call("POST", "/api/channel", {"channel": "stable"})
+        j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r)}
+        ok(j["state"] == "ok" and "stable channel" in j["summary"] and "restore the backup" in j["summary"],
+           "stable: ok, with FFXI's database note (%s)" % j["summary"])
+        ok(any(x["args"][0] == "logout" for x in dcalls()), "stable: docker logout")
+        ok(not os.path.exists(chstate) and not os.path.exists(chfile), "stable: code, sign-in and .channel removed")
+        comp = [e for e in senvs() if e["args"][0] == "compose"]
+        ok(comp and all(e["docker_config"] is None for e in comp), "stable: compose runs without DOCKER_CONFIG")
+        code, ch = c.get("/api/channel")
+        ok(ch["channel"] == "stable" and ch["code_stored"] is False, "stable: GET says stable")
+
+        # --channel for the setup scripts
+        set_valid(CH_CODE2.split(":", 1)[1])
+        clear()
+        argv = [sys.executable, DEPLOYER, "--channel", "dev", "--bind", "127.0.0.1:%d" % s.port]
+        cli = subprocess.run(argv, input="kart-wrong-code-0000\n", env=s.env(), capture_output=True,
+                             text=True, timeout=120)
+        ok(cli.returncode == 1 and "did not accept" in cli.stdout, "--channel dev, a wrong code: exit 1 (%s)" % cli.stdout.strip())
+        cli = subprocess.run(argv, input=CH_CODE2 + "\n", env=s.env(), capture_output=True, text=True, timeout=120)
+        ok(cli.returncode == 0 and "dev channel" in cli.stdout, "--channel dev: exit 0 (%s)" % cli.stdout.strip()[-200:])
+        logins = [x for x in dcalls() if x["args"][0] == "login"]
+        ok(logins and logins[-1]["args"][2] == "kartclub", "--channel dev: name:code signs in under that name")
+        cli = subprocess.run([sys.executable, DEPLOYER, "--channel", "stable", "--bind", "127.0.0.1:%d" % s.port],
+                             env=s.env(), capture_output=True, text=True, timeout=120)
+        ok(cli.returncode == 0 and "stable channel" in cli.stdout, "--channel stable: exit 0")
+
+        # the code is nowhere it should not be
+        secrets = [CH_CODE, CH_CODE2, CH_CODE2.split(":", 1)[1]]
+        hits = []
+        files = [os.path.join(dp, f) for dp, _, fs in os.walk(state) for f in fs]
+        files += [os.path.join(t.fakedir, n) for n in ("calls.txt", "envs.txt")]
+        files += [os.path.join(chdir, "calls.txt"), s.err.name]
+        for path in files:
+            try:
+                data = open(path, "rb").read()
+            except OSError:
+                continue
+            for sec in secrets:
+                if sec.encode() in data:
+                    hits.append("%s in %s" % (sec[:9], os.path.relpath(path, t.tmp)))
+        ok(not hits, "the access code is in no job file, log, argument or answer (%s)" % hits)
+        ok(not any(sec in x for x in reg.paths for sec in secrets), "the access code is in no URL")
+    finally:
+        s.stop()
+        if saved is None:
+            os.remove(games)
+        else:
+            with open(games, "w") as f:
+                f.write(saved)
+        shutil.rmtree(bridge, ignore_errors=True)
+        if os.path.exists(chfile):
+            os.remove(chfile)
+
+
 def main():
     t = Tree()
     servers = []
@@ -1808,6 +2193,7 @@ def main():
         test_updates_images(t, servers)
         test_check_paths(t)
         test_paths_server(t, servers)
+        test_channel(t, servers)
         hits = scan_for_token(t, servers)
         ok(not hits, "the token is in no job file or server log (%s)" % hits)
     finally:

@@ -132,7 +132,7 @@ class Deployer(Reply):
         DEP["asked"].append(self.path)
         if urllib.parse.urlsplit(self.path).path == "/api/updates":
             return self.reply(200, {"checked_at": "2026-10-21T12:00:00Z", "checking": False,
-                                    "items": DEP["items"]})
+                                    "items": DEP["items"], "channel": DEP.get("channel", "stable")})
         return self.reply(404, {"error": "not found"})
 
 
@@ -271,6 +271,18 @@ chk("  the deployer's item wins over the game's own report (matched by module)",
     (it["kartclub"]["behind"], it["kartclub"]["how"]), (1, "Update it from Settings > Install games."))
 chk("  its checked_at, and no module field passed on", (out["checked_at"], "module" in it["kartclub"]),
     ("2026-10-21T12:00:00Z", False))
+chk("  the stable channel by default", (out["channel"], "channel" in it["kartclub"]), ("stable", False))
+DEP["channel"] = "dev"
+DEP["items"][1] = dict(DEP["items"][1], channel="dev", behind=None, changes=[],
+                       why="A newer dev build is published: kart:main.")
+DEP["items"][0] = dict(DEP["items"][0], channel="beta")
+out = U.overview()
+it = items(out)
+chk("the dev channel: said for the list and for the item that follows a dev image",
+    (out["channel"], it["kartclub"].get("channel"), it["kartclub"]["update"], it["kartclub"]["why"]),
+    ("dev", "dev", "available", "A newer dev build is published: kart:main."))
+chk("  a channel word it does not know marks nothing", "channel" in it["core"], False)
+DEP["channel"] = "stable"
 U.overview(refresh=True)
 chk("refresh is passed on", DEP["asked"][-1], "/api/updates?refresh=1")
 os.environ["POL_DEPLOYER_URL"] = DEAD
@@ -278,6 +290,7 @@ out = U.overview()
 chk("a deployer that does not answer: the panel's own check and the games' reports",
     sorted((i["key"], i["update"]) for i in out["items"]),
     [("core", "available"), ("derby", "unknown"), ("kart", "available")])
+chk("  and the stable channel", out["channel"], "stable")
 del os.environ["POL_DEPLOYER_URL"]
 
 print("cleaning what comes in")

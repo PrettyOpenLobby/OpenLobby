@@ -22,6 +22,7 @@ Standard library only (Python 3.8+). Built into one file with PyInstaller
 """
 import argparse
 import datetime
+import getpass
 import json
 import os
 import re
@@ -99,6 +100,79 @@ class Answers:
     """--yes takes every default without asking."""
     yes = False
     closed = False
+
+
+#: The update channel the setup script is run with (docs/deployer.md, "Dev channel"):
+#: {"channel", "registry", "code_file"}. The access code is in code_file, a private
+#: temporary file the script reads and this program removes; never on a command line.
+CHANNEL = {}
+REGISTRY_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$")
+
+
+def channel_argv(windows):
+    """The setup script's channel options, from CHANNEL."""
+    ch = CHANNEL.get("channel")
+    if not ch:
+        return []
+    names = ("-Channel", "-Registry", "-CodeFile") if windows else ("--channel", "--registry", "--code-file")
+    out = [names[0], ch]
+    if ch == "dev":
+        if CHANNEL.get("registry"):
+            out += [names[1], CHANNEL["registry"]]
+        if CHANNEL.get("code_file"):
+            out += [names[2], CHANNEL["code_file"]]
+    return out
+
+
+def prepare_channel(args):
+    """Ask what the dev channel needs (the registry, the access code, hidden) and keep the
+    code in a private temporary file for the script. False when it cannot go ahead."""
+    CHANNEL.clear()
+    if not args.channel:
+        return True
+    CHANNEL["channel"] = args.channel
+    if args.channel != "dev":
+        return True
+    reg = (args.registry or "").strip()
+    if not reg and not Answers.yes:
+        reg = ask("Dev registry (the developers give it with the access code)", "").strip()
+    if reg and not REGISTRY_RE.match(reg):
+        say("The dev registry looks like registry.example.org/team (got %s)." % reg)
+        return False
+    CHANNEL["registry"] = reg
+    if args.dry_run:
+        return True
+    if args.code_file:
+        try:
+            with open(args.code_file, encoding="utf-8") as f:
+                code = f.readline().strip()
+        except OSError as exc:
+            say("Cannot read the access code file: %s" % exc)
+            return False
+    elif Answers.yes:
+        say("--channel dev with --yes needs --code-file (the access code is not taken on the command line).")
+        return False
+    else:
+        try:
+            code = getpass.getpass("Access code (not shown): ").strip()
+        except EOFError:
+            code = ""
+    if not code:
+        say("No access code was given.")
+        return False
+    d = tempfile.mkdtemp(prefix="openlobby-channel-")
+    path = os.path.join(d, "code")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(code + "\n")
+    CHANNEL["code_file"] = path
+    return True
+
+
+def forget_channel_code():
+    path = CHANNEL.pop("code_file", None)
+    if path:
+        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
 
 
 def say(text=""):
@@ -640,6 +714,7 @@ def script_command(inst, settings=None, admin_user="", client=None, dry_run=Fals
         if admin_user:
             cmd += ["-AdminUser", admin_user]
         cmd.append("-InstallClient" if client else "-NoClient")
+        cmd += channel_argv(True)
         if dry_run:
             cmd.append("-DryRun")
         return cmd
@@ -655,6 +730,7 @@ def script_command(inst, settings=None, admin_user="", client=None, dry_run=Fals
         cmd.append("--ps2" if settings.get("ps2") else "--no-ps2")
     if admin_user:
         cmd += ["--admin-user", admin_user]
+    cmd += channel_argv(False)
     if dry_run:
         cmd.append("--dry-run")
     return cmd
@@ -1574,6 +1650,12 @@ def parse_args(argv=None):
     do.add_argument("--uninstall", action="store_true",
                     help="remove the containers; the data stays unless --delete-data is given")
     ap.add_argument("--delete-data", action="store_true", help="with --uninstall: delete the data too")
+    ap.add_argument("--channel", choices=("stable", "dev"),
+                    help="the update channel: dev follows the developers' preview builds and asks for "
+                         "an access code (not shown); docs/deployer.md, \"Dev channel\"")
+    ap.add_argument("--registry", default="", help="with --channel dev: the dev registry, host/path")
+    ap.add_argument("--code-file", default="",
+                    help="with --channel dev and --yes: read the access code from this file's first line")
     ap.add_argument("--repo", default=REPO_URL, help=argparse.SUPPRESS)
     ap.add_argument("--zip-url", default=ZIP_URL, help=argparse.SUPPRESS)
     ap.add_argument("--panel-url", default="", help=argparse.SUPPRESS)
@@ -1588,6 +1670,8 @@ def main(argv=None):
     Answers.closed = False
     try:
         heading("%s %s" % (NAME, version()))
+        if not prepare_channel(args):
+            return 2
         step("Checking Docker")
         if args.dry_run:
             state = docker_state()
@@ -1621,6 +1705,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         say()
         return 1
+    finally:
+        forget_channel_code()
 
 
 def other_installs_note(inst):

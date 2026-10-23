@@ -205,6 +205,16 @@ curl -fsSL https://raw.githubusercontent.com/PrettyOpenLobby/OpenLobby/main/setu
 | `--admin-user NAME` | `OPENLOBBY_ADMIN_USER` | The admin panel's user name on a new `.env`. Default: `admin`. |
 | `--install-docker` | `OPENLOBBY_INSTALL_DOCKER=1` | With `--yes`, allow the Docker and git install commands. Without it, `--yes` prints them and stops. |
 | `--no-start` | | Write `.env` and stop. |
+| `--channel stable\|dev` | `OPENLOBBY_CHANNEL` | The update channel. `dev` follows the developers' preview builds; it asks for the access code without showing it and needs the deployer. |
+| `--registry HOST/PATH` | `OPENLOBBY_DEV_REGISTRY` | The dev registry, kept in `.env` as `POL_DEV_REGISTRY`. |
+| `--code-file FILE` | `OPENLOBBY_DEV_CODE_FILE` | With `--yes`, read the access code from the file's first line; it is never taken on the command line. |
+
+The dev channel (docs/deployer.md, "Dev channel") is switched by the
+deployer: the script hands it the code on stdin once the stack is up, and
+`--channel stable` switches back. setup.ps1 takes the same as `-Channel`,
+`-Registry` and `-CodeFile`, and the setup program as `--channel`,
+`--registry` and `--code-file`. Switching from the admin panel, Settings >
+Install games > Update channel, does the same.
 
 `python tools/setup_test.py` tests both scripts offline, with stand-ins for
 `docker`, `git` and the address tools.

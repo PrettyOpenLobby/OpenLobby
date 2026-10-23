@@ -17,6 +17,15 @@ that keeps its volumes and images in a JSON file: a missing volume is
 created and filled, an empty one filled, one with files left alone, and a
 failed download, a full disk and a catalog entry that cannot be used each
 end in a plain sentence with nothing written.
+
+The dev channel (docs/deployer.md, "Dev channel"): every catalog "dev" entry
+names services its game's compose files define and an image they run; on
+the dev channel the plan swaps the title chain's base where a dev image
+replaces it and adds a compose file that sets image: for those services,
+last in the -f list, with published images only for the catalog's own
+images; .channel round-trips and refuses a registry that is not one; and,
+with docker, `docker compose config` shows the dev image on the services
+and nowhere else.
 """
 import ast
 import json
@@ -32,6 +41,7 @@ sys.path.insert(0, HERE)
 import stack  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "services", "deployer"))
 import clientdata  # noqa: E402
+import devchannel  # noqa: E402
 
 FAILS = []
 SKIPS = []
@@ -577,6 +587,154 @@ def check_docker(catalog, root, parent):
             print("ok   docker compose config %s" % ",".join(keys))
 
 
+DEV = {"channel": "dev", "registry": "registry.example.org/kart",
+       "source": "https://code.example.org/kart"}
+
+
+def check_channel(catalog, root, parent):
+    """The dev channel's catalog entries, image map and compose override."""
+    for key, e in catalog.items():
+        raw = e.get("dev") or []
+        ok(isinstance(raw, list), "%s: dev is a list" % key)
+        good = devchannel.dev_entries(e)
+        ok(len(good) == len(raw), "%s: every dev entry is well formed (%d of %d)" % (key, len(good), len(raw)))
+        d = stack.checkout_of(e, root, parent)
+        if raw and not os.path.isdir(d):
+            skip("%s: dev entries against compose (no checkout)" % key)
+            continue
+        texts = "".join(read(os.path.join(d, f)) for f in e["compose"] + e["compose_ghcr"])
+        declared = set()
+        for f in e["compose"]:
+            declared |= set(compose_services(read(os.path.join(d, f))))
+        for x in good:
+            ok(x["replaces"] in texts, "%s: dev %s replaces %s, which its compose runs"
+               % (key, x["image"], x["replaces"]))
+            for svc in x["services"]:
+                ok(svc in declared, "%s: dev %s service %s is in its compose" % (key, x["image"], svc))
+            ok(isinstance(x.get("source"), str) and x["source"], "%s: dev %s names its source" % (key, x["image"]))
+            ok(isinstance(x.get("license"), str) and x["license"], "%s: dev %s names its license" % (key, x["image"]))
+
+    # stable: the plan is what it was
+    a = stack.plan(catalog, ["ffxi"], ["up", "-d"], root=root, parent=parent, environ={})
+    b = stack.plan(catalog, ["ffxi"], ["up", "-d"], root=root, parent=parent, environ={},
+                   channel={"channel": "stable"})
+    ok(a["files"] == b["files"] and b["override"] == "", "stable channel: the plan is unchanged")
+
+    # dev, built here: the world server (not a catalog image of our own) is swapped
+    ref = "registry.example.org/kart/lsb-server:stock"
+    p = stack.plan(catalog, ["ffxi"], ["up", "-d", "--build"], root=root, parent=parent, environ={},
+                   channel=DEV, override_path="/tmp/over.yml")
+    ok(p["files"][-1] == "/tmp/over.yml" and p["steps"][-1]["argv"].count("/tmp/over.yml") == 1,
+       "dev ffxi: the override is the last -f file")
+    for svc in ("db-update", "connect", "search", "world", "map"):
+        ok("  %s:\n    image: %s\n" % (svc, ref) in p["override"], "dev ffxi: %s runs %s" % (svc, ref))
+    ok("  db:" not in p["override"] and "bridge" not in p["override"],
+       "dev ffxi: the database and the bridge keep their images")
+    ok(p["base"] == a["base"], "dev ffxi, built here: the title chain is unchanged")
+    p = stack.plan(catalog, ["tm"], ["up", "-d"], root=root, parent=parent, environ={}, channel=DEV)
+    ok(p["override"] == "" and p["files"] == stack.plan(catalog, ["tm"], ["up", "-d"], root=root,
+                                                         parent=parent, environ={})["files"],
+       "dev tm (no dev build): no override file")
+
+    # a catalog where the core and Tetra Master have dev builds of their own images
+    cat = json.loads(json.dumps(catalog))
+    cat["core"]["dev"] = [{"replaces": "ghcr.io/prettyopenlobby/openlobby", "image": "openlobby",
+                           "tag": "main", "services": ["login", "dns"], "source": "openlobby",
+                           "license": "AGPL-3.0-or-later"}]
+    cat["tm"]["dev"] = [{"replaces": "ghcr.io/prettyopenlobby/hippaulmaster", "image": "hippaulmaster",
+                         "tag": "main", "services": ["login"], "source": "hippaulmaster",
+                         "license": "AGPL-3.0-or-later"}]
+    p = stack.plan(cat, ["fe"], ["up", "-d"], ghcr=True, root=root, parent=parent, environ={}, channel=DEV)
+    ok(p["steps"][0]["env"].get("POL_TITLE_BASE_IMAGE") == "registry.example.org/kart/openlobby:main",
+       "dev, published: the first title link builds on the dev core image")
+    ok("  dns:\n    image: registry.example.org/kart/openlobby:main\n" in p["override"],
+       "dev, published: the core's services run the dev core image")
+    p = stack.plan(cat, ["tm", "jan"], ["up", "-d"], ghcr=True, root=root, parent=parent,
+                   environ={"HIPPAULMASTER_TAG": "0.2.0"}, channel=DEV)
+    ok(p["steps"][-1]["env"]["POL_TITLE_BASE_IMAGE"] == "registry.example.org/kart/hippaulmaster:main",
+       "dev, published: jan builds on the dev Tetra Master image, not the pinned tag")
+    p = stack.plan(cat, ["fe"], ["up", "-d", "--build"], root=root, parent=parent, environ={}, channel=DEV)
+    ok(p["override"] == "" and p["steps"][0]["argv"][-1] == "dns",
+       "dev, built here: a dev build of our own image is not used (the checkout is built)")
+    rows = devchannel.image_rows(cat, DEV, False, keys=["fe"])
+    core = [r for r in rows if r["stable"] == "ghcr.io/prettyopenlobby/openlobby"][0]
+    ok(not core["applies"] and "POL_DEPLOY_GHCR" in core["note"], "  and the row says why")
+    ok(core["source"] == "https://code.example.org/kart/openlobby", "  the source URL is under the channel's")
+    gaps = [r["stable"] for r in devchannel.image_rows(catalog, DEV, True) if r["dev_image"] is None]
+    ok("ghcr.io/prettyopenlobby/openlobby" in gaps and "ghcr.io/landsandboat/server" not in gaps,
+       "rows: the images with no dev build are listed (%d)" % len(gaps))
+
+    # .channel round trip and refusals, in a scratch checkout
+    tmp = tempfile.mkdtemp(prefix="stacktest-channel-")
+    try:
+        ok(devchannel.read_channel(tmp) == {"channel": "stable"}, ".channel absent: stable")
+        devchannel.write_channel(tmp, "dev", "registry.example.org:5000/kart")
+        ch = devchannel.read_channel(tmp)
+        ok(ch["channel"] == "dev" and ch["registry"] == "registry.example.org:5000/kart"
+           and ch["source"] == "https://registry.example.org:5000/kart" and ch.get("since"),
+           ".channel dev round trip, default source (%s)" % ch)
+        for bad in ("Registry.Example.org/kart", "registry.example.org/kart ; rm", "", "https://x.org/a"):
+            try:
+                devchannel.write_channel(tmp, "dev", bad)
+                ok(False, ".channel refuses registry %r" % bad)
+            except devchannel.ChannelError:
+                pass
+        with open(os.path.join(tmp, ".channel"), "w") as f:
+            f.write("{not json")
+        ch = devchannel.read_channel(tmp)
+        ok(ch["channel"] == "stable" and ch.get("problem"), "a .channel that does not parse: stable, with a sentence")
+        devchannel.write_channel(tmp, "stable")
+        ok(not os.path.exists(os.path.join(tmp, ".channel")), "channel stable removes .channel")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    for argv, want in ((["channel", "dev"], "--registry"), (["channel", "beta"], "stable or dev"),
+                       (["channel", "dev", "--registry", "not a registry"], "registry")):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "stack.py")] + argv,
+                           capture_output=True, text=True)
+        ok(r.returncode == 2 and want in r.stderr, "stack.py %s: refused (%s)" % (" ".join(argv), r.stderr.strip()))
+    r = subprocess.run([sys.executable, os.path.join(HERE, "stack.py"), "channel", "--json"],
+                       capture_output=True, text=True)
+    try:
+        doc = json.loads(r.stdout)
+    except ValueError:
+        doc = {}
+    ok(r.returncode == 0 and doc.get("channel") in ("stable", "dev") and doc.get("images"),
+       "stack.py channel --json answers")
+
+    # docker compose config with the override: the dev image on those services only
+    docker = shutil.which("docker")
+    if not docker or subprocess.run([docker, "info"], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL).returncode != 0:
+        skip("docker compose config on the dev channel (docker not available)")
+        return
+    if not os.path.isdir(stack.checkout_of(catalog["ffxi"], root, parent)):
+        skip("docker compose config on the dev channel (no FFXI checkout)")
+        return
+    fd, over = tempfile.mkstemp(suffix=".yml")
+    os.close(fd)
+    try:
+        p = stack.plan(catalog, ["ffxi"], ["config", "--format", "json"], root=root, parent=parent,
+                       environ={}, channel=DEV, override_path=over)
+        with open(over, "w", encoding="utf-8", newline="\n") as f:
+            f.write(p["override"])
+        step = p["steps"][-1]
+        env = dict(os.environ)
+        env.update(step["env"])
+        r = subprocess.run(step["argv"], env=env, capture_output=True, text=True)
+        if ok(r.returncode == 0, "docker compose config on the dev channel: %s" % r.stderr.strip()[-300:]):
+            svcs = json.loads(r.stdout)["services"]
+            dev = sorted(n for n, v in svcs.items() if v.get("image") == ref)
+            ok(dev == ["connect", "db-update", "map", "search", "world"],
+               "config: exactly the five LSB services run the dev image (%s)" % dev)
+            ok(not svcs["db"]["image"].startswith("registry.example.org"), "config: the database is untouched")
+            ok(set(svcs) == set(json.loads(subprocess.run(
+                stack.plan(catalog, ["ffxi"], ["config", "--format", "json"], root=root, parent=parent,
+                           environ={})["steps"][-1]["argv"], env=env, capture_output=True,
+                text=True).stdout)["services"]), "config: the override adds no service")
+    finally:
+        os.remove(over)
+
+
 def main():
     parent = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else stack.PARENT
     root = stack.ROOT
@@ -587,6 +745,7 @@ def main():
     check_report_and_ps(catalog)
     check_volumes()
     check_docker(catalog, root, parent)
+    check_channel(catalog, root, parent)
     print("stack_test: %d failed, %d skipped" % (len(FAILS), len(SKIPS)))
     return 1 if FAILS else 0
 

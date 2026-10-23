@@ -371,10 +371,11 @@ is the start-up check's result ("Where Docker sees the checkouts"): `ok`,
             "ports": [...], "notes": "...", "services": {"tmrank": "running"}},
            ...],
  "core": {"running": true, "services": {...}},
- "options": {"ghcr": false, "problem": null}}
+ "options": {"ghcr": false, "channel": "stable", "problem": null}}
 ```
 
-`options.problem` is the same as in `/api/health`.
+`options.problem` is the same as in `/api/health`. `options.channel` is
+`stable` or `dev` ("Dev channel" below).
 
 - `installed`: the checkout directory exists. `enabled`: the key is in
   `.games`.
@@ -565,6 +566,8 @@ When the branch has newer commits outside the pin, `why` says so.
   for a checkout and for an image that does not say.
 - `how` is set when an update is available.
 - `checking` is true while a check runs.
+- `channel` (top level) is `stable` or `dev`; on the dev channel an item
+  that runs a dev image has `"channel": "dev"` ("Dev channel" below).
 
 `GET /api/updates?refresh=1` starts a check now, past the hour's cache,
 and answers at once with `checking` true; ask again until it is false.
@@ -601,6 +604,129 @@ report that does not fit the shape shows as `unknown` with a sentence
 saying so. `POL_ADMIN_GITHUB_API` points the panel's check at another
 GitHub API, as the tests do.
 
+## Dev channel
+
+An install follows the stable channel by default: the images published to
+ghcr.io, and the upstream images the games run (FFXI's world server is the
+LandSandBoat team's own image). The dev channel follows preview builds
+instead, from a container registry the developers give you access to with
+an access code. Only the images that have a dev build change; the rest stay
+on the published images, and the panel lists which.
+
+The catalog says which images have a dev build. A `games/*.json` entry may
+carry a `dev` list:
+
+```
+"dev": [{"replaces": "ghcr.io/landsandboat/server", "image": "lsb-server", "tag": "stock",
+         "services": ["db-update", "connect", "search", "world", "map"],
+         "source": "lsb-server", "license": "GPL-3.0-or-later",
+         "what": "The world server: ...", "back": "..."}]
+```
+
+`replaces` is the stable image (no tag), `image` and `tag` its name under
+the dev registry, `services` every service that runs it, `source` its
+repository under the dev source address, `license` the licence of that
+source, and `back`, when given, what switching back to Stable does not
+undo. On the dev channel the image becomes `<registry>/<image>:<tag>`.
+
+A dev build of an image OpenLobby itself publishes (the core's images, a
+game's own image) is used with published images only (`POL_DEPLOY_GHCR=1`):
+a stack built from its checkouts builds those images itself. A dev build of
+an upstream image, such as the world server above, is used either way.
+
+### Switching
+
+In the admin panel, Settings > Install games > Update channel (the owner
+only): choose Dev, give the registry (filled in from `POL_DEV_REGISTRY`
+when that is set) and the access code. The panel hands the code to the
+deployer and keeps nothing; the field is cleared as soon as it is sent.
+The deployer then
+
+1. asks the registry, the way docker does (`/v2/`, then its token
+   endpoint with the code), whether the code reads the dev images this
+   install would run, and answers with a sentence when it does not: a wrong
+   code, a code without read access, an image that is not there, or a
+   registry that does not answer. Nothing has changed at that point.
+2. starts a `channel` job: `docker login --password-stdin` to the registry
+   with the code on stdin, into a Docker client config of its own
+   (`DOCKER_CONFIG` is `channel/docker` in the deployer's volume, never the
+   host's); keeps the code in `channel/code`, mode 600, in a folder of mode
+   700; runs `stack.py channel dev --registry <registry>`, which writes
+   `.channel` in the checkout (no secret in it); then pulls and restarts the
+   stack as an update does.
+
+The activity log says "switched to the dev channel" or "tried to switch to
+the dev channel" with the deployer's sentence. The code is in no log, job
+file, answer or argument: the job log blanks it if a tool ever prints it.
+
+From then on every docker command the deployer runs uses that client
+config, so updates and installs pull the dev images with the same buttons.
+Before an update pulls anything, and before enabling a game, the deployer
+asks the registry again. A code that has been revoked or has expired fails
+the job with "The access code no longer works; ask for a new one or switch
+back to Stable." and nothing is pulled. The update list says "dev channel",
+marks the items that run a dev image, and shows such an item as having an
+update when the registry's digest for its tag is one this host does not
+have. "Enter a new access code" in the same panel replaces the code.
+
+Switching back to Stable runs `stack.py channel stable` (which removes
+`.channel`), `docker logout`, deletes the code and the client config, then
+pulls and restarts with the published images.
+
+A dev image may change a game's database in ways the stable image does
+not undo. FFXI's dev world server runs its own migrations at start, so the
+world database keeps them after a switch back. Back that database up
+before switching to Dev (`docker compose exec db mariadb-dump ...` in the
+FFXI checkout, or a copy of the `crystalbridge_lsb-db` volume), and restore it to go
+back exactly.
+
+### Source
+
+The panel shows, for each dev image, where its source is:
+`POL_DEV_SOURCE/<source>`, or `https://<registry>/<source>` when
+`POL_DEV_SOURCE` is not set (a Forgejo or Gitea server serves its
+registry and its repositories under the same address), with the licence
+from the catalog. The same access code reads it: use it as the password
+when git asks, with any user name.
+
+### By hand and from the setup scripts
+
+`stack.py channel [--json]` shows the channel and what each image is on
+it; `stack.py channel dev --registry HOST/PATH` and `stack.py channel
+stable` set it. They only write `.channel`: signing in to the registry is
+up to you (`docker login`) when you run the stack without the deployer.
+`stack.py compose` applies the channel by adding a compose file that sets
+`image:` for the services of the dev images, last in the `-f` list and
+removed after the command; `--dry-run` prints it.
+
+`setup.sh --channel dev --registry HOST/PATH`, `setup.ps1 -Channel dev
+-Registry HOST/PATH` and the setup program's `--channel dev` ask for the
+code without showing it (or read it from `--code-file` / `-CodeFile` with
+`--yes`) and hand it to the running deployer on stdin:
+`docker compose --profile deployer exec -T deployer python /app/deployer.py
+--channel dev`. `--channel stable` switches back the same way.
+
+`POST /api/channel` with `{"channel": "dev", "code": "...", "registry":
+"..."}` (`registry` optional when `POL_DEV_REGISTRY` is set) answers 202
+with the job, 400 with a sentence when the request or the code is refused,
+502 when the registry does not answer, and 409 while another job runs.
+`{"channel": "stable"}` starts the switch back. `GET /api/channel`
+answers
+
+```
+{"channel": "dev", "registry": "registry.example.org/team",
+ "source": "https://registry.example.org/team", "since": "2026-10-23T09:14:00Z",
+ "registry_default": "registry.example.org/team", "code_stored": true,
+ "ghcr": true, "problem": null,
+ "images": [{"key": "ffxi", "name": "...", "stable": "ghcr.io/landsandboat/server",
+             "dev_image": "lsb-server:stock", "dev": "registry.example.org/team/lsb-server:stock",
+             "applies": true, "source": "https://registry.example.org/team/lsb-server",
+             "license": "GPL-3.0-or-later", "what": "...", "note": null, "enabled": true}, ...]}
+```
+
+with one row per stable image of the core and each installed game; a row
+with no dev build has `dev_image` null and a `note`.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -614,6 +740,10 @@ GitHub API, as the tests do.
 | `POL_DEPLOYER_BIND` | `0.0.0.0:8099` | Address inside the container. Change `POL_DEPLOYER_URL` with it. |
 | `POL_DEPLOYER_URL` | `http://deployer:8099` | Where the admin service finds the deployer. |
 | `POL_DEPLOY_GITHUB_API` | `https://api.github.com` | The GitHub API the update check asks. Tests point it at a stand-in. |
+| `POL_DEV_REGISTRY` | empty | The dev channel's registry, `host/path`. Empty: the panel asks for it with the code. |
+| `POL_DEV_SOURCE` | `https://<POL_DEV_REGISTRY>` | Where the dev images' source repositories are. |
+| `POL_DEV_USER` | `dev` | The user name an access code without one (`name:code`) signs in under. |
+| `POL_DEV_REGISTRY_HTTP` | empty | `1`: the registry speaks plain http (tests, a registry on your network). |
 
 ## The image
 
@@ -623,8 +753,9 @@ the docker CLI, the compose plugin and buildx, each pinned by version and
 checksum in `services/deployer/fetch_docker.py`, and pinned Pillow, numpy,
 fontTools and brotli for the import tools. The server is
 `services/deployer/deployer.py` with `clientdata.py` (archives,
-paths and uploads) and `updatecheck.py` (the update check, which the admin
-panel uses too) beside it, standard library only. It runs as root inside its
+paths and uploads), `devchannel.py` (the dev channel, which `stack.py` and
+the admin panel use too) and `updatecheck.py` (the update check, which the
+admin panel uses too) beside it, standard library only. It runs as root inside its
 container: it needs the socket, whose group id differs from host to host,
 and it has to start git and the import tools as the checkout's owner.
 

@@ -62,6 +62,11 @@ case "$*" in
   "volume inspect "*) exit 1 ;;
   "network inspect "*) exit 1 ;;
   "compose ps "*) printf 'admin running healthy\ndns running healthy\npostgres running healthy\n' ;;
+  *"deployer.py --channel"*)
+    # the deployer's channel switch: what came on stdin is kept to compare, never logged
+    IFS= read -r code
+    printf '%s' "$code" > "$STUB_STATE/channel-code"
+    echo "On the dev channel: the stand-in says so." ;;
   *"--show-admin"*)
     # a slow first start: the first STUB_ADMIN_SLOW answers say the service is not running
     n=$(cat "$STUB_STATE/admin-asked" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_STATE/admin-asked"
@@ -386,6 +391,61 @@ class SetupShTest(unittest.TestCase):
         _, env = self.env()
         self.assertEqual(env["POL_DNS_BIND"], LAN)
 
+    # the dev update channel (docs/deployer.md, "Dev channel")
+
+    def test_dev_channel_hands_the_code_to_the_deployer_on_stdin(self):
+        code = "kart-dev-7Qm2x9Lp4Vb8"
+        cf = os.path.join(self.tmp, "code.txt")
+        with open(cf, "w", newline="\n") as f:
+            f.write("  " + code + "  \r\n")
+        out = self.run_sh("--yes", "--reach", "lan", "--channel", "dev", "--registry",
+                          "registry.example.org/kart", "--code-file", bash_path(BASH, cf))
+        _, env = self.env()
+        self.assertEqual(env["POL_DEV_REGISTRY"], "registry.example.org/kart")
+        calls = self.calls()
+        self.assertIn("docker compose --profile deployer exec -T deployer python /app/deployer.py --channel dev",
+                      calls)
+        with open(os.path.join(self.state, "channel-code")) as f:
+            self.assertEqual(f.read(), code)         # trimmed, on stdin
+        self.assertFalse([c for c in calls if code in c])
+        self.assertNotIn(code, out)
+        self.assertNotIn(code, self.env()[0])
+        self.assertIn("On the dev channel", out)
+        self.assertLess(calls.index("docker compose --profile deployer up -d deployer"),
+                        calls.index("docker compose --profile deployer exec -T deployer python /app/deployer.py --channel dev"))
+
+    def test_dev_channel_refusals(self):
+        out = self.run_sh("--yes", "--channel", "beta", expect=2)
+        self.assertIn("--channel is stable or dev", out)
+        out = self.run_sh("--yes", "--channel", "dev", "--registry", "Not A Registry", expect=2)
+        self.assertIn("--registry looks like", out)
+        out = self.run_sh("--yes", "--reach", "lan", "--channel", "dev", "--registry",
+                          "registry.example.org/kart", expect=1)
+        self.assertIn("needs --code-file", out)
+        out = self.run_sh("--yes", "--reach", "lan", "--channel", "dev", "--no-deployer", expect=1)
+        self.assertIn("run with --deployer", out)
+        out = self.run_sh("--yes", "--reach", "lan", "--channel", "dev", expect=1)
+        self.assertIn("needs --registry", out)
+        self.assertFalse([c for c in self.calls() if "--channel" in c])
+        self.assertFalse(os.path.exists(os.path.join(self.checkout, ".env")) and
+                         "POL_DEV_REGISTRY=registry" in self.env()[0])
+
+    def test_dev_channel_dry_run(self):
+        out = self.run_sh("--dry-run", "--yes", "--reach", "lan", "--channel", "dev", "--registry",
+                          "registry.example.org/kart")
+        self.assertIn("would run: docker compose --profile deployer exec -T deployer python "
+                      "/app/deployer.py --channel dev (the access code on stdin)", out)
+        self.assertFalse([c for c in self.calls() if "--channel" in c])
+
+    def test_stable_switches_back_only_from_dev(self):
+        self.run_sh("--yes", "--reach", "lan", "--channel", "stable")
+        self.assertFalse([c for c in self.calls() if "--channel" in c])
+        with open(os.path.join(self.checkout, ".channel"), "w", newline="\n") as f:
+            f.write('{\n "channel": "dev",\n "registry": "registry.example.org/kart"\n}\n')
+        self.run_sh("--yes", "--reach", "lan", "--channel", "stable")
+        self.assertIn("docker compose --profile deployer exec -T deployer python /app/deployer.py --channel stable",
+                      self.calls())
+
     def test_build_locally_without_deployer(self):
         out = self.run_sh("--yes", "--reach", "lan", "--images", "build", "--no-deployer")
         _, env = self.env()
@@ -522,10 +582,18 @@ if (-not (Test-Path variable:global:StubDeployerHealth)) { $global:StubDeployerH
 if (-not (Test-Path variable:global:StubUpFails)) { $global:StubUpFails = $false }
 if (-not (Test-Path variable:global:StubUdp53)) { $global:StubUdp53 = $false }
 function docker {
+    $piped = @($input)
     $line = 'docker ' + ($args -join ' ')
     $global:StubLog.Add($line)
     $global:LASTEXITCODE = 0
     switch -Wildcard ($line) {
+        '*deployer.py --channel*' {
+            # what came on stdin, as its sha256: compared by the test, never shown
+            $b = [Text.Encoding]::UTF8.GetBytes(($piped -join ''))
+            $h = [Security.Cryptography.SHA256]::Create().ComputeHash($b)
+            'CHANNEL-STDIN ' + (($h | ForEach-Object { $_.ToString('x2') }) -join '')
+            'On the dev channel: the stand-in says so.'
+        }
         'docker --version' { 'Docker version 27.0.0, build test' }
         'docker compose version --short' { '2.29.1' }
         'docker compose version' { 'Docker Compose version v2.29.1' }
@@ -629,6 +697,33 @@ class SetupPs1Test(unittest.TestCase):
         p = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", ps],
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_dev_channel_hands_the_code_to_the_deployer_on_stdin(self):
+        import hashlib
+        code = "kart-dev-7Qm2x9Lp4Vb8"
+        cf = os.path.join(self.tmp, "code.txt")
+        with open(cf, "w") as f:
+            f.write(" " + code + " \n")
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", "-NoFirewall", "-Channel", "dev",
+                          "-Registry", "registry.example.org/kart", "-CodeFile", "'%s'" % cf)
+        self.assertEqual(self.env()["POL_DEV_REGISTRY"], "registry.example.org/kart")
+        log = out.split("STUBLOG:", 1)[1]
+        self.assertIn("docker compose --profile deployer exec -T deployer python /app/deployer.py --channel dev", log)
+        self.assertIn("CHANNEL-STDIN " + hashlib.sha256(code.encode()).hexdigest(), out)
+        self.assertNotIn(code, out)
+        self.assertIn("On the dev channel", out)
+
+    def test_dev_channel_refusals(self):
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", "-NoFirewall", "-Channel", "dev",
+                          "-Registry", "registry.example.org/kart", expect=1)
+        self.assertIn("needs -CodeFile", out)
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", "-NoFirewall", "-Channel", "dev",
+                          "-Registry", "'Not A Registry'", expect=2)
+        self.assertIn("-Registry looks like", out)
+        out = self.run_ps("-Yes", "-DryRun", "-Reach", "lan", "-Channel", "dev", "-Registry",
+                          "registry.example.org/kart")
+        self.assertIn("would run: docker compose --profile deployer exec -T deployer python /app/deployer.py "
+                      "--channel dev (the access code on stdin)", out)
 
     def test_dry_run(self):
         out = self.run_ps("-Yes", "-DryRun", "-Reach", "vpn", "-NoPs2")

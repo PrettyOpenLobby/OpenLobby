@@ -25,6 +25,13 @@
     {"name": "hippaulbridge-title:latest", "context": "lsb", "dockerfile": "Dockerfile.title",
      "ghcr": null, "tag_var": null}
   ],
+  "dev": [
+    {"replaces": "ghcr.io/landsandboat/server", "image": "lsb-server", "tag": "stock",
+     "services": ["db-update", "connect", "search", "world", "map"],
+     "source": "lsb-server", "license": "GPL-3.0-or-later",
+     "what": "The world server: LandSandBoat with OpenLobby's changes (PS2 consoles among them).",
+     "back": "FFXI's world database keeps what the dev world server's migrations changed in it; to go back exactly, restore the backup of it taken before switching to Dev (docs/deployer.md, \"Dev channel\")."}
+  ],
   "services": ["db", "db-update", "db-zoneip", "connect", "search", "world", "map", "bridge"],
   "profiles": {},
   "env": [

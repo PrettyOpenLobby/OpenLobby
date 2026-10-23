@@ -19,3 +19,4 @@ services/admin_web/pmlfont/
 # What setup/build.py makes (PyInstaller work files and the setup program).
 /build/
 /dist/
+/.channel

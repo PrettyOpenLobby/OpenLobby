@@ -13,6 +13,9 @@ update, stop, uninstall keeping the data and the shared network, uninstall
 next to another install's game server, a failed script, and a run that
 picks up a script the previous window left running. The flags the program
 hands the scripts are checked against setup.sh and setup.ps1 themselves.
+The dev channel: the access code reaches the script in a private temporary
+file (never on its command line) that is gone afterwards, asked hidden when
+there is a terminal and refused with --yes unless --code-file gives it.
 """
 import builtins
 import contextlib
@@ -170,6 +173,10 @@ def opt(*names):
             return a[a.index(n) + 1]
     return ""
 dry = "--dry-run" in a or "-DryRun" in a
+cf = opt("--code-file", "-CodeFile")
+if cf:
+    with open(cf, encoding="utf-8") as f:
+        save("channel_code", f.read().strip())
 print("== OpenLobby setup")
 print("== Checking Docker and git")
 print("== Settings (.env)")
@@ -676,7 +683,50 @@ class SetupAppTest(unittest.TestCase):
 
     # ---------------------------------------------------------------- the scripts
 
+    # ---------------------------------------------------------------- the dev channel
+
+    def test_dev_channel_hands_the_code_over_in_a_private_file(self):
+        code = "kart-dev-7Qm2x9Lp4Vb8"
+        cf = os.path.join(self.tmp, "code.txt")
+        with open(cf, "w", encoding="utf-8") as f:
+            f.write(code + "\n")
+        self.install("--channel", "dev", "--registry", "registry.example.org/kart", "--code-file", cf)
+        script = self.calls("script")[0]
+        self.assertIn("-Channel dev -Registry registry.example.org/kart -CodeFile ", script)
+        self.assertNotIn(code, script)
+        self.assertEqual(self.get("channel_code"), code)
+        handed = script.split("-CodeFile ", 1)[1].split(" ")[0]
+        self.assertNotEqual(os.path.normcase(handed), os.path.normcase(cf))
+        self.assertFalse(os.path.exists(handed), "the temporary code file is removed")
+        self.assertEqual(self.mod.CHANNEL, {"channel": "dev", "registry": "registry.example.org/kart"})
+
+    def test_dev_channel_asks_the_code_hidden(self):
+        self.system = "linux"
+        code = "kart-dev-second-55Zr"
+        asked = []
+        with mock.patch.object(self.mod.getpass, "getpass", lambda prompt: asked.append(prompt) or code):
+            self.main("--dir", self.folder, "--panel-url", self.panel, "--panel-wait", "5",
+                      "--channel", "dev", answers=["registry.example.org/kart", "", "1", LAN, "n", "", ""])
+        self.assertEqual(asked, ["Access code (not shown): "])
+        self.assertTrue(any(q.startswith("Dev registry") for q in self.asked), self.asked)
+        script = self.calls("script")[0]
+        self.assertIn("--channel dev --registry registry.example.org/kart --code-file ", script)
+        self.assertNotIn(code, script)
+        self.assertEqual(self.get("channel_code"), code)
+
+    def test_dev_channel_refusals(self):
+        out = self.main("--yes", "--dir", self.folder, "--channel", "dev", "--registry",
+                        "registry.example.org/kart", expect=2)
+        self.assertIn("needs --code-file", out)
+        out = self.main("--yes", "--dir", self.folder, "--channel", "dev", "--registry", "Not A Registry",
+                        expect=2)
+        self.assertIn("looks like registry.example.org/team", out)
+        self.assertEqual(self.calls("script"), [])
+
     def test_flags_exist_in_the_scripts(self):
+        self.mod.CHANNEL.update(channel="dev", registry="registry.example.org/kart",
+                                code_file=os.path.join(self.tmp, "code"))
+        self.addCleanup(self.mod.CHANNEL.clear)
         inst = self.mod.Install(self.folder)
         settings = {"reach": "internet", "address": PUBLIC, "lookup": True, "ps2": True}
         with open(os.path.join(ROOT, "setup.sh"), encoding="utf-8") as f:

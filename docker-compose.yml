@@ -476,6 +476,10 @@ services:
       POL_DEPLOY_GHCR: "${POL_DEPLOY_GHCR:-}"
       POL_DEPLOY_CLIENTS: "${POL_DEPLOY_CLIENTS:-}"
       POL_DEPLOY_UPLOAD_MAX: "${POL_DEPLOY_UPLOAD_MAX:-8G}"
+      # the dev update channel (docs/deployer.md, "Dev channel"); the access code is not here
+      POL_DEV_REGISTRY: "${POL_DEV_REGISTRY:-}"
+      POL_DEV_SOURCE: "${POL_DEV_SOURCE:-}"
+      POL_DEV_USER: "${POL_DEV_USER:-}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - type: bind
