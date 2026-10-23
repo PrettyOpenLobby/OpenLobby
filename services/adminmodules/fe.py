@@ -140,18 +140,21 @@ MODULE = Module(
                             {"id": "extra", "label": "Pretend extra players (N, or attack:defence; "
                                                      "0 = none)", "type": "text"}],
                     about="A small war scales toward the retail values by each side's players "
-                          "online: summon prices, keep and building HP, the war's length, and "
-                          "crystals per draw and per kill. At the full-strength number and "
+                          "online: summon prices, keep and building HP, and "
+                          "crystals per draw and per kill (every war still runs its full hour). At the full-strength number and "
                           "above, everything is retail. Pretend players let you see a big "
                           "war's values with two people. Send it empty to see what each war "
                           "under way scales to now. Changes last until the world restarts."),
              Action("warbots", "War bots", _warbots, danger=True,
                     fields=[{"id": "count", "label": "Soldiers a side (0 = off)", "type": "text"}],
                     about="A test mode for a big war with few people: every war fills with "
-                          "soldier bots, this many a side (at most the war cap less 5, so real "
-                          "players can still join). They start at their keep, march on the "
-                          "enemy, fight players, each other and the enemy keep, and count in "
-                          "the war's sign-ups. They earn nothing and are never saved. A war "
+                          "soldier bots, this many a side. For now that is at most 20 a side "
+                          "until bots are proven stable (a larger number is taken as 20), and "
+                          "never more than the war cap less 5, so real players can still "
+                          "join. They start behind their keep and set off a few at a time, "
+                          "march on the enemy, fight players, each other and the enemy keep, "
+                          "and count in the war's sign-ups. Each player is shown only the "
+                          "bots near them. They earn nothing and are never saved. A war "
                           "under way gets them at once; 0 takes them all out. Changes last "
                           "until the world restarts.")],
     players=_players,

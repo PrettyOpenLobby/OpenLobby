@@ -4,5 +4,7 @@
 portal/patches/*.diff -text
 portal/authored/** -text
 *.sh text eol=lf
+# files mounted into the Linux containers: stunnel reads a carriage return at a line end as part of a path
+*.conf text eol=lf
 Dockerfile* text eol=lf
 *.cmd text eol=crlf

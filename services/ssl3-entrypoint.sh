@@ -167,8 +167,14 @@ fi
 # or this service uses a non-default leaf path (SSL3_CERT). The baked configs
 # hardcode `cert = /certs/ssl3.pem`; only that exact line is retargeted, so the
 # separate `cert = /certs/dnas.pem` DNAS section in stunnel-web.conf is untouched.
+#
+# Always run from a copy with the carriage returns taken out: a checkout made by
+# git on Windows (core.autocrlf) gives the mounted conf CRLF line endings, and
+# then stunnel looks for "/certs/ssl3.pem\r" ("stat: No such file or directory",
+# "Failed to initialize TLS context") and none of the rewrites below match.
+tr -d '\r' < "$CONF" > /tmp/stunnel.conf
+CONF=/tmp/stunnel.conf
 if [ -n "${SSL3_CONNECT_HOST:-}" ] || [ "$CERT" != /certs/ssl3.pem ]; then
-    cp "$CONF" /tmp/stunnel.conf
     if [ -n "${SSL3_CONNECT_HOST:-}" ]; then
         sed -i "s/^\( *connect *= *\)[^:]*:/\1${SSL3_CONNECT_HOST}:/" /tmp/stunnel.conf
         echo "connect hosts rewritten to ${SSL3_CONNECT_HOST}:"
