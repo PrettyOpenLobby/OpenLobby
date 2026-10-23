@@ -334,6 +334,11 @@ class Server:
         self.lock = threading.Lock()
         self.stats = {"cmd1": 0, "cmd3": 0, "cmd7": 0, "reject": 0, "bytes": 0}
         self._last_report = 0
+        #: connections that have asked for a list or a file and are still
+        #: open, i.e. updates in progress. Published as live:patch so the
+        #: deploy gate holds this service back instead of cutting a download,
+        #: which the client cannot resume: it starts the update over.
+        self.updating = 0
 
     def log(self, msg):
         if self.verbose:
@@ -367,6 +372,7 @@ class Server:
         # A PS2 cmd 1 on this connection: (t_sent, list size), so the close
         # line can say whether the console took the whole list before leaving.
         list_sent = None
+        updating = False
         why = "closed by client"
         try:
             while True:
@@ -399,6 +405,10 @@ class Server:
                     self.log(f"[{addr[0]}] bad checksum, dropping")
                     return
                 cmd = struct.unpack_from("<I", pkt, 12)[0]
+                if cmd in (1, 3) and not updating:
+                    updating = True
+                    with self.lock:
+                        self.updating += 1
                 reply = self.dispatch(pkt, cmd, addr, dlhost)
                 if reply is None:
                     return
@@ -421,6 +431,9 @@ class Server:
         except (OSError, struct.error) as e:
             why = f"{type(e).__name__}: {e}"
         finally:
+            if updating:
+                with self.lock:
+                    self.updating -= 1
             if list_sent:
                 self.log(f"[{addr[0]}:{addr[1]}] cmd1 conn end "
                          f"+{time.monotonic() - list_sent[0]:.2f}s after a "
@@ -985,6 +998,15 @@ def main():
         threading.Thread(target=srv.serve_port, args=(bind,), daemon=True).start()
         print(f"[*] listening on 0.0.0.0:{bind}"
               + (f"  (service port {p} + offset)" if args.bind_offset else ""))
+    # Report updates in progress to the deploy gate (pol-git-sync and
+    # pol-stale-check defer `patch` while live:patch is non-zero). Every
+    # services push moves this image, so without it each push cut whatever
+    # downloads were running.
+    try:
+        import live_sessions
+        live_sessions.start_heartbeat("patch", lambda: srv.updating)
+    except Exception as e:
+        print(f"[*] live-session heartbeat not started: {e!r}", flush=True)
     try:
         while True:
             time.sleep(3600)

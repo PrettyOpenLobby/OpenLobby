@@ -60,6 +60,9 @@ case "$*" in
   "network inspect "*) exit 1 ;;
   "compose ps "*) printf 'admin running healthy\ndns running healthy\npostgres running healthy\n' ;;
   *"--show-admin"*)
+    # a slow first start: the first STUB_ADMIN_SLOW answers say the service is not running
+    n=$(cat "$STUB_STATE/admin-asked" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_STATE/admin-asked"
+    if [ "$n" -le "${STUB_ADMIN_SLOW:-0}" ]; then echo 'service "admin" is not running' >&2; exit 1; fi
     if [ -f "$STUB_STATE/admin-password" ]; then echo "[admin] user='admin' set 2026-01-01"
     else echo "[admin] no stored credential; the panel is OPEN"; fi ;;
   *"--set-password"*)
@@ -265,6 +268,22 @@ class SetupShTest(unittest.TestCase):
         self.assertIn("Settings > Install games", out)
         self.assert_never_removes()
         self.assertNotIn("curl", "\n".join(calls))       # no lookup unless asked
+
+    def test_admin_service_slow_to_start_still_gets_a_password(self):
+        out = self.run_sh("--yes", "--reach", "lan", extra_env={"STUB_ADMIN_SLOW": "2"})
+        with open(os.path.join(self.state, "admin-password")) as f:
+            pw = f.read()
+        self.assertIn("Password: " + pw, out)
+        self.assertNotIn("No password is set yet", out)
+
+    def test_no_password_set_says_so_with_the_command(self):
+        out = self.run_sh("--yes", "--reach", "lan",
+                          extra_env={"STUB_ADMIN_SLOW": "99", "OPENLOBBY_ADMIN_TRIES": "2"})
+        self.assertFalse(os.path.exists(os.path.join(self.state, "admin-password")))
+        self.assertNotIn("Password: ", out)
+        self.assertIn("No password is set yet", out)
+        self.assertIn("There is no default", out)
+        self.assertIn("exec admin python admin.py --set-password", out)
 
     def test_secrets_differ_between_installs(self):
         self.run_sh("--yes", "--reach", "lan", "--no-start")

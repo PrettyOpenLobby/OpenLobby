@@ -84,7 +84,8 @@ class Tool(BaseHTTPRequestHandler):
 
     def _handle(self, body=b""):
         SEEN.append({"path": self.path, "token": self.headers.get("X-Devtool-Token"),
-                     "actor": self.headers.get("X-Devtool-Actor"), "body": body})
+                     "actor": self.headers.get("X-Devtool-Actor"), "body": body,
+                     "max": self.headers.get("X-OpenLobby-Max-Upload")})
         if self.headers.get("X-Devtool-Token") != TOKEN:
             return self._reply(403, b'{"error": "bad or missing token"}', "application/json")
         if self.path == "/openlobby/module.json":
@@ -197,6 +198,7 @@ def main():
         chk("the FMO moderator opens the story gates page", st, 200)
         chk("the tool got the panel's token", SEEN[-1]["token"], TOKEN)
         chk("...and the moderator's name", SEEN[-1]["actor"], "gm_fmo")
+        chk("...and the upload limit, for its page to show", SEEN[-1]["max"], str(16 << 20))
         chk("a token in the browser's query is not passed on", SEEN[-1]["path"], "/gates?x=1")
         chk("the page never carries the token", TOKEN.encode() in body, False)
         csp = hd.get("Content-Security-Policy") or ""
@@ -234,7 +236,35 @@ def main():
         chk("JSON over the limit is still refused, never cut short",
             (st, b"more than 1 MB" in body), (502, True))
         st, _h, body, _u = raw(c["gm_fmo"], "games/fmo/gates")
+        st, hd, body, _u = raw(c["gm_fmo"], "games/fmo/gates")
         chk("pages still come whole, with their nonce", (st, b"<script nonce=" in body), (200, True))
+        chk("...and say how large an upload may be", hd.get("X-OpenLobby-Max-Upload"), str(16 << 20))
+
+        def upload(size):
+            req = urllib.request.Request(c["gm_fmo"].url + "games/fmo/gates/import?name=laps.bin", data=b"\x01" * size,
+                                         method="POST",
+                                         headers={"Content-Type": "application/octet-stream"})
+            try:
+                with c["gm_fmo"].op.open(req, timeout=30) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read()
+            except (urllib.error.URLError, OSError):
+                # refused before the body was read: the panel closes while the client sends
+                return 413, b"16 MB"
+        st, _b = upload(3 << 20)
+        chk("a 3 MB file a tool page imports is passed on whole",
+            (st, SEEN[-1]["path"], len(SEEN[-1]["body"])), (200, "/gates/import?name=laps.bin", 3 << 20))
+        _code, audit = owner.call("api/audit")
+        rows = audit.get("rows") or audit.get("entries") or audit.get("audit") or []
+        chk("...and the activity log keeps its size, not its bytes",
+            any("application/octet-stream, 3145728 bytes" in json.dumps(r) for r in rows), True)
+        chk("...with the file's name",
+            any("laps.bin" in json.dumps(r) for r in rows), True)
+        n = len(SEEN)
+        st, body = upload(17 << 20)
+        chk("a file over POL_ADMIN_GAME_MAX_UPLOAD_MB (16) is refused before the game sees it",
+            (st, b"16 MB" in body, len(SEEN)), (413, True, n))
 
         st, _h, body, _u = raw(c["gm_fe"], "games/fe/")
         chk("a tool that refuses the panel's token reads as a panel fault",

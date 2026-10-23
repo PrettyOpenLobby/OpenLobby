@@ -594,7 +594,12 @@ if ($DryRun) {
     Say '  and, when no credential is stored, generate a password and send it to'
     Say '  docker compose exec -T admin python admin.py --set-password'
 } else {
-    $shown = (docker compose exec -T admin python admin.py --show-admin 2>&1 | Out-String)
+    # the admin service may still be starting on a slow first run: ask for up to a minute
+    for ($i = 0; $i -lt 12; $i++) {
+        $shown = (docker compose exec -T admin python admin.py --show-admin 2>&1 | Out-String)
+        if ($shown -match "user='|no stored credential") { break }
+        Start-Sleep -Seconds 5
+    }
     if ($shown -match "user='([^']*)'") {
         $AdminUser = $Matches[1]; $AdminState = 'kept'
         Say "A password is already set for $AdminUser; leaving it alone."
@@ -684,6 +689,11 @@ if ($AdminState -eq 'new') {
     Say '  This is the only time it is shown. Change it on the panel, Settings > Sign-in.'
 } elseif ($AdminState -eq 'kept') {
     Say "  User: $AdminUser (password unchanged)"
+} elseif (-not $DryRun) {
+    Say '  No password is set yet, and the panel lets nobody in until one is.'
+    Say '  There is no default. Set one now (it asks for it), in PowerShell:'
+    Say "    cd `"$Checkout`"; docker compose exec admin python admin.py --set-password"
+    Say "  Then sign in as $AdminUser."
 }
 Say ''
 Say 'Players:'

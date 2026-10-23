@@ -35,6 +35,9 @@ import adminmodules
 
 TIMEOUT = float(os.environ.get("POL_ADMIN_GAME_TIMEOUT", "20"))
 MAX_BODY = 1 << 20
+# What a tool page may upload through the panel (a file it imports): larger than a form,
+# still bounded, since the panel reads it whole before passing it on.
+MAX_UPLOAD = int(os.environ.get("POL_ADMIN_GAME_MAX_UPLOAD_MB", "16")) << 20
 # What a tool may send back: pages and JSON are small, but a download (a player's save
 # or transfer file) can be big. A larger answer is refused, never cut short.
 MAX_REPLY = int(os.environ.get("POL_ADMIN_GAME_MAX_REPLY_MB", "64")) << 20
@@ -101,7 +104,8 @@ def _request(key, sub, method, query, body, ctype, actor):
          if k != "t"]
     url = base + "/" + urllib.parse.quote(sub, safe="/._-") + (
         "?" + urllib.parse.urlencode(q) if q else "")
-    headers = {"X-Devtool-Actor": actor or ""}
+    # the upload limit too, so a tool page can tell its user before a file is sent
+    headers = {"X-Devtool-Actor": actor or "", "X-OpenLobby-Max-Upload": str(MAX_UPLOAD)}
     if token:
         headers["X-Devtool-Token"] = token
     if ctype:
@@ -160,6 +164,9 @@ def _finish(key, sub, r):
         nonce = secrets.token_urlsafe(16)
         data = re.sub(rb"<script(?=[\s>])", ('<script nonce="%s"' % nonce).encode(), data)
         out.append(("Content-Security-Policy", _csp(nonce)))
+        # A page that uploads checks a file's size against this first: a larger upload is
+        # refused before it is read, which a browser sees only as a connection cut off.
+        out.append(("X-OpenLobby-Max-Upload", str(MAX_UPLOAD)))
     return status, out, data
 
 

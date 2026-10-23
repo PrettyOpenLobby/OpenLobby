@@ -815,8 +815,15 @@ if [ -n "$DRY" ]; then
     say "  and, when no credential is stored, generate a password and pipe it to"
     say "  ${DC[*]} exec -T admin python admin.py --set-password"
 else
-    local shown
-    shown="$("${DC[@]}" exec -T admin python admin.py --show-admin 2>&1 </dev/null)"
+    local shown asked=0
+    # the admin service may still be starting on a slow first run: ask for up to a minute
+    while :; do
+        shown="$("${DC[@]}" exec -T admin python admin.py --show-admin 2>&1 </dev/null)"
+        case "$shown" in *"user="*|*"no stored credential"*) break ;; esac
+        asked=$((asked + 1))
+        [ "$asked" -ge "${OPENLOBBY_ADMIN_TRIES:-12}" ] && break
+        sleep 5
+    done
     case "$shown" in
         *"user="*)
             ADMIN_STATE=kept
@@ -890,6 +897,13 @@ case "$ADMIN_STATE" in
         say "  Password: $ADMIN_PW"
         say "  This is the only time it is shown. Change it on the panel, Settings > Sign-in." ;;
     kept) say "  User: $ADMIN_USER (password unchanged)" ;;
+    *)
+        if [ -z "$DRY" ]; then
+            say "  No password is set yet, and the panel lets nobody in until one is."
+            say "  There is no default. Set one now (it asks for it):"
+            say "    cd \"$CHECKOUT\" && ${DC[*]} exec admin python admin.py --set-password"
+            say "  Then sign in as $ADMIN_USER."
+        fi ;;
 esac
 say ""
 say "Players:"

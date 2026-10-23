@@ -78,6 +78,34 @@ def _testmode(m, params, actor):
     return admingames.call("fe", "admin/testmode", {"on": on}, actor)
 
 
+def _popscale(m, params, actor):
+    import admingames
+    body = {}
+    on = str(params.get("on") or "").strip().lower()
+    if on:
+        if on not in ("on", "off"):
+            return False, "Write on or off, or leave it empty."
+        body["on"] = on
+    full = str(params.get("full") or "").strip()
+    if full:
+        n = _number(full, 50)
+        if n is None:
+            return False, "Full strength is 1 to 50 players a side."
+        body["full"] = str(n)
+    extra = str(params.get("extra") or "").strip()
+    if extra:
+        body["extra"] = extra
+    return admingames.call("fe", "admin/popscale", body, actor)
+
+
+def _warbots(m, params, actor):
+    import admingames
+    v = str(params.get("count") or "").strip()
+    if not (0 < len(v) <= 3 and v.isdigit() and v.isascii()) or int(v) > 200:
+        return False, "Soldiers a side is a number from 0 to 200."
+    return admingames.call("fe", "admin/warbots", {"count": int(v)}, actor)
+
+
 MODULE = Module(
     "fe", "Fantasy Earth", platform="PlayOnline: PC", content_ids=[11],
     markers=["felobby", "feworld"],
@@ -104,7 +132,28 @@ MODULE = Module(
                     about="For trying summons on a quiet server: one vote declares a war, "
                           "summons cost nothing, and a player holding the Dragon item rises as "
                           "the Dragon on every death. It changes the running world only; "
-                          "turn it off after the test (a restart of the world also does).")],
+                          "turn it off after the test (a restart of the world also does)."),
+             Action("popscale", "War scaling", _popscale,
+                    fields=[{"id": "on", "label": "on or off (empty = keep)", "type": "text"},
+                            {"id": "full", "label": "Retail values from (players a side)",
+                             "type": "text"},
+                            {"id": "extra", "label": "Pretend extra players (N, or attack:defence; "
+                                                     "0 = none)", "type": "text"}],
+                    about="A small war scales toward the retail values by each side's players "
+                          "online: summon prices, keep and building HP, the war's length, and "
+                          "crystals per draw and per kill. At the full-strength number and "
+                          "above, everything is retail. Pretend players let you see a big "
+                          "war's values with two people. Send it empty to see what each war "
+                          "under way scales to now. Changes last until the world restarts."),
+             Action("warbots", "War bots", _warbots, danger=True,
+                    fields=[{"id": "count", "label": "Soldiers a side (0 = off)", "type": "text"}],
+                    about="A test mode for a big war with few people: every war fills with "
+                          "soldier bots, this many a side (at most the war cap less 5, so real "
+                          "players can still join). They start at their keep, march on the "
+                          "enemy, fight players, each other and the enemy keep, and count in "
+                          "the war's sign-ups. They earn nothing and are never saved. A war "
+                          "under way gets them at once; 0 takes them all out. Changes last "
+                          "until the world restarts.")],
     players=_players,
     services=[Service(["{core}-felobby-1", "{core}-feworld-1", "{core}-fellb-1"], {54848: "lobby"},
                       warning="Everyone in Fantasy Earth is disconnected.")],

@@ -2809,8 +2809,9 @@ class Handler(BaseHTTPRequestHandler):
         body, ctype = None, None
         if method == "POST":
             n = int(self.headers.get("Content-Length", 0) or 0)
-            if n > admingames.MAX_BODY:
-                return self._send(413, {"error": "too large"})
+            if n > admingames.MAX_UPLOAD:
+                return self._send(413, {"error": "That file is larger than the %d MB the panel "
+                                                 "passes on." % (admingames.MAX_UPLOAD >> 20)})
             body = self.rfile.read(n) if n else b""
             ctype = self.headers.get("Content-Type")
         user, role, _p = self._caller()
@@ -2828,7 +2829,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 req = json.loads(body or b"{}")
             except ValueError:
-                req = {"text": (body or b"")[:200].decode("utf-8", "replace")}
+                if (ctype or "").split(";")[0].strip().lower() in ("", "text/plain",
+                                                                   "application/x-www-form-urlencoded"):
+                    req = {"text": (body or b"")[:200].decode("utf-8", "replace")}
+                else:
+                    # a file: its size goes in the log, not its bytes
+                    req = {"upload": "%s, %d bytes" % ((ctype or "").split(";")[0], len(body or b""))}
+                    name = dict(urllib.parse.parse_qsl(query or "")).get("name", "")
+                    if name:
+                        req["file"] = name[:120]
             if not isinstance(req, dict):
                 req = {}
             detail = {"tool": sub or "/"}
