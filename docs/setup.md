@@ -35,18 +35,34 @@ Install games, `docs/deployer.md`). On macOS, where Docker Desktop is not
 proven for it, the deployer is left off.
 
 Every later run starts with the server's state and address, then offers
-Update, Change settings, Stop (or Start), Show what to tell players, Start
-over and Uninstall. Uninstall removes the containers and keeps the data unless
+Update, Change settings, Stop (or Start), Show what to tell players, Check that
+consoles can reach this server, Start over and Uninstall. Uninstall removes the
+containers and keeps the data unless
 you ask (and type `delete`); deleting the data also deletes the games the panel
 installed beside it, and keeps the client files folder. Start over keeps a copy
 of the old `.env` in `backups`, and the installed games. Neither removes the
 `openlobby` network, and when another install's
 game server is on this machine, this install's `dns` and `http` services stay,
 since that game uses them (`docs/installs.md`). Game servers it finds there
-are named, with how to pair them with the panel; it does not change them.
+are named, with how to pair them with the panel; it does not change them. On
+Windows, Uninstall also removes the firewall rules setup made (the rule group
+`OpenLobby`, after a UAC prompt), unless another install still uses this one's
+DNS and port 80.
+
+The console check runs at the end of every install and update, and from the
+menu (or `--check`). It asks the DNS service for `wh000.pol.com` at the
+address consoles are told to use, the way a console does, and at `127.0.0.1`,
+and checks that the answer is this server's address. It checks that the `dns`
+container runs, and on Windows it lists the `OpenLobby` firewall rules, the
+network type of the network consoles reach this computer on, any rule that
+blocks Docker Desktop, and the other networks this computer is on. Each line
+reads `ok`, `note` or `FIX`, and it ends with what to set on the PlayStation 2.
+A question this computer asks itself does not pass through Windows Firewall
+the way a console's does, so a good answer shows that the server answers; the
+firewall and network lines are the part that covers the console.
 
 `--yes`, `--dir`, `--address`, `--admin-user`, `--dry-run` and `--update`,
-`--change-settings`, `--stop`, `--start`, `--uninstall` (with `--delete-data`)
+`--change-settings`, `--stop`, `--start`, `--check`, `--uninstall` (with `--delete-data`)
 run it without the menu; `--help` lists them. From a checkout, `python
 setup/openlobby_setup.py` is the same program; `python setup/build.py` builds
 it with PyInstaller, and `python tools/setup_app_test.py` tests it offline.
@@ -210,6 +226,27 @@ It follows the same steps with these differences:
   DNS service every query as coming from inside Docker, so `POL_DNS_CLIENTS`
   and the public DNS mode cannot tell clients apart there
   (`docs/configuration.md`, "DNS"); keep port 53 behind Windows Firewall.
+  When something already holds port 53 on every address (Internet Connection
+  Sharing and the Mobile hotspot do), the DNS service is pinned to the LAN
+  address with `POL_DNS_BIND`, which works beside it. When a start fails on a
+  taken port, the script names the program that holds it.
+- After starting the stack it sets up Windows Firewall, in a step of its own
+  ("Windows Firewall"). It adds inbound allow rules for the ports players
+  reach (`docs/ports.md`): 53/udp and the TCP list, with 443 where a
+  PlayStation 2 may play (always on a local network). They apply to Private
+  networks and to senders on the local network; for players on a VPN also to
+  the VPN's range on any network type, and for the internet case to everyone.
+  All of them are in one rule group, `OpenLobby`, which a run replaces as a
+  whole, so `Get-NetFirewallRule -Group OpenLobby` lists them and
+  `Remove-NetFirewallRule -Group OpenLobby` removes them. When the network
+  consoles reach this PC on is set to Public, it says so and offers to switch
+  it to Private (the default for players on this network only). When Windows
+  has block rules for Docker Desktop's port forwarder, made when its "Allow
+  access" question was cancelled, it turns them off: a block rule wins over
+  every allow rule. All of this needs administrator rights, so it runs
+  `tools\firewall.ps1` elevated, one UAC prompt, and only when something is
+  missing; a run that finds the rules in place asks nothing. `-NoFirewall`
+  leaves the firewall alone.
 - The published images are selected with
   `COMPOSE_FILE=docker-compose.yml;docker-compose.ghcr.yml`, because Compose
   separates that list with `;` on Windows.
@@ -231,7 +268,27 @@ It follows the same steps with these differences:
 Its options are `-Yes`, `-DryRun`, `-Dir`, `-Repo`, `-Reach`, `-Address`,
 `-PublicAddress`, `-LookupPublic`, `-Ps2`, `-NoPs2`, `-Images`, `-AdminUser`,
 `-ChangeAddress`, `-Deployer`, `-NoDeployer`, `-Clients`, `-InstallTools`,
-`-InstallClient`, `-NoClient` and `-NoStart`, with the meanings above.
+`-InstallClient`, `-NoClient`, `-NoFirewall` and `-NoStart`, with the meanings
+above.
+
+### When a PlayStation 2 cannot connect
+
+A console that stops at "checking PlayOnline version" and then reports that
+the DNS server did not respond is not getting answers from this PC. In OpenLobby
+Setup choose "Check that consoles can reach this server" (or run
+`python tools\doctor.py` in the checkout) and fix what it marks. The usual
+causes, in order:
+
+1. Windows Firewall stops the console. Choose Update in OpenLobby Setup (or run
+   `setup.ps1` again) and accept the UAC prompt; it adds the rules.
+2. The network is set to Public. Settings > Network and internet > (the
+   network) > Network profile type > Private network.
+3. The DNS service is not running because something else holds port 53, often
+   the Mobile hotspot. Turn the hotspot off, or choose Change settings and keep
+   the same answers, which pins the DNS service beside it.
+4. The console has the wrong DNS address. It must be the address setup prints
+   for the PlayStation 2, on the same network as the console. A PC with Wi-Fi
+   and a cable, a VPN or WSL has several addresses; the check lists them.
 
 ## By hand
 

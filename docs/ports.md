@@ -53,6 +53,9 @@ password first (`docs/configuration.md`, "Admin panel").
 ## Which ports to open
 
 On a LAN, nothing needs opening beyond what the host's own firewall blocks.
+A PlayStation 2 needs 53/udp (it has no hosts file, so it always uses this
+server's DNS), 443, 80, 54000 and the lobby ports. A PC with the hosts
+installer does not need 53/udp or 443.
 
 When players come from another network, they need 80, 51200-51271,
 51273-51310, 51330, 53001-53015 and 54000 (plus 25 and 110 if anyone uses a
@@ -82,6 +85,52 @@ to control it that do work:
   evaluates first.
 - Filter in front of the host: the router, or your hosting provider's
   firewall.
+
+### Windows Firewall
+
+On Windows, Docker Desktop publishes container ports through one of its own
+programs (`com.docker.backend.exe` in current releases, `vpnkit.exe` in older
+ones), and Windows Defender Firewall filters what reaches it like any other
+program. Three things stop players there:
+
+- No rule lets the ports in. Docker Desktop's first run asks whether to
+  "Allow access", and the rules that makes cover only the network types
+  ticked there.
+- The network is set to Public. Windows keeps other devices out of a Public
+  network, and Private rules do not apply on it. A home network should be
+  Private: Settings > Network and internet > (the network) > Network profile
+  type > Private network.
+- Cancelling Docker Desktop's "Allow access" question makes Windows add
+  inbound Block rules for its program, and a Block rule wins over every Allow
+  rule.
+
+`setup.ps1` deals with all three in its "Windows Firewall" step
+(`docs/setup.md`, "Windows"), with one UAC prompt. It adds inbound allow rules
+by port, not by program, so they keep working when a Docker Desktop update
+changes which program holds the ports: 53/udp and the TCP ports above (25, 80,
+110, 51200-51271, 51273-51310, 51330, 53001-53015, 54000, and 443 where a
+PlayStation 2 may play), for Private networks and senders on the local
+network (`LocalSubnet`). For players on a VPN it adds the same for the VPN's
+range on any network type, and for the internet case it allows everyone; 53/udp
+stays local unless the public DNS mode is on. 51112/udp is added when
+`POL_GM_CALL=1`. All of the rules are in the group `OpenLobby`:
+
+```powershell
+Get-NetFirewallRule -Group OpenLobby | Format-Table DisplayName, Profile, Enabled
+Remove-NetFirewallRule -Group OpenLobby
+```
+
+Run again, the step replaces the group when it differs and asks nothing when
+it is in place; `-NoFirewall` skips it, and OpenLobby Setup's Uninstall removes
+the group. `tools\firewall.ps1` makes the rules, and can be run by hand from an
+elevated PowerShell (`Get-Help .\tools\firewall.ps1`).
+
+A check from the server itself (`nslookup wh000.pol.com 192.0.2.10` on the
+server, `tools/doctor.py`, or OpenLobby Setup's console check) is not filtered
+the way a console's packets are, so it shows that the server answers but not
+that the firewall lets a console in. Those checks also report the rules, the
+network type and any Docker Desktop block rule; the real test is the same
+`nslookup` from another machine on the console's network.
 
 ## DNS
 

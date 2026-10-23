@@ -88,9 +88,23 @@ here requires it.
 A console has no hosts file, so DNS is its only route. In the console's
 network settings (or the emulator's network settings, or the router's DHCP
 settings for the whole LAN), set the primary DNS server to the address of the
-machine running the `dns` service. The console must be inside
-`POL_DNS_CLIENTS`; a console on your LAN is, with the defaults. The console
-also uses port 443 (`docs/ports.md`).
+machine running the `dns` service, and leave the secondary DNS server empty:
+a console that falls back to another DNS server does not find this one. The
+setup scripts print the address to use ("set the
+primary DNS server to ..."). The console must be on the same network as that
+address and inside `POL_DNS_CLIENTS`; a console on your LAN is, with the
+defaults. The console also uses port 443 (`docs/ports.md`).
+
+A console that stops at "checking PlayOnline version" and then says the DNS
+server did not respond gets no answer from that address. On a Windows server
+the usual reasons are Windows Firewall, a network Windows treats as Public, the
+`dns` service not running because the Mobile hotspot or Internet Connection
+Sharing holds port 53, or a DNS address from the wrong network (a PC with both
+Wi-Fi and a cable has two). `setup.ps1` sets up the firewall and the network
+type (`docs/setup.md`, "Windows"); OpenLobby Setup's "Check that consoles can
+reach this server", or `python tools\doctor.py`, checks each of these and says
+what to change. From another computer on the console's network,
+`nslookup wh000.pol.com <the DNS address>` shows what the console gets.
 
 What else you need on the console side:
 

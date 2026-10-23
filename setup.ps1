@@ -9,6 +9,10 @@
     prints what to do next. Run again, it keeps the .env it finds.
     docs/setup.md explains every step.
 
+    On Windows Firewall it lets the players' ports in from the local network
+    (one rule group, OpenLobby, made with administrator rights after a UAC
+    prompt), and says when the network is set to Public.
+
     It also sets up the deployer, which lets the admin panel install and
     update games and OpenLobby itself (docs/deployer.md), unless told not to.
 
@@ -42,6 +46,7 @@ param(
     [switch]$InstallTools,
     [switch]$InstallClient,
     [switch]$NoClient,
+    [switch]$NoFirewall,
     [switch]$NoStart,
     [switch]$Help
 )
@@ -80,6 +85,8 @@ Options:
                     checkout; none: uploads only)
   -InstallTools    with -Yes, allow installing git and Docker Desktop
   -InstallClient / -NoClient  run (or skip) the hosts installer for this PC
+  -NoFirewall       leave Windows Firewall alone (by default setup lets
+                    players through it, with one UAC prompt; docs/ports.md)
   -NoStart          write .env and stop there
 '@
     exit 0
@@ -290,6 +297,43 @@ function Test-ComposeAtLeast([int]$maj, [int]$min) {
     $a = 0; $b = 0
     if (-not [int]::TryParse($p[0], [ref]$a) -or -not [int]::TryParse($p[1], [ref]$b)) { return $false }
     return ($a -gt $maj -or ($a -eq $maj -and $b -ge $min))
+}
+
+# What holds the ports a start needs, said plainly: a start that fails on a taken
+# port prints Docker's own error above, which names the port but not the program.
+function Show-PortHolders {
+    $held = @()
+    try {
+        foreach ($e in @(Get-NetUDPEndpoint -LocalPort 53 -ErrorAction Stop)) {
+            $held += ,@('UDP', 53, [string]$e.LocalAddress, [int]$e.OwningProcess)
+        }
+    } catch { }
+    foreach ($port in 80, 443) {
+        try {
+            foreach ($e in @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop)) {
+                $held += ,@('TCP', $port, [string]$e.LocalAddress, [int]$e.OwningProcess)
+            }
+        } catch { }
+    }
+    foreach ($h in $held) {
+        $name = "process $($h[3])"
+        try { $name = (Get-Process -Id $h[3] -ErrorAction Stop).ProcessName + " (process $($h[3]))" } catch { }
+        if ($name -match '^(com\.docker\.backend|vpnkit)') { $name = 'Docker Desktop, for another container (docker ps lists them)' }
+        Say "  $($h[0]) port $($h[1]) on $($h[2]) is taken by $name."
+        if ($h[1] -eq 53 -and $name -like 'svchost*') {
+            Say '    That is usually Internet Connection Sharing or the Mobile hotspot. Turn the'
+            Say '    hotspot off (Settings > Network and internet), or keep it and run this'
+            Say '    script again with -ChangeAddress: it then pins the DNS service to this'
+            Say '    PC''s network address (POL_DNS_BIND), which works beside it.'
+        }
+    }
+}
+
+function Fail-Up {
+    Say ''
+    Say 'Ports OpenLobby needs that another program holds:'
+    Show-PortHolders
+    Fail 'docker compose up failed; see the output above'
 }
 
 # ------------------------------------------------------------------ clone
@@ -659,15 +703,15 @@ if ($Games.Count -gt 0 -and -not $py) {
     if ($Published) {
         $sc += '--ghcr'
         if ((Run $py ($sc + @('pull', '--ignore-buildable', '--ignore-pull-failures'))) -ne 0) { Fail 'pulling the images failed' }
-        if ((Run $py ($sc + @('up', '-d'))) -ne 0) { Fail 'docker compose up failed; see the output above' }
+        if ((Run $py ($sc + @('up', '-d'))) -ne 0) { Fail-Up }
     } else {
-        if ((Run $py ($sc + @('up', '-d', '--build'))) -ne 0) { Fail 'docker compose up failed; see the output above' }
+        if ((Run $py ($sc + @('up', '-d', '--build'))) -ne 0) { Fail-Up }
     }
 } elseif ($Published) {
     if ((Run 'docker' @('compose', 'pull')) -ne 0) { Fail 'pulling the images failed' }
-    if ((Run 'docker' @('compose', 'up', '-d')) -ne 0) { Fail 'docker compose up failed; see the output above' }
+    if ((Run 'docker' @('compose', 'up', '-d')) -ne 0) { Fail-Up }
 } else {
-    if ((Run 'docker' @('compose', 'up', '-d', '--build')) -ne 0) { Fail 'docker compose up failed; see the output above' }
+    if ((Run 'docker' @('compose', 'up', '-d', '--build')) -ne 0) { Fail-Up }
 }
 
 if ($started -and -not $DryRun) {
@@ -768,6 +812,180 @@ if ($DryRun) {
     }
 }
 
+# ------------------------------------------------------------------ firewall
+
+$Adv = Get-EnvValue $lines 'POL_ADVERTISE'
+if (-not $Adv) { $Adv = '127.0.0.1' }
+$Ps2Dns = Get-EnvValue $lines 'POL_ADVERTISE_LAN'
+if (-not $Ps2Dns) { $Ps2Dns = $Adv }
+
+$finalReach = $script:ReachChosen
+if (-not $finalReach) {
+    if ((Get-EnvValue $lines 'POL_DNS_CLIENTS') -or (Test-Cgnat $Adv)) { $finalReach = 'vpn' }
+    elseif ((Test-Private $Adv) -or $Adv.StartsWith('127.')) { $finalReach = 'lan' }
+    else { $finalReach = 'internet' }
+}
+
+$FwGroup = 'OpenLobby'
+$FwState = ''
+
+# The rules for the ports players reach (docs/ports.md), as tools\firewall.ps1 takes
+# them: PROTOCOL:PORTS:PROFILES:REMOTE. Private networks, from the local network (and
+# the VPN's range, on any network type, for friends on a VPN); everyone only for the
+# internet case. 443 only where a PlayStation 2 may play: always on a local network,
+# where nothing else says whether one will.
+function Get-FirewallSpecs {
+    $consoles = ($finalReach -eq 'lan') -or [bool]$Ps2 -or [bool](Get-EnvValue $lines 'POL_ADVERTISE_LAN') -or
+        ((Get-EnvValue $lines 'POL_DNS_PUBLIC') -eq '1')
+    $tcp = @('25', '80', '110')
+    if ($consoles) { $tcp += '443' }
+    $tcp += '51200-51271', '51273-51310', '51330', '53001-53015', '54000'
+    $tcp = $tcp -join ','
+    $vpn = @()
+    foreach ($c in (Get-EnvValue $lines 'POL_DNS_CLIENTS').Split(',')) {
+        $c = $c.Trim()
+        if ($c -and -not $c.StartsWith('127.') -and $c -match '^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$') { $vpn += $c }
+    }
+    $near = (@('LocalSubnet') + $vpn) -join ','
+    $specs = @()
+    if ($finalReach -eq 'internet') {
+        $dnsFrom = 'LocalSubnet'
+        if ((Get-EnvValue $lines 'POL_DNS_PUBLIC') -eq '1') { $dnsFrom = 'Any' }
+        $specs += "UDP:53:Private:$dnsFrom", "TCP:${tcp}:Private:Any"
+        $gmFrom = 'Any'
+    } else {
+        $specs += "UDP:53:Private:$near", "TCP:${tcp}:Private:$near"
+        if ($vpn.Count -gt 0) {
+            $v = $vpn -join ','
+            $specs += "UDP:53:Public:$v", "TCP:${tcp}:Public:$v"
+        }
+        $gmFrom = $near
+    }
+    if ((Get-EnvValue $lines 'POL_GM_CALL') -eq '1') { $specs += "UDP:51112:Private:$gmFrom" }
+    return ,$specs
+}
+
+# The address consoles use as their DNS server, whose network type matters
+function Get-ConsoleAddress {
+    $a = Get-EnvValue $lines 'POL_ADVERTISE_LAN'
+    if ($a) { return $a }
+    if ($finalReach -eq 'lan') { return $Adv }
+    $b = Get-EnvValue $lines 'POL_DNS_BIND'
+    if (Test-Private $b) { return $b }
+    return (Get-Addresses).Lan
+}
+
+function Format-Spec([string]$spec) {
+    $f = $spec.Split(':')
+    $from = $f[3] -replace 'LocalSubnet', 'the local network' -replace ',', ', '
+    if ($from -eq 'Any') { $from = 'anywhere' }
+    return ("  $($f[0]) " + ($f[1] -replace ',', ', ') + " from $from, on $($f[2]) networks")
+}
+
+Step 'Windows Firewall'
+if ($NoFirewall) {
+    $FwState = 'skipped'
+    Say 'Left alone (-NoFirewall). docs/ports.md lists the ports to allow.'
+} elseif (-not (Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue)) {
+    $FwState = 'skipped'
+    Say 'This Windows has no firewall cmdlets, so the firewall was left alone (docs/ports.md).'
+} else {
+    $specs = Get-FirewallSpecs
+    $todo = @()
+    $have = @()
+    try { $have = @(Get-NetFirewallRule -Group $FwGroup -ErrorAction Stop | ForEach-Object { [string]$_.Description }) } catch { }
+    $same = ((@($have | Sort-Object) -join ';') -eq (@($specs | Sort-Object) -join ';'))
+    if ($same) {
+        Say "The rules that let players in are in place (rule group $FwGroup)."
+    } else {
+        $todo += "let players in (rule group $FwGroup)"
+    }
+
+    # Windows blocks other devices on a network it calls Public
+    $privateIf = 0
+    $conAddr = Get-ConsoleAddress
+    if (Test-IPv4 $conAddr) {
+        $ip = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { [string]$_.IPAddress -eq $conAddr }) | Select-Object -First 1
+        if (-not $ip) {
+            Warn "$conAddr is not an address of this PC right now, so a console pointed at it reaches nothing. If the router gave this PC a new address, run this script again with -ChangeAddress."
+        } else {
+            $cat = ''
+            try { $cat = [string](Get-NetConnectionProfile -InterfaceIndex $ip.InterfaceIndex -ErrorAction Stop).NetworkCategory } catch { }
+            Say "Consoles reach this PC at $conAddr, on $($ip.InterfaceAlias) (network type: $cat)."
+            if ($cat -eq 'Public') {
+                Say "Windows treats the network on $($ip.InterfaceAlias) as Public, a network it does not"
+                Say 'trust, and keeps other devices on it from reaching this PC. A home network'
+                Say 'should be Private: Settings > Network and internet > (the network) > Network'
+                Say 'profile type > Private network.'
+                if (YesNo "Switch $($ip.InterfaceAlias) to Private now?" ($finalReach -eq 'lan')) {
+                    $privateIf = [int]$ip.InterfaceIndex
+                    $todo += "switch $($ip.InterfaceAlias) to Private"
+                }
+            }
+        }
+    }
+
+    # "Allow access" cancelled for Docker Desktop leaves block rules, and a block rule
+    # wins over every allow rule
+    $blocks = @()
+    try {
+        $blocks = @(Get-NetFirewallApplicationFilter -ErrorAction Stop |
+            Where-Object { [string]$_.Program -match '\\(com\.docker\.backend|com\.docker\.vpnkit|vpnkit)\.exe$' } |
+            Get-NetFirewallRule -ErrorAction Stop |
+            Where-Object { [string]$_.Direction -eq 'Inbound' -and [string]$_.Action -eq 'Block' -and [string]$_.Enabled -eq 'True' })
+    } catch { }
+    if ($blocks.Count -gt 0) {
+        Say 'Windows Firewall has rules that block Docker Desktop, made when its "Allow'
+        Say 'access" question was cancelled. They stop every player, whatever else allows:'
+        foreach ($b in $blocks) { Say "  $($b.DisplayName) ($($b.Profile))" }
+        $todo += 'turn those block rules off'
+    }
+
+    $fw = Join-Path $Checkout 'tools\firewall.ps1'
+    if ($todo.Count -eq 0) {
+        $FwState = 'kept'
+    } elseif (-not (Test-Path -LiteralPath $fw)) {
+        $FwState = 'failed'
+        Warn "$fw is missing, so the firewall was left alone; allow the ports in docs/ports.md by hand"
+    } else {
+        Say ('Setup will ' + ($todo -join ', and ') + '.')
+        if (-not $same) {
+            Say 'The ports, as docs/ports.md lists them:'
+            foreach ($sp in $specs) { Say (Format-Spec $sp) }
+        }
+        Say 'Windows asks for administrator rights for this (a UAC prompt).'
+        $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$fw`" -Group $FwGroup -Rules `"$($specs -join ';')`""
+        if ($privateIf) { $argLine += " -PrivateInterface $privateIf" }
+        if ($blocks.Count -gt 0) { $argLine += ' -UnblockDocker' }
+        if ($DryRun) {
+            Say "  would run (elevated): powershell.exe $argLine"
+        } elseif (-not (YesNo 'Do this now?' $true)) {
+            $FwState = 'failed'
+            Say 'Left as it is. docs/ports.md lists the ports to allow by hand.'
+        } else {
+            $fwLog = Join-Path ([System.IO.Path]::GetTempPath()) ('openlobby-firewall-' + [guid]::NewGuid().ToString('N') + '.txt')
+            $argLine += " -Log `"$fwLog`""
+            try {
+                $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+                if (Test-Path -LiteralPath $fwLog) {
+                    foreach ($l in [System.IO.File]::ReadAllLines($fwLog)) { Say "  $l" }
+                    Remove-Item -LiteralPath $fwLog -Force -ErrorAction SilentlyContinue
+                }
+                if ($p -and $p.ExitCode -eq 0) {
+                    $FwState = 'done'
+                    Say 'Done.'
+                } else {
+                    $FwState = 'failed'
+                    Warn 'the firewall step did not finish (the lines above say why); run this script again to retry'
+                }
+            } catch {
+                $FwState = 'failed'
+                Warn 'the firewall was left as it is (the UAC prompt was declined?); run this script again to retry'
+            }
+        }
+    }
+}
+
 # ------------------------------------------------------------------ doctor
 
 Step 'Checking the setup (tools/doctor.py)'
@@ -781,10 +999,6 @@ if ($py) {
 
 # ------------------------------------------------------------------ client on this PC
 
-$Adv = Get-EnvValue $lines 'POL_ADVERTISE'
-if (-not $Adv) { $Adv = '127.0.0.1' }
-$Ps2Dns = Get-EnvValue $lines 'POL_ADVERTISE_LAN'
-if (-not $Ps2Dns) { $Ps2Dns = $Adv }
 $installer = Join-Path $Checkout 'client\Install-PolConnect.ps1'
 
 Step 'This PC as a player'
@@ -810,13 +1024,6 @@ if ($doClient) {
 
 # ------------------------------------------------------------------ summary
 
-$finalReach = $script:ReachChosen
-if (-not $finalReach) {
-    if ((Get-EnvValue $lines 'POL_DNS_CLIENTS') -or (Test-Cgnat $Adv)) { $finalReach = 'vpn' }
-    elseif ((Test-Private $Adv) -or $Adv.StartsWith('127.')) { $finalReach = 'lan' }
-    else { $finalReach = 'internet' }
-}
-
 Step 'Done'
 Say 'Admin panel:'
 Say '  http://127.0.0.1:8090 (on this PC only)'
@@ -837,7 +1044,8 @@ Say 'Players:'
 Say '  PC: copy client\Install-PolConnect.ps1 to the player''s PC and run, in an'
 Say '  elevated PowerShell:'
 Say "    powershell -ExecutionPolicy Bypass -File .\Install-PolConnect.ps1 -Server $Adv"
-Say "  PlayStation 2: set the console's DNS server to $Ps2Dns (docs/client.md)."
+Say "  PlayStation 2: in the console's network settings, set the primary DNS server"
+Say "  to $Ps2Dns and leave the secondary one empty (docs/client.md)."
 Say '  Accounts: create them on the admin panel, or registration codes for the'
 Say '  in-client sign-up.'
 Say ''
@@ -849,15 +1057,27 @@ if ($UseDeployer) {
 }
 Say ''
 Say 'Firewall (docs/ports.md):'
+switch ($FwState) {
+    'done' { Say "  Windows Firewall lets players in now (rule group $FwGroup)." }
+    'kept' { Say "  Windows Firewall already lets players in (rule group $FwGroup)." }
+    'skipped' { Say '  Windows Firewall was left alone.' }
+    'failed' { Say '  Windows Firewall was NOT changed; run this script again to retry.' }
+}
+Say '  To check that consoles can reach this server: OpenLobby Setup, "Check that'
+Say '  consoles can reach this server", or python tools\doctor.py in this folder.'
 switch ($finalReach) {
     'lan' {
-        Say '  On a local network, allow the ports in docs/ports.md through Windows'
-        Say '  Firewall for the Private profile if other machines cannot connect.'
+        if ($FwState -ne 'done' -and $FwState -ne 'kept') {
+            Say '  On a local network, allow the ports in docs/ports.md through Windows'
+            Say '  Firewall for the Private profile if other machines cannot connect.'
+        }
     }
     'vpn' {
-        Say '  Allow these from the VPN: TCP 80, 51200-51271, 51273-51310, 51330,'
-        Say '  53001-53015, 54000 (25 and 110 for generic mail accounts), and 53/udp'
-        Say '  for clients using this server''s DNS.'
+        if ($FwState -ne 'done' -and $FwState -ne 'kept') {
+            Say '  Allow these from the VPN: TCP 80, 51200-51271, 51273-51310, 51330,'
+            Say '  53001-53015, 54000 (25 and 110 for generic mail accounts), and 53/udp'
+            Say '  for clients using this server''s DNS.'
+        }
     }
     'internet' {
         Say '  Forward or open TCP 80, 51200-51271, 51273-51310, 51330, 53001-53015'

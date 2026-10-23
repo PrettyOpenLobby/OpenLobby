@@ -8,7 +8,8 @@ play, the address players connect to, the admin panel's user name), gets
 OpenLobby, makes the shared `openlobby` Docker network and runs the setup
 script that comes with OpenLobby (setup.ps1 on Windows, setup.sh elsewhere)
 with those answers. Later runs show a menu: update, change settings, stop or
-start, what to tell players, start over, uninstall.
+start, what to tell players, a check that consoles can reach the server, start
+over, uninstall.
 
 The work itself stays in setup.sh and setup.ps1, which a checkout already has
 and docs/setup.md describes; this program asks the questions, runs the script
@@ -68,6 +69,7 @@ STEPS = {
     "Game data": "Getting the games' data (the first time can download several hundred MB)",
     "Starting the stack": "Starting OpenLobby (the first start downloads it, a few minutes)",
     "Admin panel password": "Setting the admin panel's password",
+    "Windows Firewall": "Letting players through Windows Firewall (Windows may ask for administrator rights)",
     "Checking the setup (tools/doctor.py)": "Checking the setup",
     "This PC as a player": "Pointing this PC at the server",
     "Done": None,
@@ -754,7 +756,7 @@ def follow(proc, log):
 
 
 #: the script steps whose every line is shown, not only their heading and warnings
-SHOW_ALL = {"Game data"}
+SHOW_ALL = {"Game data", "Windows Firewall"}
 _current = {"step": None}
 
 
@@ -894,7 +896,279 @@ def explain_busy_port(log):
     if holder and holder.lower().startswith("svchost") and port == 53:
         say("On Windows that is usually Internet Connection Sharing or the Mobile hotspot: "
             "turn it off in Settings, Network and internet.")
+    if port == 53 and addr == "0.0.0.0":
+        say("Or keep that program: choose Change settings in %s and keep the same answers. Setup "
+            "then pins OpenLobby's DNS to this computer's network address, which works beside it."
+            % NAME)
     return True
+
+
+# --- can consoles reach this server? ------------------------------------------------------
+
+#: A PlayOnline name every console asks for (the portal), and the rule group setup.ps1 makes
+CHECK_NAME = "wh000.pol.com"
+FW_GROUP = "OpenLobby"
+
+# What Windows says about the console path, as one line of JSON: the OpenLobby rules,
+# this computer's addresses with their network type, and inbound block rules on Docker
+# Desktop's port forwarder (a block rule wins over every allow rule). Reads only.
+FW_STATUS_PS = r"""
+$r = [ordered]@{ rules = @(); addresses = @(); blocks = @(); allows = @() }
+foreach ($x in @(Get-NetFirewallRule -Group 'OpenLobby' -ErrorAction SilentlyContinue)) {
+    $pf = $x | Get-NetFirewallPortFilter
+    $af = $x | Get-NetFirewallAddressFilter
+    $r.rules += ,([ordered]@{ name = [string]$x.DisplayName; enabled = [string]$x.Enabled;
+        profile = [string]$x.Profile; protocol = [string]$pf.Protocol;
+        ports = (@($pf.LocalPort) -join ','); remote = (@($af.RemoteAddress) -join ',') })
+}
+foreach ($a in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+    $ip = [string]$a.IPAddress
+    if ($ip.StartsWith('127.') -or $ip.StartsWith('169.254.')) { continue }
+    $cat = ''
+    $p = Get-NetConnectionProfile -InterfaceIndex $a.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($p) { $cat = [string]$p.NetworkCategory }
+    $r.addresses += ,([ordered]@{ ip = $ip; alias = [string]$a.InterfaceAlias; profile = $cat })
+}
+foreach ($b in @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |
+        Where-Object { [string]$_.Program -match '\\(com\.docker\.backend|com\.docker\.vpnkit|vpnkit)\.exe$' } |
+        Get-NetFirewallRule -ErrorAction SilentlyContinue |
+        Where-Object { [string]$_.Direction -eq 'Inbound' -and [string]$_.Enabled -eq 'True' })) {
+    if ([string]$b.Action -eq 'Block') { $r.blocks += ,([string]$b.DisplayName + ' (' + [string]$b.Profile + ')') }
+    else { $r.allows += ,([string]$b.Profile) }
+}
+'OLJSON ' + ($r | ConvertTo-Json -Depth 4 -Compress)
+"""
+
+
+def dns_ask(server, name, port=53, timeout=3.0):
+    """Ask `server` for the A record of `name` the way a console does: (rcode, [IPv4
+    addresses]), or None when nothing answered."""
+    qid = int.from_bytes(os.urandom(2), "big") or 1
+    query = qid.to_bytes(2, "big") + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+    for label in name.rstrip(".").split("."):
+        query += bytes([len(label)]) + label.encode("ascii")
+    query += b"\x00\x00\x01\x00\x01"
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(query, (server, port))
+        while True:
+            data = s.recv(4096)
+            if len(data) >= 12 and int.from_bytes(data[:2], "big") == qid and data[2] & 0x80:
+                return parse_dns_answer(data)
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def parse_dns_answer(data):
+    """(rcode, [IPv4 addresses]) from a DNS reply."""
+    def skip_name(i):
+        while i < len(data):
+            n = data[i]
+            if n == 0:
+                return i + 1
+            if n & 0xC0 == 0xC0:
+                return i + 2
+            i += 1 + n
+        return i
+    rcode = data[3] & 0x0F
+    qd, an = int.from_bytes(data[4:6], "big"), int.from_bytes(data[6:8], "big")
+    i, ips = 12, []
+    for _ in range(qd):
+        i = skip_name(i) + 4
+    for _ in range(an):
+        i = skip_name(i)
+        if i + 10 > len(data):
+            break
+        rtype, rdlen = int.from_bytes(data[i:i + 2], "big"), int.from_bytes(data[i + 8:i + 10], "big")
+        i += 10
+        if rtype == 1 and rdlen == 4:
+            ips.append(".".join(str(b) for b in data[i:i + 4]))
+        i += rdlen
+    return rcode, ips
+
+
+def windows_network():
+    """The firewall and network facts FW_STATUS_PS gathers, or None."""
+    code, out = run("powershell", "-NoProfile", "-NonInteractive", "-Command", FW_STATUS_PS, timeout=180)
+    for line in out.splitlines():
+        if line.startswith("OLJSON "):
+            try:
+                got = json.loads(line[7:])
+            except ValueError:
+                return None
+            if not isinstance(got, dict):
+                return None
+            for key in ("rules", "addresses", "blocks", "allows"):
+                v = got.get(key) or []
+                got[key] = v if isinstance(v, list) else [v]
+            return got
+    return None
+
+
+def check_consoles(inst, args=None):
+    """Check from this computer what a console needs: the DNS service running, a real
+    DNS question to the address consoles are told to use answered with this server's
+    address, and on Windows the firewall rules and the network type. Prints plain next
+    steps; returns 0 when nothing needs fixing, else 1."""
+    heading("Can consoles reach this server?")
+    env = inst.env()
+    adv = env.get("POL_ADVERTISE") or "127.0.0.1"
+    console_dns = env.get("POL_ADVERTISE_LAN") or adv
+    good_answers = {a for a in (adv, env.get("POL_ADVERTISE_LAN")) if a}
+    bind = env.get("POL_DNS_BIND", "")
+    problems = []
+
+    def ok(text):
+        say("  ok    " + text)
+
+    def fix(text, *more):
+        problems.append(text)
+        say("  FIX   " + text)
+        for line in more:
+            say("        " + line)
+
+    def note(text):
+        say("  note  " + text)
+
+    dns = [c for c in containers("label=%s=dns" % ROLE_LABEL)]
+    running = [c for c in dns if c["state"] == "running"]
+    if running:
+        ok("The DNS service is running (%s)." % ", ".join(sorted({c["project"] or c["id"] for c in running})))
+    else:
+        # a program on the wildcard address is in the way only when the DNS service wants it
+        # too; pinned to one address (POL_DNS_BIND), it starts beside one
+        holder = port_holder("UDP", "0.0.0.0", 53) if bind in ("", "0.0.0.0") else None
+        fix("The DNS service is not running, so no console finds this server.",
+            ("UDP port 53 is taken by %s. " % holder if holder else "")
+            + "Choose Update or Start in %s; if it stops on port 53, it says what holds it." % NAME)
+
+    if console_dns.startswith("127."):
+        fix("Players are given %s, which only this computer can use." % console_dns,
+            "Choose Change settings and give this computer's network address.")
+
+    asked = []
+    for server, why in ((console_dns, "the address consoles use"), ("127.0.0.1", "through Docker on this computer")):
+        if server in [a for a, _ in asked]:
+            continue
+        if server == "127.0.0.1" and bind and not bind.startswith("127.") and bind != "0.0.0.0":
+            note("Not asked at 127.0.0.1: the DNS service listens on %s only (POL_DNS_BIND)." % bind)
+            continue
+        ans = dns_ask(server, CHECK_NAME)
+        asked.append((server, ans))
+        if ans is None:
+            fix("No answer from %s port 53 (%s)." % (server, why))
+        elif ans[0] != 0 or not ans[1]:
+            fix("%s answered %s with no address (DNS error %d)." % (server, CHECK_NAME, ans[0]),
+                "The DNS service may not take questions from this address: see docs/configuration.md, \"DNS\".")
+        elif not good_answers & set(ans[1]):
+            fix("%s answers %s with %s, not this server's address %s."
+                % (server, CHECK_NAME, ", ".join(ans[1]), adv),
+                "Another DNS service answers there, or OpenLobby's has old settings: choose Update.")
+        else:
+            ok("%s answers %s with %s (%s)." % (server, CHECK_NAME, ", ".join(ans[1]), why))
+    lan_ans = asked[0][1] if asked and asked[0][0] == console_dns else None
+    if lan_ans is None and any(a for s, a in asked[1:] if a):
+        note("The DNS service answers on this computer but not at %s. If something else on this "
+             "computer holds port 53 there, OpenLobby's DNS has to be pinned to %s (POL_DNS_BIND): "
+             "choose Change settings and keep the same answers." % (console_dns, console_dns))
+
+    alias = ""
+    if osname() == "windows":
+        net = windows_network()
+        if net is None:
+            note("Windows did not say how its firewall is set up, so that part is not checked.")
+        else:
+            mine = {a.get("ip"): a for a in net["addresses"] if isinstance(a, dict)}
+            here = mine.get(console_dns)
+            if console_dns.startswith("127."):
+                pass
+            elif not here:
+                fix("%s is not an address of this computer right now." % console_dns,
+                    "If the router gave this computer a new address, choose Change settings.")
+            else:
+                alias = here.get("alias", "")
+                profile = here.get("profile", "")
+                if profile == "Public":
+                    fix("Windows treats the network on %s as Public, so it keeps other devices out." % alias,
+                        "Make it Private: Settings > Network and internet > (the network) > Network "
+                        "profile type > Private network. Or choose Update here: for players on this "
+                        "network it switches it for you.")
+                else:
+                    ok("%s is on %s (network type: %s)." % (console_dns, alias, profile or "unknown"))
+            # real networks only: not Hyper-V/WSL/Docker switches, not VPN interfaces
+            others = [a for ip, a in sorted(mine.items())
+                      if ip != console_dns and not re.search(
+                          r"vEthernet|WSL|Loopback|docker|Bluetooth|^(wg|wt|tailscale|zt)", a.get("alias", ""), re.I)]
+            if here and others:
+                note("This computer is on more than one network: "
+                     + ", ".join("%s (%s)" % (a["ip"], a.get("alias", "")) for a in [here] + others)
+                     + ". A console must be on the same network as %s." % console_dns)
+            rules = [r for r in net["rules"] if isinstance(r, dict)]
+            for r in rules:
+                say("        rule: %s, from %s%s" % (r.get("name", ""), r.get("remote", ""),
+                                                   "" if r.get("enabled") == "True" else " (turned off)"))
+            dns_rule = [r for r in rules if r.get("protocol") == "UDP" and r.get("enabled") == "True"
+                        and "53" in r.get("ports", "").split(",")]
+            profile = (here or {}).get("profile", "")
+            docker_allows = [p for p in net["allows"] if isinstance(p, str)
+                             and (p == "Any" or (profile and profile in p.split(", ")))]
+            if not rules and docker_allows:
+                note("No OpenLobby rules in Windows Firewall, but Docker Desktop's own allow rule "
+                     "covers this network (%s). Update here adds OpenLobby's own rules." % docker_allows[0])
+            elif not rules:
+                fix("Windows Firewall has no OpenLobby rules, so it likely stops consoles.",
+                    "Choose Update here: setup adds them (Windows asks for administrator rights once).")
+            elif not dns_rule:
+                fix("The OpenLobby rules do not let DNS (UDP 53) in.", "Choose Update here to put them right.")
+            else:
+                ok("Windows Firewall has the OpenLobby rules (%d), DNS included." % len(rules))
+            for b in net["blocks"]:
+                fix("Windows Firewall blocks Docker Desktop: %s." % b,
+                    "Choose Update here: setup turns that rule off (Windows asks for administrator rights).")
+        say()
+        say("  This computer asked its own DNS service. Windows Firewall does not stop a")
+        say("  computer's questions to itself the way it stops a console's, so the answers")
+        say("  above show that the server answers; the network and firewall lines are what")
+        say("  decide whether a console gets through.")
+    say()
+    say("  On the PlayStation 2: in its network settings, set the primary DNS server to")
+    say("  %s and leave the secondary one empty. The console must be on the same" % console_dns)
+    say("  network as this computer%s." % (" (%s)" % alias if alias else ""))
+    say("  From another computer on that network, this shows what a console gets:")
+    say("    nslookup %s %s     (it should answer %s)" % (CHECK_NAME, console_dns, adv))
+    say()
+    if problems:
+        say("  %d thing%s to fix, listed above." % (len(problems), "s" if len(problems) > 1 else ""))
+        return 1
+    say("  Nothing to fix found.")
+    return 0
+
+
+def remove_firewall_rules(inst):
+    """Windows: take setup.ps1's firewall rule group away, which needs administrator
+    rights (one UAC prompt). Kept while another install uses this one's DNS and port 80."""
+    if osname() != "windows":
+        return
+    code, out = run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "@(Get-NetFirewallRule -Group %s -ErrorAction SilentlyContinue).Count" % FW_GROUP)
+    count = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    if code != 0 or not count.isdigit() or count == "0":
+        return
+    if shared_kept(inst):
+        say("The Windows Firewall rules (group %s) stay: other game servers here use this server's "
+            "DNS and port 80." % FW_GROUP)
+        return
+    step("Removing OpenLobby's Windows Firewall rules (Windows asks for administrator rights)")
+    code, out = run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
+                    "-ArgumentList '-NoProfile -Command Remove-NetFirewallRule -Group %s'; exit $p.ExitCode } "
+                    "catch { exit 5 }" % FW_GROUP)
+    if code != 0:
+        say("    The firewall rules were not removed (the UAC prompt was declined?). To remove them")
+        say("    later, in PowerShell as administrator: Remove-NetFirewallRule -Group %s" % FW_GROUP)
 
 
 def finish(inst, code, log, url, wait=120):
@@ -931,6 +1205,7 @@ def finish(inst, code, log, url, wait=120):
     say("=" * 72)
     hide_password(log)
     tell_about_games(inst.project())
+    check_consoles(inst)
     return True
 
 
@@ -1203,6 +1478,7 @@ def uninstall(inst, args):
             delete = False
     if not confirm("Uninstall OpenLobby now?", args.uninstall):
         return 0
+    remove_firewall_rules(inst)
     if not remove(inst, delete, games=delete):
         return 1
     if delete:
@@ -1251,8 +1527,9 @@ def menu(inst, args):
         running = any(c["service"] == "admin" and c["state"] == "running" for c in project_containers(inst))
         items = [("Update", update), ("Change settings", change_settings),
                  ("Stop OpenLobby", stop) if running else ("Start OpenLobby", start),
-                 ("Show what to tell players", tell_players), ("Start over", start_over),
-                 ("Uninstall", uninstall)]
+                 ("Show what to tell players", tell_players),
+                 ("Check that consoles can reach this server", check_consoles),
+                 ("Start over", start_over), ("Uninstall", uninstall)]
         say()
         for i, (title, _) in enumerate(items, 1):
             say("  %d. %s" % (i, title))
@@ -1292,6 +1569,8 @@ def parse_args(argv=None):
     do.add_argument("--change-settings", action="store_true", help="ask the address questions again")
     do.add_argument("--stop", action="store_true", help="stop OpenLobby")
     do.add_argument("--start", action="store_true", help="start OpenLobby again")
+    do.add_argument("--check", action="store_true",
+                    help="check that consoles can reach this server (DNS, and on Windows the firewall)")
     do.add_argument("--uninstall", action="store_true",
                     help="remove the containers; the data stays unless --delete-data is given")
     ap.add_argument("--delete-data", action="store_true", help="with --uninstall: delete the data too")
@@ -1325,7 +1604,7 @@ def main(argv=None):
         if not inst.installed():
             for line in other_installs_note(inst):
                 say(line)
-            if args.update or args.change_settings or args.stop or args.start or args.uninstall:
+            if args.update or args.change_settings or args.stop or args.start or args.uninstall or args.check:
                 say("OpenLobby is not set up in %s." % inst.folder)
                 return 1
             return first_run(inst, args)
@@ -1334,7 +1613,8 @@ def main(argv=None):
         if args.dry_run:
             return run_attached(inst, script_command(inst, client=False, dry_run=True))
         for flag, action in ((args.update, update), (args.change_settings, change_settings),
-                             (args.stop, stop), (args.start, start), (args.uninstall, uninstall)):
+                             (args.stop, stop), (args.start, start), (args.uninstall, uninstall),
+                             (args.check, check_consoles)):
             if flag:
                 return action(inst, args)
         return menu(inst, args)

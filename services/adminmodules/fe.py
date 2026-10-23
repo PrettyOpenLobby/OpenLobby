@@ -148,12 +148,12 @@ MODULE = Module(
              Action("warbots", "War bots", _warbots, danger=True,
                     fields=[{"id": "count", "label": "Soldiers a side (0 = off)", "type": "text"}],
                     about="A test mode for a big war with few people: every war fills with "
-                          "soldier bots, this many a side. For now that is at most 20 a side "
-                          "until bots are proven stable (a larger number is taken as 20), and "
-                          "never more than the war cap less 5, so real players can still "
-                          "join. They start behind their keep and set off a few at a time, "
-                          "march on the enemy, fight players, each other and the enemy keep, "
-                          "and count in the war's sign-ups. Each player is shown only the "
+                          "soldier bots, this many a side, never more than the war cap less 5 "
+                          "(45 at the usual cap of 50), so real players can still join. "
+                          "They start behind their keep and set off a squad at a time, "
+                          "march on the enemy by their own paths, fight players, each other "
+                          "and the enemy keep, and count in the war's sign-ups. Bots alone "
+                          "never take a keep below half its HP, so players decide the war. Each player is shown only the "
                           "bots near them. They earn nothing and are never saved. A war "
                           "under way gets them at once; 0 takes them all out. Changes last "
                           "until the world restarts.")],

@@ -519,6 +519,8 @@ PS_STUBS = r"""
 $global:StubLog = New-Object System.Collections.Generic.List[string]
 if (-not (Test-Path variable:global:StubDockerOs)) { $global:StubDockerOs = 'Docker Desktop' }
 if (-not (Test-Path variable:global:StubDeployerHealth)) { $global:StubDeployerHealth = 'paths ok' }
+if (-not (Test-Path variable:global:StubUpFails)) { $global:StubUpFails = $false }
+if (-not (Test-Path variable:global:StubUdp53)) { $global:StubUdp53 = $false }
 function docker {
     $line = 'docker ' + ($args -join ' ')
     $global:StubLog.Add($line)
@@ -532,6 +534,7 @@ function docker {
         'docker volume inspect*' { $global:LASTEXITCODE = 1 }
         'docker network inspect*' { $global:LASTEXITCODE = 1 }
         'docker compose ps*' { 'admin running healthy'; 'dns running healthy' }
+        'docker compose up*' { if ($global:StubUpFails) { 'Error response from daemon: ports are not available: exposing port UDP 0.0.0.0:53'; $global:LASTEXITCODE = 1 } }
         '*deployer.py --healthcheck' {
             $global:StubDeployerHealth
             if ($global:StubDeployerHealth -ne 'paths ok') { $global:LASTEXITCODE = 1 }
@@ -549,9 +552,39 @@ function Get-NetIPAddress {
 }
 function Get-NetRoute { [pscustomobject]@{ InterfaceIndex = 5; RouteMetric = 0 } }
 function Get-NetAdapter { [pscustomobject]@{ InterfaceDescription = 'Test adapter' } }
-function Get-NetUDPEndpoint { throw 'none' }
+function Get-NetUDPEndpoint {
+    if (-not $global:StubUdp53) { throw 'none' }
+    [pscustomobject]@{ LocalAddress = '0.0.0.0'; LocalPort = 53; OwningProcess = 4242 }
+}
+function Get-NetTCPConnection { throw 'none' }
+function Get-Process { [pscustomobject]@{ ProcessName = 'svchost' } }
 function Invoke-RestMethod { $global:StubLog.Add('lookup'); '203.0.113.99' }
-function Start-Process { $global:StubLog.Add('start-process ' + ($args -join ' ')) }
+function Start-Process {
+    $global:StubLog.Add('start-process ' + ($args -join ' '))
+    [pscustomobject]@{ ExitCode = 0 }
+}
+# Windows Firewall as setup.ps1 reads it: the OpenLobby rules in place (their
+# descriptions), the network type and Docker Desktop's block rules
+if (-not (Test-Path variable:global:StubFwRules)) { $global:StubFwRules = @() }
+if (-not (Test-Path variable:global:StubProfile)) { $global:StubProfile = 'Private' }
+if (-not (Test-Path variable:global:StubDockerBlocks)) { $global:StubDockerBlocks = 0 }
+function New-NetFirewallRule { $global:StubLog.Add('REAL FIREWALL CHANGE') }
+function Get-NetFirewallRule {
+    $global:StubLog.Add('get-netfirewallrule ' + ($args -join ' '))
+    if ($args -contains '-Group') {
+        if ($global:StubFwRules.Count -eq 0) { throw 'No MSFT_NetFirewallRule objects found' }
+        foreach ($d in $global:StubFwRules) { [pscustomobject]@{ Description = $d } }
+        return
+    }
+    foreach ($i in 1..$global:StubDockerBlocks) {
+        if ($global:StubDockerBlocks -eq 0) { break }
+        [pscustomobject]@{ DisplayName = 'Docker Desktop Backend'; Direction = 'Inbound'; Action = 'Block'; Enabled = 'True'; Profile = 'Public' }
+    }
+}
+function Get-NetFirewallApplicationFilter {
+    [pscustomobject]@{ Program = 'C:\Program Files\Docker\Docker\resources\com.docker.backend.exe' }
+}
+function Get-NetConnectionProfile { [pscustomobject]@{ NetworkCategory = $global:StubProfile } }
 """
 
 
@@ -563,7 +596,7 @@ class SetupPs1Test(unittest.TestCase):
         self.srv = os.path.join(self.tmp, "srv")
         self.checkout = os.path.join(self.srv, "openlobby")
         os.makedirs(os.path.join(self.checkout, "tools"))
-        for name in ("setup.ps1", ".env.example", "docker-compose.yml"):
+        for name in ("setup.ps1", ".env.example", "docker-compose.yml", os.path.join("tools", "firewall.ps1")):
             shutil.copy(os.path.join(ROOT, name), os.path.join(self.checkout, name))
         with open(os.path.join(self.checkout, "tools", "stack.py"), "w") as f:
             f.write("# stand-in\n")
@@ -734,6 +767,179 @@ class SetupPs1Test(unittest.TestCase):
         # the games' data volumes are set up first, under a step of their own
         self.assertLess(out.index("== Game data"), out.index("== Starting the stack"))
         self.assertIn("== Done", out)
+
+    # ------------------------------------------------------------ Windows Firewall
+
+    LAN_TCP = "25,80,110,443,51200-51271,51273-51310,51330,53001-53015,54000"
+
+    def firewall_call(self, out):
+        """The elevated tools\\firewall.ps1 run, or None."""
+        log = out.split("STUBLOG:", 1)[1].splitlines()
+        self.assertNotIn("REAL FIREWALL CHANGE", log)
+        runs = [l for l in log if l.startswith("start-process") and "firewall.ps1" in l]
+        self.assertLessEqual(len(runs), 1, runs)
+        return runs[0] if runs else None
+
+    def test_firewall_lan_adds_the_players_ports_elevated(self):
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient")
+        call = self.firewall_call(out)
+        self.assertIsNotNone(call, out)
+        self.assertIn("-Verb RunAs", call)
+        self.assertIn(os.path.join(self.checkout, "tools", "firewall.ps1"), call)
+        self.assertIn("-Group OpenLobby", call)
+        self.assertIn('-Rules "UDP:53:Private:LocalSubnet;TCP:%s:Private:LocalSubnet"' % self.LAN_TCP, call)
+        self.assertIn("-Log ", call)
+        self.assertNotIn("-PrivateInterface", call)
+        self.assertNotIn("-UnblockDocker", call)
+        self.assertIn("Consoles reach this PC at %s, on Ethernet (network type: Private)." % LAN, out)
+        self.assertIn("Windows asks for administrator rights", out)
+        self.assertIn("Windows Firewall lets players in now (rule group OpenLobby).", out)
+        self.assertIn("set the primary DNS server", out)
+        # before the doctor, so its checks see the rules
+        self.assertLess(out.index("== Windows Firewall"), out.index("== Done"))
+
+    def test_firewall_rules_in_place_are_left_alone(self):
+        pre = ("$global:StubFwRules = @('TCP:%s:Private:LocalSubnet', 'UDP:53:Private:LocalSubnet')"
+               % self.LAN_TCP)
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", pre=pre)
+        self.assertIsNone(self.firewall_call(out))
+        self.assertIn("are in place (rule group OpenLobby)", out)
+        self.assertIn("Windows Firewall already lets players in", out)
+        # a rule that differs (443 missing) is replaced
+        pre = "$global:StubFwRules = @('TCP:80:Private:LocalSubnet', 'UDP:53:Private:LocalSubnet')"
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", pre=pre)
+        self.assertIsNotNone(self.firewall_call(out))
+
+    def test_firewall_public_network_is_switched_to_private_on_a_lan(self):
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", pre="$global:StubProfile = 'Public'")
+        call = self.firewall_call(out)
+        self.assertIn("-PrivateInterface 5", call)
+        self.assertIn("Windows treats the network on Ethernet as Public", out)
+        self.assertIn("Network and internet", out)
+        self.assertIn("switch Ethernet to Private", out)
+
+    def test_firewall_public_network_is_only_explained_for_internet_players(self):
+        pre = ("$global:StubProfile = 'Public'; $global:StubFwRules = @('UDP:53:Private:LocalSubnet', "
+               "'TCP:25,80,110,51200-51271,51273-51310,51330,53001-53015,54000:Private:Any')")
+        out = self.run_ps("-Yes", "-Reach", "internet", "-PublicAddress", PUBLIC, "-NoPs2", "-NoClient", pre=pre)
+        self.assertIsNone(self.firewall_call(out))
+        self.assertIn("Windows treats the network on Ethernet as Public", out)
+
+    def test_firewall_turns_off_docker_block_rules(self):
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", pre="$global:StubDockerBlocks = 2")
+        call = self.firewall_call(out)
+        self.assertIn("-UnblockDocker", call)
+        self.assertIn('"Allow\naccess" question was cancelled', out.replace("\r", ""))
+        self.assertIn("Docker Desktop Backend (Public)", out)
+
+    def test_firewall_vpn_without_consoles_has_no_443(self):
+        out = self.run_ps("-Yes", "-Reach", "vpn", "-NoPs2", "-NoClient")
+        call = self.firewall_call(out)
+        tcp = "25,80,110,51200-51271,51273-51310,51330,53001-53015,54000"
+        net = "198.51.100.0/24"
+        self.assertIn('-Rules "UDP:53:Private:LocalSubnet,{n};TCP:{t}:Private:LocalSubnet,{n};'
+                      'UDP:53:Public:{n};TCP:{t}:Public:{n}"'.format(n=net, t=tcp), call)
+
+    def test_firewall_dry_run_and_no_firewall(self):
+        out = self.run_ps("-Yes", "-DryRun", "-Reach", "lan")
+        self.assertIsNone(self.firewall_call(out))
+        self.assertIn("would run (elevated): powershell.exe -NoProfile -ExecutionPolicy Bypass -File", out)
+        self.assertIn('-Rules "UDP:53:Private:LocalSubnet;', out)
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", "-NoFirewall")
+        self.assertIsNone(self.firewall_call(out))
+        self.assertIn("Left alone (-NoFirewall)", out)
+        self.assertNotIn("get-netfirewallrule", out.split("STUBLOG:", 1)[1])
+
+    def test_failed_start_names_the_port_holder(self):
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", expect=1,
+                          pre="$global:StubUpFails = $true; $global:StubUdp53 = $true")
+        self.assertIn("UDP port 53 on 0.0.0.0 is taken by svchost (process 4242).", out)
+        self.assertIn("Internet Connection Sharing or the Mobile hotspot", out)
+        self.assertIn("-ChangeAddress", out)
+        self.assertIn("docker compose up failed", out)
+
+
+@unittest.skipUnless(POWERSHELL, "Windows PowerShell not found")
+class FirewallPs1Test(unittest.TestCase):
+    """tools\\firewall.ps1 against stand-ins for the NetSecurity cmdlets: what it
+    would ask Windows Firewall to do. Nothing reaches the real firewall."""
+
+    STUBS = r"""
+$global:Calls = New-Object System.Collections.Generic.List[string]
+function Get-NetFirewallRule {
+    $global:Calls.Add('get ' + ($args -join ' '))
+    if ($args -contains '-Group') { [pscustomobject]@{ Name = 'old' }; return }
+    [pscustomobject]@{ DisplayName = 'Docker Desktop Backend'; Direction = 'Inbound'; Action = 'Block'; Enabled = 'True'; Profile = 'Public' }
+    [pscustomobject]@{ DisplayName = 'Docker Desktop Backend'; Direction = 'Inbound'; Action = 'Allow'; Enabled = 'True'; Profile = 'Private' }
+}
+function Remove-NetFirewallRule { $global:Calls.Add('remove ' + ($args -join ' ')) }
+function New-NetFirewallRule {
+    param($Name, $DisplayName, $Group, $Description, $Direction, $Action, $Protocol, $LocalPort, $Profile,
+          $RemoteAddress, $ErrorAction, [switch]$WhatIf)
+    $global:Calls.Add("new $Name|$Group|$Description|$Direction|$Action|$Protocol|" + ($LocalPort -join ',') +
+        "|$Profile|" + ($RemoteAddress -join ','))
+}
+function Set-NetConnectionProfile { $global:Calls.Add('profile ' + ($args -join ' ')) }
+function Get-NetFirewallApplicationFilter {
+    [pscustomobject]@{ Program = 'C:\Program Files\Docker\Docker\resources\com.docker.backend.exe' }
+    [pscustomobject]@{ Program = 'C:\Program Files\Other\other.exe' }
+}
+function Disable-NetFirewallRule { $global:Calls.Add('disable ' + ($input | ForEach-Object { $_.Profile })) }
+"""
+
+    def run_fw(self, *args):
+        script = os.path.join(ROOT, "tools", "firewall.ps1")
+        cmd = self.STUBS + "\n& '%s' %s\n$rc = $LASTEXITCODE\n'CALLS:'; $global:Calls\nexit $rc\n" % (
+            script.replace("'", "''"), " ".join(args))
+        p = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                            "-Command", "-"], input=cmd, capture_output=True, text=True, timeout=120)
+        out = p.stdout + p.stderr
+        return p.returncode, out, out.split("CALLS:", 1)[1].split() if "CALLS:" in out else []
+
+    def test_parses_and_is_ascii(self):
+        path = os.path.join(ROOT, "tools", "firewall.ps1")
+        with open(path, "rb") as f:
+            self.assertTrue(all(b < 128 for b in f.read()), "firewall.ps1 must be ASCII")
+
+    def test_replaces_the_group_with_the_rules_given(self):
+        code, out, _ = self.run_fw("-Rules", '"UDP:53:Private:LocalSubnet;TCP:80,51200-51271:Private:LocalSubnet,198.51.100.0/24"')
+        self.assertEqual(code, 0, out)
+        calls = out.split("CALLS:", 1)[1]
+        self.assertIn("get -Group OpenLobby", calls)
+        self.assertLess(calls.index("remove"), calls.index("new "))
+        self.assertIn("new OpenLobby-1|OpenLobby|UDP:53:Private:LocalSubnet|Inbound|Allow|UDP|53|Private|LocalSubnet",
+                      calls)
+        self.assertIn("new OpenLobby-2|OpenLobby|TCP:80,51200-51271:Private:LocalSubnet,198.51.100.0/24|Inbound|"
+                      "Allow|TCP|80,51200-51271|Private|LocalSubnet,198.51.100.0/24", calls)
+        self.assertNotIn("profile", calls)
+        self.assertNotIn("disable", calls)
+
+    def test_profile_and_docker_blocks(self):
+        code, out, _ = self.run_fw("-Rules", "UDP:53:Private:LocalSubnet", "-PrivateInterface", "7",
+                                   "-UnblockDocker")
+        self.assertEqual(code, 0, out)
+        calls = out.split("CALLS:", 1)[1]
+        self.assertIn("profile -InterfaceIndex 7 -NetworkCategory Private", calls)
+        # only the block rule, only Docker Desktop's forwarder
+        self.assertIn("disable Public", calls)
+        self.assertNotIn("disable Private", calls)
+
+    def test_remove_only_removes(self):
+        code, out, _ = self.run_fw("-Remove")
+        self.assertEqual(code, 0, out)
+        calls = out.split("CALLS:", 1)[1]
+        self.assertIn("remove", calls)
+        self.assertNotIn("new ", calls)
+
+    def test_a_bad_rule_changes_nothing(self):
+        for rules in ("TCP:80:Private:somewhere", "ICMP:0:Private:Any", "TCP:80;x:Private:Any",
+                      "TCP:80:Home:Any", "TCP:80:Private"):
+            code, out, _ = self.run_fw("-Rules", '"%s"' % rules)
+            self.assertEqual(code, 1, rules + out)
+            calls = out.split("CALLS:", 1)[1]
+            self.assertNotIn("remove", calls, rules)
+            self.assertNotIn("new ", calls, rules)
+            self.assertIn("error: bad", out, rules)
 
 
 if __name__ == "__main__":

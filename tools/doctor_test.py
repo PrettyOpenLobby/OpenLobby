@@ -238,5 +238,89 @@ class MiscTest(unittest.TestCase):
         self.assertIn(("WARN", "env"), run("192.0.2.10", {"192.0.2.10"}, exists=False))
 
 
+class ConsolePathTest(unittest.TestCase):
+    """The DNS answer and the Windows Firewall lines, with stand-ins for the
+    resolver and for PowerShell."""
+
+    RULES = [{"name": "OpenLobby UDP 53 (Private)", "enabled": "True", "protocol": "UDP", "ports": "53"},
+             {"name": "OpenLobby TCP 80, 443 (Private)", "enabled": "True", "protocol": "TCP",
+              "ports": "80,443"}]
+
+    def rows(self, state, address="192.0.2.20"):
+        rep = doctor.Report()
+        doctor.check_windows_firewall(rep, address, state)
+        return [(r["status"], r["check"], r["message"]) for r in rep.rows]
+
+    def state(self, **kw):
+        s = {"rules": list(self.RULES), "alias": "Ethernet", "profile": "Private", "found": True,
+             "blocks": [], "allows": []}
+        s.update(kw)
+        return s
+
+    def test_all_in_place(self):
+        rows = self.rows(self.state())
+        self.assertEqual([r[0] for r in rows], ["OK", "OK"], rows)
+        self.assertIn("2 rule(s) in group OpenLobby, UDP 53 included", rows[0][2])
+        self.assertIn("192.0.2.20 is on Ethernet (network type: Private)", rows[1][2])
+
+    def test_public_network_missing_rules_and_docker_blocks(self):
+        rows = self.rows(self.state(rules=[], profile="Public",
+                                    blocks=["Docker Desktop Backend (Public)"]))
+        got = {(s, c) for s, c, _m in rows}
+        self.assertIn(("WARN", "firewall"), got)
+        self.assertIn(("WARN", "network"), got)
+        self.assertIn(("FAIL", "firewall"), got)
+        self.assertTrue(any("Docker Desktop Backend (Public)" in m for _s, _c, m in rows))
+
+    def test_docker_allow_rule_covers_a_private_network(self):
+        rows = self.rows(self.state(rules=[], allows=["Private"]))
+        self.assertEqual(rows[0][0], "OK", rows)
+        self.assertIn("Docker Desktop's own allow rule", rows[0][2])
+        rows = self.rows(self.state(rules=[], allows=["Private"], profile="Public"))
+        self.assertEqual(rows[0][0], "WARN", rows)
+
+    def test_rules_without_dns_and_address_gone(self):
+        rows = self.rows(self.state(rules=[self.RULES[1]], found=False))
+        self.assertIn(("WARN", "firewall", "the OpenLobby rules do not let UDP 53 (DNS) in"), rows)
+        self.assertTrue(any(c == "network" and "not an address of this PC" in m for _s, c, m in rows))
+
+    def test_no_answer_from_powershell_is_skipped(self):
+        self.assertEqual(self.rows(None)[0][:2], ("SKIP", "firewall"))
+
+    def test_state_reads_the_json_line(self):
+        calls = []
+
+        def run(cmd, cwd=None, timeout=30, env=None):
+            calls.append(cmd)
+            return 0, 'WARNING: noise\nOLJSON {"rules": {"name": "x", "enabled": "True", "protocol": "UDP", ' \
+                      '"ports": "53"}, "alias": "Wi-Fi", "profile": "Private", "found": true, ' \
+                      '"blocks": null, "allows": "Private"}\n', ""
+        real = doctor.run
+        doctor.run = run
+        try:
+            got = doctor.windows_firewall_state("192.0.2.20")
+            self.assertIsNone(doctor.windows_firewall_state("not an address"))
+        finally:
+            doctor.run = real
+        self.assertEqual(len(calls), 1)
+        self.assertIn("'192.0.2.20'", calls[0][-1])
+        self.assertNotIn("@ADDR@", calls[0][-1])
+        self.assertEqual(got["rules"][0]["ports"], "53")     # one rule comes as an object
+        self.assertEqual(got["blocks"], [])
+        self.assertEqual(got["allows"], ["Private"])
+
+    def test_dns_answer_compared_with_the_address(self):
+        answers = {"192.0.2.20": (0, ["192.0.2.20"]), "192.0.2.21": (0, ["203.0.113.9"])}
+        real = doctor.dns_ask
+        doctor.dns_ask = lambda server, name, timeout=3.0: answers.get(server)
+        try:
+            for server, want in (("192.0.2.20", "OK"), ("192.0.2.21", "FAIL"), ("192.0.2.22", "FAIL")):
+                rep = doctor.Report()
+                doctor.check_dns(rep, server, "192.0.2.20")
+                self.assertEqual(rep.rows[0]["status"], want, (server, rep.rows))
+        finally:
+            doctor.dns_ask = real
+
+
 if __name__ == "__main__":
     unittest.main()

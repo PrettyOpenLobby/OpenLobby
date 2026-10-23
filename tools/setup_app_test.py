@@ -137,10 +137,31 @@ if a[:1] == ["clone"]:
     os.makedirs(os.path.join(a[2], ".git"))
 '''
 
-# setup.ps1 or setup.sh: what the real ones leave behind, in a few lines
+# setup.ps1 or setup.sh: what the real ones leave behind, in a few lines. As powershell
+# without a script, it answers the program's own Windows Firewall questions from the
+# state: fw_rules (the OpenLobby group) and fw_status (what FW_STATUS_PS reports).
 STUB_SCRIPT = STUB_COMMON + r'''
-log("script")
 a = sys.argv[1:]
+if not [x for x in a if x.endswith(("setup.sh", "setup.ps1"))]:
+    cmd = a[-1] if a else ""
+    def note(text):
+        with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as f:
+            f.write("powershell " + text + "\n")
+    if "OLJSON" in cmd:
+        note("firewall status")
+        status = load("fw_status", {"addresses": [], "blocks": []})
+        status["rules"] = load("fw_rules", [])
+        print("OLJSON " + json.dumps(status))
+    elif ".Count" in cmd:
+        note("firewall count " + cmd)
+        print(len(load("fw_rules", [])))
+    elif "Remove-NetFirewallRule" in cmd:
+        note(cmd)
+        if not load("uac_ok", True):
+            sys.exit(5)
+        save("fw_rules", [])
+    sys.exit(0)
+log("script")
 path = [x for x in a if x.endswith(("setup.sh", "setup.ps1"))][0]
 checkout = os.path.dirname(path)
 def opt(*names):
@@ -191,6 +212,13 @@ nets = load("networks", [])
 if "openlobby_default" not in nets:
     save("networks", nets + ["openlobby_default"])
 print("Warning: a stand-in warning")
+if path.endswith("setup.ps1"):
+    print("== Windows Firewall")
+    print("Consoles reach this PC at %s, on Ethernet (network type: Private)." % (address or "198.51.100.5"))
+    save("fw_rules", [{"name": "OpenLobby UDP 53 (Private)", "enabled": "True", "profile": "Private",
+                       "protocol": "UDP", "ports": "53", "remote": "LocalSubnet"},
+                      {"name": "OpenLobby TCP 80 (Private)", "enabled": "True", "profile": "Private",
+                       "protocol": "TCP", "ports": "80", "remote": "LocalSubnet"}])
 print("== Admin panel password")
 print("== Done")
 print("Admin panel:")
@@ -274,6 +302,14 @@ class SetupAppTest(unittest.TestCase):
         self.mod.tool = lambda name: None if name in self.missing else self.stubs.get(name)
         self.system = "windows"
         self.mod.osname = lambda: self.system
+        # a stand-in resolver: {server: (rcode, [addresses])}, nothing answers elsewhere
+        self.dns = {}
+        self.dns_asked = []
+
+        def dns_ask(server, name, port=53, timeout=3.0):
+            self.dns_asked.append((server, name))
+            return self.dns.get(server)
+        self.mod.dns_ask = dns_ask
 
     # ---------------------------------------------------------------- helpers
 
@@ -478,7 +514,8 @@ class SetupAppTest(unittest.TestCase):
         out = self.main("--dir", self.folder, "--panel-url", self.panel, answers=["0"])
         for line in ("OpenLobby: running", "Players use:   " + LAN, "Admin panel:   " + self.panel,
                      "What to tell players.txt", "1. Update", "2. Change settings", "3. Stop OpenLobby",
-                     "4. Show what to tell players", "5. Start over", "6. Uninstall", "0. Quit"):
+                     "4. Show what to tell players", "5. Check that consoles can reach this server",
+                     "6. Start over", "7. Uninstall", "0. Quit"):
             self.assertIn(line, out)
         self.assertEqual(self.calls("script"), [])
         self.assertEqual(self.calls("git"), [])
@@ -558,7 +595,7 @@ class SetupAppTest(unittest.TestCase):
 
     def test_uninstall_asks_and_defaults_to_no(self):
         self.install()
-        self.main("--dir", self.folder, answers=["6", "", ""])     # Uninstall; keep data; not now
+        self.main("--dir", self.folder, answers=["7", "", ""])     # Uninstall; keep data; not now
         self.assertEqual(len(self.get("containers")), 4)
 
     def test_uninstall_with_data_next_to_another_game(self):
@@ -609,7 +646,7 @@ class SetupAppTest(unittest.TestCase):
         self.install()
         open(self.log, "w").close()
         self.main("--dir", self.folder, "--panel-url", self.panel, "--panel-wait", "5",
-                  answers=["5", "start over", "", "1", LAN, "", "", ""])
+                  answers=["6", "start over", "", "1", LAN, "", "", ""])
         backups = os.listdir(os.path.join(self.folder, "backups"))
         self.assertEqual(len(backups), 1)
         self.assertIn("docker volume rm openlobby_pol-pgdata", self.calls("docker"))
@@ -618,7 +655,7 @@ class SetupAppTest(unittest.TestCase):
 
     def test_start_over_needs_the_words(self):
         self.install()
-        self.main("--dir", self.folder, answers=["5", "yes"])
+        self.main("--dir", self.folder, answers=["6", "yes"])
         self.assertEqual(len(self.get("containers")), 4)
         self.assertFalse(os.path.exists(os.path.join(self.folder, "backups")))
 
@@ -682,6 +719,154 @@ class SetupAppTest(unittest.TestCase):
             self.assertIn("Game data", self.mod.STEPS)
             self.assertLess(text.index("Game data"), text.index("Starting the stack"), name)
             self.assertLess(text.index(call), text.index("Starting the stack"), name)
+
+    # ---------------------------------------------------------------- consoles and firewall
+
+    def network(self, profile="Private", blocks=()):
+        self.put("fw_status", {"addresses": [
+            {"ip": LAN, "alias": "Ethernet", "profile": profile},
+            {"ip": "192.0.2.77", "alias": "Wi-Fi", "profile": "Private"},
+            {"ip": "198.18.5.1", "alias": "vEthernet (WSL)", "profile": ""}], "blocks": list(blocks)})
+
+    def test_check_all_good(self):
+        self.install()
+        self.network()
+        self.dns = {LAN: (0, [LAN]), "127.0.0.1": (0, [LAN])}
+        out = self.main("--dir", self.folder, "--check")
+        self.assertIn((LAN, "wh000.pol.com"), self.dns_asked)
+        self.assertIn(("127.0.0.1", "wh000.pol.com"), self.dns_asked)
+        for line in ("ok    The DNS service is running (openlobby).",
+                     "ok    %s answers wh000.pol.com with %s (the address consoles use)." % (LAN, LAN),
+                     "ok    %s is on Ethernet (network type: Private)." % LAN,
+                     "rule: OpenLobby UDP 53 (Private), from LocalSubnet",
+                     "ok    Windows Firewall has the OpenLobby rules (2), DNS included.",
+                     "Windows Firewall does not stop a",
+                     "set the primary DNS server to",
+                     "nslookup wh000.pol.com %s" % LAN,
+                     "Nothing to fix found."):
+            self.assertIn(line, out)
+        # another real network is named, the virtual one is not
+        self.assertIn("more than one network: %s (Ethernet), 192.0.2.77 (Wi-Fi)" % LAN, out)
+        self.assertNotIn("198.18.5.1", out)
+        self.assertNotIn("FIX", out)
+
+    def test_check_runs_after_install_and_from_the_menu(self):
+        out = self.install()
+        self.assertIn("Can consoles reach this server?", out)
+        self.assertLess(out.index("OpenLobby is running."), out.index("Can consoles reach this server?"))
+        self.assertIn("powershell firewall status", self.calls("powershell"))
+        out = self.main("--dir", self.folder, answers=["5", "0"])
+        self.assertEqual(out.count("Can consoles reach this server?"), 1)
+
+    def test_check_names_what_to_fix(self):
+        self.install()
+        self.put("fw_rules", [])
+        self.network(profile="Public", blocks=["Docker Desktop Backend (Public)"])
+        self.dns = {"127.0.0.1": (0, ["203.0.113.50"])}
+        rows = [r for r in self.get("containers") if r["service"] != "dns"]
+        self.put("containers", rows)
+        out = self.main("--dir", self.folder, "--check", expect=1)
+        for line in ("FIX   The DNS service is not running",
+                     "FIX   No answer from %s port 53 (the address consoles use)." % LAN,
+                     "FIX   127.0.0.1 answers wh000.pol.com with 203.0.113.50, not this server's address",
+                     "FIX   Windows treats the network on Ethernet as Public",
+                     "Network profile type > Private network",
+                     "FIX   Windows Firewall has no OpenLobby rules",
+                     "FIX   Windows Firewall blocks Docker Desktop: Docker Desktop Backend (Public).",
+                     "6 things to fix, listed above."):
+            self.assertIn(line, out)
+
+    def test_check_docker_allow_rule_is_a_note_not_a_fix(self):
+        self.install()
+        self.put("fw_rules", [])
+        self.network()
+        status = self.get("fw_status")
+        status["allows"] = ["Private"]
+        self.put("fw_status", status)
+        self.dns = {LAN: (0, [LAN]), "127.0.0.1": (0, [LAN])}
+        out = self.main("--dir", self.folder, "--check")
+        self.assertIn("Docker Desktop's own allow rule covers this network (Private)", out)
+        self.assertIn("Nothing to fix found.", out)
+
+    def test_check_with_dns_pinned_skips_loopback(self):
+        self.install()
+        env = os.path.join(self.folder, "openlobby", ".env")
+        with open(env, "a", encoding="utf-8") as f:
+            f.write("POL_DNS_BIND=%s\n" % LAN)
+        self.network()
+        self.dns = {LAN: (0, [LAN])}
+        self.dns_asked.clear()
+        out = self.main("--dir", self.folder, "--check")
+        self.assertNotIn(("127.0.0.1", "wh000.pol.com"), self.dns_asked)
+        self.assertIn("listens on %s only (POL_DNS_BIND)" % LAN, out)
+        self.assertIn("Nothing to fix found.", out)
+
+    def test_check_address_not_on_this_computer(self):
+        self.install()
+        self.put("fw_status", {"addresses": [{"ip": "192.0.2.99", "alias": "Ethernet", "profile": "Private"}],
+                               "blocks": []})
+        self.dns = {LAN: (0, [LAN]), "127.0.0.1": (0, [LAN])}
+        out = self.main("--dir", self.folder, "--check", expect=1)
+        self.assertIn("FIX   %s is not an address of this computer right now." % LAN, out)
+
+    def test_check_on_linux_has_no_firewall_part(self):
+        self.system = "linux"
+        self.install()
+        open(self.log, "w").close()
+        self.dns = {LAN: (0, [LAN]), "127.0.0.1": (0, [LAN])}
+        out = self.main("--dir", self.folder, "--check")
+        self.assertEqual(self.calls("powershell"), [])
+        self.assertNotIn("Windows Firewall", out)
+        self.assertIn("Nothing to fix found.", out)
+
+    def test_uninstall_removes_the_firewall_rules(self):
+        self.install()
+        self.assertEqual(len(self.get("fw_rules")), 2)
+        self.main("--dir", self.folder, "--uninstall", "--yes")
+        removed = [c for c in self.calls("powershell") if "Remove-NetFirewallRule" in c]
+        self.assertEqual(len(removed), 1, self.calls("powershell"))
+        self.assertIn("Start-Process powershell.exe -Verb RunAs", removed[0])
+        self.assertIn("Remove-NetFirewallRule -Group OpenLobby", removed[0])
+        self.assertEqual(self.get("fw_rules"), [])
+        # nothing left: no second UAC prompt
+        open(self.log, "w").close()
+        self.install()
+        self.put("fw_rules", [])
+        self.main("--dir", self.folder, "--uninstall", "--yes")
+        self.assertFalse([c for c in self.calls("powershell") if "Remove-NetFirewallRule" in c])
+
+    def test_uninstall_says_how_when_the_uac_prompt_is_declined(self):
+        self.install()
+        self.put("uac_ok", False)
+        out = self.main("--dir", self.folder, "--uninstall", "--yes")
+        self.assertIn("The firewall rules were not removed", out)
+        self.assertIn("Remove-NetFirewallRule -Group OpenLobby", out)
+        self.assertEqual(self.get("containers"), [])       # the uninstall itself went on
+
+    def test_uninstall_keeps_the_rules_another_install_uses(self):
+        self.install()
+        self.put("containers", self.get("containers") + [self.kart_club()])
+        out = self.main("--dir", self.folder, "--uninstall", "--yes")
+        self.assertIn("The Windows Firewall rules (group OpenLobby) stay", out)
+        self.assertEqual(len(self.get("fw_rules")), 2)
+
+    def test_firewall_step_lines_are_shown(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for line in ("== Windows Firewall", "Windows treats the network on Wi-Fi as Public, a network it does not",
+                         "== Admin panel password", "Set a new password for admin."):
+                self.mod.show_line(line)
+        text = out.getvalue()
+        self.assertIn("Letting players through Windows Firewall", text)
+        self.assertIn("    Windows treats the network on Wi-Fi as Public", text)
+        self.assertNotIn("Set a new password", text)
+
+    def test_dns_answer_parser(self):
+        reply = bytes.fromhex("1234818000010001000000000377683003706f6c03636f6d0000010001"
+                              "c00c000100010000003c0004c0000214")
+        self.assertEqual(self.mod.parse_dns_answer(reply), (0, ["192.0.2.20"]))
+        refused = bytes.fromhex("123481850001000000000000")
+        self.assertEqual(self.mod.parse_dns_answer(refused), (5, []))
 
     def test_program_is_ascii(self):
         with open(PROGRAM, "rb") as f:

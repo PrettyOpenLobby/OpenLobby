@@ -973,6 +973,105 @@ def check_games(rep, env):
             rep.ok("games", f"{key}: game data present")
 
 
+#: The rule group setup.ps1 puts its Windows Firewall rules in (tools/firewall.ps1)
+FW_GROUP = "OpenLobby"
+
+# Reads only: the OpenLobby rules (protocol and ports), the network type of the
+# interface holding @ADDR@, and the inbound rules on Docker Desktop's port forwarder.
+WIN_FIREWALL_PS = r"""
+$r = [ordered]@{ rules = @(); alias = ''; profile = ''; found = $false; blocks = @(); allows = @() }
+foreach ($x in @(Get-NetFirewallRule -Group 'OpenLobby' -ErrorAction SilentlyContinue)) {
+    $pf = $x | Get-NetFirewallPortFilter
+    $r.rules += ,([ordered]@{ name = [string]$x.DisplayName; enabled = [string]$x.Enabled;
+        protocol = [string]$pf.Protocol; ports = (@($pf.LocalPort) -join ',') })
+}
+$a = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { [string]$_.IPAddress -eq '@ADDR@' } | Select-Object -First 1
+if ($a) {
+    $r.found = $true
+    $r.alias = [string]$a.InterfaceAlias
+    $p = Get-NetConnectionProfile -InterfaceIndex $a.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($p) { $r.profile = [string]$p.NetworkCategory }
+}
+foreach ($b in @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |
+        Where-Object { [string]$_.Program -match '\\(com\.docker\.backend|com\.docker\.vpnkit|vpnkit)\.exe$' } |
+        Get-NetFirewallRule -ErrorAction SilentlyContinue |
+        Where-Object { [string]$_.Direction -eq 'Inbound' -and [string]$_.Enabled -eq 'True' })) {
+    if ([string]$b.Action -eq 'Block') { $r.blocks += ,([string]$b.DisplayName + ' (' + [string]$b.Profile + ')') }
+    else { $r.allows += ,([string]$b.Profile) }
+}
+'OLJSON ' + ($r | ConvertTo-Json -Depth 4 -Compress)
+"""
+
+
+def windows_firewall_state(address):
+    """What WIN_FIREWALL_PS reports for `address`, or None."""
+    if not is_ipv4(address):
+        return None
+    rc, out, _err = run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                         WIN_FIREWALL_PS.replace("@ADDR@", address)], timeout=180)
+    for line in (out or "").splitlines():
+        if line.startswith("OLJSON "):
+            try:
+                got = json.loads(line[7:])
+            except ValueError:
+                return None
+            if isinstance(got, dict):
+                for key in ("rules", "blocks", "allows"):
+                    v = got.get(key) or []
+                    got[key] = v if isinstance(v, list) else [v]
+                return got
+    return None
+
+
+def check_windows_firewall(rep, address, state):
+    """Windows Firewall on the way from a console to this PC: setup.ps1's rules,
+    the network type of the interface consoles reach, and the block rules Windows
+    makes when Docker Desktop's "Allow access" question is cancelled."""
+    if state is None:
+        rep.skip("firewall", "Windows did not say how its firewall is set up")
+        return
+    rules = [r for r in state["rules"] if isinstance(r, dict)]
+    dns = [r for r in rules if r.get("protocol") == "UDP" and r.get("enabled") == "True"
+           and "53" in str(r.get("ports", "")).split(",")]
+    profile = state.get("profile") or ""
+    covered = [p for p in state["allows"] if isinstance(p, str)
+               and (p == "Any" or (profile and profile in p.split(", ")))]
+    if dns:
+        rep.ok("firewall", f"{len(rules)} rule(s) in group {FW_GROUP}, UDP 53 included")
+    elif rules:
+        rep.warn("firewall", f"the {FW_GROUP} rules do not let UDP 53 (DNS) in",
+                 "run setup.ps1 again; it puts the rules right (one UAC prompt)")
+    elif covered:
+        rep.ok("firewall", f"no {FW_GROUP} rules, but Docker Desktop's own allow rule "
+               f"covers the {profile} network")
+    else:
+        rep.warn("firewall", f"no {FW_GROUP} rules in Windows Firewall, so consoles and "
+                 "other computers are likely stopped",
+                 "run setup.ps1 again (it adds them with one UAC prompt), or allow "
+                 "the ports in docs/ports.md")
+    if not state.get("found"):
+        rep.warn("network", f"{address} is not an address of this PC right now",
+                 "if the router gave this PC a new address, run setup.ps1 -ChangeAddress")
+    elif profile == "Public":
+        rep.warn("network", f"Windows treats the network on {state.get('alias')} as Public "
+                 "and keeps other devices from reaching this PC",
+                 "make it Private: Settings > Network and internet > (the network) > "
+                 "Network profile type > Private network")
+    else:
+        rep.ok("network", f"{address} is on {state.get('alias')} "
+               f"(network type: {profile or 'unknown'})")
+    for b in state["blocks"]:
+        rep.fail("firewall", f"a rule blocks Docker Desktop from other devices: {b}",
+                 "run setup.ps1 again, which turns it off (one UAC prompt), or turn it "
+                 "off in Windows Defender Firewall, Inbound Rules")
+
+
+FIREWALL_NOTE = ("Note: the DNS questions above came from this PC. Windows Firewall does "
+                 "not stop a PC's questions to itself the way it stops a console's, so an OK "
+                 "there shows that the server answers; the firewall and network lines cover "
+                 "the console's way in.")
+
+
 # --------------------------------------------------------------------------- #
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -1044,12 +1143,22 @@ def main(argv=None):
         check_admin(rep, ports, target, remote, state)
     if not remote:
         check_games(rep, env)
+    windows = not remote and os.name == "nt"
+    if windows:
+        # the address consoles use as their DNS server
+        console = env.get("POL_ADVERTISE_LAN", "").strip() or adv_set
+        if console and is_ipv4(console) and not ipaddress.IPv4Address(console).is_loopback:
+            check_windows_firewall(rep, console, windows_firewall_state(console))
+        else:
+            windows = False
 
     if args.json:
         print(json.dumps({"ok": not rep.failed, "target": target,
                           "checks": rep.rows}, indent=2))
     else:
         rep.print_text()
+        if windows:
+            print("\n" + FIREWALL_NOTE)
     return 1 if rep.failed else 0
 
 
