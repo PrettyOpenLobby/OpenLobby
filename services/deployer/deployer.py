@@ -5,7 +5,8 @@ client folder or an uploaded archive. docs/deployer.md describes the HTTP
 API and how to run it.
 
     python deployer.py                 serve (settings from the environment)
-    python deployer.py --healthcheck   exit 0 when the local server answers
+    python deployer.py --healthcheck   exit 0 when the local server answers (and
+                                       Docker sees the checkouts where it does)
 
 It is the only container that holds the Docker socket, so it accepts
 nothing but a fixed set of actions on game keys from the catalog, each run
@@ -30,6 +31,7 @@ Standard library only.
 """
 import argparse
 import glob
+import hashlib
 import hmac
 import json
 import os
@@ -38,6 +40,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -68,6 +71,8 @@ NOBODY = 65534             # the uid and gid an import runs as when the checkout
 UPDATE_PERIOD = 6 * 3600   # the update check runs at start and this often
 REFRESH_GAP = 60.0         # at most one forced update check this often
 GIT_TIMEOUT = 60           # a git fetch for the update check is stopped after this long
+COMPOSING = ("enable", "disable", "update", "restart")   # the actions that run docker compose
+PROBE_TIMEOUT = 120        # the start-up check that Docker sees the checkout where we do
 
 JOB_ID = re.compile(r"^[0-9]{8}T[0-9]{6}-[0-9a-f]{6}$")
 ACTIVE = ("queued", "running")
@@ -122,6 +127,10 @@ class Config:
         self.docker = ["docker"]     # the docker CLI, as an argv prefix
         self.github_api = updatecheck.API
         self.refresh_gap = REFRESH_GAP
+        # whether the Docker daemon sees the core checkout at the path we see it
+        # (check_paths): "ok", "wrong" or "unchecked", and the sentence for it
+        self.paths = "unchecked"
+        self.paths_note = "not checked"
 
 
 def parse_args(argv):
@@ -153,8 +162,12 @@ def parse_args(argv):
     ap.add_argument("--docker", default="",
                     help="the docker CLI the update check runs (default docker; tests point "
                          "this at a stand-in .py)")
+    ap.add_argument("--container", default="",
+                    help="the container to check the checkout paths from (default: this one, "
+                         "when running in a container; tests name one their docker stand-in knows)")
     ap.add_argument("--healthcheck", action="store_true",
-                    help="ask the local server for /api/health and exit 0 if it answers")
+                    help="ask the local server for /api/health and exit 0 if it answers and "
+                         "Docker sees the checkouts where the deployer does")
     return ap.parse_args(argv)
 
 
@@ -280,6 +293,12 @@ def docker_sockets():
 def socket_open_to(uid, gids, path):
     """Whether uid (with the groups gids) may connect to the socket at path.
     Connecting to a unix socket needs write permission on it."""
+    return may_write(uid, gids, path)
+
+
+def may_write(uid, gids, path):
+    """Whether uid (with the groups gids) has write permission on path, by its
+    owner, group and mode. False when path is not there."""
     try:
         st = os.stat(path)
     except OSError:
@@ -292,6 +311,28 @@ def socket_open_to(uid, gids, path):
     if st.st_gid in gids:
         return bool(mode & 0o020)
     return bool(mode & 0o002)
+
+
+DESKTOP_MNT = "/run/desktop/mnt/host/"
+
+
+def on_desktop(path):
+    """Whether path is a host folder as Docker Desktop's VM sees it. Every file
+    there reads as root's unless a Linux program made it; the Windows owner is
+    kept apart."""
+    return path.replace("\\", "/").startswith(DESKTOP_MNT)
+
+
+def install_identity(root):
+    """subprocess arguments for `stack.py add`, which clones a game beside the
+    core: as the owner of the checkouts folder, as owner_kwargs. On Docker
+    Desktop that folder reads as root's, so the clone is made as nobody
+    instead: it then belongs to nobody, and an import tool, which runs as the
+    checkout's owner and never as root, can write its data into it."""
+    kw = owner_kwargs(root)
+    if not kw and on_desktop(root) and hasattr(os, "getuid") and os.getuid() == 0:
+        kw = {"user": NOBODY, "group": NOBODY, "extra_groups": []}
+    return kw
 
 
 def import_identity(checkout):
@@ -324,6 +365,99 @@ def import_env(home):
     else:
         env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
     return env
+
+
+# ------------------------------------------------- where Docker sees the checkouts
+
+# docker compose runs here, but the Docker daemon resolves the paths it is
+# handed. With Docker Engine on Linux the checkouts are mounted at their host
+# path, so both read the same folder. Docker Desktop's daemon runs in a Linux
+# VM that sees a Windows folder C:\x as /run/desktop/mnt/host/c/x, so there
+# POL_DEPLOY_ROOT is that path. Rather than trust either, the deployer starts
+# a throwaway container from its own image with the core checkout mounted the
+# way compose will mount it, and compares what that container reads with what
+# it reads itself.
+PROBE_FILE = "docker-compose.yml"
+PROBE_CODE = ("import hashlib, os\n"
+              "p = os.path.join('/probe', %r)\n"
+              "st = os.stat(p)\n"
+              "with open(p, 'rb') as f:\n"
+              "    print('%%s %%d %%d' %% (hashlib.sha256(f.read()).hexdigest(), st.st_size, "
+              "int(st.st_mtime)))\n" % PROBE_FILE)
+MOUNT_MISSING = ("bind source path does not exist", "no such file or directory",
+                 "not a directory", "invalid mount config")
+
+
+def core_mark(core):
+    """What the probe container must print for `core`: the compose file's
+    sha256, size and whole-second mtime."""
+    p = os.path.join(core, PROBE_FILE)
+    st = os.stat(p)
+    with open(p, "rb") as f:
+        return "%s %d %d" % (hashlib.sha256(f.read()).hexdigest(), st.st_size, int(st.st_mtime))
+
+
+def own_container():
+    """This container's id (Docker makes it the hostname), or "" outside a container."""
+    if not os.path.exists("/.dockerenv"):
+        return ""
+    return socket.gethostname()
+
+
+def paths_sentence(core, why):
+    return ("The Docker daemon does not see the OpenLobby checkout at %s, where the deployer "
+            "sees it (%s), so docker compose would mount other folders than the ones it reads. "
+            "The deployer runs no docker compose command until POL_DEPLOY_ROOT is the folder "
+            "as the daemon sees it, mounted at that same path. On Docker Desktop for Windows "
+            "that is the path under /run/desktop/mnt/host/, for example "
+            "/run/desktop/mnt/host/c/Users/you/openlobby-server for "
+            "C:\\Users\\you\\openlobby-server (docs/deployer.md)." % (core, why))
+
+
+def check_paths(cfg, container):
+    """("ok" | "wrong" | "unchecked", sentence) for the core checkout: whether
+    a container the daemon starts with cfg.core mounted reads the same
+    docker-compose.yml there as this one does. "unchecked" when Docker could
+    not be asked at all; jobs then run as before."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "POL_DEPLOYER_TOKEN" and v != cfg.token}
+
+    def ask(argv):
+        try:
+            r = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=PROBE_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, "", str(exc)
+        return (r.returncode, r.stdout.decode("utf-8", "replace").strip(),
+                r.stderr.decode("utf-8", "replace").strip())
+
+    if not container:
+        return "unchecked", "not running in a container"
+    rc, image, err = ask(cfg.docker + ["inspect", "--format", "{{.Image}}", container])
+    if rc != 0 or not image:
+        return "unchecked", "could not ask Docker about this container (%s)" % (
+            (err.splitlines() or ["exit %s" % rc])[-1])
+    try:
+        mine = core_mark(cfg.core)
+    except OSError as exc:
+        return "wrong", paths_sentence(cfg.core, "this container cannot read %s: %s"
+                                       % (PROBE_FILE, exc.strerror or exc))
+    # --mount takes CSV: a quoted field keeps a comma in the path
+    source = '"source=%s"' % cfg.core.replace('"', '""')
+    rc, out, err = ask(cfg.docker + [
+        "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "python",
+        "--mount", "type=bind,%s,target=/probe,readonly" % source, image, "-c", PROBE_CODE])
+    if rc == 0 and out == mine:
+        return "ok", "Docker sees %s where the deployer does" % cfg.core
+    if rc == 0:
+        return "wrong", paths_sentence(cfg.core, "a container started there reads another "
+                                       "%s" % PROBE_FILE)
+    lines = [l.strip() for l in err.splitlines() if l.strip()]
+    hit = [l for l in lines if any(m in l.lower() for m in MOUNT_MISSING)]
+    if rc is not None and hit:
+        return "wrong", paths_sentence(cfg.core, "Docker says: %s" % hit[0])
+    return "unchecked", "the check container did not run (%s)" % (
+        (lines or ["exit %s" % rc])[0])
 
 
 # ----------------------------------------------------------------- jobs
@@ -571,10 +705,15 @@ class Runner:
 
     # ---- the commands
 
-    def stack(self, args, owner=None):
-        return self.run([self.cfg.python, self.cfg.stack] + args, owner=owner)
+    def stack(self, args, owner=None, kw=None):
+        return self.run([self.cfg.python, self.cfg.stack] + args, owner=owner, kw=kw)
+
+    def paths_guard(self):
+        if self.cfg.paths == "wrong":
+            raise JobFailed(self.cfg.paths_note)
 
     def compose(self, args, prebuild=True):
+        self.paths_guard()
         self.profile_guard()
         head = ["compose"] + (["--ghcr"] if self.cfg.ghcr else []) + ([] if prebuild else ["--no-prebuild"])
         rc = self.stack(head + args)
@@ -687,7 +826,7 @@ def needs_sentence(name, req):
 
 def act_install(r, key):
     r.need_git()
-    if r.stack(["add", key, "--yes"], owner=r.cfg.root) != 0:
+    if r.stack(["add", key, "--yes"], kw=install_identity(r.cfg.root)) != 0:
         raise JobFailed("Cloning %s failed; the log has git's message." % r.name(key), r.last_rc)
     if not os.path.isdir(r.checkout(key)):
         raise JobFailed("%s was not cloned to %s." % (r.name(key), r.checkout(key)))
@@ -787,6 +926,12 @@ def act_import(r, key, job):
                 raise JobFailed("The import tool would run as uid %d, which may use the Docker "
                                 "socket %s, so it was not started. Give the checkout to a user "
                                 "outside the docker group (docs/deployer.md)." % (uid, sock))
+        if not may_write(uid, gids, d):
+            raise JobFailed("The import tool would run as uid %d (the checkout's owner, or nobody "
+                            "when root owns it), which cannot write to %s, so it was not started. "
+                            "Give the checkout to a user outside the docker group "
+                            "(docs/deployer.md, \"How an import is kept apart from the socket\")."
+                            % (uid, os.path.basename(d)))
     home = os.path.join(r.cfg.state, "imports", job["id"])
     os.makedirs(home, exist_ok=True)
     if kw:
@@ -1174,6 +1319,8 @@ class Deployer:
                 log.line("importing %s from %s" % (job["item"], json.dumps(job["source"])))
                 state, summary, missing = act_import(r, job["game"], job)
             else:
+                if job["action"] in COMPOSING:
+                    r.paths_guard()        # before stack.py enable or git pull change anything
                 state, summary, missing = ACT[job["action"]](r, job["game"])
             job["exit"] = 0 if r.last_rc is None else r.last_rc
         except JobFailed as exc:
@@ -1248,7 +1395,8 @@ class Deployer:
         out = {"games": games,
                "core": {"running": ps["core"]["running"] if ps_ok else None,
                         "services": ps["core"].get("services", {}) if ps_ok else {}},
-               "options": {"ghcr": self.cfg.ghcr}}
+               "options": {"ghcr": self.cfg.ghcr,
+                           "problem": self.cfg.paths_note if self.cfg.paths == "wrong" else None}}
         if not report:
             out["error"] = "stack.py check did not answer; data_ok is unknown"
         if not ps_ok:
@@ -1303,7 +1451,9 @@ def make_handler(dep):
             parts = [p for p in u.path.split("/") if p]
             if parts == ["api", "health"]:
                 return self.send_json(200, {"ok": True, "version": VERSION,
-                                            "busy": bool(dep.busy())})
+                                            "busy": bool(dep.busy()), "paths": dep.cfg.paths,
+                                            "problem": dep.cfg.paths_note
+                                            if dep.cfg.paths == "wrong" else None})
             if parts == ["api", "games"]:
                 return self.send_json(200, dep.games())
             if parts == ["api", "updates"]:
@@ -1511,9 +1661,14 @@ def healthcheck(args):
                                  headers={"Authorization": "Bearer " + token})
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            return 0 if json.load(r).get("ok") else 1
+            h = json.load(r)
     except Exception:
         return 1
+    if h.get("problem"):
+        print(h["problem"])
+        return 1
+    print("paths %s" % h.get("paths"))
+    return 0 if h.get("ok") else 1
 
 
 def main(argv=None):
@@ -1521,6 +1676,8 @@ def main(argv=None):
     if args.healthcheck:
         return healthcheck(args)
     cfg = make_config(args)
+    cfg.paths, cfg.paths_note = check_paths(cfg, args.container or own_container())
+    say(("paths: " if cfg.paths != "wrong" else "") + cfg.paths_note)
     dep = Deployer(cfg)
     srv = ThreadingHTTPServer((cfg.host, cfg.port), make_handler(dep))
     srv.daemon_threads = True

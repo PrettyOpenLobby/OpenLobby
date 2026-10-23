@@ -754,6 +754,10 @@ function renderDeploy() {
       + "for the admin service.";
     return;
   }
+  // the deployer found that Docker sees the checkouts elsewhere: it runs no compose command
+  const problem = (d.options || {}).problem || "";
+  $("#deployProblem").hidden = !problem;
+  $("#deployProblem").textContent = problem;
   const busy = (d.jobs || []).some((j) => !JOB_DONE.has(j.state));
   const rows = [{ key: "core", name: "OpenLobby (this server)", installed: true, enabled: true,
                   running: (d.core || {}).running, missing: [], admin_env: [], core: true }]

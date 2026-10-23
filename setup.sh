@@ -66,7 +66,8 @@ panel's password. Running it again keeps the existing .env.
                         run the published images (default) or build locally
   --deployer | --no-deployer
                         run the deployer, which lets the admin panel install
-                        games (default: on)
+                        games (default: on; off with Docker Desktop unless
+                        --deployer is given)
   --clients DIR|none    folder of your own client installs for the deployer
   --admin-user NAME     the admin panel's user name on a new .env
                         (default: admin)
@@ -687,8 +688,15 @@ local USE_DEPLOYER=""
 if [ -n "$(env_get POL_DEPLOYER_TOKEN "$WORK")" ] && [ "$DEPLOYER" != no ]; then
     USE_DEPLOYER=1
 elif [ -n "$NEW_ENV" ] || [ "$DEPLOYER" = yes ]; then
-    if [ -n "$DESKTOP" ]; then
-        say "This Docker is Docker Desktop; the deployer needs Docker Engine, so it is left off."
+    if [ -n "$DESKTOP" ] && [ "$DEPLOYER" = yes ]; then
+        warn "this Docker is Docker Desktop, where the deployer is proven only on Windows (setup.ps1)"
+        say "The deployer checks when it starts that Docker sees $PARENT where it does,"
+        say "and runs no docker compose command when it does not (docs/deployer.md)."
+        USE_DEPLOYER=1
+    elif [ -n "$DESKTOP" ]; then
+        say "This Docker is Docker Desktop. The deployer is set up for it by setup.ps1 on"
+        say "Windows; from here it is not proven, so it is left off. --deployer turns it on,"
+        say "and it then checks that Docker sees the checkouts where it does (docs/deployer.md)."
     elif [ "$DEPLOYER" = yes ]; then
         USE_DEPLOYER=1
     elif [ "$DEPLOYER" != no ]; then

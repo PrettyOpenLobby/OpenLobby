@@ -450,7 +450,10 @@ services:
   # refuses to start without POL_DEPLOYER_TOKEN, and runs nothing but
   # stack.py with fixed arguments. POL_DEPLOY_ROOT, the directory holding
   # this checkout and the game checkouts, is mounted at the same path inside
-  # so the paths in the game compose files mean the same to the daemon; the
+  # so the paths in the game compose files mean the same to the daemon (on
+  # Docker Desktop for Windows it is the path the daemon's VM sees,
+  # /run/desktop/mnt/host/c/... for C:\..., and the deployer checks at start
+  # that the daemon sees the folder there); the
   # bind is never created when the directory is missing or the variable is
   # unset. Commands it runs leave this profile out, so it never recreates
   # itself. POL_DEPLOY_CLIENTS, a folder of client installs the panel may

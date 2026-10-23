@@ -947,7 +947,10 @@ def check_games(rep, env):
         checkout = item.get("checkout")
         if isinstance(checkout, str) and checkout:
             checkout = substitute(checkout, env)
-            base = checkout if os.path.isabs(checkout) else os.path.join(ROOT, checkout)
+            # as tools/stack.py has it: the core is this checkout, a game's sits beside it
+            base = (checkout if os.path.isabs(checkout)
+                    else ROOT if item.get("kind") == "core"
+                    else os.path.join(os.path.dirname(ROOT), checkout))
             if not os.path.isdir(base):
                 rep.fail("games", f"{key}: checkout {checkout} not found",
                          f"clone the {key} repository next to openlobby, as "

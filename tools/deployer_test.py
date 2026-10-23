@@ -25,6 +25,14 @@ The update check (GET /api/updates) runs against a stand-in GitHub API on
 published image behind, current, without a revision, pinned, rate limited
 and offline; the one-hour cache surviving a restart, and the limit on
 forced checks. Nothing reaches the network.
+
+The start-up check that the Docker daemon sees the core checkout where the
+deployer does (Docker Desktop's VM sees a Windows folder elsewhere) runs
+against a stand-in docker CLI that mounts the folder, reads another one, or
+refuses the mount, and a deployer whose check failed must refuse every
+compose action before it changes anything. Who clones a game on Docker
+Desktop (nobody, so its imports can write) is checked with a stand-in
+os.stat.
 """
 import http.client
 import io
@@ -514,7 +522,8 @@ def test_games(c, t):
     ok(by["fe"]["data_ok"] is False and by["fe"]["missing"][0]["path"].endswith("fe-fet-area.tsv")
        and set(by["fe"]["missing"][0]) >= {"path", "hint"}, "fe: data_ok false with missing")
     ok(not by["fmo"]["installed"] and by["fmo"]["data_ok"] is None, "fmo: not installed, data_ok None")
-    ok(g["core"]["running"] is True and g["options"] == {"ghcr": False}, "core running, options")
+    ok(g["core"]["running"] is True and g["options"] == {"ghcr": False, "problem": None},
+       "core running, options")
     t.flag("ps.json", on=False)
     t.flag("check.json", on=False)
 
@@ -541,6 +550,156 @@ print(json.dumps([images[args[2]]]))
 
 def sha(n, salt="kart"):
     return hashlib.sha1(("%s-%d" % (salt, n)).encode()).hexdigest()
+
+
+# ------------------------------------------------- where Docker sees the checkouts
+
+# The stand-in docker CLI for the start-up check (check_paths): `inspect`
+# names an image, and `run` runs the probe code itself with /probe standing
+# for the --mount source, the way Docker Engine on Linux mounts it. The file
+# FAKE_PROBE_DIR/mode makes it act out the other cases: "other" reads another
+# folder (a daemon that sees a different filesystem), "missing" is Docker
+# Desktop refusing a source its VM does not have, "noinspect" and "noimage"
+# are Docker not answering the way the check needs.
+FAKE_PROBE_DOCKER = r"""
+import csv, io, json, os, subprocess, sys
+args = sys.argv[1:]
+d = os.environ["FAKE_PROBE_DIR"]
+mode = open(os.path.join(d, "mode")).read().strip()
+with open(os.path.join(d, "calls.txt"), "a") as f:
+    f.write(json.dumps(args) + "\n")
+if args[0] == "inspect":
+    if mode == "noinspect":
+        sys.stderr.write("Error: No such object: " + args[-1] + "\n")
+        sys.exit(1)
+    print("sha256:" + "ab" * 32)
+    sys.exit(0)
+if args[0] == "run":
+    if mode == "missing":
+        sys.stderr.write('docker: Error response from daemon: invalid mount config for type "bind": '
+                         'bind source path does not exist: /srv/pol/openlobby\n'
+                         "Run 'docker run --help' for more information\n")
+        sys.exit(125)
+    if mode == "noimage":
+        sys.stderr.write("docker: Error response from daemon: No such image: sha256:abab\n")
+        sys.exit(125)
+    fields = next(csv.reader(io.StringIO(args[args.index("--mount") + 1])))
+    src = [x[len("source="):] for x in fields if x.startswith("source=")][0]
+    if mode == "other":
+        src = os.path.join(d, "elsewhere")
+    code = args[args.index("-c") + 1].replace("'/probe'", repr(src))
+    sys.exit(subprocess.run([sys.executable, "-c", code]).returncode)
+sys.exit(2)
+"""
+
+
+def probe_docker(t):
+    """(stand-in docker path, its folder); the folder's mode file says how it acts."""
+    d = os.path.join(t.tmp, "probedocker")
+    os.makedirs(os.path.join(d, "elsewhere"), exist_ok=True)
+    with open(os.path.join(d, "elsewhere", "docker-compose.yml"), "w") as f:
+        f.write("services: {}  # another install\n")
+    p = os.path.join(d, "docker.py")
+    with open(p, "w") as f:
+        f.write(FAKE_PROBE_DOCKER)
+    return p, d
+
+
+def set_mode(d, mode):
+    with open(os.path.join(d, "mode"), "w") as f:
+        f.write(mode)
+
+
+def test_check_paths(t):
+    """check_paths itself: every outcome, and the probe container it asks for."""
+    import types
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import deployer as dep
+    dock, d = probe_docker(t)
+    core = os.path.join(t.tmp, "kart,club", "openlobby")      # a comma, which --mount must quote
+    os.makedirs(core)
+    with open(os.path.join(core, "docker-compose.yml"), "w") as f:
+        f.write("services: {}  # Kart Club\n")
+    cfg = types.SimpleNamespace(docker=[sys.executable, dock], core=core, token=TOKEN)
+    os.environ["FAKE_PROBE_DIR"] = d        # check_paths hands the stand-in this environment
+    set_mode(d, "same")
+    state, note = dep.check_paths(cfg, "c0ffee")
+    ok(state == "ok" and core in note, "paths: the daemon reads the same compose file: ok (%s)" % note)
+    with open(os.path.join(d, "calls.txt")) as f:
+        calls = [json.loads(l) for l in f]
+    run = calls[-1]
+    ok(calls[0][:3] == ["inspect", "--format", "{{.Image}}"] and calls[0][-1] == "c0ffee",
+       "paths: asks Docker for this container's image")
+    ok(run[:2] == ["run", "--rm"] and run[run.index("--pull") + 1] == "never"
+       and run[run.index("--network") + 1] == "none" and "sha256:" + "ab" * 32 in run,
+       "paths: a throwaway container of its own image, no pull, no network (%s)" % run[:9])
+    spec = run[run.index("--mount") + 1]
+    ok(spec.startswith("type=bind,") and spec.endswith(",target=/probe,readonly")
+       and '"source=%s"' % core in spec, "paths: the core mounted read-only, the source quoted (%s)" % spec)
+    set_mode(d, "other")
+    state, note = dep.check_paths(cfg, "c0ffee")
+    ok(state == "wrong" and "POL_DEPLOY_ROOT" in note and "/run/desktop/mnt/host/c/" in note,
+       "paths: the daemon reads another folder: wrong, with the Docker Desktop path to use")
+    set_mode(d, "missing")
+    state, note = dep.check_paths(cfg, "c0ffee")
+    ok(state == "wrong" and "bind source path does not exist" in note and "docker run --help" not in note,
+       "paths: Docker cannot mount the folder: wrong, quoting Docker's line (%s)" % note[:160])
+    for mode in ("noinspect", "noimage"):
+        set_mode(d, mode)
+        state, note = dep.check_paths(cfg, "c0ffee")
+        ok(state == "unchecked", "paths: %s: unchecked, jobs run as before (%s)" % (mode, note))
+    state, note = dep.check_paths(cfg, "")
+    ok(state == "unchecked", "paths: outside a container: unchecked")
+    os.remove(os.path.join(core, "docker-compose.yml"))
+    set_mode(d, "same")
+    state, note = dep.check_paths(cfg, "c0ffee")
+    ok(state == "wrong" and "cannot read docker-compose.yml" in note,
+       "paths: no compose file in the core here: wrong")
+
+
+def test_paths_server(t, servers):
+    """A deployer whose check found the paths wrong: it says so everywhere and
+    runs no compose action, nor the git pull or stack.py enable before one."""
+    dock, d = probe_docker(t)
+    with open(os.path.join(t.core, "docker-compose.yml"), "w") as f:
+        f.write("services: {}  # Kart Club\n")
+    set_mode(d, "missing")
+    s = Server(t, extra_env={"FAKE_PROBE_DIR": d}, args=["--container", "c0ffee", "--docker", dock])
+    servers.append(s)
+    c = s.start()
+    code, h = c.get("/api/health")
+    ok(code == 200 and h["paths"] == "wrong" and "POL_DEPLOY_ROOT" in (h["problem"] or ""),
+       "paths wrong: /api/health says so with the sentence")
+    code, g = c.get("/api/games")
+    ok(g["options"]["problem"] == h["problem"], "paths wrong: /api/games carries it for the panel")
+    hc = subprocess.run([sys.executable, DEPLOYER, "--healthcheck", "--bind", "127.0.0.1:%d" % s.port],
+                        env=s.env(), capture_output=True, text=True, timeout=30)
+    ok(hc.returncode == 1 and "POL_DEPLOY_ROOT" in hc.stdout,
+       "paths wrong: --healthcheck exits 1 and prints why (%d)" % hc.returncode)
+    t.clear_calls()
+    for action, game in (("enable", "jan"), ("disable", "tm"), ("restart", "core"), ("update", "core")):
+        j = c.run(action, game)
+        ok(j["state"] == "failed" and j["summary"] == h["problem"],
+           "paths wrong: %s %s refused with the sentence" % (action, game))
+        ok("$ git" not in j.get("log", ""), "  before git ran")
+    ok(not [x for x in t.calls() if x[0] in ("enable", "disable", "compose")],
+       "paths wrong: stack.py enable, disable and compose never ran (%s)" % t.calls())
+    j = c.run("check", "tm")
+    ok(j["state"] == "ok", "paths wrong: check still runs (it starts no container)")
+    s.stop()
+    set_mode(d, "same")
+    s = Server(t, extra_env={"FAKE_PROBE_DIR": d}, args=["--container", "c0ffee", "--docker", dock])
+    servers.append(s)
+    c = s.start()
+    code, h = c.get("/api/health")
+    ok(h["paths"] == "ok" and h["problem"] is None, "paths right: /api/health paths ok")
+    hc = subprocess.run([sys.executable, DEPLOYER, "--healthcheck", "--bind", "127.0.0.1:%d" % s.port],
+                        env=s.env(), capture_output=True, text=True, timeout=30)
+    ok(hc.returncode == 0 and hc.stdout.strip() == "paths ok", "paths right: --healthcheck prints paths ok")
+    j = c.run("restart", "core")
+    ok(j["state"] == "ok", "paths right: compose actions run (%s)" % j["summary"])
+    s.stop()
+    os.remove(os.path.join(t.core, "docker-compose.yml"))
 
 
 class FakeGitHub:
@@ -1120,6 +1279,25 @@ def test_unit_helpers():
         ok(dep.socket_open_to(0, set(), "/s"), "  open to root")
         os.stat = lambda p, *a, **k: St(0, 0, 0o140666)
         ok(dep.socket_open_to(1000, {1000}, "/s"), "socket 666: open to anyone")
+        # Docker Desktop: the socket as a container sees it there (root:root 660), and
+        # a game checkout the deployer cloned as root before, which nobody cannot write
+        os.stat = lambda p, *a, **k: St(0, 0, 0o140660)
+        ok(not dep.socket_open_to(dep.NOBODY, {dep.NOBODY}, "/s"), "socket root:root 660: closed to nobody")
+        os.stat = lambda p, *a, **k: St(0, 0, 0o40755)
+        ok(not dep.may_write(dep.NOBODY, {dep.NOBODY}, "/c"), "a root-owned 755 checkout: nobody cannot write")
+        os.stat = lambda p, *a, **k: St(dep.NOBODY, dep.NOBODY, 0o40755)
+        ok(dep.may_write(dep.NOBODY, {dep.NOBODY}, "/c"), "  one nobody owns: it can")
+        # who clones a game: the folder's owner; on Docker Desktop, where it reads as root's, nobody
+        desk = "/run/desktop/mnt/host/c/Users/you/openlobby-server"
+        os.stat = lambda p, *a, **k: St(0, 0, 0o40777)
+        ok(dep.install_identity(desk) == {"user": dep.NOBODY, "group": dep.NOBODY, "extra_groups": []},
+           "Docker Desktop: a game is cloned as nobody, so its imports can write")
+        ok(dep.install_identity("/srv/pol") == {}, "a root-owned folder elsewhere: cloned as root, as before")
+        os.stat = lambda p, *a, **k: St(1000, 1000)
+        ok(dep.install_identity(desk)["user"] == 1000 and dep.install_identity("/srv/pol")["user"] == 1000,
+           "a folder a user owns: cloned as that user")
+        ok(dep.on_desktop(desk + "/openlobby") and not dep.on_desktop("/srv/pol")
+           and not dep.on_desktop("/run/desktop/other"), "on_desktop: only the VM's host-drive folders")
     finally:
         for k, v in saved.items():
             if v is None:
@@ -1510,6 +1688,8 @@ def main():
 
         run_import_tests(t, servers)
         test_updates_images(t, servers)
+        test_check_paths(t)
+        test_paths_server(t, servers)
         hits = scan_for_token(t, servers)
         ok(not hits, "the token is in no job file or server log (%s)" % hits)
     finally:

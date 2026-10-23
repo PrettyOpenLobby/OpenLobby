@@ -9,10 +9,8 @@
     prints what to do next. Run again, it keeps the .env it finds.
     docs/setup.md explains every step.
 
-    The deployer (installing games from the admin panel) needs Docker Engine
-    on Linux and is not set up here. Run games with python tools\stack.py
-    (docs/games.md), or run setup.sh on a Linux machine, a WSL2 distribution
-    with Docker Engine, or a VPS.
+    It also sets up the deployer, which lets the admin panel install and
+    update games and OpenLobby itself (docs/deployer.md), unless told not to.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\setup.ps1
@@ -38,6 +36,9 @@ param(
     [ValidatePattern('^[A-Za-z0-9._-]*$')]
     [string]$AdminUser = '',
     [switch]$ChangeAddress,
+    [switch]$Deployer,
+    [switch]$NoDeployer,
+    [string]$Clients = '',
     [switch]$InstallTools,
     [switch]$InstallClient,
     [switch]$NoClient,
@@ -72,7 +73,12 @@ Options:
   -Images published|build   published images (default) or a local build
   -AdminUser NAME   the admin panel's user name on a new .env (default: admin)
   -ChangeAddress    on an existing .env, redo the address questions
-  -InstallTools     with -Yes, allow installing git and Docker Desktop
+  -Deployer / -NoDeployer  run (or leave off) the deployer, which lets the
+                    admin panel install and update games (docs/deployer.md)
+  -Clients DIR|none folder of your own client installs for the deployer
+                    to import game data from (default: clients beside the
+                    checkout; none: uploads only)
+  -InstallTools    with -Yes, allow installing git and Docker Desktop
   -InstallClient / -NoClient  run (or skip) the hosts installer for this PC
   -NoStart          write .env and stop there
 '@
@@ -106,6 +112,18 @@ function YesNo([string]$question, [bool]$default) {
 
 function Have([string]$name) {
     return [bool](Get-Command $name -ErrorAction SilentlyContinue)
+}
+
+# Python 3's path, or $null
+function Find-Python {
+    foreach ($n in 'py', 'python', 'python3') {
+        $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $c) { continue }
+        # the Microsoft Store placeholder answers with an error instead of a version
+        $v = (& $c.Source -c 'import sys; print(sys.version_info[0])' 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $v -eq '3') { return $c.Source }
+    }
+    return $null
 }
 
 # Run a native command that changes something; with -DryRun, print it.
@@ -484,10 +502,83 @@ if ($NewEnv -and -not (Get-EnvValue $lines 'POL_DB_PASSWORD')) {
     }
 }
 
-Say ''
-Say 'The deployer (installing games from the admin panel) needs Docker Engine on'
-Say 'Linux, so it is not set up here. Run games with python tools\stack.py'
-Say '(docs/games.md), or run setup.sh in WSL2 with Docker Engine or on a Linux VPS.'
+# ------------------------------------------------------------------ deployer
+
+# Docker Desktop runs the Docker daemon in a Linux VM, which sees the Windows folder
+# C:\x as /run/desktop/mnt/host/c/x. The deployer gets the checkouts mounted at that
+# path, so the paths docker compose hands the daemon from inside it name the same
+# folders (docs/deployer.md, "Docker Desktop"). '' for a folder with no drive letter.
+function ConvertTo-DaemonPath([string]$path) {
+    if ($path -notmatch '^([A-Za-z]):\\(.*)$') { return '' }
+    $rest = $Matches[2].TrimEnd('\') -replace '\\', '/'
+    $p = '/run/desktop/mnt/host/' + $Matches[1].ToLower()
+    if ($rest) { $p += '/' + $rest }
+    return $p
+}
+
+$Parent = Split-Path -Parent $Checkout
+$UseDeployer = $false
+$genToken = $false
+$hasToken = [bool](Get-EnvValue $lines 'POL_DEPLOYER_TOKEN')
+if ($hasToken -and -not $NoDeployer) {
+    $UseDeployer = $true
+} elseif ($NewEnv -or $Deployer) {
+    $why = ''
+    $dockerOs = ((docker info --format '{{.OperatingSystem}}' 2>$null) | Out-String).Trim()
+    if ($dockerOs -notmatch 'Docker Desktop') {
+        $why = "this Docker is not Docker Desktop ($dockerOs), so where its daemon sees this folder is not known"
+    } elseif (-not (ConvertTo-DaemonPath $Parent)) {
+        $why = "$Parent is not on a drive letter"
+    } elseif ($Parent.Contains('$')) {
+        $why = "$Parent has a dollar sign, which Docker Compose would read as a variable"
+    }
+    if ($NoDeployer) {
+    } elseif ($why) {
+        Say "The deployer (installing games from the admin panel) is left off: $why."
+    } elseif ($Deployer) {
+        $UseDeployer = $true
+    } else {
+        Say ''
+        Say 'The deployer lets the admin panel install, enable and update games and'
+        Say 'OpenLobby itself (docs/deployer.md). It holds the Docker socket, which makes'
+        Say 'it as powerful as Docker Desktop itself; it publishes no port and needs a token.'
+        $UseDeployer = YesNo 'Run the deployer?' $true
+    }
+    if ($UseDeployer) {
+        Set-EnvValue $lines 'POL_DEPLOYER_TOKEN' (New-Secret 43 ($Alnum + '_-'))
+        $genToken = $true
+    }
+} elseif (-not $hasToken) {
+    Say 'The deployer is not set up in this .env; run with -Deployer to add it.'
+}
+if ($UseDeployer) {
+    if (-not (Get-EnvValue $lines 'POL_DEPLOY_ROOT')) { Set-EnvValue $lines 'POL_DEPLOY_ROOT' (ConvertTo-DaemonPath $Parent) }
+    if ((Split-Path -Leaf $Checkout) -ne 'openlobby' -and -not (Get-EnvValue $lines 'POL_DEPLOY_CORE')) {
+        Set-EnvValue $lines 'POL_DEPLOY_CORE' (ConvertTo-DaemonPath $Checkout)
+    }
+    if ($Published -and -not (Get-EnvValue $lines 'POL_DEPLOY_GHCR')) { Set-EnvValue $lines 'POL_DEPLOY_GHCR' '1' }
+    if (-not (Get-EnvValue $lines 'POL_DEPLOY_CLIENTS') -and $Clients -ne 'none') {
+        if (-not $Clients) {
+            Say ''
+            Say 'Optional: a folder for your own client installs (copies of your game'
+            Say 'install folders). When a game needs data from your client, the admin'
+            Say 'panel can pick an install from this folder to import it from. The'
+            Say 'deployer only reads it. Without one, the panel takes uploaded archives'
+            Say 'instead. Enter - to skip.'
+            $Clients = Ask 'Client installs folder' (Join-Path $Parent 'clients')
+        }
+        if ($Clients -and $Clients -ne '-' -and $Clients -ne 'none') {
+            $Clients = [System.IO.Path]::GetFullPath($Clients).TrimEnd('\')
+            $cpath = ConvertTo-DaemonPath $Clients
+            if (-not $cpath -or $Clients.Contains('$')) {
+                Warn "$Clients cannot be handed to the deployer (no drive letter, or a dollar sign); uploads only"
+            } else {
+                Set-EnvValue $lines 'POL_DEPLOY_CLIENTS' $cpath
+                if ($DryRun) { Say "  would create $Clients" } else { New-Item -ItemType Directory -Force -Path $Clients | Out-Null }
+            }
+        }
+    }
+}
 
 $text = ($lines -join "`n") + "`n"
 if ($DryRun) {
@@ -510,6 +601,7 @@ if ($DryRun) {
     Say "$EnvFile is unchanged."
 }
 if ($genDb -and -not $DryRun) { Say 'Generated a database password (POL_DB_PASSWORD, kept in .env).' }
+if ($genToken -and -not $DryRun) { Say 'Generated a deployer token (POL_DEPLOYER_TOKEN, kept in .env).' }
 
 if ($NoStart) {
     Say ''
@@ -531,19 +623,45 @@ if ($LASTEXITCODE -ne 0) {
         if ($LASTEXITCODE -ne 0) { Fail 'could not create the Docker network openlobby' }
     }
 }
-if ((Test-Path (Join-Path $Checkout '.games')) -and (Get-Content (Join-Path $Checkout '.games') | Where-Object { $_.Trim() })) {
-    Say 'Games are enabled in .games; this script starts the core only. Start the whole'
-    Say 'stack with: python tools\stack.py compose up -d (add --ghcr for published images).'
-    exit 0
+if ($UseDeployer) {
+    # built here from services\deployer (the first time takes a few minutes)
+    if ((Run 'docker' @('compose', '--profile', 'deployer', 'up', '-d', 'deployer')) -ne 0) {
+        Warn 'the deployer did not start; docker compose --profile deployer logs deployer says why'
+    }
 }
-if ($Published) {
+# Enabled games (one key per line in .games, # comments) start through tools\stack.py, so
+# their compose files come along and login keeps their title plugins; a plain docker
+# compose up would rebuild login without them.
+$Games = @()
+$gamesFile = Join-Path $Checkout '.games'
+if (Test-Path -LiteralPath $gamesFile) {
+    $Games = @(Get-Content -LiteralPath $gamesFile | ForEach-Object { ($_ -replace '#.*$', '').Trim() } | Where-Object { $_ })
+}
+$py = Find-Python
+$started = $true
+if ($Games.Count -gt 0 -and -not $py) {
+    Warn ('games are enabled (' + ($Games -join ', ') + ') and starting them needs Python 3 for tools\stack.py, which is not installed, so the stack was left as it is')
+    Say 'Install Python 3 and run this script again, or restart OpenLobby from the admin'
+    Say 'panel, Settings > Install games.'
+    $started = $false
+} elseif ($Games.Count -gt 0) {
+    Say ('Enabled games: ' + ($Games -join ', ') + ' (started through tools\stack.py)')
+    $sc = @('tools\stack.py', 'compose')
+    if ($Published) {
+        $sc += '--ghcr'
+        if ((Run $py ($sc + @('pull', '--ignore-buildable', '--ignore-pull-failures'))) -ne 0) { Fail 'pulling the images failed' }
+        if ((Run $py ($sc + @('up', '-d'))) -ne 0) { Fail 'docker compose up failed; see the output above' }
+    } else {
+        if ((Run $py ($sc + @('up', '-d', '--build'))) -ne 0) { Fail 'docker compose up failed; see the output above' }
+    }
+} elseif ($Published) {
     if ((Run 'docker' @('compose', 'pull')) -ne 0) { Fail 'pulling the images failed' }
     if ((Run 'docker' @('compose', 'up', '-d')) -ne 0) { Fail 'docker compose up failed; see the output above' }
 } else {
     if ((Run 'docker' @('compose', 'up', '-d', '--build')) -ne 0) { Fail 'docker compose up failed; see the output above' }
 }
 
-if (-not $DryRun) {
+if ($started -and -not $DryRun) {
     Say 'Waiting for the services to report healthy (up to 3 minutes)...'
     $deadline = (Get-Date).AddSeconds(180)
     while ($true) {
@@ -558,6 +676,24 @@ if (-not $DryRun) {
         if ($st.Count -gt 0 -and $pending.Count -eq 0) { Say 'All services are up.'; break }
         if ((Get-Date) -gt $deadline) { Warn ('still waiting on: ' + ($pending -join ' ') + ' (docker compose ps; docker compose logs <service>)'); break }
         Start-Sleep -Seconds 5
+    }
+}
+if ($UseDeployer -and -not $DryRun) {
+    # The deployer checks when it starts that Docker sees this folder where it does, and
+    # runs no docker compose command when it does not; its healthcheck says which.
+    $dh = ''
+    $dok = $false
+    for ($i = 0; $i -lt 12; $i++) {
+        $dh = (docker compose --profile deployer exec -T deployer python /app/deployer.py --healthcheck 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0) { $dok = $true; break }
+        if ($dh -match 'POL_DEPLOY_ROOT') { break }
+        Start-Sleep -Seconds 5
+    }
+    if ($dok -and $dh -match 'paths ok') { Say 'The deployer is running, and Docker sees this folder where the deployer does.' }
+    elseif ($dok) { Say 'The deployer is running.' }
+    else {
+        Warn ('the deployer is not ready: ' + $dh)
+        Say 'docker compose --profile deployer logs deployer says more (docs/deployer.md).'
     }
 }
 
@@ -626,14 +762,6 @@ if ($DryRun) {
 # ------------------------------------------------------------------ doctor
 
 Step 'Checking the setup (tools/doctor.py)'
-$py = $null
-foreach ($n in 'py', 'python', 'python3') {
-    $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $c) { continue }
-    # the Microsoft Store placeholder answers with an error instead of a version
-    $v = (& $c.Source -c 'import sys; print(sys.version_info[0])' 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0 -and $v -eq '3') { $py = $c.Source; break }
-}
 if ($py) {
     $rc = Run $py @('tools\doctor.py')
     if ($rc -ne 0) { Say '(doctor.py reported problems; each FAIL line says what to do)' }
@@ -704,8 +832,12 @@ Say "  PlayStation 2: set the console's DNS server to $Ps2Dns (docs/client.md)."
 Say '  Accounts: create them on the admin panel, or registration codes for the'
 Say '  in-client sign-up.'
 Say ''
-Say 'Games: python tools\stack.py (docs/games.md). Installing them from the admin'
-Say 'panel needs the deployer, which runs on Linux only (setup.sh).'
+if ($UseDeployer) {
+    Say 'Games and updates: on the admin panel, Settings > Install games.'
+} else {
+    Say 'Games: python tools\stack.py (docs/games.md), or run this script with -Deployer'
+    Say 'to install and update them from the admin panel.'
+}
 Say ''
 Say 'Firewall (docs/ports.md):'
 switch ($finalReach) {

@@ -34,12 +34,15 @@ leave the profile off if you do not want the panel to manage games.
 
 ## Requirements
 
-- A Linux host with Docker Engine. The deployer mounts your checkouts at
-  the same path inside its container as on the host (see below), which is
-  what makes the relative paths in the game compose files mean the same
-  thing to the Docker daemon. With Docker Desktop on Windows or macOS the
-  daemon sees a different filesystem from the host, and that is not
-  supported.
+- Docker Engine on Linux, or Docker Desktop on Windows. The deployer runs
+  `docker compose` inside its container, and the Docker daemon resolves
+  the paths compose hands it, so the deployer mounts your checkouts at the
+  path where the daemon sees them. On Docker Engine that is their path on
+  the host. Docker Desktop's daemon runs in a Linux VM, which sees the
+  Windows folder `C:\Users\you\openlobby-server` as
+  `/run/desktop/mnt/host/c/Users/you/openlobby-server`; "Docker Desktop"
+  below has the details. Docker Desktop on macOS and Linux is not proven:
+  `setup.sh` leaves the deployer off there unless you ask for it.
 - The `openlobby` checkout and the game checkouts side by side in one
   directory, as docs/games.md describes, for example `/srv/pol/openlobby`,
   `/srv/pol/hippaulmaster`.
@@ -58,8 +61,13 @@ leave the profile off if you do not want the panel to manage games.
    ```
 
    `POL_DEPLOY_ROOT` is the parent of the `openlobby` checkout, as an
-   absolute host path. If the checkout is not named `openlobby`, also set
-   `POL_DEPLOY_CORE` to its full path.
+   absolute path where the Docker daemon sees it: the host path on Docker
+   Engine, the `/run/desktop/mnt/host/...` path on Docker Desktop for
+   Windows. If the checkout is not named `openlobby`, also set
+   `POL_DEPLOY_CORE` to its full path, written the same way.
+
+   `setup.sh` (Docker Engine) and `setup.ps1` (Docker Desktop on Windows)
+   do this step and the next for you (docs/setup.md).
 
 2. Start the deployer, and recreate the admin service so it picks up the
    token:
@@ -74,7 +82,8 @@ leave the profile off if you do not want the panel to manage games.
 
 3. `docker compose logs deployer` should end with a line saying where it is
    listening and which directories it uses. If the token or the directory
-   is wrong it says so there and stops.
+   is wrong it says so there and stops. The line before it says whether
+   the Docker daemon sees the checkout where the deployer does (below).
 
 The admin service finds the deployer through `POL_DEPLOYER_URL` (default
 `http://deployer:8099`) and `POL_DEPLOYER_TOKEN`, both from `.env`. Set
@@ -84,7 +93,61 @@ way `stack.py compose --ghcr` does.
 To stop managing games from the panel, `docker compose --profile deployer
 stop deployer` (or `rm -sf deployer`). To update the deployer itself after
 pulling OpenLobby, run `docker compose --profile deployer up -d --build
-deployer` by hand: the deployer never recreates itself.
+deployer` by hand: the deployer never recreates itself, so updating the
+core from the panel leaves the running deployer as it was. Running
+`setup.sh` or `setup.ps1` again, or Update in OpenLobby Setup, does it for
+you.
+
+### Where Docker sees the checkouts
+
+When it starts, the deployer starts a throwaway container from its own
+image, with no network, the core checkout mounted read-only the way
+`docker compose` will mount it, and compares the `docker-compose.yml` that
+container reads (contents, size and time) with the one it reads itself.
+When they differ, or Docker cannot mount the folder at all, it logs why,
+`/api/health` and `/api/games` carry the sentence, `--healthcheck` exits 1
+(so `docker compose ps` shows the deployer unhealthy), the panel shows it
+on Settings > Install games, and every `enable`, `disable`, `update` and
+`restart` job fails with it before changing anything. `install`, `check`
+and `import` start no container and still run. When Docker cannot be asked
+(the deployer runs outside a container, or its image cannot be found), the
+check is skipped and jobs run as before.
+
+### Docker Desktop
+
+Proven on Docker Desktop for Windows with the WSL 2 backend (Docker Engine
+29.3 and Compose 5.1 in Docker Desktop): from the panel, updating the core
+from older published images, installing, turning on, updating and turning
+off a game, and importing client data from the clients folder.
+
+- Docker Desktop's Linux VM sees each Windows drive under
+  `/run/desktop/mnt/host/<drive letter>/`. `setup.ps1` sets
+  `POL_DEPLOY_ROOT` (and `POL_DEPLOY_CORE`, `POL_DEPLOY_CLIENTS`) to that
+  form of the folders, and compose mounts each at that same path in the
+  deployer, so the relative paths in the compose files mean the same
+  folders to the daemon. A folder without a drive letter (a network share,
+  a WSL path) is not supported, and `setup.ps1` then leaves the deployer
+  off.
+- The containers `docker compose` on Windows created name their folders as
+  `C:\...`, the deployer's as `/run/desktop/mnt/host/c/...`; the first
+  deployer job that runs `up` recreates them for that reason, as does the
+  next `setup.ps1` run. Nothing else changes.
+- Files on a Windows drive read as root's inside a container, unless a
+  Linux program created them. The deployer therefore runs `git` and
+  `stack.py` as root there, and clones a game as `nobody` (uid 65534), so
+  the checkout belongs to nobody and an import tool, which runs as the
+  checkout's owner, can write its data into it. A game cloned as root
+  (by hand from a container, or by an older deployer) refuses
+  imports with a sentence saying so; to fix it, `docker compose --profile
+  deployer exec deployer chown -R 65534:65534 /run/desktop/mnt/host/...`
+  for that checkout, or delete the folder and install the game again.
+- Git for Windows checks files out with CRLF line ends; the repositories'
+  `.gitattributes` (`* text=auto`) make the deployer's git see the same
+  content, so `update` finds no local changes.
+- Docker Desktop on macOS and Linux shares host folders differently and is
+  not proven. `setup.sh` leaves the deployer off there unless given
+  `--deployer`, which sets `POL_DEPLOY_ROOT` to the host path; the check
+  above then says whether the daemon sees it there.
 
 ## What each action runs
 
@@ -123,7 +186,8 @@ A few details that follow from those commands:
 
 `git` and `stack.py add`, `enable` and `disable` run as the user that owns
 the checkout directory, so the files they write on the host belong to you
-and not to root. `docker compose` runs as root inside the container.
+and not to root. `docker compose` runs as root inside the container. On
+Docker Desktop the owners differ ("Docker Desktop" above).
 
 ## When a game needs your data
 
@@ -225,9 +289,17 @@ never runs with either:
   from the unpacked upload, and writes into the game's checkout, which its
   user owns.
 
-With Docker Desktop the checkout can appear owned by root inside the
-container, so imports run as `nobody`, which then needs write access to
-the checkout's data folders.
+- Before starting it, the deployer also checks that this user can write
+  to the checkout, and refuses with a sentence when it cannot (a checkout
+  root owns, whose import would run as nobody).
+
+On Docker Desktop for Windows the socket inside the container is
+`root:root` with mode 660, so `nobody` cannot use it, and the deployer
+clones games as `nobody` so their imports can write ("Docker Desktop"
+above). Every folder on a Windows drive that a Linux program did not
+create, the core checkout among them, reads as writable by anyone in a
+container there. That gives an import tool no more than it has on Linux,
+where it runs as the user who owns all the checkouts.
 
 ### How uploads are unpacked
 
@@ -270,8 +342,10 @@ JSON in and out, except the raw log. Every endpoint, `/api/health`
 included, needs the bearer token and answers 401 without it. Errors carry
 an `error` sentence.
 
-`GET /api/health` answers `{"ok": true, "version": "2.0", "busy": false}`;
-`busy` is true while a job runs.
+`GET /api/health` answers `{"ok": true, "version": "2.0", "busy": false,
+"paths": "ok", "problem": null}`; `busy` is true while a job runs. `paths`
+is the start-up check's result ("Where Docker sees the checkouts"): `ok`,
+`wrong` or `unchecked`; `problem` is its sentence when `wrong`, else null.
 
 `GET /api/games` lists every game in the catalog:
 
@@ -283,8 +357,10 @@ an `error` sentence.
             "ports": [...], "notes": "...", "services": {"tmrank": "running"}},
            ...],
  "core": {"running": true, "services": {...}},
- "options": {"ghcr": false}}
+ "options": {"ghcr": false, "problem": null}}
 ```
+
+`options.problem` is the same as in `/api/health`.
 
 - `installed`: the checkout directory exists. `enabled`: the key is in
   `.games`.
@@ -515,10 +591,10 @@ GitHub API, as the tests do.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `POL_DEPLOYER_TOKEN` | (none) | Required. The bearer token; the admin service gets the same value. |
-| `POL_DEPLOY_ROOT` | (none) | Required. Absolute host path of the directory holding the checkouts. |
-| `POL_DEPLOY_CORE` | `POL_DEPLOY_ROOT/openlobby` | The OpenLobby checkout, when it has another name. |
+| `POL_DEPLOY_ROOT` | (none) | Required. Absolute path of the directory holding the checkouts, as the Docker daemon sees it (on Docker Desktop for Windows, `/run/desktop/mnt/host/<drive>/...`). |
+| `POL_DEPLOY_CORE` | `POL_DEPLOY_ROOT/openlobby` | The OpenLobby checkout, when it has another name, written the same way. |
 | `POL_DEPLOY_GHCR` | empty | `1`: actions use the published images. |
-| `POL_DEPLOY_CLIENTS` | empty | Absolute host path of a folder of client installs to browse for imports, mounted read-only. Empty: uploads only. |
+| `POL_DEPLOY_CLIENTS` | empty | Absolute path of a folder of client installs to browse for imports, as the daemon sees it, mounted read-only. Empty: uploads only. |
 | `POL_DEPLOY_UPLOAD_MAX` | `8G` | The most an uploaded archive may be, and may unpack to (`K`, `M`, `G` suffixes, powers of 1024). |
 | `POL_DEPLOYER_BIND` | `0.0.0.0:8099` | Address inside the container. Change `POL_DEPLOYER_URL` with it. |
 | `POL_DEPLOYER_URL` | `http://deployer:8099` | Where the admin service finds the deployer. |
@@ -545,4 +621,6 @@ would hand a request's folder to the Docker daemon.
 `python tools/deployer_test.py` tests it offline, with stand-ins for
 `stack.py`, an import tool, the docker CLI and the GitHub API, and needs
 only Python and git. It
-builds its malicious archives itself.
+builds its malicious archives itself. Its docker stand-in also acts out
+the start-up path check: a daemon that sees the folder, one that sees
+another, and one that cannot mount it.

@@ -176,8 +176,15 @@ for name, role in (("admin", "panel"), ("dns", "dns"), ("http", "http"), ("postg
     rows.append({"id": "c-" + name, "state": "running", "role": role, "project": "openlobby",
                  "workdir": checkout, "service": name, "panel_url": url if role == "panel" else "",
                  "mounts": ["openlobby_pol-data"] if role in ("dns", "http") else ["openlobby_pol-pgdata"]})
+if os.environ.get("STUB_DEPLOYER"):
+    # setup.ps1 on Docker Desktop and setup.sh on Docker Engine start the deployer too
+    rows.append({"id": "c-deployer", "state": "running", "role": "", "project": "openlobby",
+                 "workdir": checkout, "service": "deployer", "panel_url": "",
+                 "mounts": ["openlobby_pol-deployer"]})
 save("containers", rows)
 vols = load("volumes", {})
+if os.environ.get("STUB_DEPLOYER"):
+    vols["openlobby_pol-deployer"] = "openlobby"
 vols.update({"openlobby_pol-data": "openlobby", "openlobby_pol-pgdata": "openlobby"})
 save("volumes", vols)
 nets = load("networks", [])
@@ -533,6 +540,21 @@ class SetupAppTest(unittest.TestCase):
         self.assertFalse([c for c in self.calls("docker") if c.startswith("docker volume rm")])
         self.assert_network_kept()
         self.assertTrue(os.path.isfile(os.path.join(self.folder, "openlobby", ".env")))
+
+    def test_windows_install_runs_the_deployer_and_uninstall_takes_it(self):
+        # the script runs with -Yes and never -NoDeployer, so setup.ps1 sets up the deployer
+        with mock.patch.dict(os.environ, {"STUB_DEPLOYER": "1"}):
+            self.install()
+        script = self.calls("script")[0]
+        self.assertIn("-Yes", script)
+        self.assertNotIn("Deployer", script)
+        with open(os.path.join(ROOT, "setup.ps1"), encoding="utf-8") as f:
+            self.assertIn("YesNo 'Run the deployer?' $true", f.read())
+        self.assertIn("c-deployer", {r["id"] for r in self.get("containers")})
+        self.main("--dir", self.folder, "--uninstall", "--delete-data", "--yes")
+        self.assertEqual(self.get("containers"), [])
+        self.assertNotIn("openlobby_pol-deployer", self.get("volumes"))
+        self.assert_network_kept()
 
     def test_uninstall_asks_and_defaults_to_no(self):
         self.install()

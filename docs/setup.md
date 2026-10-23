@@ -29,6 +29,11 @@ install folder) and the ports to open. The script runs on its own with its
 output in the install folder's `logs`, so closing the window does not stop it;
 the next run shows how it went.
 
+On Windows and Linux the install includes the deployer, so the admin panel
+installs, turns on and updates games and updates OpenLobby itself (Settings >
+Install games, `docs/deployer.md`). On macOS, where Docker Desktop is not
+proven for it, the deployer is left off.
+
 Every later run starts with the server's state and address, then offers
 Update, Change settings, Stop (or Start), Show what to tell players, Start
 over and Uninstall. Uninstall removes the containers and keeps the data unless
@@ -98,8 +103,10 @@ What it does, in order:
    it, since the deployer only mounts a folder that exists. When a game needs
    data from your client, the admin panel can import it from an install in
    that folder; the folder is mounted read-only. Without it, the panel takes
-   uploaded archives instead (`docs/deployer.md`). The deployer is left off
-   when Docker is Docker Desktop.
+   uploaded archives instead (`docs/deployer.md`). When Docker is Docker
+   Desktop (macOS, or a Linux or WSL machine using it), where this is not
+   proven, the deployer is left off unless you give `--deployer`; on
+   Windows, `setup.ps1` sets it up for Docker Desktop.
 8. It writes `.env`: a copy of `.env.example` with those keys filled in, so
    every comment stays, readable by your user only (`chmod 600`).
 9. It starts the stack with `docker compose pull` and `docker compose up -d`
@@ -199,17 +206,25 @@ It follows the same steps with these differences:
 - The published images are selected with
   `COMPOSE_FILE=docker-compose.yml;docker-compose.ghcr.yml`, because Compose
   separates that list with `;` on Windows.
-- There is no deployer: it needs Docker Engine on Linux. Run games with
-  `python tools\stack.py` (`docs/games.md`), or use `setup.sh` in a WSL2
-  distribution with Docker Engine or on a Linux VPS.
+- The deployer is set up as in step 7, with its folders written as Docker
+  Desktop's VM sees them: the folder above the checkout,
+  `C:\Users\you\openlobby-server`, becomes
+  `POL_DEPLOY_ROOT=/run/desktop/mnt/host/c/Users/you/openlobby-server`
+  (`docs/deployer.md`, "Docker Desktop"). A checkout on a network share or
+  in WSL has no such path, and the deployer is then left off. After
+  starting it, the script asks the deployer whether Docker sees the
+  checkout where it does and prints the answer.
+- When games are enabled in `.games`, it starts them through
+  `python tools\stack.py compose`, which needs Python 3; without Python it
+  leaves the stack as it is and says so.
 - It offers to run `client\Install-PolConnect.ps1 -Server <address>` for
   this same PC, so a Viewer here can play. That edits the system hosts file,
   so Windows shows a UAC prompt for it.
 
 Its options are `-Yes`, `-DryRun`, `-Dir`, `-Repo`, `-Reach`, `-Address`,
 `-PublicAddress`, `-LookupPublic`, `-Ps2`, `-NoPs2`, `-Images`, `-AdminUser`,
-`-ChangeAddress`, `-InstallTools`, `-InstallClient`, `-NoClient` and
-`-NoStart`, with the meanings above.
+`-ChangeAddress`, `-Deployer`, `-NoDeployer`, `-Clients`, `-InstallTools`,
+`-InstallClient`, `-NoClient` and `-NoStart`, with the meanings above.
 
 ## By hand
 

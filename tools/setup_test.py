@@ -11,9 +11,12 @@ that the secrets are random and survive a second run, that .env is made
 private, and that the script never removes containers or volumes. Needs
 bash (Git Bash on Windows); without it those tests are skipped.
 
-setup.ps1 is parse-checked with Windows PowerShell, then run with -DryRun and
--NoStart against PowerShell functions standing in for docker, git and the
-address cmdlets. Skipped where powershell.exe is missing.
+setup.ps1 is parse-checked with Windows PowerShell, then run with -DryRun,
+-NoStart and through a whole start against PowerShell functions standing in
+for docker, git and the address cmdlets: the deployer's settings with the
+checkouts as Docker Desktop's VM sees them (C:\\x is /run/desktop/mnt/host/c/x),
+the deployer started and its own check reported, and enabled games started
+through tools\\stack.py. Skipped where powershell.exe is missing.
 
 shellcheck runs on setup.sh when it is installed.
 """
@@ -55,7 +58,7 @@ case "$*" in
       echo "permission denied while trying to connect to the Docker daemon socket" >&2; exit 1
     fi
     echo "Server: test" ;;
-  "info --format "*) echo "Ubuntu 24.04 LTS" ;;
+  "info --format "*) echo "${STUB_DOCKER_OS:-Ubuntu 24.04 LTS}" ;;
   "volume inspect "*) exit 1 ;;
   "network inspect "*) exit 1 ;;
   "compose ps "*) printf 'admin running healthy\ndns running healthy\npostgres running healthy\n' ;;
@@ -143,6 +146,12 @@ def bash_path(bash, p):
     out = subprocess.run([bash, "-c", 'cygpath -u "$1"', "_", p],
                          capture_output=True, text=True, check=True)
     return out.stdout.strip()
+
+
+def daemon_path(p):
+    """A Windows folder as Docker Desktop's VM sees it: C:\\x\\y is /run/desktop/mnt/host/c/x/y."""
+    drive, rest = os.path.splitdrive(os.path.abspath(p))
+    return "/run/desktop/mnt/host/" + drive[0].lower() + rest.replace("\\", "/").rstrip("/")
 
 
 def parse_env(text):
@@ -389,6 +398,22 @@ class SetupShTest(unittest.TestCase):
         self.assertFalse([c for c in calls if "deployer" in c])
         self.assertIn("python3 tools/stack.py", out)
 
+    def test_docker_desktop_leaves_the_deployer_off_unless_asked(self):
+        out = self.run_sh("--yes", "--reach", "lan", "--no-start",
+                          extra_env={"STUB_DOCKER_OS": "Docker Desktop"})
+        self.assertIn("This Docker is Docker Desktop.", out)
+        self.assertIn("--deployer turns it on", out)
+        self.assertNotIn("POL_DEPLOYER_TOKEN", self.env()[1])
+
+    def test_docker_desktop_with_deployer(self):
+        out = self.run_sh("--yes", "--reach", "lan", "--deployer", "--clients", "none",
+                          extra_env={"STUB_DOCKER_OS": "Docker Desktop"})
+        env = self.env()[1]
+        self.assertRegex(env["POL_DEPLOYER_TOKEN"], r"^[A-Za-z0-9_-]{43}$")
+        self.assertEqual(env["POL_DEPLOY_ROOT"], bash_path(BASH, self.srv))
+        self.assertIn("proven only on Windows", out)
+        self.assertIn("docker compose --profile deployer up -d deployer", self.calls())
+
     def test_clients_none(self):
         self.run_sh("--yes", "--reach", "lan", "--clients", "none", "--no-start")
         _, env = self.env()
@@ -488,6 +513,8 @@ class SetupShTest(unittest.TestCase):
 
 PS_STUBS = r"""
 $global:StubLog = New-Object System.Collections.Generic.List[string]
+if (-not (Test-Path variable:global:StubDockerOs)) { $global:StubDockerOs = 'Docker Desktop' }
+if (-not (Test-Path variable:global:StubDeployerHealth)) { $global:StubDeployerHealth = 'paths ok' }
 function docker {
     $line = 'docker ' + ($args -join ' ')
     $global:StubLog.Add($line)
@@ -496,11 +523,19 @@ function docker {
         'docker --version' { 'Docker version 27.0.0, build test' }
         'docker compose version --short' { '2.29.1' }
         'docker compose version' { 'Docker Compose version v2.29.1' }
+        'docker info --format*' { $global:StubDockerOs; break }
         'docker info*' { 'ok' }
         'docker volume inspect*' { $global:LASTEXITCODE = 1 }
         'docker network inspect*' { $global:LASTEXITCODE = 1 }
+        'docker compose ps*' { 'admin running healthy'; 'dns running healthy' }
+        '*deployer.py --healthcheck' {
+            $global:StubDeployerHealth
+            if ($global:StubDeployerHealth -ne 'paths ok') { $global:LASTEXITCODE = 1 }
+        }
+        '*--show-admin' { "[admin] user='admin' set 2026-01-01" }
     }
 }
+function Start-Sleep { }
 function git { $global:StubLog.Add('git ' + ($args -join ' ')); $global:LASTEXITCODE = 0; 'git version 2.45.0' }
 function winget { $global:StubLog.Add('winget ' + ($args -join ' ')); $global:LASTEXITCODE = 0 }
 function Get-NetIPAddress {
@@ -521,16 +556,17 @@ class SetupPs1Test(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="olsetup-ps-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.checkout = os.path.join(self.tmp, "srv", "openlobby")
+        self.srv = os.path.join(self.tmp, "srv")
+        self.checkout = os.path.join(self.srv, "openlobby")
         os.makedirs(os.path.join(self.checkout, "tools"))
         for name in ("setup.ps1", ".env.example", "docker-compose.yml"):
             shutil.copy(os.path.join(ROOT, name), os.path.join(self.checkout, name))
         with open(os.path.join(self.checkout, "tools", "stack.py"), "w") as f:
             f.write("# stand-in\n")
 
-    def run_ps(self, *args, expect=0):
+    def run_ps(self, *args, expect=0, pre=""):
         script = os.path.join(self.checkout, "setup.ps1")
-        cmd = PS_STUBS + "\n& '%s' %s\n'STUBLOG:'; $global:StubLog\nexit $LASTEXITCODE\n" % (
+        cmd = pre + "\n" + PS_STUBS + "\n& '%s' %s\n'STUBLOG:'; $global:StubLog\nexit $LASTEXITCODE\n" % (
             script.replace("'", "''"), " ".join(args))
         p = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                             "Bypass", "-Command", "-"], input=cmd, capture_output=True,
@@ -566,7 +602,12 @@ class SetupPs1Test(unittest.TestCase):
         self.assertIn("POL_DB_PASSWORD=<secret>", out)
         self.assertIn("would run: docker compose pull", out)
         self.assertIn("would run: docker network create openlobby", out)
-        self.assertIn("Linux", out)          # the deployer note
+        # the deployer, with the checkouts as Docker Desktop's VM sees them
+        self.assertIn("POL_DEPLOYER_TOKEN=<secret>", out)
+        self.assertIn("POL_DEPLOY_ROOT=" + daemon_path(self.srv), out)
+        self.assertIn("would run: docker compose --profile deployer up -d deployer", out)
+        self.assertIn("would create " + os.path.join(self.srv, "clients"), out)
+        self.assertNotIn("Linux only", out)
         log = out.split("STUBLOG:", 1)[1]
         self.assertNotIn("compose up", log)
         self.assertNotIn("compose down", log)
@@ -577,7 +618,14 @@ class SetupPs1Test(unittest.TestCase):
         self.assertEqual(a["POL_ADVERTISE"], LAN)
         self.assertEqual(a["COMPOSE_FILE"], "docker-compose.yml;docker-compose.ghcr.yml")
         self.assertRegex(a["POL_DB_PASSWORD"], r"^[A-Za-z0-9]{32}$")
-        self.assertNotIn("POL_DEPLOYER_TOKEN", a)
+        self.assertRegex(a["POL_DEPLOYER_TOKEN"], r"^[A-Za-z0-9_-]{43}$")
+        self.assertEqual(a["POL_DEPLOY_ROOT"], daemon_path(self.srv))
+        self.assertTrue(a["POL_DEPLOY_ROOT"].startswith("/run/desktop/mnt/host/"), a["POL_DEPLOY_ROOT"])
+        self.assertEqual(a["POL_DEPLOY_GHCR"], "1")
+        self.assertEqual(a["POL_DEPLOY_CLIENTS"], daemon_path(os.path.join(self.srv, "clients")))
+        self.assertTrue(os.path.isdir(os.path.join(self.srv, "clients")))
+        self.assertNotIn("POL_DEPLOY_CORE", a)           # the checkout is named openlobby
+        self.assertNotIn("COMPOSE_PROFILES", a)          # docs/deployer.md: jobs refuse it
         out = self.run_ps("-Yes", "-NoStart")
         self.assertIn("keeping its values", out)
         self.assertEqual(self.env(), a)
@@ -590,6 +638,95 @@ class SetupPs1Test(unittest.TestCase):
     def test_admin_user(self):
         self.run_ps("-Yes", "-Reach", "lan", "-AdminUser", "host", "-NoStart")
         self.assertEqual(self.env()["POL_ADMIN_USER"], "host")
+
+    def test_no_deployer_and_no_clients(self):
+        self.run_ps("-Yes", "-Reach", "lan", "-NoDeployer", "-NoStart")
+        self.assertFalse([k for k in self.env() if k.startswith(("POL_DEPLOY", "POL_DEPLOYER"))])
+        out = self.run_ps("-Yes", "-Deployer", "-Clients", "none", "-NoStart")
+        a = self.env()
+        self.assertRegex(a["POL_DEPLOYER_TOKEN"], r"^[A-Za-z0-9_-]{43}$")
+        self.assertNotIn("POL_DEPLOY_CLIENTS", a)
+        self.assertIn("Generated a deployer token", out)
+
+    def test_not_docker_desktop_leaves_it_off(self):
+        out = self.run_ps("-Yes", "-Reach", "lan", "-Deployer", "-NoStart",
+                          pre="$global:StubDockerOs = 'Ubuntu 24.04 LTS'")
+        self.assertIn("is left off: this Docker is not Docker Desktop (Ubuntu 24.04 LTS)", out)
+        self.assertNotIn("POL_DEPLOYER_TOKEN", self.env())
+
+    def test_checkout_with_another_name_sets_core(self):
+        other = os.path.join(self.tmp, "srv", "kartclub-lobby")
+        shutil.copytree(self.checkout, other)
+        self.checkout = other
+        self.run_ps("-Yes", "-Reach", "lan", "-NoStart")
+        a = self.env()
+        self.assertEqual(a["POL_DEPLOY_ROOT"], daemon_path(self.srv))
+        self.assertEqual(a["POL_DEPLOY_CORE"], daemon_path(other))
+
+    def test_daemon_path_mapping(self):
+        ps = ("$t = $null; $e = $null; "
+              "$ast = [System.Management.Automation.Language.Parser]::ParseFile('%s', [ref]$t, [ref]$e); "
+              "$f = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] "
+              "-and $n.Name -eq 'ConvertTo-DaemonPath' }, $true); "
+              "Invoke-Expression $f.Extent.Text; "
+              "foreach ($p in 'C:\\Users\\Kart Club\\openlobby-server', 'D:\\', 'e:\\srv\\pol\\', "
+              "'\\\\server\\share\\x', 'relative\\x') { '[' + (ConvertTo-DaemonPath $p) + ']' }"
+              % SETUP_PS1.replace("'", "''"))
+        p = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.stdout.split(), ["[/run/desktop/mnt/host/c/Users/Kart", "Club/openlobby-server]",
+                                            "[/run/desktop/mnt/host/d]", "[/run/desktop/mnt/host/e/srv/pol]",
+                                            "[]", "[]"], p.stdout + p.stderr)
+
+    def write_stack_standin(self):
+        """tools/stack.py that records its arguments, for the runs that start the stack."""
+        with open(os.path.join(self.checkout, "tools", "stack.py"), "w") as f:
+            f.write("import os, sys\n"
+                    "with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stack-calls.txt'),"
+                    " 'a') as f:\n"
+                    "    f.write(' '.join(sys.argv[1:]) + '\\n')\n")
+        return os.path.join(self.checkout, "tools", "stack-calls.txt")
+
+    def test_start_runs_the_deployer_and_reports_its_check(self):
+        self.write_stack_standin()
+        with open(os.path.join(self.checkout, ".games"), "w") as f:
+            f.write("# Games tools/stack.py runs with the core, one key per line.\n")
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient")
+        log = out.split("STUBLOG:", 1)[1].splitlines()
+        # a .games with comments only enables nothing: the core starts with docker compose
+        self.assertIn("docker compose --profile deployer up -d deployer", log)
+        self.assertIn("docker compose pull", log)
+        self.assertIn("docker compose up -d", log)
+        self.assertIn("docker compose --profile deployer exec -T deployer python /app/deployer.py --healthcheck", log)
+        self.assertIn("The deployer is running, and Docker sees this folder where the deployer does.", out)
+        self.assertIn("Games and updates: on the admin panel, Settings > Install games.", out)
+        self.assertIn("== Done", out)
+        self.assertNotIn("runs on Linux only", out)
+
+    def test_start_says_when_the_deployer_check_fails(self):
+        self.write_stack_standin()
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient",
+                          pre="$global:StubDeployerHealth = 'The Docker daemon does not see the OpenLobby "
+                              "checkout; set POL_DEPLOY_ROOT'")
+        self.assertIn("the deployer is not ready: The Docker daemon does not see", out)
+        self.assertEqual(out.count("deployer.py --healthcheck"), 1, out)   # no retries on that answer
+        self.assertIn("== Done", out)
+
+    @unittest.skipUnless(shutil.which("python") or shutil.which("py"), "Python not found")
+    def test_enabled_games_start_through_stack_py(self):
+        calls = self.write_stack_standin()
+        with open(os.path.join(self.checkout, ".games"), "w") as f:
+            f.write("# Games tools/stack.py runs with the core, one key per line.\njan\n")
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient")
+        log = out.split("STUBLOG:", 1)[1].splitlines()
+        self.assertIn("Enabled games: jan (started through tools\\stack.py)", out)
+        self.assertNotIn("docker compose up -d", log)       # it would rebuild login without the game
+        self.assertNotIn("docker compose pull", log)
+        with open(calls) as f:
+            self.assertEqual(f.read().splitlines(), [
+                "compose --ghcr pull --ignore-buildable --ignore-pull-failures",
+                "compose --ghcr up -d"])
+        self.assertIn("== Done", out)
 
 
 if __name__ == "__main__":
