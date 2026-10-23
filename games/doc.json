@@ -25,6 +25,11 @@
     {"name": "hippauldirge-title:latest", "context": ".", "dockerfile": "Dockerfile.title",
      "ghcr": null, "tag_var": null}
   ],
+  "dev": [
+    {"replaces": "ghcr.io/prettyopenlobby/hippauldirge", "image": "hippauldirge", "tag": "dev",
+     "services": ["doc"],
+     "source": "https://github.com/PrettyOpenLobby/HippaulDirge", "license": "AGPL-3.0"}
+  ],
   "services": ["doc"],
   "profiles": {},
   "env": [

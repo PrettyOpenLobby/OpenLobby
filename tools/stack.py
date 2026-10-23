@@ -22,6 +22,8 @@ chain the title plugins need. docs/games.md explains the design.
     python tools/stack.py channel [--json]       which update channel this install follows
     python tools/stack.py channel dev --registry HOST/PATH [--source URL]
     python tools/stack.py channel stable
+    python tools/stack.py dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL]
+                                                 make an access code for the dev channel
 
 Standard library only. Works from any directory.
 """
@@ -48,6 +50,9 @@ STATE_FILE = os.path.join(ROOT, ".games")
 
 #: Variables this tool computes. A value for them in an env file is ignored.
 COMPUTED = ("POL_TITLES", "POL_TITLE_BASE_IMAGE")
+
+#: the services the title chain's last link runs (docs/games.md)
+TITLE_SERVICES = ("login", "authsess")
 
 #: docker compose options (before the subcommand) that take a value
 _COMPOSE_VALUE_OPTS = {"-f", "--file", "-p", "--project-name", "--profile",
@@ -235,11 +240,10 @@ def plan(catalog, keys, compose_args, ghcr=False, root=ROOT, parent=PARENT,
     games = [catalog[k] for k in keys]
     efiles = env_files(catalog, keys, root, parent)
     vals = env_values(efiles, environ)
-    swap, override = {}, ""
+    swap, override, rows = {}, "", []
     if channel and channel.get("channel") == "dev":
         rows = devchannel.image_rows(catalog, channel, ghcr, keys=keys)
         swap = devchannel.applied(rows)
-        override = devchannel.override_text(rows)
 
     core_files = [os.path.join(root, f) for f in core["compose"]]
     if ghcr:
@@ -267,6 +271,18 @@ def plan(catalog, keys, compose_args, ghcr=False, root=ROOT, parent=PARENT,
         prev = image
     final_base = link_image[-2] if len(links) >= 2 else base0
     titles = ",".join(g["title"]["module"] for g in links)
+    if rows:
+        # With titles, login and authsess run the chain's last link, which stands on the
+        # swapped images through base0 and the first link: the core's dev image must not
+        # take them over. A published first link that is also the last one is set by its
+        # own compose file, so the dev build of it is set for them here.
+        skip, extra = (), {}
+        if links:
+            skip = TITLE_SERVICES
+            t0 = links[0]["title"]
+            if ghcr and len(links) == 1 and t0.get("ghcr_image") and swap.get(t0["ghcr_image"]):
+                extra = {svc: swap[t0["ghcr_image"]] for svc in TITLE_SERVICES}
+        override = devchannel.override_text(rows, skip=skip, extra=extra)
 
     files = list(core_files)
     for g in games:
@@ -873,7 +889,9 @@ def cmd_compose(catalog, args):
         if p["override"]:
             with open(over, "w", encoding="utf-8", newline="\n") as f:
                 f.write(p["override"])
-            print("stack.py: dev channel (%s)" % channel["registry"], file=sys.stderr)
+            print("stack.py: dev channel: the dev builds of %d image(s)"
+                  % len(devchannel.applied(devchannel.image_rows(catalog, channel, ghcr, keys=keys))),
+                  file=sys.stderr)
         for step in p["steps"]:
             print("stack.py: %s" % step["why"], file=sys.stderr)
             env = dict(os.environ)
@@ -933,9 +951,66 @@ def cmd_channel(catalog, args):
     if ch["channel"] == "stable":
         print("channel: stable (the published images)")
         return 0
-    print("channel: dev, registry %s, source %s" % (ch["registry"], ch["source"]))
+    # the registry is in .channel and --json; this summary names the images only
+    print("channel: dev (the dev builds)")
     for r in rows:
-        print("  %-5s %s -> %s" % (r["key"], r["stable"], r["dev"] if r["applies"] else r["note"]))
+        print("  %-5s %s -> %s" % (r["key"], r["stable"],
+                                   r["dev_name"] if r["applies"] and r["dev_name"] else r["note"]))
+    return 0
+
+
+def cmd_dev_code(catalog, args):
+    """dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL]: print an access
+    code for the dev channel (docs/deployer.md, "Dev channel"). The token, when the images
+    need one, is read from FILE's first line or from stdin (-), never from the command
+    line. dev-code --decode reads a code on stdin and says what is in it, the token left
+    out."""
+    args = list(args)
+    if args == ["--decode"]:
+        try:
+            info = devchannel.parse_code(sys.stdin.readline().strip())
+        except devchannel.ChannelError as exc:
+            raise StackError(str(exc))
+        print("registry: %s" % info["registry"])
+        print("token:    %s" % ("yes" if info["token"] else "none (public images)"))
+        print("source:   %s" % (info["source"] or devchannel.default_source(info["registry"])
+                                + " (the default)"))
+        return 0
+    opts = {}
+    for name in ("--registry", "--token-file", "--source"):
+        if name in args:
+            i = args.index(name)
+            if i + 1 >= len(args):
+                raise StackError("%s needs a value" % name)
+            opts[name] = args[i + 1]
+            del args[i:i + 2]
+    if args:
+        raise StackError("dev-code takes only --registry, --token-file and --source; the "
+                         "token is never given on the command line")
+    if not opts.get("--registry"):
+        raise StackError("dev-code needs --registry HOST/PATH")
+    token = None
+    tf = opts.get("--token-file")
+    if tf:
+        try:
+            if tf == "-":
+                if sys.stdin.isatty():
+                    import getpass
+                    token = getpass.getpass("Token: ")
+                else:
+                    token = sys.stdin.readline()
+            else:
+                with open(tf, encoding="utf-8") as f:
+                    token = f.readline()
+        except OSError as exc:
+            raise StackError("cannot read the token: %s" % exc)
+        token = token.strip()
+        if not token:
+            raise StackError("the token file is empty")
+    try:
+        print(devchannel.make_code(opts["--registry"], token, opts.get("--source")))
+    except devchannel.ChannelError as exc:
+        raise StackError(str(exc))
     return 0
 
 
@@ -972,7 +1047,8 @@ def cmd_volumes(catalog, args):
 
 COMMANDS = {"list": cmd_list, "add": cmd_add, "enable": cmd_enable,
             "disable": cmd_disable, "check": cmd_check, "ps": cmd_ps,
-            "compose": cmd_compose, "volumes": cmd_volumes, "channel": cmd_channel}
+            "compose": cmd_compose, "volumes": cmd_volumes, "channel": cmd_channel,
+            "dev-code": cmd_dev_code}
 
 
 def main(argv=None):

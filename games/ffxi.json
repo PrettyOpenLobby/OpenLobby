@@ -30,7 +30,10 @@
      "services": ["db-update", "connect", "search", "world", "map"],
      "source": "lsb-server", "license": "GPL-3.0-or-later",
      "what": "The world server: LandSandBoat with OpenLobby's changes (PS2 consoles among them).",
-     "back": "FFXI's world database keeps what the dev world server's migrations changed in it; to go back exactly, restore the backup of it taken before switching to Dev (docs/deployer.md, \"Dev channel\")."}
+     "back": "FFXI's world database keeps what the dev world server's migrations changed in it; to go back exactly, restore the backup of it taken before switching to Dev (docs/deployer.md, \"Dev channel\")."},
+    {"replaces": "ghcr.io/prettyopenlobby/hippaulbridge", "image": "hippaulbridge", "tag": "dev",
+     "services": ["bridge"],
+     "source": "https://github.com/PrettyOpenLobby/HippaulBridge", "license": "GPL-3.0"}
   ],
   "services": ["db", "db-update", "db-zoneip", "connect", "search", "world", "map", "bridge"],
   "profiles": {},

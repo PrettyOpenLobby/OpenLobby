@@ -1,14 +1,18 @@
 """The dev update channel (docs/deployer.md, "Dev channel").
 
 An install follows the stable images by default: OpenLobby's and the games' published images
-and the upstream images the games run. The dev channel swaps some of them for preview builds
-that live in a registry of your choosing (POL_DEV_REGISTRY, e.g. registry.example.org/team),
-which is read with an access code. The catalog says which: each games/*.json may carry
+and the upstream images the games run. The dev channel swaps some of them for preview builds,
+unlocked with an access code the developers hand out. The code carries everything the
+deployer needs (make_code, parse_code below): "olx1." and then, base64url without padding,
+the compact JSON {"r": "<registry host/path>", "t": "<token>", "s": "<source base URL>"},
+"t" and "s" optional. The panel never shows the registry; it says "dev builds". A plain
+token with POL_DEV_REGISTRY (or a registry given beside it) still works, as before. The
+catalog says which images have a dev build: each games/*.json may carry
 
     "dev": [{"replaces": "<the stable image, without tag>",
              "image": "<its name under the dev registry>", "tag": "<the tag to follow>",
              "services": ["<every service that runs it>", ...],
-             "source": "<its repository under the dev source URL>",
+             "source": "<its repository under the dev source URL, or a full https:// URL>",
              "what": "<what it is, for the panel>", "license": "<SPDX id>"}]
 
 Which channel an install is on lives in the core checkout's .channel file (JSON, written by
@@ -35,8 +39,14 @@ CHANNELS = ("stable", "dev")
 #: host[:port] followed by zero or more path parts, as an image name starts
 REGISTRY = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?"
                       r"(/[a-z0-9]([a-z0-9._-]{0,126}[a-z0-9])?){0,8}$")
-#: what an access code may be: printable ASCII, no spaces, 8 to 512 characters
-CODE = re.compile(r"^[\x21-\x7e]{8,512}$")
+#: what an access code may be: printable ASCII, no spaces, 8 to 2048 characters
+CODE = re.compile(r"^[\x21-\x7e]{8,2048}$")
+#: what a token inside an access code may be
+TOKEN = re.compile(r"^[\x21-\x7e]{1,400}$")
+#: an access code of ours: olx<version>.<base64url payload, no padding>
+CODE_PREFIX = "olx1."
+_VERSIONED = re.compile(r"^olx([0-9]{1,3})\.")
+_B64URL = re.compile(r"^[A-Za-z0-9_-]{4,2043}$")
 SOURCE = re.compile(r"^https?://[A-Za-z0-9._~:/%+@-]{1,400}$")
 _NAME = re.compile(r"^[a-z0-9]([a-z0-9._/-]{0,126}[a-z0-9])?$")
 _TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
@@ -49,6 +59,10 @@ ACCEPT = ", ".join(("application/vnd.oci.image.index.v1+json",
                     "application/vnd.docker.distribution.manifest.v2+json"))
 
 REVOKED = "The access code no longer works; ask for a new one or switch back to Stable."
+DAMAGED = "This access code is damaged or incomplete; copy it again, whole."
+NEWER = ("This access code is for a newer version of OpenLobby; update OpenLobby first, then "
+         "enter it again.")
+NOT_OURS = "That is not an OpenLobby access code (they start with olx1.); copy it again, whole."
 NO_CODE = ("The dev channel is on but no access code is stored here; switch to Dev again with "
            "a code, or back to Stable.")
 
@@ -129,6 +143,88 @@ def registry_host(registry):
     return registry.split("/", 1)[0]
 
 
+# ------------------------------------------------------------------ access codes
+
+def make_code(registry, token=None, source=None):
+    """The access code for `registry` (host/path), signing in with `token` (None: the
+    images are public and need none), their source under `source` (None: the default,
+    https://<registry>). For the operator's `tools/stack.py dev-code`."""
+    check_registry(registry)
+    doc = {"r": registry}
+    if token is not None:
+        if not isinstance(token, str) or not TOKEN.match(token):
+            raise ChannelError("the token must be 1 to 400 printable characters, no spaces")
+        doc["t"] = token
+    if source is not None:
+        if not isinstance(source, str) or not SOURCE.match(source):
+            raise ChannelError("the source URL must be http(s)://... (got %r)" % (source,))
+        doc["s"] = source.rstrip("/")
+    raw = json.dumps(doc, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    code = CODE_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    if not CODE.match(code):
+        raise ChannelError("that makes a code longer than 2048 characters")
+    return code
+
+
+def parse_code(code, registry=None):
+    """What an access code says: {"kind", "registry", "token", "source"}.
+
+    An olx1. code carries its registry, its token (None when it has none: public images)
+    and its source base URL (None: the default). Anything else is a plain token for
+    `registry` (POL_DEV_REGISTRY, or one given beside the code), the way codes worked
+    before; with no such registry it is refused. ChannelError carries the sentence the
+    panel shows; no sentence repeats the code."""
+    if not isinstance(code, str) or not code.strip():
+        raise ChannelError("Type the access code.")
+    code = code.strip()
+    m = _VERSIONED.match(code)
+    if not CODE.match(code):
+        if m:
+            raise ChannelError(DAMAGED)
+        raise ChannelError("The access code is 8 to 2048 characters, with no spaces.")
+    if m:
+        if m.group(0) != CODE_PREFIX:
+            raise ChannelError(NEWER if int(m.group(1)) > 1 else DAMAGED)
+        payload = code[len(CODE_PREFIX):]
+        if not _B64URL.match(payload) or len(payload) % 4 == 1:
+            raise ChannelError(DAMAGED)
+        try:
+            raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+            doc = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise ChannelError(DAMAGED)
+        if (not isinstance(doc, dict) or set(doc) - {"r", "t", "s"}
+                or not isinstance(doc.get("r"), str) or not REGISTRY.match(doc["r"])
+                or ("t" in doc and not (isinstance(doc["t"], str) and TOKEN.match(doc["t"])))
+                or ("s" in doc and not (isinstance(doc["s"], str) and SOURCE.match(doc["s"])))):
+            raise ChannelError(DAMAGED)
+        return {"kind": "olx1", "registry": doc["r"], "token": doc.get("t"),
+                "source": doc["s"].rstrip("/") if doc.get("s") else None}
+    if not registry:
+        raise ChannelError(NOT_OURS)
+    check_registry(registry)
+    return {"kind": "plain", "registry": registry, "token": code, "source": None}
+
+
+def token_of(code):
+    """The token a stored code signs in with: an olx1. code's own (None for public
+    images), else the code itself. A damaged stored code gives itself back, so a check
+    with it is refused rather than passed."""
+    if not code:
+        return None
+    if _VERSIONED.match(code):
+        try:
+            return parse_code(code)["token"]
+        except ChannelError:
+            return code
+    return code
+
+
+def short_name(d):
+    """What the panel calls a dev image: the last part of its name, then "(dev)"."""
+    return "%s (dev)" % d["image"].rstrip("/").rsplit("/", 1)[-1]
+
+
 # ------------------------------------------------------------------ the image map
 
 def own_images(catalog):
@@ -169,8 +265,11 @@ def image_rows(catalog, channel, ghcr, keys=None, registry=None):
     """One row per stable image of the core and the games `keys` (every entry when None), in
     catalog order: what the dev channel puts in its place, or why nothing:
 
-        {"key", "name", "stable", "dev_image", "dev", "applies", "services", "source",
-         "what", "license", "note"}
+        {"key", "name", "stable", "dev_image", "dev_name", "dev", "applies", "services",
+         "source", "what", "license", "note"}
+
+    dev_image is name:tag under the registry, dev_name what the panel shows ("lsb-server
+    (dev)"), dev the full reference (None while no registry is known).
 
     `registry` names the dev registry when the channel is stable (the panel shows what Dev
     would use); on the dev channel it is the channel's."""
@@ -195,7 +294,7 @@ def image_rows(catalog, channel, ghcr, keys=None, registry=None):
             seen.add(s)
             d = devs.get(s)
             row = {"key": key, "name": e.get("name") or key, "stable": s, "dev_image": None,
-                   "dev": None, "applies": False, "services": [], "source": None,
+                   "dev_name": None, "dev": None, "applies": False, "services": [], "source": None,
                    "what": None, "license": None, "note": None}
             if d is None:
                 row["note"] = "No dev build yet; it stays on the published image."
@@ -205,8 +304,12 @@ def image_rows(catalog, channel, ghcr, keys=None, registry=None):
                            services=list(d["services"]),
                            what=d.get("what") if isinstance(d.get("what"), str) else None,
                            license=d.get("license") if isinstance(d.get("license"), str) else None)
-                if isinstance(d.get("source"), str) and d["source"] and src_base:
-                    row["source"] = "%s/%s" % (src_base.rstrip("/"), d["source"].strip("/"))
+                row["dev_name"] = short_name(d)
+                src = d.get("source")
+                if isinstance(src, str) and SOURCE.match(src):
+                    row["source"] = src          # a full address, as the catalog gives it
+                elif isinstance(src, str) and src.strip("/") and src_base:
+                    row["source"] = "%s/%s" % (src_base.rstrip("/"), src.strip("/"))
                 row["applies"] = bool(ghcr or s not in own)
                 if not row["applies"]:
                     row["note"] = ("This install builds it from its checkout, so the dev image is "
@@ -220,11 +323,14 @@ def applied(rows):
     return {r["stable"]: r["dev"] for r in rows if r["applies"] and r["dev"]}
 
 
-def override_text(rows):
+def override_text(rows, skip=(), extra=None):
     """A compose file that sets image: for every service a swapped image runs, or "" when
-    nothing is swapped. Applied last, so it wins over the published-image overrides."""
+    nothing is swapped. Applied last, so it wins over the published-image overrides.
+    Services in `skip` are left alone (the title chain's, which tools/stack.py works out);
+    `extra` is {service: image} to set as well."""
     lines = []
-    seen = set()
+    seen = set(skip)
+    done = set()
     for r in rows:
         if not (r["applies"] and r["dev"]):
             continue
@@ -232,7 +338,12 @@ def override_text(rows):
             if s in seen:
                 continue
             seen.add(s)
+            done.add(s)
             lines.append("  %s:\n    image: %s\n" % (s, r["dev"]))
+    for s, image in sorted((extra or {}).items()):
+        if s not in done:
+            done.add(s)
+            lines.append("  %s:\n    image: %s\n" % (s, image))
     if not lines:
         return ""
     return ("# The dev channel (docs/deployer.md): written by tools/stack.py for one command.\n"
@@ -269,7 +380,8 @@ def _challenge(value):
 
 
 def check_access(registry, code, probes=(), scheme="https", user=None, timeout=TIMEOUT):
-    """Whether `code` reads the dev registry, asked the way docker asks (the registry API's
+    """Whether `code` (a token: token_of an access code; None signs in as nobody, for
+    public images) reads the dev registry, asked the way docker asks (the registry API's
     token handshake), without docker. probes are (name, tag) pairs under the registry's
     path. Returns {"state", "why", "digests": {"name:tag": digest}} where state is
 
@@ -279,36 +391,43 @@ def check_access(registry, code, probes=(), scheme="https", user=None, timeout=T
         missing      a probe is not in the registry
         unreachable  the registry did not answer as a registry
 
-    Nothing here logs or returns the code."""
+    Nothing here logs or returns the code, and no sentence names the registry: the panel
+    shows them as they are."""
     host = registry_host(registry)
     path = registry[len(host):].strip("/")
     base = "%s://%s" % (scheme, host)
-    name, secret = split_code(code, user)
-    basic = "Basic " + base64.b64encode(("%s:%s" % (name, secret)).encode("utf-8")).decode("ascii")
+    if code:
+        name, secret = split_code(code, user)
+        basic = "Basic " + base64.b64encode(("%s:%s" % (name, secret)).encode("utf-8")).decode("ascii")
+        sign = {"Authorization": basic}
+    else:
+        basic, sign = None, {}
     out = {"state": "ok", "why": None, "digests": {}}
+    refused = ("The dev builds did not accept the access code. Check it, or ask for a new one."
+               if code else "The dev builds need a sign-in this access code does not carry; "
+                            "ask for a new one.")
 
     st, hdrs, body = _request(base + "/v2/", {}, timeout=timeout)
     if st is None:
-        return dict(out, state="unreachable", why="The dev registry %s did not answer (%s)."
-                    % (host, str(body)[:160]))
+        return dict(out, state="unreachable", why="The dev builds' registry did not answer (%s)."
+                    % _hide(str(body)[:160], host))
     kind, params = _challenge(hdrs.get("WWW-Authenticate") if hdrs is not None else "")
 
     def bearer(names):
         realm = params.get("realm")
         if not realm or not realm.startswith(("http://", "https://")):
             return None, dict(out, state="unreachable",
-                              why="The dev registry %s asks for a sign-in it does not describe." % host)
+                              why="The dev builds' registry asks for a sign-in it does not describe.")
         q = [("service", params.get("service", ""))] + \
             [("scope", "repository:%s:pull" % n) for n in names]
         st2, _h, b2 = _request(realm + ("&" if "?" in realm else "?") + urllib.parse.urlencode(q),
-                               {"Authorization": basic}, timeout=timeout)
+                               sign, timeout=timeout)
         if st2 in (401, 403):
-            return None, dict(out, state="wrong", why="The dev registry %s did not accept the "
-                                                      "access code. Check it, or ask for a new one." % host)
+            return None, dict(out, state="wrong", why=refused)
         if st2 != 200:
             return None, dict(out, state="unreachable",
-                              why="The dev registry %s did not hand out a sign-in (%s)."
-                              % (host, "HTTP %d" % st2 if st2 else str(b2)[:160]))
+                              why="The dev builds' registry did not hand out a sign-in (%s)."
+                              % ("HTTP %d" % st2 if st2 else _hide(str(b2)[:160], host)))
         try:
             doc = json.loads(b2)
             tok = doc.get("token") or doc.get("access_token")
@@ -316,7 +435,7 @@ def check_access(registry, code, probes=(), scheme="https", user=None, timeout=T
             tok = None
         if not isinstance(tok, str) or not tok:
             return None, dict(out, state="unreachable",
-                              why="The dev registry %s answered the sign-in with no token." % host)
+                              why="The dev builds' registry answered the sign-in with no token.")
         return "Bearer " + tok, None
 
     names = ["%s/%s" % (path, n) if path else n for n, _t in probes]
@@ -325,33 +444,41 @@ def check_access(registry, code, probes=(), scheme="https", user=None, timeout=T
         if fail:
             return fail
     elif st == 401 and kind == "basic":
-        st2, _h, _b = _request(base + "/v2/", {"Authorization": basic}, timeout=timeout)
+        if not code:
+            return dict(out, state="wrong", why=refused)
+        st2, _h, _b = _request(base + "/v2/", sign, timeout=timeout)
         if st2 in (401, 403):
-            return dict(out, state="wrong", why="The dev registry %s did not accept the access "
-                                                "code. Check it, or ask for a new one." % host)
+            return dict(out, state="wrong", why=refused)
         auth = basic
     elif st == 200:
         auth = basic           # a registry open to all: nothing to check the code against
     else:
-        return dict(out, state="unreachable", why="%s does not answer as a container registry "
-                                                  "(HTTP %d at /v2/)." % (host, st))
+        return dict(out, state="unreachable", why="The dev builds' registry does not answer as a "
+                                                  "container registry (HTTP %d at /v2/)." % st)
     for (n, tag), full in zip(probes, names):
-        st3, h3, b3 = _request("%s/v2/%s/manifests/%s" % (base, full, tag),
-                               {"Authorization": auth, "Accept": ACCEPT}, method="HEAD",
+        hdrs = {"Accept": ACCEPT}
+        if auth:
+            hdrs["Authorization"] = auth
+        st3, h3, b3 = _request("%s/v2/%s/manifests/%s" % (base, full, tag), hdrs, method="HEAD",
                                timeout=timeout)
+        shown = short_name({"image": n})
         if st3 == 200:
             out["digests"]["%s:%s" % (n, tag)] = (h3.get("Docker-Content-Digest") or "").strip() or None
         elif st3 in (401, 403):
-            return dict(out, state="denied", why="The access code signs in to %s but may not read "
-                                                 "%s:%s; ask for a code that can." % (host, n, tag))
+            return dict(out, state="denied", why="The access code may not read %s; ask for a code "
+                                                 "that can." % shown)
         elif st3 == 404:
-            return dict(out, state="missing", why="The dev registry %s has no image %s:%s."
-                                                  % (host, n, tag))
+            return dict(out, state="missing", why="The dev builds have no %s yet." % shown)
         else:
-            return dict(out, state="unreachable", why="The dev registry %s did not answer for "
-                                                      "%s:%s (%s)." % (host, n, tag, "HTTP %d" % st3
-                                                                        if st3 else str(b3)[:160]))
+            return dict(out, state="unreachable", why="The dev builds' registry did not answer for "
+                                                      "%s (%s)." % (shown, "HTTP %d" % st3
+                                                                    if st3 else _hide(str(b3)[:160], host)))
     return out
+
+
+def _hide(text, host):
+    """`text` without the registry's host in it (a network error can name it)."""
+    return text.replace(host, "the registry").replace(host.split(":", 1)[0], "the registry")
 
 
 def probes_of(rows):

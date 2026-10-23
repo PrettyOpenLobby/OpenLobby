@@ -25,6 +25,11 @@
     {"name": "hippaulfront-title:latest", "context": ".", "dockerfile": "Dockerfile.title",
      "ghcr": null, "tag_var": null}
   ],
+  "dev": [
+    {"replaces": "ghcr.io/prettyopenlobby/hippaulfront", "image": "hippaulfront", "tag": "dev",
+     "services": ["fmo", "fmoboard"],
+     "source": "https://github.com/PrettyOpenLobby/HippaulFront", "license": "AGPL-3.0"}
+  ],
   "services": ["fmo"],
   "profiles": {"board": ["fmoboard"]},
   "env": [

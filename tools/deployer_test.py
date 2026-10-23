@@ -1789,9 +1789,13 @@ class FakeRegistry:
     """The registry API as docker uses it: /v2/ asks for a bearer token, /v2/token hands
     one out for a known password (any user name, as Forgejo does for a token), and a
     manifest answers with its digest while the password that got the token is still
-    valid. Records each request's path."""
+    valid. With `public` set, a token request without a password gets an anonymous token
+    that reads every image, as a registry of public images does. Records each request's
+    path and whether it carried a password."""
 
     def __init__(self):
+        self.public = False
+        self.anon = []
         self.valid = set()
         self.tokens = {}
         self.denied = set()
@@ -1825,6 +1829,9 @@ class FakeRegistry:
                     if auth.startswith("Basic "):
                         import base64
                         pw = base64.b64decode(auth[6:]).decode().split(":", 1)[1]
+                    if pw is None and reg.public:
+                        reg.anon.append(self.path)
+                        return self.answer(200, json.dumps({"token": "anon"}).encode())
                     if pw in reg.valid:
                         tok = "tok-%d" % len(reg.tokens)
                         reg.tokens[tok] = pw
@@ -1833,7 +1840,7 @@ class FakeRegistry:
                 m = re.match(r"^/v2/(.+)/manifests/([^/]+)$", u.path)
                 if m:
                     tok = auth[7:] if auth.startswith("Bearer ") else ""
-                    if reg.tokens.get(tok) not in reg.valid:
+                    if not (tok == "anon" and reg.public) and reg.tokens.get(tok) not in reg.valid:
                         return self.answer(401)
                     if m.group(1) in reg.denied:
                         return self.answer(403)
@@ -1918,9 +1925,26 @@ def test_channel_unit(reg):
     ok(r["state"] == "denied" and "may not read" in r["why"], "check_access: no read access: denied")
     reg.denied = set()
     r = devchannel.check_access(registry, CH_CODE, [("nothing", "stock")], scheme="http")
-    ok(r["state"] == "missing" and "no image nothing:stock" in r["why"], "check_access: no such image: missing")
-    r = devchannel.check_access("127.0.0.1:%d/kart" % free_port(), CH_CODE, probe, scheme="http", timeout=3)
-    ok(r["state"] == "unreachable" and "did not answer" in r["why"], "check_access: nobody there: unreachable")
+    ok(r["state"] == "missing" and "no nothing (dev)" in r["why"], "check_access: no such image: missing (%s)"
+       % r["why"])
+    gone = "127.0.0.1:%d/kart" % free_port()
+    r = devchannel.check_access(gone, CH_CODE, probe, scheme="http", timeout=3)
+    ok(r["state"] == "unreachable" and "did not answer" in r["why"] and "127.0.0.1" not in r["why"],
+       "check_access: nobody there: unreachable, the address not named (%s)" % r["why"])
+    r = devchannel.check_access(registry, None, probe, scheme="http")
+    ok(r["state"] == "wrong" and "sign-in" in r["why"], "check_access: no token, private images: wrong")
+    reg.public = True
+    r = devchannel.check_access(registry, None, probe, scheme="http")
+    ok(r["state"] == "ok" and r["digests"] and reg.anon, "check_access: no token, public images: ok, anonymous")
+    reg.public = False
+    reg.anon[:] = []
+    whys = []
+    reg.denied = {"kart/lsb-server"}
+    whys.append(devchannel.check_access(registry, CH_CODE, probe, scheme="http")["why"])
+    reg.denied = set()
+    whys.append(devchannel.check_access(registry, "kart-wrong-code-0000", probe, scheme="http")["why"])
+    whys.append(devchannel.check_access(registry, CH_CODE, [("nothing", "stock")], scheme="http")["why"])
+    ok(not any(("127.0.0.1:%d" % reg.port) in w for w in whys), "check_access: no sentence names the registry")
     ok(not any(CH_CODE in x for x in reg.paths), "check_access: the code is in no request path")
     ok(devchannel.split_code("a:b") == ("a", "b") and devchannel.split_code("abc", "dev") == ("dev", "abc")
        and devchannel.split_code(":abc", "dev") == ("dev", ":abc"), "split_code: name:secret and bare codes")
@@ -1969,6 +1993,7 @@ def _test_channel(t, servers, reg):
         t.clear_calls()
 
     registry = "127.0.0.1:%d/kart" % reg.port
+    host = "127.0.0.1:%d" % reg.port
     ref = registry + "/lsb-server:stock"
     state = os.path.join(t.tmp, "state-channel")
     chstate = os.path.join(state, "channel")
@@ -1987,14 +2012,18 @@ def _test_channel(t, servers, reg):
     try:
         c = s.start()
         code, ch = c.get("/api/channel")
-        ok(code == 200 and ch["channel"] == "stable" and ch["registry_default"] == registry
-           and ch["code_stored"] is False, "channel: stable at first, the registry from POL_DEV_REGISTRY")
-        ff = [r for r in ch["images"] if r["key"] == "ffxi" and r["dev_image"]]
-        ok(ff and ff[0]["dev"] == ref and ff[0]["applies"] and ff[0]["enabled"]
-           and ff[0]["source"] == "https://%s/lsb-server" % registry and ff[0]["license"],
-           "channel: FFXI's world server has a dev image, with its source (%s)" % (ff[:1],))
-        ok(any(r["key"] == "core" and r["dev_image"] is None and "No dev build" in r["note"]
-               for r in ch["images"]), "channel: the core's images say they have no dev build")
+        ok(code == 200 and ch["channel"] == "stable" and ch["code_stored"] is False
+           and "registry" not in ch and "registry_default" not in ch and host not in json.dumps(ch),
+           "channel: stable at first, and the answer names no registry")
+        ff = [r for r in ch["images"] if r["key"] == "ffxi" and r["stable"] == "ghcr.io/landsandboat/server"]
+        ok(ff and ff[0]["dev_name"] == "lsb-server (dev)" and ff[0]["applies"] and ff[0]["enabled"]
+           and ff[0]["license"] and ff[0]["has_source"] is False and "source" not in ff[0] and "dev" not in ff[0],
+           "channel: FFXI's world server has a dev image, by short name (%s)" % (ff[:1],))
+        ok(any(r["key"] == "core" and r["dev_name"] == "openlobby (dev)" and not r["applies"]
+               and "POL_DEPLOY_GHCR" in r["note"] for r in ch["images"]),
+           "channel: the core's dev builds are used with published images only")
+        ok(c.get("/api/channel/source?stable=ghcr.io/landsandboat/server")[0] == 404,
+           "channel source: none on the stable channel")
         absent = [k for k in ("fe", "fmo", "doc", "jan")
                   if not os.path.isdir(os.path.join(t.root, json.load(open(os.path.join(
                       t.core, "games", k + ".json")))["checkout"]))]
@@ -2003,8 +2032,10 @@ def _test_channel(t, servers, reg):
         ok(c.get("/api/games")[1]["options"]["channel"] == "stable", "games: options.channel stable")
 
         for body, want in (({"channel": "beta"}, "stable or dev"),
-                           ({"channel": "dev", "code": "short"}, "8 to 512"),
-                           ({"channel": "dev", "code": "has a space in it"}, "8 to 512"),
+                           ({"channel": "dev", "code": "short"}, "8 to 2048"),
+                           ({"channel": "dev", "code": "has a space in it"}, "8 to 2048"),
+                           ({"channel": "dev", "code": "olx1.bm90IGpzb24"}, "damaged"),
+                           ({"channel": "dev", "code": "olx7.eyJyIjoieCJ9"}, "newer version"),
                            ({"channel": "dev", "code": CH_CODE, "extra": 1}, "unknown fields"),
                            ({"channel": "dev", "code": CH_CODE, "registry": "Not A Registry"},
                             "registry.example.org")):
@@ -2014,15 +2045,18 @@ def _test_channel(t, servers, reg):
         ok(st == 400 and "did not accept" in r.get("error", ""), "channel: a wrong code refused at once (%s)" % r)
         st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": CH_CODE,
                                                 "registry": "127.0.0.1:%d/kart" % free_port()})
-        ok(st == 502 and "did not answer" in r.get("error", ""), "channel: a registry nobody answers: 502 (%s)" % r)
+        ok(st == 502 and "did not answer" in r.get("error", "") and "127.0.0.1" not in r.get("error", ""),
+           "channel: a registry nobody answers: 502, not named (%s)" % r)
         ok(not dcalls() and not os.path.exists(chfile) and not c.get("/api/jobs")[1]["jobs"],
            "channel: refused requests ran no docker command, wrote no .channel, started no job")
 
         st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": CH_CODE})
         ok(st == 202 and r.get("job"), "channel: a good code starts the switch (%s)" % r)
         j = c.wait(r["job"], 60)
-        ok(j["state"] == "ok" and "lsb-server:stock" in j["summary"] and j["action"] == "channel",
+        ok(j["state"] == "ok" and "lsb-server (dev)" in j["summary"] and j["action"] == "channel",
            "channel dev job: ok (%s)" % j["summary"])
+        ok(host not in j["log"] and "[dev builds]" in j["log"] and host not in json.dumps(c.get("/api/jobs")[1]),
+           "channel dev job: the log says [dev builds] where the registry was, never its address")
         logins = [x for x in dcalls() if x["args"][0] == "login"]
         ok(len(logins) == 1 and logins[0]["args"] == ["login", "--username", "dev", "--password-stdin",
                                                      "127.0.0.1:%d" % reg.port],
@@ -2051,6 +2085,13 @@ def _test_channel(t, servers, reg):
         code, ch = c.get("/api/channel")
         ok(ch["channel"] == "dev" and ch["code_stored"] is True and ch["since"]
            and CH_CODE not in json.dumps(ch), "channel: GET says dev, a code is stored, never shows it")
+        ok(host not in json.dumps(ch), "channel: GET on dev names no registry")
+        ff = [r for r in ch["images"] if r["stable"] == "ghcr.io/landsandboat/server"]
+        ok(ff and ff[0]["has_source"] is True, "channel: on dev the world server's source is offered")
+        st, src = c.get("/api/channel/source?stable=ghcr.io/landsandboat/server")
+        ok(st == 200 and src.get("url") == "https://%s/lsb-server" % registry and src.get("license"),
+           "channel source: the address behind the link (%s)" % src)
+        ok(c.get("/api/channel/source?stable=ghcr.io/example/none")[0] == 404, "channel source: unknown image: 404")
         ok(c.get("/api/games")[1]["options"]["channel"] == "dev", "games: options.channel dev")
 
         # the update check: the dev image's digest against the registry's
@@ -2072,7 +2113,8 @@ def _test_channel(t, servers, reg):
         code, u, _ = updates(c, refresh=True)
         it = by_key(u).get("ffxi") or {}
         ok(it.get("update") != "available", "updates: the registry's digest here: no dev update (%s)" % it.get("why"))
-        ok(by_key(u).get("tm", {}).get("channel") is None, "updates: a game with no dev image is not marked dev")
+        ok(by_key(u).get("tm", {}).get("channel") is None, "updates: a game with no dev image here is not marked dev")
+        ok(host not in json.dumps(u), "updates: the answer names no registry")
 
         # the code is revoked
         set_valid()
@@ -2088,6 +2130,9 @@ def _test_channel(t, servers, reg):
         it = by_key(u).get("ffxi") or {}
         ok(it.get("update") == "unknown" and it.get("why") == devchannel.REVOKED,
            "revoked: the update list says so for the dev item")
+        ok(not any(host in (x.get("log") or "") for x in [c.get("/api/jobs/" + y["id"])[1]
+                                                          for y in c.get("/api/jobs?limit=50")[1]["jobs"]]),
+           "revoked: no job log names the registry")
 
         # back to stable
         clear()
@@ -2097,6 +2142,7 @@ def _test_channel(t, servers, reg):
            "stable: ok, with FFXI's database note (%s)" % j["summary"])
         ok(any(x["args"][0] == "logout" for x in dcalls()), "stable: docker logout")
         ok(not os.path.exists(chstate) and not os.path.exists(chfile), "stable: code, sign-in and .channel removed")
+        ok(host not in j.get("log", ""), "stable: the job log names no registry (docker logout's included)")
         comp = [e for e in senvs() if e["args"][0] == "compose"]
         ok(comp and all(e["docker_config"] is None for e in comp), "stable: compose runs without DOCKER_CONFIG")
         code, ch = c.get("/api/channel")
@@ -2135,6 +2181,86 @@ def _test_channel(t, servers, reg):
         ok(not any(sec in x for x in reg.paths for sec in secrets), "the access code is in no URL")
     finally:
         s.stop()
+    _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, registry, host, state,
+                        games, saved, bridge, chfile)
+
+
+def _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, registry, host, state,
+                        games, saved, bridge, chfile):
+    """olx1. access codes: no POL_DEV_REGISTRY, the code carries the registry, the token and
+    the source; a code without a token for public images signs in as nobody."""
+    import hashlib
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import devchannel
+    token = "kart-dev-token-3Hq8"
+    code = devchannel.make_code(registry, token, "https://code.example.org/kart")
+    os.makedirs(bridge, exist_ok=True)
+    with open(games, "w") as f:
+        f.write("ffxi\ntm\n")
+    set_valid(token)
+    clear()
+    env = {"POL_DEV_REGISTRY_HTTP": "1", "FAKE_CH_DIR": chdir}
+    s = Server(t, extra_env=env, args=["--state", state, "--docker", dock, "--refresh-gap", "0"])
+    servers.append(s)
+    try:
+        c = s.start()
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "kart-plain-token-01"})
+        ok(st == 400 and "olx1." in r.get("error", ""), "code: a plain token with no registry set: refused (%s)" % r)
+        bad = devchannel.make_code(registry, "kart-wrong-token", None)
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": bad})
+        ok(st == 400 and "did not accept" in r.get("error", "") and host not in json.dumps(r),
+           "code: a code whose token is refused: 400, the registry not named (%s)" % r)
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": code})
+        j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r), "log": ""}
+        ok(j["state"] == "ok", "code: an olx1. code switches to Dev (%s)" % j["summary"])
+        logins = [x for x in dcalls() if x["args"][0] == "login"]
+        ok(len(logins) == 1 and logins[0]["args"][-1] == host
+           and logins[0].get("stdin_sha") == hashlib.sha256(token.encode()).hexdigest(),
+           "code: docker login to the code's registry with its token on stdin")
+        doc = json.load(open(chfile))
+        ok(doc["registry"] == registry and doc["source"] == "https://code.example.org/kart",
+           "code: .channel has the code's registry and source")
+        ok(host not in j["log"] and token not in j["log"] and code not in j["log"],
+           "code: the job log has neither the registry, the token nor the code")
+        st, src = c.get("/api/channel/source?stable=ghcr.io/landsandboat/server")
+        ok(st == 200 and src.get("url") == "https://code.example.org/kart/lsb-server",
+           "code: the source is under the code's source address (%s)" % src)
+        ch = c.get("/api/channel")[1]
+        ok(host not in json.dumps(ch) and "code.example.org" not in json.dumps(ch),
+           "code: GET /api/channel names neither the registry nor the source host")
+        j = c.run("enable", "tm")
+        ok(j["state"] in ("ok", "needs_data") and host not in j.get("log", "") and "still reads the dev builds" in j.get("log", ""),
+           "code: enabling a game asks again with the code's token (%s)" % j["summary"])
+        st, r = c.call("POST", "/api/channel", {"channel": "stable"})
+        j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st}
+        ok(j["state"] == "ok", "code: back to stable")
+
+        # public images: a code without a token, no docker login at all
+        reg.public = True
+        set_valid()
+        clear()
+        pub = devchannel.make_code(registry)
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": pub})
+        j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r), "log": ""}
+        ok(j["state"] == "ok" and not [x for x in dcalls() if x["args"][0] == "login"]
+           and "no sign-in" in j["log"], "code: public images: on Dev with no docker login (%s)" % j["summary"])
+        j = c.run("enable", "tm")
+        ok(j["state"] in ("ok", "needs_data") and "still reads the dev builds" in j.get("log", ""), "code: public images: enable asks the registry as nobody (%s)" % j["summary"])
+        st, r = c.call("POST", "/api/channel", {"channel": "stable"})
+        if st == 202:
+            c.wait(r["job"], 60)
+        # a POL_DEV_REGISTRY for a plain token does not override a code's own
+    finally:
+        reg.public = False
+        s.stop()
+        if saved is None:
+            os.remove(games)
+        else:
+            with open(games, "w") as f:
+                f.write(saved)
+        shutil.rmtree(bridge, ignore_errors=True)
+        if os.path.exists(chfile):
+            os.remove(chfile)
         if saved is None:
             os.remove(games)
         else:

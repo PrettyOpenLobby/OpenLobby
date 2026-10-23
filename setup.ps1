@@ -90,7 +90,8 @@ Options:
   -Channel stable|dev  the update channel (docs/deployer.md, "Dev channel"):
                     dev follows the developers' preview builds and asks for
                     an access code (not shown); needs the deployer
-  -Registry HOST/PATH  the dev registry (kept in .env as POL_DEV_REGISTRY)
+  -Registry HOST/PATH  advanced: the registry a plain token is for (kept in .env
+                    as POL_DEV_REGISTRY); an access code carries its own
   -CodeFile FILE    with -Yes: read the access code from FILE's first line
   -InstallTools    with -Yes, allow installing git and Docker Desktop
   -InstallClient / -NoClient  run (or skip) the hosts installer for this PC
@@ -639,17 +640,12 @@ if ($UseDeployer) {
 }
 
 # The update channel (docs/deployer.md, "Dev channel"). The deployer signs in to the dev
-# registry and keeps the access code; this script only hands it over, on stdin.
+# builds and keeps the access code; this script only hands it over, on stdin.
 $DevCode = ''
 if ($Channel -eq 'dev') {
     if (-not $UseDeployer) { Fail 'the dev channel is run by the deployer; run with -Deployer' }
+    # an access code carries where the dev builds are; -Registry is only for a plain token
     if ($Registry) { Set-EnvValue $lines 'POL_DEV_REGISTRY' $Registry }
-    if (-not (Get-EnvValue $lines 'POL_DEV_REGISTRY')) {
-        if ($Yes) { Fail '-Channel dev needs -Registry (the developers give it with the access code)' }
-        $r = (Ask 'Dev registry (the developers give it with the access code)' '').Trim()
-        if ($r -cnotmatch $RegistryPattern) { Fail 'the dev registry looks like registry.example.org/team' }
-        Set-EnvValue $lines 'POL_DEV_REGISTRY' $r
-    }
     if ($CodeFile) {
         if (-not (Test-Path -LiteralPath $CodeFile -PathType Leaf)) { Fail "cannot read the access code file $CodeFile" }
         $DevCode = [string](Get-Content -LiteralPath $CodeFile -TotalCount 1)

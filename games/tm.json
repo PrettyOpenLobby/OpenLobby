@@ -23,6 +23,11 @@
     {"name": "hippaulmaster:latest", "context": ".", "dockerfile": "Dockerfile",
      "ghcr": "ghcr.io/prettyopenlobby/hippaulmaster", "tag_var": "HIPPAULMASTER_TAG"}
   ],
+  "dev": [
+    {"replaces": "ghcr.io/prettyopenlobby/hippaulmaster", "image": "hippaulmaster", "tag": "dev",
+     "services": ["tmrank", "tmboard"],
+     "source": "https://github.com/PrettyOpenLobby/HippaulMaster", "license": "AGPL-3.0"}
+  ],
   "services": ["tmrank"],
   "profiles": {"board": ["tmboard"]},
   "env": [

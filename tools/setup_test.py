@@ -424,11 +424,27 @@ class SetupShTest(unittest.TestCase):
         self.assertIn("needs --code-file", out)
         out = self.run_sh("--yes", "--reach", "lan", "--channel", "dev", "--no-deployer", expect=1)
         self.assertIn("run with --deployer", out)
+        # no registry is asked for any more: an access code carries its own
         out = self.run_sh("--yes", "--reach", "lan", "--channel", "dev", expect=1)
-        self.assertIn("needs --registry", out)
+        self.assertIn("needs --code-file", out)
+        self.assertNotIn("registry", out.split("== Settings", 1)[-1].lower())
         self.assertFalse([c for c in self.calls() if "--channel" in c])
         self.assertFalse(os.path.exists(os.path.join(self.checkout, ".env")) and
                          "POL_DEV_REGISTRY=registry" in self.env()[0])
+
+    def test_dev_channel_access_code_needs_no_registry(self):
+        code = "olx1.eyJyIjoicmVnaXN0cnkuZXhhbXBsZS5vcmcva2FydCJ9"
+        cf = os.path.join(self.tmp, "code.txt")
+        with open(cf, "w", newline="\n") as f:
+            f.write(code + "\n")
+        out = self.run_sh("--yes", "--reach", "lan", "--channel", "dev", "--code-file", bash_path(BASH, cf))
+        text, env = self.env()
+        self.assertNotIn("POL_DEV_REGISTRY", env)
+        self.assertNotIn("POL_DEV_REGISTRY=r", text)
+        with open(os.path.join(self.state, "channel-code")) as f:
+            self.assertEqual(f.read(), code)
+        self.assertNotIn(code, out)
+        self.assertIn("On the dev channel", out)
 
     def test_dev_channel_dry_run(self):
         out = self.run_sh("--dry-run", "--yes", "--reach", "lan", "--channel", "dev", "--registry",
@@ -717,6 +733,10 @@ class SetupPs1Test(unittest.TestCase):
         out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", "-NoFirewall", "-Channel", "dev",
                           "-Registry", "registry.example.org/kart", expect=1)
         self.assertIn("needs -CodeFile", out)
+        # no registry is asked for: an access code carries its own
+        out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", "-NoFirewall", "-Channel", "dev", expect=1)
+        self.assertIn("needs -CodeFile", out)
+        self.assertNotIn("Dev registry", out)
         out = self.run_ps("-Yes", "-Reach", "lan", "-NoClient", "-NoFirewall", "-Channel", "dev",
                           "-Registry", "'Not A Registry'", expect=2)
         self.assertIn("-Registry looks like", out)

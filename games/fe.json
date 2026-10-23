@@ -25,6 +25,11 @@
     {"name": "hippaulring-title:latest", "context": ".", "dockerfile": "Dockerfile.title",
      "ghcr": null, "tag_var": null}
   ],
+  "dev": [
+    {"replaces": "ghcr.io/prettyopenlobby/hippaulring", "image": "hippaulring", "tag": "dev",
+     "services": ["fellb", "felobby", "feworld", "femap"],
+     "source": "https://github.com/PrettyOpenLobby/HippaulRing", "license": "AGPL-3.0"}
+  ],
   "services": ["fellb", "felobby", "feworld"],
   "profiles": {"map": ["femap"]},
   "env": [

@@ -23,6 +23,11 @@
     {"name": "hippaulholo:latest", "context": ".", "dockerfile": "Dockerfile",
      "ghcr": "ghcr.io/prettyopenlobby/hippaulholo", "tag_var": "HIPPAULHOLO_TAG"}
   ],
+  "dev": [
+    {"replaces": "ghcr.io/prettyopenlobby/hippaulholo", "image": "hippaulholo", "tag": "dev",
+     "services": ["jan", "janboard"],
+     "source": "https://github.com/PrettyOpenLobby/HippaulHoLo", "license": "AGPL-3.0"}
+  ],
   "services": ["jan"],
   "profiles": {"board": ["janboard"]},
   "env": [

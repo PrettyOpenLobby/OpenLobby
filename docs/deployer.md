@@ -609,8 +609,9 @@ GitHub API, as the tests do.
 An install follows the stable channel by default: the images published to
 ghcr.io, and the upstream images the games run (FFXI's world server is the
 LandSandBoat team's own image). The dev channel follows preview builds
-instead, from a container registry the developers give you access to with
-an access code. Only the images that have a dev build change; the rest stay
+instead. The developers hand out an access code; the code says where the
+builds are, so you never type an address, and the panel calls them "the
+dev builds". Only the images that have a dev build change; the rest stay
 on the published images, and the panel lists which.
 
 The catalog says which images have a dev build. A `games/*.json` entry may
@@ -625,39 +626,81 @@ carry a `dev` list:
 
 `replaces` is the stable image (no tag), `image` and `tag` its name under
 the dev registry, `services` every service that runs it, `source` its
-repository under the dev source address, `license` the licence of that
-source, and `back`, when given, what switching back to Stable does not
-undo. On the dev channel the image becomes `<registry>/<image>:<tag>`.
+repository under the dev source address (or a full `https://` address of
+its own), `license` the licence of that source, and `back`, when given,
+what switching back to Stable does not undo. On the dev channel the image
+becomes `<registry>/<image>:<tag>`. The core's images and each game's own
+image follow the `dev` tag, which the developers' CI moves on every push
+to their main branch; the panel shows each as its short name, such as
+`lsb-server (dev)`.
 
 A dev build of an image OpenLobby itself publishes (the core's images, a
 game's own image) is used with published images only (`POL_DEPLOY_GHCR=1`):
 a stack built from its checkouts builds those images itself. A dev build of
 an upstream image, such as the world server above, is used either way.
+With games that add a title (`login` and `authsess` run the title chain's
+last link), the dev core image is the base the chain is built on rather
+than the image those two services run.
+
+### Access codes
+
+An access code is `olx1.` followed by a base64url string (no padding) of
+compact JSON:
+
+```
+{"r": "registry.example.org/team", "t": "<token>", "s": "https://code.example.org/team"}
+```
+
+`r` is the registry, host and path, where the dev images are. `t` is the
+token that reads them; a code without one is for public images and signs
+in as nobody. `s` is where their source repositories are (default
+`https://<r>`). Nothing else may be in it: a code with another field, a
+field of the wrong kind, a damaged string or padding is refused with "This
+access code is damaged or incomplete; copy it again, whole.", and one that
+starts `olx2.` or later with "This access code is for a newer version of
+OpenLobby; update OpenLobby first, then enter it again."
+
+The developers make codes with `python tools/stack.py dev-code --registry
+HOST/PATH [--token-file FILE] [--source URL]`. The token is read from the
+first line of FILE, or from stdin with `--token-file -`, never from the
+command line. `stack.py dev-code --decode` reads a code on stdin and says
+what is in it, the token left out.
+
+Advanced: a plain registry token still works as the code when the deployer
+knows the registry, from `POL_DEV_REGISTRY` or a `registry` given beside
+the code to `POST /api/channel`, `deployer.py --channel dev --registry`
+or the setup scripts' `--registry`. That is how codes worked before; an
+`olx1.` code always uses its own registry.
 
 ### Switching
 
 In the admin panel, Settings > Install games > Update channel (the owner
-only): choose Dev, give the registry (filled in from `POL_DEV_REGISTRY`
-when that is set) and the access code. The panel hands the code to the
-deployer and keeps nothing; the field is cleared as soon as it is sent.
+only): choose Dev and paste the access code. The panel hands the code to
+the deployer and keeps nothing; the field is cleared as soon as it is sent.
 The deployer then
 
 1. asks the registry, the way docker does (`/v2/`, then its token
-   endpoint with the code), whether the code reads the dev images this
-   install would run, and answers with a sentence when it does not: a wrong
-   code, a code without read access, an image that is not there, or a
-   registry that does not answer. Nothing has changed at that point.
-2. starts a `channel` job: `docker login --password-stdin` to the registry
-   with the code on stdin, into a Docker client config of its own
+   endpoint with the code's token, or as nobody), whether the code reads
+   the dev images this install would run, and answers with a sentence when
+   it does not: a wrong code, a code without read access, an image that is
+   not there, or a registry that does not answer. Nothing has changed at
+   that point.
+2. starts a `channel` job: with a token, `docker login --password-stdin`
+   with the token on stdin, into a Docker client config of its own
    (`DOCKER_CONFIG` is `channel/docker` in the deployer's volume, never the
    host's); keeps the code in `channel/code`, mode 600, in a folder of mode
-   700; runs `stack.py channel dev --registry <registry>`, which writes
-   `.channel` in the checkout (no secret in it); then pulls and restarts the
-   stack as an update does.
+   700; runs `stack.py channel dev --registry <registry>` (and `--source`
+   from the code or `POL_DEV_SOURCE`), which writes `.channel` in the
+   checkout (no secret in it); then pulls and restarts the stack as an
+   update does.
 
-The activity log says "switched to the dev channel" or "tried to switch to
-the dev channel" with the deployer's sentence. The code is in no log, job
-file, answer or argument: the job log blanks it if a tool ever prints it.
+No answer the panel reads and no line of a job log names the registry: the
+deployer's sentences say "the dev builds", and a job log shows
+`[dev builds]` where a tool printed its address. The activity log says
+"switched to the dev channel" or "tried to switch to the dev channel" with
+the deployer's sentence. The code is in no log, job file, answer or
+argument: the job log blanks it, and the token inside it, if a tool ever
+prints them.
 
 From then on every docker command the deployer runs uses that client
 config, so updates and installs pull the dev images with the same buttons.
@@ -682,50 +725,50 @@ back exactly.
 
 ### Source
 
-The panel shows, for each dev image, where its source is:
-`POL_DEV_SOURCE/<source>`, or `https://<registry>/<source>` when
-`POL_DEV_SOURCE` is not set (a Forgejo or Gitea server serves its
-registry and its repositories under the same address), with the licence
-from the catalog. The same access code reads it: use it as the password
-when git asks, with any user name.
+On the dev channel the panel shows the owner a link to the source of each
+dev image, named after its licence (for example "GPL-3.0 source"). The
+link goes through the panel (`/api/deploy/channel/source`), which answers
+with a redirect to the address: the catalog's own `https://` address, or
+the image's `source` under the code's `s` (or `POL_DEV_SOURCE`, or
+`https://<registry>`), so the page itself never holds it.
 
 ### By hand and from the setup scripts
 
 `stack.py channel [--json]` shows the channel and what each image is on
-it; `stack.py channel dev --registry HOST/PATH` and `stack.py channel
-stable` set it. They only write `.channel`: signing in to the registry is
-up to you (`docker login`) when you run the stack without the deployer.
-`stack.py compose` applies the channel by adding a compose file that sets
-`image:` for the services of the dev images, last in the `-f` list and
-removed after the command; `--dry-run` prints it.
+it (`--json` includes the registry); `stack.py channel dev --registry
+HOST/PATH` and `stack.py channel stable` set it. They only write
+`.channel`: signing in to the registry is up to you (`docker login`) when
+you run the stack without the deployer. `stack.py compose` applies the
+channel by adding a compose file that sets `image:` for the services of
+the dev images, last in the `-f` list and removed after the command;
+`--dry-run` prints it.
 
-`setup.sh --channel dev --registry HOST/PATH`, `setup.ps1 -Channel dev
--Registry HOST/PATH` and the setup program's `--channel dev` ask for the
-code without showing it (or read it from `--code-file` / `-CodeFile` with
-`--yes`) and hand it to the running deployer on stdin:
-`docker compose --profile deployer exec -T deployer python /app/deployer.py
---channel dev`. `--channel stable` switches back the same way.
+`setup.sh --channel dev`, `setup.ps1 -Channel dev` and the setup program's
+`--channel dev` ask for the code without showing it (or read it from
+`--code-file` / `-CodeFile` with `--yes`) and hand it to the running
+deployer on stdin: `docker compose --profile deployer exec -T deployer
+python /app/deployer.py --channel dev`. `--channel stable` switches back
+the same way.
 
-`POST /api/channel` with `{"channel": "dev", "code": "...", "registry":
-"..."}` (`registry` optional when `POL_DEV_REGISTRY` is set) answers 202
-with the job, 400 with a sentence when the request or the code is refused,
-502 when the registry does not answer, and 409 while another job runs.
-`{"channel": "stable"}` starts the switch back. `GET /api/channel`
+`POST /api/channel` with `{"channel": "dev", "code": "olx1...."}` answers
+202 with the job, 400 with a sentence when the request or the code is
+refused, 502 when the registry does not answer, and 409 while another job
+runs. `{"channel": "stable"}` starts the switch back. `GET /api/channel`
 answers
 
 ```
-{"channel": "dev", "registry": "registry.example.org/team",
- "source": "https://registry.example.org/team", "since": "2026-10-23T09:14:00Z",
- "registry_default": "registry.example.org/team", "code_stored": true,
+{"channel": "dev", "since": "2026-10-23T09:14:00Z", "code_stored": true,
  "ghcr": true, "problem": null,
  "images": [{"key": "ffxi", "name": "...", "stable": "ghcr.io/landsandboat/server",
-             "dev_image": "lsb-server:stock", "dev": "registry.example.org/team/lsb-server:stock",
-             "applies": true, "source": "https://registry.example.org/team/lsb-server",
-             "license": "GPL-3.0-or-later", "what": "...", "note": null, "enabled": true}, ...]}
+             "dev_name": "lsb-server (dev)", "applies": true, "license": "GPL-3.0-or-later",
+             "what": "...", "note": null, "enabled": true, "has_source": true}, ...]}
 ```
 
 with one row per stable image of the core and each installed game; a row
-with no dev build has `dev_image` null and a `note`.
+with no dev build has `dev_name` null and a `note`. `has_source` is only
+ever true on the dev channel. `GET /api/channel/source?stable=<image>`
+answers `{"url", "license"}` for such a row, and 404 on the stable channel
+or for an image without a source address.
 
 ## Settings
 
@@ -740,8 +783,8 @@ with no dev build has `dev_image` null and a `note`.
 | `POL_DEPLOYER_BIND` | `0.0.0.0:8099` | Address inside the container. Change `POL_DEPLOYER_URL` with it. |
 | `POL_DEPLOYER_URL` | `http://deployer:8099` | Where the admin service finds the deployer. |
 | `POL_DEPLOY_GITHUB_API` | `https://api.github.com` | The GitHub API the update check asks. Tests point it at a stand-in. |
-| `POL_DEV_REGISTRY` | empty | The dev channel's registry, `host/path`. Empty: the panel asks for it with the code. |
-| `POL_DEV_SOURCE` | `https://<POL_DEV_REGISTRY>` | Where the dev images' source repositories are. |
+| `POL_DEV_REGISTRY` | empty | Advanced: the registry, `host/path`, a plain token is for. An access code (`olx1.`...) carries its own and does not need it. |
+| `POL_DEV_SOURCE` | `https://<registry>` | Where the dev images' source repositories are, when the access code does not say. |
 | `POL_DEV_USER` | `dev` | The user name an access code without one (`name:code`) signs in under. |
 | `POL_DEV_REGISTRY_HTTP` | empty | `1`: the registry speaks plain http (tests, a registry on your network). |
 

@@ -706,11 +706,13 @@ class SetupAppTest(unittest.TestCase):
         asked = []
         with mock.patch.object(self.mod.getpass, "getpass", lambda prompt: asked.append(prompt) or code):
             self.main("--dir", self.folder, "--panel-url", self.panel, "--panel-wait", "5",
-                      "--channel", "dev", answers=["registry.example.org/kart", "", "1", LAN, "n", "", ""])
+                      "--channel", "dev", answers=["", "1", LAN, "n", "", ""])
         self.assertEqual(asked, ["Access code (not shown): "])
-        self.assertTrue(any(q.startswith("Dev registry") for q in self.asked), self.asked)
+        # only the code is asked for: an access code carries where the dev builds are
+        self.assertFalse(any("registry" in q.lower() for q in self.asked), self.asked)
         script = self.calls("script")[0]
-        self.assertIn("--channel dev --registry registry.example.org/kart --code-file ", script)
+        self.assertIn("--channel dev --code-file ", script)
+        self.assertNotIn("--registry", script)
         self.assertNotIn(code, script)
         self.assertEqual(self.get("channel_code"), code)
 

@@ -76,7 +76,8 @@ panel's password. Running it again keeps the existing .env.
   --channel stable|dev  the update channel (docs/deployer.md, "Dev channel"):
                         dev follows the developers' preview builds and asks
                         for an access code (hidden); needs the deployer
-  --registry HOST/PATH  the dev registry (kept in .env as POL_DEV_REGISTRY)
+  --registry HOST/PATH  advanced: the registry a plain token is for (kept in .env
+                        as POL_DEV_REGISTRY); an access code carries its own
   --code-file FILE      with --yes: read the access code from FILE's first line
   --admin-user NAME     the admin panel's user name on a new .env
                         (default: admin)
@@ -760,18 +761,11 @@ if [ -n "$USE_DEPLOYER" ]; then
 fi
 
 # The update channel (docs/deployer.md, "Dev channel"). The deployer signs in to the dev
-# registry and keeps the access code; this script only hands it over, on stdin.
+# builds and keeps the access code; this script only hands it over, on stdin.
 if [ "$CHANNEL" = dev ]; then
     [ -n "$USE_DEPLOYER" ] || die "the dev channel is run by the deployer; run with --deployer"
+    # an access code carries where the dev builds are; --registry is only for a plain token
     [ -n "$DEV_REGISTRY" ] && env_set "$WORK" POL_DEV_REGISTRY "$DEV_REGISTRY"
-    if [ -z "$(env_get POL_DEV_REGISTRY "$WORK")" ]; then
-        [ -n "$YES" ] && die "--channel dev needs --registry (the developers give it with the access code)"
-        ask "Dev registry (the developers give it with the access code)" ""
-        case "$REPLY" in
-            ""|*[!a-z0-9./:_-]*|/*|*//*) die "the dev registry looks like registry.example.org/team" ;;
-        esac
-        env_set "$WORK" POL_DEV_REGISTRY "$REPLY"
-    fi
     if [ -n "$CODE_FILE" ]; then
         [ -r "$CODE_FILE" ] || die "cannot read the access code file $CODE_FILE"
         IFS= read -r DEV_CODE <"$CODE_FILE" || true

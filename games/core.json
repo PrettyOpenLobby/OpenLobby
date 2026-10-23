@@ -21,6 +21,17 @@
     {"name": "openlobby-sslterm:latest", "context": "services/sslterm", "dockerfile": "Dockerfile",
      "ghcr": "ghcr.io/prettyopenlobby/openlobby-sslterm", "tag_var": "OPENLOBBY_TAG"}
   ],
+  "dev": [
+    {"replaces": "ghcr.io/prettyopenlobby/openlobby", "image": "openlobby", "tag": "dev",
+     "services": ["dns", "http", "ucs", "login", "authsess", "authrelay", "gmd", "ucs-plain", "admin", "patch"],
+     "source": "https://github.com/PrettyOpenLobby/OpenLobby", "license": "AGPL-3.0"},
+    {"replaces": "ghcr.io/prettyopenlobby/openlobby-ssl3", "image": "openlobby-ssl3", "tag": "dev",
+     "services": ["ssl3web", "ssl3ucs"],
+     "source": "https://github.com/PrettyOpenLobby/OpenLobby", "license": "AGPL-3.0"},
+    {"replaces": "ghcr.io/prettyopenlobby/openlobby-sslterm", "image": "openlobby-sslterm", "tag": "dev",
+     "services": ["sslterm"],
+     "source": "https://github.com/PrettyOpenLobby/OpenLobby", "license": "AGPL-3.0"}
+  ],
   "services": ["postgres", "valkey", "dns", "http", "ssl3web", "ssl3ucs", "sslterm", "ucs", "login",
                "authsess", "authrelay", "ucs-plain", "admin", "patch"],
   "profiles": {"gm": ["gmd"], "deployer": ["deployer"]},

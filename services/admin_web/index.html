@@ -1998,14 +1998,12 @@
         <p class="hint chan-warn" id="chanWarn" hidden></p>
         <div class="ga-box" id="chanForm" hidden>
           <h3>Switch to Dev</h3>
-          <p class="hint" style="margin-top:0">The developers give you a registry and an access code. The panel
-            hands the code to the deployer, which checks it with the registry and keeps it; it is not stored
-            here and never shown again. Switching pulls the dev images and restarts what runs them.</p>
+          <p class="hint" style="margin-top:0">Paste the access code the developers gave you. The panel hands it
+            to the deployer, which checks it and keeps it; it is not stored here and never shown again.
+            Switching pulls the dev builds and restarts what runs them.</p>
           <div class="row">
-            <div style="flex:2 1 240px"><label for="chanReg">Dev registry</label>
-              <input type="text" id="chanReg" class="mono" maxlength="300" autocomplete="off" spellcheck="false" placeholder="registry.example.org/team"></div>
-            <div style="flex:2 1 220px"><label for="chanCode">Access code</label>
-              <input type="password" id="chanCode" class="mono" maxlength="512" autocomplete="off" spellcheck="false"></div>
+            <div style="flex:1 1 280px"><label for="chanCode">Access code</label>
+              <input type="password" id="chanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="olx1..."></div>
           </div>
           <div class="ga-result bad" id="chanResult" role="alert" hidden></div>
           <div class="toolbar" style="margin-top:12px">
@@ -2014,7 +2012,7 @@
           </div>
         </div>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Runs</th><th>Stable image</th>
-          <th>On Dev</th><th>Source</th></tr></thead><tbody id="chanBody"></tbody></table></div>
+          <th>On Dev</th><th id="chanSrcHead">Source</th></tr></thead><tbody id="chanBody"></tbody></table></div>
         <p class="hint chan-src" id="chanGaps" hidden></p>
         <p class="hint chan-src" id="chanSource" hidden></p>
       </div>

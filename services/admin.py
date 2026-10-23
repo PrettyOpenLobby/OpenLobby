@@ -2454,6 +2454,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(*admindeploy.uploads())
         if path == "/api/deploy/channel":
             return self._send(*admindeploy.channel())
+        if path == "/api/deploy/channel/source":
+            # the source of a dev image (the GPL and AGPL offer): a redirect, so its address
+            # is in no answer the page reads, only where the owner's click lands
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            st, out = admindeploy.channel_source(q.get("stable", [""])[0])
+            if st == 200:
+                return self._send(302, "", "text/plain", headers=[("Location", out["url"]),
+                                                                  ("Referrer-Policy", "no-referrer")])
+            return self._send(st, str(out.get("error") or "Not found.") + "\n",
+                              "text/plain; charset=utf-8")
         # update notices (adminupdates.py) and a pairing code's state: owner only, as above
         if path == "/api/updates":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)

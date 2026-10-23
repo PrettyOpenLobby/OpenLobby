@@ -103,7 +103,8 @@ class Answers:
 
 
 #: The update channel the setup script is run with (docs/deployer.md, "Dev channel"):
-#: {"channel", "registry", "code_file"}. The access code is in code_file, a private
+#: {"channel", "registry", "code_file"} ("registry" only for a plain token, advanced: an
+#: access code carries its own). The access code is in code_file, a private
 #: temporary file the script reads and this program removes; never on a command line.
 CHANNEL = {}
 REGISTRY_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$")
@@ -125,8 +126,8 @@ def channel_argv(windows):
 
 
 def prepare_channel(args):
-    """Ask what the dev channel needs (the registry, the access code, hidden) and keep the
-    code in a private temporary file for the script. False when it cannot go ahead."""
+    """Ask what the dev channel needs (the access code, hidden) and keep it in a private
+    temporary file for the script. False when it cannot go ahead."""
     CHANNEL.clear()
     if not args.channel:
         return True
@@ -134,8 +135,6 @@ def prepare_channel(args):
     if args.channel != "dev":
         return True
     reg = (args.registry or "").strip()
-    if not reg and not Answers.yes:
-        reg = ask("Dev registry (the developers give it with the access code)", "").strip()
     if reg and not REGISTRY_RE.match(reg):
         say("The dev registry looks like registry.example.org/team (got %s)." % reg)
         return False
@@ -1653,7 +1652,9 @@ def parse_args(argv=None):
     ap.add_argument("--channel", choices=("stable", "dev"),
                     help="the update channel: dev follows the developers' preview builds and asks for "
                          "an access code (not shown); docs/deployer.md, \"Dev channel\"")
-    ap.add_argument("--registry", default="", help="with --channel dev: the dev registry, host/path")
+    ap.add_argument("--registry", default="",
+                    help="advanced, with --channel dev and a plain token: its registry, host/path "
+                         "(an access code carries its own)")
     ap.add_argument("--code-file", default="",
                     help="with --channel dev and --yes: read the access code from this file's first line")
     ap.add_argument("--repo", default=REPO_URL, help=argparse.SUPPRESS)

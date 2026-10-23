@@ -8,8 +8,9 @@ Checks that the owner sees the catalog and the jobs, that a moderator cannot rea
 that an action goes to the deployer with the panel's token and lands in the activity log, that a
 busy deployer's 409 comes back with a sentence, that a job's log is read from an offset, that a
 wrong token and an unreachable deployer read as "not available", and that with no deployer set
-up the page is simply off. The update channel: the owner reads it, a moderator can neither read
-nor switch it, an access code goes to the deployer and nowhere else (not the activity log, not
+up the page is simply off. The update channel: the owner reads it (by short image names: the
+registry's address is not passed on, even from a deployer that sends it), a moderator can neither
+read nor switch it, a dev image's source link is a redirect for the owner only, an access code goes to the deployer and nowhere else (not the activity log, not
 the panel's own output), a code that does not fit never leaves the panel, the deployer's refusal
 comes back with its sentence, and a deployer without channels reads as such. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
 subprocess on a loopback port.
@@ -126,6 +127,14 @@ class Deployer(BaseHTTPRequestHandler):
             if not CHANNEL["on"]:
                 return self._reply(404, {"error": "not found"})
             return self._reply(200, CHANNEL_ANSWER)
+        if self.path.startswith("/api/channel/source?"):
+            SEEN.append(("SOURCE", self.path))
+            stable = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("stable", [""])[0]
+            if stable == "ghcr.io/example/kart":
+                return self._reply(200, {"url": "https://code.example.org/kart/kart", "license": "AGPL-3.0"})
+            if stable == "ghcr.io/example/evil":
+                return self._reply(200, {"url": "javascript:alert(1)"})
+            return self._reply(404, {"error": "No dev image there has a source address."})
         if self.path.startswith("/api/jobs/j2/log?offset="):
             off = int(self.path.rsplit("=", 1)[1])
             return self._reply(200, LOG[off:], "text/plain", [("X-Job-State", "running"),
@@ -336,9 +345,35 @@ def main():
 
         print("update channel")
         code, ch = owner.call("api/deploy/channel")
-        chk("the owner reads the channel and its images",
-            (code, ch.get("available"), ch.get("channel"), [r["dev"] for r in ch.get("images", [])]),
-            (200, True, "stable", ["registry.example.org/kart/kart:main"]))
+        chk("the owner reads the channel and its images, by short name",
+            (code, ch.get("available"), ch.get("channel"), [r.get("dev_name") for r in ch.get("images", [])]),
+            (200, True, "stable", ["kart (dev)"]))
+        chk("...and the registry's address is nowhere in the answer, though the deployer sent it",
+            ("registry.example.org" in json.dumps(ch), sorted(ch), sorted(ch["images"][0])),
+            (False, ["available", "channel", "code_stored", "ghcr", "images", "problem", "since"],
+             ["applies", "dev_name", "enabled", "has_source", "key", "license", "name", "note", "stable", "what"]))
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+        jar = [h for h in owner.op.handlers if isinstance(h, urllib.request.HTTPCookieProcessor)][0].cookiejar
+
+        def source(who_jar, stable):
+            op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(who_jar), NoRedirect)
+            try:
+                r = op.open(owner.url + "api/deploy/channel/source?" + urllib.parse.urlencode({"stable": stable}),
+                            timeout=15)
+                return r.status, r.headers.get("Location")
+            except urllib.error.HTTPError as e:
+                return e.code, e.headers.get("Location")
+        chk("the source link sends the owner to the address the deployer gives",
+            source(jar, "ghcr.io/example/kart"), (302, "https://code.example.org/kart/kart"))
+        chk("...an image without one, or an address that is not http(s), is a 404",
+            (source(jar, "ghcr.io/example/none"), source(jar, "ghcr.io/example/evil")), ((404, None), (404, None)))
+        gjar = [h for h in gm.op.handlers if isinstance(h, urllib.request.HTTPCookieProcessor)][0].cookiejar
+        n = len(SEEN)
+        chk("...and a moderator gets no redirect", source(gjar, "ghcr.io/example/kart"), (403, None))
+        chk("...nor reaches the deployer", [s for s in SEEN[n:] if s[0] == "SOURCE"], [])
         n = len(SEEN)
         chk("a moderator with every permission can neither read nor switch it",
             (gm.call("api/deploy/channel")[0],

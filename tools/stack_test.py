@@ -660,9 +660,108 @@ def check_channel(catalog, root, parent):
     core = [r for r in rows if r["stable"] == "ghcr.io/prettyopenlobby/openlobby"][0]
     ok(not core["applies"] and "POL_DEPLOY_GHCR" in core["note"], "  and the row says why")
     ok(core["source"] == "https://code.example.org/kart/openlobby", "  the source URL is under the channel's")
-    gaps = [r["stable"] for r in devchannel.image_rows(catalog, DEV, True) if r["dev_image"] is None]
+    nodev = json.loads(json.dumps(catalog))
+    nodev["core"].pop("dev", None)
+    gaps = [r["stable"] for r in devchannel.image_rows(nodev, DEV, True) if r["dev_image"] is None]
     ok("ghcr.io/prettyopenlobby/openlobby" in gaps and "ghcr.io/landsandboat/server" not in gaps,
        "rows: the images with no dev build are listed (%d)" % len(gaps))
+
+    # the shipped catalog: every image an install pulls has a dev build, tag dev
+    rows = devchannel.image_rows(catalog, DEV, True)
+    own = devchannel.own_images(catalog)
+    ok(own and all(any(r["stable"] == s and r["dev_image"] for r in rows) for s in own),
+       "catalog: each published image of ours has a dev build (%s)"
+       % sorted(s for s in own if not any(r["stable"] == s and r["dev_image"] for r in rows)))
+    ok(all(r["dev_image"].endswith(":dev") for r in rows if r["dev_image"] and r["stable"] in own),
+       "catalog: our dev builds follow the dev tag")
+    lsb = [r for r in rows if r["stable"] == "ghcr.io/landsandboat/server"][0]
+    ok(lsb["dev_name"] == "lsb-server (dev)" and lsb["source"] == "https://code.example.org/kart/lsb-server",
+       "rows: dev_name is the short name, a relative source is under the channel's (%s)" % lsb["dev_name"])
+    core = [r for r in rows if r["stable"] == "ghcr.io/prettyopenlobby/openlobby"][0]
+    ok(core["dev"] == "registry.example.org/kart/openlobby:dev" and core["source"].startswith("https://")
+       and "example.org/kart" not in core["source"], "rows: a full source address is kept as it is")
+    for keys, want, gone in (
+            ([], {"login": "openlobby", "authsess": "openlobby", "dns": "openlobby",
+                  "ssl3web": "openlobby-ssl3", "sslterm": "openlobby-sslterm"}, ()),
+            (["fe"], {"dns": "openlobby", "feworld": "hippaulring"}, ("login", "authsess")),
+            (["tm"], {"login": "hippaulmaster", "authsess": "hippaulmaster", "tmrank": "hippaulmaster",
+                      "dns": "openlobby"}, ()),
+            (["tm", "jan"], {"tmrank": "hippaulmaster", "jan": "hippaulholo"}, ("login", "authsess")),
+            (["ffxi"], {"bridge": "hippaulbridge", "world": "lsb-server"}, ("login", "db"))):
+        p = stack.plan(catalog, keys, ["up", "-d"], ghcr=True, root=root, parent=parent, environ={},
+                       channel=DEV)
+        o = p["override"]
+        miss = [s for s, img in want.items()
+                if "  %s:\n    image: registry.example.org/kart/%s:" % (s, img) not in o]
+        ok(not miss and not any("\n  %s:\n" % s in "\n" + o for s in gone),
+           "dev, published %s: the title chain's services are left to the chain (%s)" % (keys or "core", miss))
+
+    # access codes: olx1. + base64url(JSON), checked strictly
+    code = devchannel.make_code("registry.example.org/kart", "kart-token-0123", "https://code.example.org/kart")
+    ok(code.startswith("olx1.") and "=" not in code and "kart-token" not in code
+       and devchannel.parse_code(code) == {"kind": "olx1", "registry": "registry.example.org/kart",
+                                           "token": "kart-token-0123", "source": "https://code.example.org/kart"},
+       "code: round trip (%s)" % code[:20])
+    pub = devchannel.make_code("registry.example.org/kart")
+    ok(devchannel.parse_code(pub)["token"] is None and devchannel.token_of(pub) is None
+       and devchannel.token_of(code) == "kart-token-0123", "code: one without a token reads as public")
+    ok(devchannel.parse_code("kart-plain-token", registry="registry.example.org/kart")
+       == {"kind": "plain", "registry": "registry.example.org/kart", "token": "kart-plain-token", "source": None},
+       "code: a plain token with a registry still works (the old way)")
+    import base64 as _b64
+
+    def enc(raw):
+        return "olx1." + _b64.urlsafe_b64encode(raw).decode().rstrip("=")
+    for bad, want in (("", "Type the access code"), ("kart-plain-token", "start with olx1"),
+                      ("olx1.", "damaged"), ("olx1.%%%%%%%%", "damaged"), (code[:-3], "damaged"),
+                      (code + "=", "damaged"), (code + " x", "damaged"), ("olx2." + code[5:], "newer"),
+                      ("olx0." + code[5:], "damaged"), (enc(b"[1,2]"), "damaged"), (enc(b"not json"), "damaged"),
+                      (enc(b'{"r":"Not A Registry"}'), "damaged"), (enc(b'{"t":"x"}'), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","x":1}'), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","t":"has space"}'), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","t":7}'), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","s":"ftp://x.example.org"}'), "damaged"),
+                      (enc(b'\xff\xfe'), "damaged")):
+        try:
+            devchannel.parse_code(bad)
+            ok(False, "code: %r refused" % bad[:30])
+        except devchannel.ChannelError as exc:
+            ok(want in str(exc) and "kart-token" not in str(exc),
+               "code: %r refused with a sentence (%s)" % (bad[:24], exc))
+
+    # stack.py dev-code: the token from a file or stdin, never the command line
+    sp = os.path.join(HERE, "stack.py")
+    tmp = tempfile.mkdtemp(prefix="stacktest-code-")
+    try:
+        tf = os.path.join(tmp, "token")
+        with open(tf, "w") as f:
+            f.write("kart-token-0123\n")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--registry", "registry.example.org/kart",
+                            "--token-file", tf, "--source", "https://code.example.org/kart"],
+                           capture_output=True, text=True)
+        ok(r.returncode == 0 and r.stdout.strip() == code, "dev-code --token-file: the same code (%s)" % r.stderr)
+        r = subprocess.run([sys.executable, sp, "dev-code", "--registry", "registry.example.org/kart",
+                            "--token-file", "-", "--source", "https://code.example.org/kart"],
+                           input="kart-token-0123\n", capture_output=True, text=True)
+        ok(r.returncode == 0 and r.stdout.strip() == code, "dev-code --token-file -: from stdin")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--registry", "registry.example.org/kart"],
+                           capture_output=True, text=True)
+        ok(r.returncode == 0 and r.stdout.strip() == pub, "dev-code with no token: a public code")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--decode"], input=code + "\n",
+                           capture_output=True, text=True)
+        ok(r.returncode == 0 and "registry.example.org/kart" in r.stdout and "token:    yes" in r.stdout
+           and "kart-token" not in r.stdout, "dev-code --decode: says what is in it, not the token")
+        for argv, want in ((["dev-code"], "--registry"),
+                           (["dev-code", "--registry", "registry.example.org/kart", "kart-token-0123"],
+                            "never given on the command line"),
+                           (["dev-code", "--registry", "Not A Registry"], "registry"),
+                           (["dev-code", "--registry", "registry.example.org/kart", "--token-file",
+                             os.path.join(tmp, "absent")], "cannot read")):
+            r = subprocess.run([sys.executable, sp] + argv, capture_output=True, text=True)
+            ok(r.returncode == 2 and want in r.stderr and "kart-token" not in r.stderr,
+               "stack.py %s: refused (%s)" % (" ".join(argv[:2]), r.stderr.strip()))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
     # .channel round trip and refusals, in a scratch checkout
     tmp = tempfile.mkdtemp(prefix="stacktest-channel-")

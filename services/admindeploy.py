@@ -99,15 +99,52 @@ def updates(refresh=False):
 OLD_DEPLOYER = "This deployer has no update channels yet; update the core first, then try again."
 
 
+#: what the panel passes on of the deployer's channel answer and of each image row: never
+#: the registry's address, which the page does not show (it says "dev builds")
+CHANNEL_KEYS = ("channel", "since", "code_stored", "ghcr", "problem")
+CHANNEL_ROW = ("key", "name", "stable", "dev_name", "applies", "what", "license", "note",
+               "enabled", "has_source")
+_SHORT = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+
+
+def _row(raw):
+    out = {k: raw.get(k) for k in CHANNEL_ROW}
+    if not isinstance(out["dev_name"], str):
+        # an older deployer names the image name:tag; the page shows "name (dev)"
+        img = raw.get("dev_image")
+        name = img.rsplit(":", 1)[0].rsplit("/", 1)[-1] if isinstance(img, str) else ""
+        out["dev_name"] = "%s (dev)" % name if _SHORT.match(name) else None
+    out["has_source"] = out["has_source"] is True
+    return out
+
+
 def channel():
-    """The update channel (docs/deployer.md, "Dev channel"): which one, the dev registry, and
-    each image of the core and the installed games on it, with where its source is."""
+    """The update channel (docs/deployer.md, "Dev channel"): which one, and each image of the
+    core and the installed games on it by short name. The registry's address is not passed
+    on, even from a deployer that sends it."""
     st, out = _call("GET", "/api/channel")
     if st == 404:
         return 200, {"available": False, "why": OLD_DEPLOYER}
-    if st == 200:
-        out["available"] = True
-    return st, out
+    if st != 200:
+        return st, out
+    got = {k: out.get(k) for k in CHANNEL_KEYS}
+    got["images"] = [_row(r) for r in out.get("images") or [] if isinstance(r, dict)]
+    got["available"] = True
+    return 200, got
+
+
+def channel_source(stable):
+    """(status, {"url"} or {"error"}): where the source of the dev image that replaces the
+    stable image `stable` is, from the deployer, on the dev channel only. The panel sends
+    the owner there (admin.py answers with a redirect), so the address is in no page."""
+    if not isinstance(stable, str) or not stable or len(stable) > 300:
+        return 400, {"error": "Which image?"}
+    st, out = _call("GET", "/api/channel/source?" + urllib.parse.urlencode({"stable": stable}))
+    url = out.get("url") if st == 200 else None
+    if not isinstance(url, str) or not devchannel.SOURCE.match(url):
+        return (404 if st in (200, 404) else st), {
+            "error": out.get("error") or "The deployer does not say where that source is."}
+    return 200, {"url": url}
 
 
 def set_channel(body):
@@ -121,8 +158,9 @@ def set_channel(body):
         code = body.get("code")
         code = code.strip() if isinstance(code, str) else ""
         if not devchannel.CODE.match(code):
-            return 400, {"error": "The access code is 8 to 512 characters, with no spaces."}
+            return 400, {"error": "The access code is 8 to 2048 characters, with no spaces."}
         out["code"] = code
+        # advanced: the registry of a plain token (an olx1. code carries its own)
         reg = body.get("registry")
         if isinstance(reg, str) and reg.strip():
             if not devchannel.REGISTRY.match(reg.strip()):

@@ -805,11 +805,7 @@ function chanForm(open) {
   $("#chanForm").hidden = !open;
   $("#chanResult").hidden = true;
   $("#chanCode").value = "";
-  if (open) {
-    const c = CHAN || {};
-    if (!$("#chanReg").value) $("#chanReg").value = c.registry || c.registry_default || "";
-    ($("#chanReg").value ? $("#chanCode") : $("#chanReg")).focus();
-  }
+  if (open) $("#chanCode").focus();
 }
 
 function renderChannel() {
@@ -840,42 +836,42 @@ function renderChannel() {
   }
   const since = c.since ? updDate(c.since) : "";
   $("#chanHint").textContent = dev
-    ? `This server follows the dev builds in ${c.registry}${since ? " since " + since : ""}. Updates and installs `
-      + "use the dev image wherever there is one; everything else stays on the published images."
+    ? `This server follows the dev builds${since ? " since " + since : ""}. Updates and installs use the dev `
+      + "build wherever there is one; everything else stays on the published images."
     : "Stable follows the published releases. Dev follows the developers' preview builds before they are "
       + "released; they give you access with an access code.";
   const warn = c.problem || (dev && !c.code_stored
-    ? "No access code is stored here, so the dev images cannot be updated. Enter a new access code, or switch back to Stable." : "");
+    ? "No access code is stored here, so the dev builds cannot be updated. Enter a new access code, or switch back to Stable." : "");
   $("#chanWarn").hidden = !warn;
   $("#chanWarn").textContent = warn;
   const rows = (c.images || []);
-  const devRows = rows.filter((r) => r.dev_image);
-  const gaps = rows.filter((r) => !r.dev_image);
+  const devRows = rows.filter((r) => r.dev_name);
+  const gaps = rows.filter((r) => !r.dev_name);
   // an image name breaks only after a slash
   const img = (ref) => `<code class="mono chan-img">${esc(ref).replace(/\//g, "/<wbr>")}</code>`;
   const who = (r) => (r.key === "core" ? "OpenLobby (this server)" : r.name || r.key);
+  // The source offer (GPL, AGPL) for the owner on Dev: the panel redirects to it, so the
+  // address is in no answer this page reads.
+  const srcLink = (r) => r.has_source
+    ? `<a href="/api/deploy/channel/source?stable=${encodeURIComponent(r.stable)}" target="_blank" `
+      + `rel="noopener noreferrer">${esc(r.license ? r.license + " source" : "Source")}</a>`
+    : '<span class="muted">-</span>';
+  $("#chanSrcHead").hidden = !dev;
   $("#chanBody").innerHTML = devRows.map((r) => {
-    const onDev = (r.applies ? img(r.dev || r.dev_image) : `<span class="muted">${esc(r.note || "")}</span>`)
+    const onDev = (r.applies ? img(r.dev_name) : `<span class="muted">${esc(r.note || "")}</span>`)
       + (r.what ? `<span class="chan-what">${esc(r.what)}</span>` : "");
-    const src = r.source
-      ? `<a href="${esc(r.source)}" target="_blank" rel="noopener noreferrer" class="mono chan-img">`
-        + `${esc(r.source.replace(/^https?:\/\//, "")).replace(/\//g, "/<wbr>")}</a>`
-        + (r.license ? `<span class="chan-what">${esc(r.license)}</span>` : "")
-      : '<span class="muted">-</span>';
     return `<tr><td class="strong" data-label="Runs">${esc(who(r))}</td>`
       + `<td data-label="Stable image">${img(r.stable)}</td>`
-      + `<td data-label="On Dev"><div>${onDev}</div></td><td data-label="Source"><div>${src}</div></td></tr>`;
-  }).join("") || '<tr><td colspan="4" class="muted">Nothing installed here has a dev build yet.</td></tr>';
+      + `<td data-label="On Dev"><div>${onDev}</div></td>`
+      + (dev ? `<td data-label="Source"><div>${srcLink(r)}</div></td>` : "") + "</tr>";
+  }).join("") || `<tr><td colspan="${dev ? 4 : 3}" class="muted">Nothing installed here has a dev build yet.</td></tr>`;
   const gapNames = [...new Set(gaps.map((r) => r.stable.split("/").pop()))];
   $("#chanGaps").hidden = !gapNames.length;
   $("#chanGaps").innerHTML = `No dev build yet, so ${dev ? "these stay" : "these would stay"} on the published images: `
     + gapNames.map((n) => `<code class="mono">${esc(n)}</code>`).join(", ") + ".";
-  const anySrc = devRows.some((r) => r.source);
+  const anySrc = dev && devRows.some((r) => r.has_source);
   $("#chanSource").hidden = !anySrc;
-  $("#chanSource").textContent = dev
-    ? "The source of each dev image is at its link, under the licence named beside it. The same access code "
-      + "reads it: use the code as the password when git asks, with any user name."
-    : "On Dev, the source of each dev image is at its link, and the access code reads it as well.";
+  $("#chanSource").textContent = "Each dev build's source code is at its link, under the licence the link names.";
 }
 
 async function chanSwitch(body) {
@@ -904,7 +900,7 @@ document.addEventListener("click", async (e) => {
     if (want === "dev" && !dev) return chanForm($("#chanForm").hidden);
     if (want === "stable" && dev) {
       const backs = "Back to Stable?\n\nThe deployer pulls the published images, restarts what ran a dev image, "
-        + "signs out of the dev registry and forgets the access code.";
+        + "signs out of the dev builds and forgets the access code.";
       const ffxi = ((CHAN || {}).images || []).some((r) => r.key === "ffxi" && r.applies && r.enabled);
       if (!confirm(backs + (ffxi ? "\n\nFFXI's world database keeps what the dev world server changed in it; to go back "
         + "exactly, restore the backup you took before switching to Dev (docs/deployer.md)." : ""))) return;
@@ -916,20 +912,20 @@ document.addEventListener("click", async (e) => {
   if (t.closest("#chanNewCode")) return chanForm($("#chanForm").hidden);
   if (t.closest("#chanCancel")) return chanForm(false);
   if (t.closest("#chanGo")) {
-    const code = $("#chanCode").value.trim(), registry = $("#chanReg").value.trim();
+    const code = $("#chanCode").value.trim();
     $("#chanCode").value = "";
     if (!code) { $("#chanResult").hidden = false; $("#chanResult").textContent = "Type the access code."; return; }
     t.closest("#chanGo").disabled = true;
     $("#chanResult").hidden = true;
     const btn = t.closest("#chanGo");
     btn.textContent = "Checking the code...";
-    await chanSwitch({ channel: "dev", code, registry });
+    await chanSwitch({ channel: "dev", code });
     btn.textContent = "Switch to Dev";
     btn.disabled = false;
   }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.target.id === "chanCode" || e.target.id === "chanReg")) {
+  if (e.key === "Enter" && e.target.id === "chanCode") {
     e.preventDefault();
     $("#chanGo").click();
   }
