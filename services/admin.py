@@ -2512,6 +2512,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/deploy/patches":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._send(*admindeploy.patches(q.get("recheck", [""])[0] == "1"))
+        if path == "/api/deploy/patches/feed":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            return self._send(*admindeploy.patch_feed(q.get("refresh", [""])[0] == "1"))
         if path == "/api/logs":
             return self._logs("GET")
         if path in ("/api/help", "/api/help/thread"):
@@ -2759,7 +2762,8 @@ class Handler(BaseHTTPRequestHandler):
             user, role, _p = self._caller()
             what = {"patch_import": "imported a patch bundle", "patch_build": "built a patch bundle",
                     "patch_rollback": "rolled a patch bundle back", "patch_remove": "removed a patch bundle",
-                    "patch_check": "checked the patch bundles"}.get(body.get("action"), "patch action")
+                    "patch_check": "checked the patch bundles",
+                    "patch_fetch": "fetched a patch bundle from the developers"}.get(body.get("action"), "patch action")
             _audit(user, role, what, target=("%s-%s" % (body.get("region"), body.get("product")))[:16]
                    if body.get("region") else None,
                    detail=dict({k: body.get(k) for k in ("to", "version", "source") if body.get(k)}, job=out.get("job")),

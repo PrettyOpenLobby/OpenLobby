@@ -10,6 +10,7 @@ can be carried to the machine running the patch service. See docs/polpatch.md.
     python tools/patch/polpatch.py build-update --base TetraMaster-W2U.polpatch \\
         --files stage/tetra --version 20040714_0 -o TetraMaster-W2U-20040714_0.polpatch
     python tools/patch/polpatch.py from-bundle --bundle mirrors/W2U-0002 -o W2U-0002.polpatch
+    python tools/patch/polpatch.py from-bundle --bundle mirrors/W2U-0002 --latest-update -o W2U-0002-new.polpatch
     python tools/patch/polpatch.py inspect TetraMaster-W2U.polpatch
     python tools/patch/polpatch.py verify TetraMaster-W2U.polpatch [--against mirrors/W2U-0002]
     python tools/patch/polpatch.py apply TetraMaster-W2U.polpatch --mirrors mirrors
@@ -74,8 +75,8 @@ def cmd_build_update(a):
 
 
 def cmd_from_bundle(a):
-    m = lib.build_from_bundle(a.bundle, a.out, note=a.note or "",
-                              limits=_limits(a), log=print)
+    build = lib.build_latest_update if a.latest_update else lib.build_from_bundle
+    m = build(a.bundle, a.out, note=a.note or "", limits=_limits(a), log=print)
     return _done(m, a.out)
 
 
@@ -215,6 +216,8 @@ def main(argv=None):
 
     p = sub.add_parser("from-bundle", help="pack an existing bundle folder")
     p.add_argument("--bundle", required=True, help="mirrors/<REGION>-<PRODUCT>")
+    p.add_argument("--latest-update", action="store_true",
+                   help="pack only the newest version, as an update on the one before it")
     p.add_argument("--note")
     p.add_argument("-o", "--out", required=True)
     limits(p)

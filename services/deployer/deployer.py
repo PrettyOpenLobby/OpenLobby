@@ -79,10 +79,12 @@ import devchannel  # noqa: E402
 import gameupdater  # noqa: E402
 import updatecheck  # noqa: E402
 import patches  # noqa: E402
+import patchfeed  # noqa: E402
 
 VERSION = "3.0"
 
-PATCH_ACTIONS = ("patch_import", "patch_build", "patch_remove", "patch_rollback", "patch_check")
+PATCH_ACTIONS = ("patch_import", "patch_build", "patch_remove", "patch_rollback", "patch_check",
+                 "patch_fetch")
 ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import") + PATCH_ACTIONS
 CORE_ACTIONS = ("update", "restart", "check")
 
@@ -105,6 +107,7 @@ UPDATER_BODY = 16384       # the most a POST /api/updater may hold
 UPDATER_LABEL = "org.openlobby.updater.job"   # on an updater's container: its job id
 VERIFY_TIMEOUT = 3600      # the quick check of an uploaded .polpatch is stopped after this long
 SERVE_WAIT = 90            # seconds the patch service gets to answer again after a restart
+FEED_TTL = 300             # seconds GET /api/patches/feed reuses its last listing
 PATCH_DRAIN = 1800         # the most seconds a patch action waits for downloads to finish
 DRAIN_POLL = 10.0          # how often it asks again while it waits
 PATCHTOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patchtool.py")
@@ -2047,9 +2050,21 @@ def patch_finish(r, dep, region, product, done, restart=True):
 
 
 def patch_install(r, job, dep, path, what):
-    """The steps of patch_import: the full check as an unprivileged user,
-    polpatch.py apply as the mirrors folder's owner, a restart of the patch
-    service and the self-check."""
+    """The steps of patch_import: patch_apply, a restart of the patch service
+    and the self-check."""
+    region, product, summary, unchanged = patch_apply(r, job, dep, path, what)
+    lib = patch_lib(r)
+    bdir = lib.find_bundle(r.cfg.mirrors, region, product)
+    if unchanged and bdir and patches.served(r.cfg.patch_host, r.cfg.patch_offset,
+                                             dep.bundles.describe(lib, bdir)):
+        return patch_finish(r, dep, region, product, summary, restart=False)
+    return patch_finish(r, dep, region, product, summary)
+
+
+def patch_apply(r, job, dep, path, what):
+    """The full check of a .polpatch as an unprivileged user, then
+    polpatch.py apply as the mirrors folder's owner. (region, product,
+    summary, unchanged)."""
     lib = patch_lib(r)
     mirrors = r.cfg.mirrors
     try:
@@ -2089,12 +2104,7 @@ def patch_install(r, job, dep, path, what):
              "unchanged": "Already had"}
     summary = "%s %s/%s %s." % (words.get(action, "Imported"), region, product,
                                 ", ".join(m["versions"]))
-    unchanged = action == "unchanged"
-    bdir = lib.find_bundle(mirrors, region, product)
-    if unchanged and bdir and patches.served(r.cfg.patch_host, r.cfg.patch_offset,
-                                             dep.bundles.describe(lib, bdir)):
-        return patch_finish(r, dep, region, product, summary, restart=False)
-    return patch_finish(r, dep, region, product, summary)
+    return region, product, summary, action == "unchanged"
 
 
 def act_patch_import(r, job, dep):
@@ -2126,6 +2136,59 @@ def act_patch_build(r, job, dep):
         return patch_install(r, job, dep, out, "importing the file just built,")
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+
+def act_patch_fetch(r, job, dep):
+    """Bring one bundle to the patch feed's newest version: plan from a fresh
+    listing, download every file with its size and SHA-256 checked, apply
+    each as patch_import would, then restart the patch service once."""
+    lib = patch_lib(r)
+    region, product = job["region"], job["product"]
+    feed, refused = dep.feed_client()
+    if refused:
+        raise JobFailed(refused[1]["error"])
+    try:
+        listing = feed.bundles()
+    except patchfeed.FeedError as exc:
+        raise JobFailed(str(exc))
+    versions = listing.get((region, product))
+    if not versions:
+        raise JobFailed("The patch feed has nothing for %s/%s." % (region, product))
+    bdir = lib.find_bundle(r.cfg.mirrors, region, product)
+    have = dep.bundles.describe(lib, bdir)["versions"] if bdir else []
+    p = patchfeed.plan(versions, have)
+    if p["status"] in ("current", "ahead"):
+        return "ok", "%s/%s already has %s; there was nothing to fetch." % (
+            region, product, have[-1]), []
+    if not p["steps"]:
+        raise JobFailed(p["why"])
+    r.log.line("fetching %d file(s) for %s/%s, %d bytes in all: %s"
+               % (len(p["steps"]), region, product, p["size"],
+                  ", ".join("%s (%s)" % (v, n) for v, n, _ in p["steps"])))
+    home = os.path.join(r.cfg.state, "feed", job["id"])
+    shutil.rmtree(home, ignore_errors=True)
+    os.makedirs(home, mode=0o755)
+    os.chmod(home, 0o755)
+    try:
+        files = []
+        for i, (v, name, want) in enumerate(p["steps"]):
+            dest = os.path.join(home, "%02d-%s" % (i, name))
+            r.log.line("downloading %s %s (%d bytes)" % (v, name, want["size"]))
+            try:
+                feed.download(region, product, v, name, want, dest, r.cfg.upload_max)
+            except patchfeed.FeedError as exc:
+                raise JobFailed(str(exc))
+            os.chmod(dest, 0o644)
+            files.append(dest)
+        for path in files:
+            _, _, summary, _ = patch_apply(r, job, dep, path, "installing from the patch feed,")
+            r.log.line(summary)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    dep.feed_cache = None
+    done = "Fetched %s/%s %s from the patch feed (%d file(s))." % (
+        region, product, p["latest"], len(p["steps"]))
+    return patch_finish(r, dep, region, product, done)
 
 
 def the_bundle(r, lib, region, product):
@@ -2244,7 +2307,7 @@ def act_patch_check(r, job, dep):
 
 PATCH_ACT = {"patch_import": act_patch_import, "patch_build": act_patch_build,
              "patch_remove": act_patch_remove, "patch_rollback": act_patch_rollback,
-             "patch_check": act_patch_check}
+             "patch_check": act_patch_check, "patch_fetch": act_patch_fetch}
 
 
 def hide_paths(text, cfg):
@@ -2289,6 +2352,7 @@ class Deployer:
         self.checks = patches.Checks(cfg.state)
         self.bundles = patches.BundleCache()
         self.manifests = patches.ManifestCache()
+        self.feed_cache = None       # (time, answer) of the last GET /api/patches/feed
         shutil.rmtree(os.path.join(cfg.state, "imports"), ignore_errors=True)
         for uid in self.uploads.expire():
             say("upload %s expired and was removed" % uid)
@@ -2384,6 +2448,15 @@ class Deployer:
             return refused
         if action == "patch_check":
             return self.start("patch_check", None)
+        if action == "patch_fetch":
+            region, product = body.get("region"), body.get("product")
+            err = id_error(region, product)
+            if err:
+                return 400, {"error": err}
+            feed, refused = self.feed_client()
+            if refused:
+                return refused
+            return self.start("patch_fetch", None, {"region": region, "product": product})
         if action == "patch_import":
             code, obj = self.patch_import_request(body, lib)
         elif action == "patch_build":
@@ -2551,6 +2624,66 @@ class Deployer:
             return code, out
         return 200, out
 
+    def feed_info(self):
+        """The parsed access code when this install is on the dev channel with a
+        code that has a patch feed in it, else (None, (code, answer))."""
+        if devchannel.read_channel(self.cfg.core).get("channel") != "dev":
+            return None, (409, {"error": "Patches from the developers come with the dev "
+                                         "channel. Switch to Dev with an access code that "
+                                         "includes patches.", "feed": False})
+        code = devchannel.Store(self.cfg.state).code()
+        try:
+            info = devchannel.parse_code(code, registry=self.cfg.dev_registry) if code else None
+        except devchannel.ChannelError:
+            info = None
+        if not info or not info.get("feed"):
+            return None, (409, {"error": "This access code does not include patches; ask the "
+                                         "developers for one that does.", "feed": False})
+        return info, None
+
+    def feed_host(self):
+        info, _ = self.feed_info()
+        return info["feed"].split("/", 1)[0] if info else None
+
+    def feed_client(self):
+        info, refused = self.feed_info()
+        if refused:
+            return None, refused
+        return patchfeed.Feed(info["feed"], info["token"], self.cfg.dev_user,
+                              self.cfg.dev_scheme), None
+
+    def feed_list(self, refresh=False):
+        """(code, answer) for GET /api/patches/feed: each bundle the feed has,
+        its newest version, the one this server has, and what fetching it takes."""
+        if not self.cfg.mirrors:
+            return 409, {"error": self.cfg.mirrors_note}
+        lib, refused = self.toolkit()
+        if refused:
+            return refused
+        feed, refused = self.feed_client()
+        if refused:
+            return refused
+        hit = self.feed_cache
+        if hit and not refresh and time.time() - hit[0] < FEED_TTL:
+            listing = hit[1]
+        else:
+            try:
+                listing = feed.bundles()
+            except patchfeed.FeedError as exc:
+                return 502, {"error": str(exc)}
+            self.feed_cache = (time.time(), listing)
+        rows = []
+        for (region, product), versions in sorted(listing.items()):
+            bdir = lib.find_bundle(self.cfg.mirrors, region, product)
+            have = self.bundles.describe(lib, bdir)["versions"] if bdir else []
+            p = patchfeed.plan(versions, have)
+            rows.append({"region": region, "product": product,
+                         "title": lib.title_for(region, product),
+                         "latest": p["latest"], "have": have[-1] if have else None,
+                         "status": p["status"], "files": len(p["steps"]),
+                         "size": p["size"], "why": p["why"]})
+        return 200, {"feed": True, "bundles": rows}
+
     def describe_polpatch(self, path):
         lib, refused = self.toolkit()
         if refused:
@@ -2611,7 +2744,7 @@ class Deployer:
         log = JobLog(self.store, job, self.cfg.token,
                      secrets=[secret, devchannel.Store(self.cfg.state).code()],
                      hide=[job.get("registry"), devchannel.read_channel(self.cfg.core).get("registry"),
-                           self.cfg.dev_registry])
+                           self.cfg.dev_registry, self.feed_host()])
         r = Runner(self.cfg, load_catalog(self.cfg.core), log)
         try:
             job["state"] = "running"
@@ -2914,6 +3047,8 @@ def make_handler(dep):
                 recheck = (q.get("recheck") or ["0"])[0].strip().lower() in ("1", "true", "yes")
                 code, obj = dep.patch_list(recheck)
                 return self.send_json(code, obj)
+            if parts == ["api", "patches", "feed"]:
+                return self.send_json(*dep.feed_list(truthy((q.get("refresh") or [""])[0])))
             if parts == ["api", "uploads"]:
                 dep.expire_uploads()
                 return self.send_json(200, {"uploads": [clientdata.public_upload(m)

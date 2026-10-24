@@ -47,6 +47,7 @@ STATE = {"busy": False}
 LOG = b"cloning kart...\nok\nenabling kart\n"
 UPLOADS = []
 UPLOAD_CAP = 3 << 20
+FEED = {"on": False}
 CHANNEL = {"on": True}
 CODE = "kart-dev-7Qm2x9Lp4Vb8"
 CHANNEL_ANSWER = {"channel": "stable", "registry": None, "source": None, "since": None,
@@ -110,6 +111,14 @@ class Deployer(BaseHTTPRequestHandler):
                                      "dirs": [] if rel else ["Kart Club"], "files": [{"name": "data.bin", "size": 4}],
                                      "matches": [{"game": "kart", "item": "disc", "label": "Kart Club: disc data"}]
                                      if rel == "Kart Club" else []})
+        if self.path.startswith("/api/patches/feed"):
+            SEEN.append(("FEED", self.path))
+            if not FEED["on"]:
+                return self._reply(409, {"error": "Patches from the developers come with the dev channel.",
+                                         "feed": False})
+            return self._reply(200, {"feed": True, "bundles": [
+                {"region": "KC1", "product": "0007", "title": "Kart Club (test)", "latest": "20050101_0",
+                 "have": "20040714_0", "status": "behind", "files": 1, "size": 700, "why": None}]})
         if self.path.startswith("/api/patches"):
             SEEN.append(("PATCHES", self.path))
             listing = {"bundles": [{"region": "KC1", "product": "0007", "title": "Kart Club (test)", "aliases": [],
@@ -342,6 +351,32 @@ def main():
         chk("...not one of them", [s for s in SEEN[n:] if s[0] == "BODY"], [])
         rows = owner.call("api/audit")[1].get("rows") or []
         chk("patch actions are in the activity log", any("rolled a patch bundle back" in json.dumps(r) for r in rows), True)
+
+        print("patch feed")
+        chk("no feed on this install: the panel hides it", owner.call("api/deploy/patches/feed"),
+            (200, {"feed": False}))
+        FEED["on"] = True
+        code, f = owner.call("api/deploy/patches/feed?refresh=1")
+        chk("with a feed: what it offers, as the deployer said",
+            (code, f.get("feed"), [(b["region"], b["status"], b["files"]) for b in f.get("bundles", [])]),
+            (200, True, [("KC1", "behind", 1)]))
+        chk("...and the refresh reaches it", SEEN[-1], ("FEED", "/api/patches/feed?refresh=1"))
+        chk("a moderator cannot see the feed or fetch from it",
+            (gm.call("api/deploy/patches/feed")[0],
+             gm.call("api/deploy/patch", {"action": "patch_fetch", "region": "KC1", "product": "0007"})[0]),
+            (403, 403))
+        n = len(SEEN)
+        code, out = owner.call("api/deploy/patch", {"action": "patch_fetch", "region": "KC1", "product": "0007"})
+        chk("a fetch reaches the deployer as the docs say",
+            (code, [s[1] for s in SEEN[n:] if s[0] == "BODY"]),
+            (202, [{"action": "patch_fetch", "region": "KC1", "product": "0007"}]))
+        n = len(SEEN)
+        chk("a fetch with a bad region never reaches it",
+            owner.call("api/deploy/patch", {"action": "patch_fetch", "region": "../", "product": "0007"})[0], 400)
+        chk("...not that one", [s for s in SEEN[n:] if s[0] == "BODY"], [])
+        rows = owner.call("api/audit")[1].get("rows") or []
+        chk("a fetch is in the activity log",
+            any("fetched a patch bundle from the developers" in json.dumps(r) for r in rows), True)
 
         print("update channel")
         code, ch = owner.call("api/deploy/channel")

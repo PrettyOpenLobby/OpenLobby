@@ -30,7 +30,7 @@ RUN apt-get update \
 COPY --from=fetch /out/docker /usr/local/bin/docker
 COPY --from=fetch /out/cli-plugins/ /usr/local/lib/docker/cli-plugins/
 WORKDIR /app
-COPY deployer.py clientdata.py devchannel.py gameupdater.py updatecheck.py patches.py patchtool.py /app/
+COPY deployer.py clientdata.py devchannel.py gameupdater.py updatecheck.py patches.py patchtool.py patchfeed.py /app/
 
 # Root, on purpose: the Docker socket it is given is owned by root (and the
 # docker group, whose id differs from host to host), and it starts git and

@@ -5,7 +5,9 @@ and the upstream images the games run. The dev channel swaps some of them for pr
 unlocked with an access code the developers hand out. The code carries everything the
 deployer needs (make_code, parse_code below): "olx1." and then, base64url without padding,
 the compact JSON {"r": "<registry host/path>", "t": "<token>", "s": "<source base URL>"},
-"t" and "s" optional. The panel never shows the registry; it says "dev builds". A plain
+"t" and "s" optional. A code that also unlocks the developers' patch feed is "olx2." with
+one more optional field, "p": "<host/owner>" of the feed's generic packages (patchfeed.py),
+so an older deployer given one says to update OpenLobby first instead of calling it damaged. The panel never shows the registry; it says "dev builds". A plain
 token with POL_DEV_REGISTRY (or a registry given beside it) still works, as before. The
 catalog says which images have a dev build: each games/*.json may carry
 
@@ -45,6 +47,10 @@ CODE = re.compile(r"^[\x21-\x7e]{8,2048}$")
 TOKEN = re.compile(r"^[\x21-\x7e]{1,400}$")
 #: an access code of ours: olx<version>.<base64url payload, no padding>
 CODE_PREFIX = "olx1."
+#: the same with a patch feed in it ("p")
+FEED_PREFIX = "olx2."
+#: where a patch feed is: host[:port]/owner
+FEED = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _VERSIONED = re.compile(r"^olx([0-9]{1,3})\.")
 _B64URL = re.compile(r"^[A-Za-z0-9_-]{4,2043}$")
 SOURCE = re.compile(r"^https?://[A-Za-z0-9._~:/%+@-]{1,400}$")
@@ -62,7 +68,7 @@ REVOKED = "The access code no longer works; ask for a new one or switch back to 
 DAMAGED = "This access code is damaged or incomplete; copy it again, whole."
 NEWER = ("This access code is for a newer version of OpenLobby; update OpenLobby first, then "
          "enter it again.")
-NOT_OURS = "That is not an OpenLobby access code (they start with olx1.); copy it again, whole."
+NOT_OURS = "That is not an OpenLobby access code (they start with olx); copy it again, whole."
 NO_CODE = ("The dev channel is on but no access code is stored here; switch to Dev again with "
            "a code, or back to Stable.")
 
@@ -145,12 +151,17 @@ def registry_host(registry):
 
 # ------------------------------------------------------------------ access codes
 
-def make_code(registry, token=None, source=None):
+def make_code(registry, token=None, source=None, feed=None):
     """The access code for `registry` (host/path), signing in with `token` (None: the
     images are public and need none), their source under `source` (None: the default,
-    https://<registry>). For the operator's `tools/stack.py dev-code`."""
+    https://<registry>), and the patch feed at `feed` (host/owner; None: no patches, and
+    the code is an olx1. one). For the operator's `tools/stack.py dev-code`."""
     check_registry(registry)
     doc = {"r": registry}
+    if feed is not None:
+        if not isinstance(feed, str) or not FEED.match(feed):
+            raise ChannelError("the patch feed must be host/owner (got %r)" % (feed,))
+        doc["p"] = feed
     if token is not None:
         if not isinstance(token, str) or not TOKEN.match(token):
             raise ChannelError("the token must be 1 to 400 printable characters, no spaces")
@@ -160,17 +171,19 @@ def make_code(registry, token=None, source=None):
             raise ChannelError("the source URL must be http(s)://... (got %r)" % (source,))
         doc["s"] = source.rstrip("/")
     raw = json.dumps(doc, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    code = CODE_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    code = (FEED_PREFIX if feed is not None else CODE_PREFIX) + \
+        base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     if not CODE.match(code):
         raise ChannelError("that makes a code longer than 2048 characters")
     return code
 
 
 def parse_code(code, registry=None):
-    """What an access code says: {"kind", "registry", "token", "source"}.
+    """What an access code says: {"kind", "registry", "token", "source", "feed"}.
 
     An olx1. code carries its registry, its token (None when it has none: public images)
-    and its source base URL (None: the default). Anything else is a plain token for
+    and its source base URL (None: the default); an olx2. code also the patch feed, else
+    "feed" is None. Anything else is a plain token for
     `registry` (POL_DEV_REGISTRY, or one given beside the code), the way codes worked
     before; with no such registry it is refused. ChannelError carries the sentence the
     panel shows; no sentence repeats the code."""
@@ -183,9 +196,10 @@ def parse_code(code, registry=None):
             raise ChannelError(DAMAGED)
         raise ChannelError("The access code is 8 to 2048 characters, with no spaces.")
     if m:
-        if m.group(0) != CODE_PREFIX:
-            raise ChannelError(NEWER if int(m.group(1)) > 1 else DAMAGED)
-        payload = code[len(CODE_PREFIX):]
+        if m.group(0) not in (CODE_PREFIX, FEED_PREFIX):
+            raise ChannelError(NEWER if int(m.group(1)) > 2 else DAMAGED)
+        fields = {"r", "t", "s"} | ({"p"} if m.group(0) == FEED_PREFIX else set())
+        payload = code[len(m.group(0)):]
         if not _B64URL.match(payload) or len(payload) % 4 == 1:
             raise ChannelError(DAMAGED)
         try:
@@ -193,17 +207,20 @@ def parse_code(code, registry=None):
             doc = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             raise ChannelError(DAMAGED)
-        if (not isinstance(doc, dict) or set(doc) - {"r", "t", "s"}
+        if (not isinstance(doc, dict) or set(doc) - fields
                 or not isinstance(doc.get("r"), str) or not REGISTRY.match(doc["r"])
                 or ("t" in doc and not (isinstance(doc["t"], str) and TOKEN.match(doc["t"])))
-                or ("s" in doc and not (isinstance(doc["s"], str) and SOURCE.match(doc["s"])))):
+                or ("s" in doc and not (isinstance(doc["s"], str) and SOURCE.match(doc["s"])))
+                or (m.group(0) == FEED_PREFIX
+                    and not (isinstance(doc.get("p"), str) and FEED.match(doc["p"])))):
             raise ChannelError(DAMAGED)
-        return {"kind": "olx1", "registry": doc["r"], "token": doc.get("t"),
-                "source": doc["s"].rstrip("/") if doc.get("s") else None}
+        return {"kind": m.group(0)[:-1], "registry": doc["r"], "token": doc.get("t"),
+                "source": doc["s"].rstrip("/") if doc.get("s") else None,
+                "feed": doc.get("p")}
     if not registry:
         raise ChannelError(NOT_OURS)
     check_registry(registry)
-    return {"kind": "plain", "registry": registry, "token": code, "source": None}
+    return {"kind": "plain", "registry": registry, "token": code, "source": None, "feed": None}
 
 
 def token_of(code):

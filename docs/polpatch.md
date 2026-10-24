@@ -88,6 +88,11 @@ every version it holds, into one file:
 python tools/patch/polpatch.py from-bundle --bundle mirrors/W2U-0002 -o W2U-0002.polpatch
 ```
 
+With `--latest-update` it packs only the newest version, as an update on
+the version before it, which is what a server that already has that one
+needs. Only the newest can be packed this way, because the bundle's lists
+already name every version it holds.
+
 ## Making an update
 
 To publish a new version on top of one you have already made, put the

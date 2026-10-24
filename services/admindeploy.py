@@ -339,7 +339,8 @@ def upload(stream, length, filename):
 _REGION = re.compile(r"^[A-Z0-9]{3}$")
 _PRODUCT = re.compile(r"^[0-9]{4}$")
 _VERSION = re.compile(r"^[0-9]{8}_[0-9A-Za-z]$")
-PATCH_ACTIONS = ("patch_import", "patch_build", "patch_rollback", "patch_remove", "patch_check")
+PATCH_ACTIONS = ("patch_import", "patch_build", "patch_rollback", "patch_remove", "patch_check",
+                 "patch_fetch")
 
 
 def patches(recheck=False):
@@ -350,6 +351,18 @@ def patches(recheck=False):
     if st == 409 and not out.get("bundles"):
         out.setdefault("error", "Patch bundles are off: the deployer has no mirrors folder (POL_DEPLOY_MIRRORS).")
         out["off"] = True
+    return st, out
+
+
+def patch_feed(refresh=False):
+    """The developers' patch feed (dev channel with a code that has patches in
+    it): what it offers and how far this server is from it. {"feed": false}
+    when this install has no feed, which is most of them."""
+    st, out = _call("GET", "/api/patches/feed" + ("?refresh=1" if refresh else ""))
+    if st == 409 and out.get("feed") is False:
+        return 200, {"feed": False}
+    if st == 502:
+        out["feed"] = True
     return st, out
 
 

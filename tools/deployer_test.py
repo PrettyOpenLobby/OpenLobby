@@ -2553,7 +2553,7 @@ def _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, 
     try:
         c = s.start()
         st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "kart-plain-token-01"})
-        ok(st == 400 and "olx1." in r.get("error", ""), "code: a plain token with no registry set: refused (%s)" % r)
+        ok(st == 400 and "start with olx" in r.get("error", ""), "code: a plain token with no registry set: refused (%s)" % r)
         bad = devchannel.make_code(registry, "kart-wrong-token", None)
         st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": bad})
         ok(st == 400 and "did not accept" in r.get("error", "") and host not in json.dumps(r),
@@ -2724,6 +2724,7 @@ class PatchKit:
 
     def env(self):
         return {"FAKE_PATCH_MIRRORS": self.mirrors, "FAKE_PATCH_SERVER": self.server,
+                "POL_DEV_REGISTRY_HTTP": "1",
                 "FAKE_PATCH_OFFSET": str(self.offset),
                 "FAKE_PATCH_SERVICES": os.path.join(self.t.core, "services")}
 
@@ -3141,8 +3142,186 @@ def test_patch_drain():
         v.close()
 
 
+class FakeFeed:
+    """A Forgejo generic package registry on loopback, enough of it for the
+    patch feed: the package list, a version's files and the downloads, all
+    behind Basic auth as dev:<token>. `packages` is {(name, version): {file: bytes}}."""
+
+    def __init__(self, token):
+        import base64 as _b64
+        self.want = "Basic " + _b64.b64encode(("dev:%s" % token).encode()).decode()
+        self.packages = {}
+        self.tamper = set()
+        self.hits = []
+        feed = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def send(self, code, body, ctype="application/json"):
+                data = body if isinstance(body, bytes) else json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                u = urllib.parse.urlsplit(self.path)
+                q = urllib.parse.parse_qs(u.query)
+                parts = [urllib.parse.unquote(p) for p in u.path.split("/") if p]
+                feed.hits.append(u.path)
+                if self.headers.get("Authorization") != feed.want:
+                    return self.send(401, {"message": "unauthorized"})
+                if parts[:3] == ["api", "v1", "packages"] and len(parts) == 4:
+                    page, limit = int(q["page"][0]), int(q["limit"][0])
+                    rows = [{"name": n, "version": v, "type": "generic"}
+                            for n, v in sorted(feed.packages)]
+                    return self.send(200, rows[(page - 1) * limit:page * limit])
+                if parts[:3] == ["api", "v1", "packages"] and len(parts) == 8 and parts[7] == "files":
+                    files = feed.packages.get((parts[5], parts[6]))
+                    if files is None:
+                        return self.send(404, {"message": "not found"})
+                    return self.send(200, [{"name": n, "size": len(b),
+                                            "sha256": hashlib.sha256(b).hexdigest()}
+                                           for n, b in sorted(files.items())])
+                if parts[:2] == ["api", "packages"] and len(parts) == 7:
+                    b = (feed.packages.get((parts[4], parts[5])) or {}).get(parts[6])
+                    if b is None:
+                        return self.send(404, {"message": "not found"})
+                    if (parts[5], parts[6]) in feed.tamper:
+                        b = b[:-1] + bytes([b[-1] ^ 1])
+                    return self.send(200, b, "application/octet-stream")
+                self.send(404, {"message": "not found"})
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+
+
+def test_patch_feed_plan():
+    """patchfeed.plan: every status, and the cheapest route it picks."""
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import patchfeed as pf
+    f = {"size": 10, "sha256": "0" * 64}
+    full = {"size": 100, "sha256": "1" * 64}
+    vs = {PV1: {"full.polpatch": full},
+          PV2: {"update-from-%s.polpatch" % PV1: f},
+          PV3: {"update-from-%s.polpatch" % PV2: f, "full.polpatch": full}}
+    p = pf.plan(vs, [])
+    ok(p["status"] == "new" and [s[1] for s in p["steps"]] == ["full.polpatch"] and p["steps"][0][0] == PV3,
+       "plan: nothing here -> the newest full file (%s)" % p["steps"])
+    p = pf.plan(vs, [PV1])
+    ok(p["status"] == "behind" and [s[0] for s in p["steps"]] == [PV2, PV3] and p["size"] == 20,
+       "plan: behind -> the chain of updates (%s)" % p["steps"])
+    p = pf.plan(vs, [PV1, PV2, PV3])
+    ok(p["status"] == "current" and not p["steps"], "plan: current")
+    p = pf.plan({PV1: vs[PV1]}, [PV1, PV2])
+    ok(p["status"] == "ahead", "plan: this server is ahead")
+    p = pf.plan(vs, [PV1, "20041111_0"])
+    ok(p["status"] == "custom" and "20041111_0" in p["why"], "plan: a version the feed lacks -> custom (%s)" % p["why"])
+    p = pf.plan({PV1: vs[PV1], PV2: {}, PV3: {"update-from-%s.polpatch" % PV2: f}}, [PV1])
+    ok(p["status"] == "unavailable" and p["why"], "plan: a broken chain and no full file -> unavailable")
+    del vs[PV2]["update-from-%s.polpatch" % PV1]
+    vs[PV2]["x"] = f
+    p = pf.plan(vs, [PV1])
+    ok(p["status"] == "behind" and [s[1] for s in p["steps"]] == ["full.polpatch"],
+       "plan: a broken chain falls back to the newest full file")
+    ok(pf.PACKAGE.match("polpatch-W2U-0002") and not pf.PACKAGE.match("polpatch-w2u-0002")
+       and not pf.PACKAGE.match("polpatch-W2U-0002/../x") and pf.UPDATE.match("update-from-%s.polpatch" % PV1)
+       and not pf.UPDATE.match("update-from-x.polpatch"), "names: only the shapes the feed uses")
+
+
+def test_patch_feed(c, k, t):
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import devchannel as dc
+    lib = polpatch_lib()
+    chfile = os.path.join(t.core, ".channel")
+    store = dc.Store(k.state)
+    code, r = pseen(c.get("/api/patches/feed"))
+    ok(code == 409 and r.get("feed") is False and "dev channel" in r.get("error", ""),
+       "feed on the stable channel: 409 (%s)" % r.get("error"))
+    code, r = pseen(c.post({"action": "patch_fetch", "region": "W2U", "product": "0002"}))
+    ok(code == 409, "patch_fetch on the stable channel: 409")
+    dc.write_channel(t.core, "dev", registry="registry.example.org/kart")
+    store.save_code(dc.make_code("registry.example.org/kart", "kart-token-0123"))
+    code, r = pseen(c.get("/api/patches/feed"))
+    ok(code == 409 and "does not include patches" in r.get("error", ""),
+       "feed with an olx1. code: 409 (%s)" % r.get("error"))
+
+    feed = FakeFeed("feed-token-4567")
+    try:
+        store.save_code(dc.make_code("registry.example.org/kart", "feed-token-4567",
+                                     feed="127.0.0.1:%d/kart-patches" % feed.port))
+        name = "polpatch-W2U-0002"
+        feed.packages[(name, PV1)] = {"full.polpatch": open(k.full, "rb").read()}
+        feed.packages[(name, PV2)] = {"update-from-%s.polpatch" % PV1: open(k.up2, "rb").read()}
+        feed.packages[(name, PV3)] = {"update-from-%s.polpatch" % PV2: open(k.up3, "rb").read(),
+                                      "evil.sh": b"echo"}
+        feed.packages[("polpatch-w2u-9", "1")] = {"full.polpatch": b"x"}
+        # start from no bundle
+        if lib.find_bundle(k.mirrors, "W2U", "0002"):
+            code, j = patch_job(c, {"action": "patch_remove", "region": "W2U", "product": "0002"})
+            ok(j["state"] == "ok", "feed: the old W2U/0002 bundle is removed first")
+        code, r = pseen(c.get("/api/patches/feed?refresh=1"))
+        rows = {"%s/%s" % (b["region"], b["product"]): b for b in r.get("bundles", [])}
+        b = rows.get("W2U/0002", {})
+        ok(code == 200 and r.get("feed") is True and list(rows) == ["W2U/0002"]
+           and b.get("status") == "new" and b.get("latest") == PV3 and b.get("have") is None
+           and b.get("files") == 3 and b.get("title", "").startswith("Tetra Master"),
+           "GET /api/patches/feed: the bundle, new here, three files (%s)" % b)
+        ok(set(b) == {"region", "product", "title", "latest", "have", "status", "files", "size", "why"},
+           "  a row has exactly the contract's fields (%s)" % sorted(b))
+        code, j = patch_job(c, {"action": "patch_fetch", "region": "W2U", "product": "0002"})
+        ok(j["state"] == "ok" and "from the patch feed" in j["summary"],
+           "patch_fetch: ok (%s: %s)" % (j["state"], j["summary"]))
+        log = j.get("log", "")
+        ok(str(feed.port) not in log and "feed-token" not in log and "127.0.0.1:%d" % feed.port not in log,
+           "  the log names neither the feed's address nor the token")
+        code, rows2, _ = patch_rows(c)
+        b2 = rows2.get("W2U/0002", {})
+        ok(b2.get("versions") == [PV1, PV2, PV3] and b2.get("served") is True and b2.get("selfcheck") == "ok",
+           "  the bundle has all three versions, is served and checked (%s)" % b2)
+        ok(not any(h.endswith("evil.sh") for h in feed.hits), "  a file of another shape is never fetched")
+        ok(not os.listdir(os.path.join(k.state, "feed")), "  the downloads are cleaned up")
+        code, r = pseen(c.get("/api/patches/feed?refresh=1"))
+        ok(r["bundles"][0]["status"] == "current" and r["bundles"][0]["files"] == 0, "feed: now current")
+
+        code, j = patch_job(c, {"action": "patch_rollback", "region": "W2U", "product": "0002", "to": PV1})
+        code, r = pseen(c.get("/api/patches/feed?refresh=1"))
+        ok(r["bundles"][0]["status"] == "behind" and r["bundles"][0]["files"] == 2,
+           "feed after a roll back to %s: behind, two updates (%s)" % (PV1, r["bundles"][0]))
+        feed.tamper.add((PV3, "update-from-%s.polpatch" % PV2))
+        code, j = patch_job(c, {"action": "patch_fetch", "region": "W2U", "product": "0002"})
+        ok(j["state"] == "failed" and "damaged" in j["summary"],
+           "a file that comes down altered fails the job (%s)" % j["summary"])
+        code, rows2, _ = patch_rows(c)
+        ok(rows2["W2U/0002"]["versions"] == [PV1], "  and nothing was applied")
+        feed.tamper.clear()
+        code, j = patch_job(c, {"action": "patch_fetch", "region": "W2U", "product": "0002"})
+        code, rows2, _ = patch_rows(c)
+        ok(j["state"] == "ok" and rows2["W2U/0002"]["versions"] == [PV1, PV2, PV3],
+           "the chain of updates brings it to %s (%s)" % (PV3, j["summary"]))
+
+        store.save_code(dc.make_code("registry.example.org/kart", "wrong-token",
+                                     feed="127.0.0.1:%d/kart-patches" % feed.port))
+        code, r = pseen(c.get("/api/patches/feed?refresh=1"))
+        ok(code == 502 and "no longer opens the patch feed" in r.get("error", ""),
+           "a token the feed refuses: 502 with a sentence (%s)" % r.get("error"))
+    finally:
+        feed.close()
+        store.forget()
+        if os.path.exists(chfile):
+            os.remove(chfile)
+
+
 def run_patch_tests(t, servers):
     test_patch_drain()
+    test_patch_feed_plan()
     k = PatchKit(t)
     s0 = Server(t, args=["--state", os.path.join(t.tmp, "state-nopatch")])
     servers.append(s0)
@@ -3161,6 +3340,7 @@ def run_patch_tests(t, servers):
         uid = test_patch_uploads(c, s.port, k)
         test_patch_browse(c, k)
         test_patch_jobs(c, k, t, uid)
+        test_patch_feed(c, k, t)
         test_patch_leaks(k, t)
     finally:
         s.stop()

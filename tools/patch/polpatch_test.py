@@ -325,6 +325,26 @@ def main():
         r = lib.apply(again, mirrors)
         check(r["action"] == "unchanged", "nor onto the bundle it was packed from")
 
+        print("from-bundle --latest-update")
+        newest = os.path.join(out, "newest.polpatch")
+        rc, txt = cli("from-bundle", "--bundle", bundle, "--latest-update", "-o", newest)
+        check(rc == 0 and lib.verify(newest) == [], "it writes a file that verifies")
+        mn = lib.read_manifest(newest)
+        check(mn["kind"] == "update" and mn["versions"] == [V2] and mn["base_version"] == V1
+              and not any(f"/blobs/{V1}/" in n for n in mn["files"]),
+              "it is the newest version as an update on the one before, without the old blobs")
+        mirrors3 = os.path.join(tmp, "mirrors3")
+        lib.apply(full, mirrors3)
+        r = lib.apply(newest, mirrors3)
+        check(r["action"] == "updated"
+              and snapshot(os.path.join(mirrors3, "W2U-0002")) == snapshot(bundle),
+              "applied on the first version it gives the same bundle byte for byte")
+        one = os.path.join(tmp, "mirrors-one")
+        lib.apply(full, one)
+        rc, txt = cli("from-bundle", "--bundle", os.path.join(one, "W2U-0002"),
+                      "--latest-update", "-o", os.path.join(out, "none.polpatch"))
+        check(rc != 0 and "one version only" in txt, "a bundle of one version is refused")
+
         print("command line formats")
         for args, needle in ((["--region", "w2u", "--product", "0002"], "region code"),
                              (["--region", "W2U", "--product", "2"], "product code"),

@@ -1033,6 +1033,21 @@ def build_from_bundle(bundle_dir, out, note="", limits=None, log=None):
     return package_bundle(bundle_dir, out, "full", note=note, limits=limits, log=log)
 
 
+def build_latest_update(bundle_dir, out, note="", limits=None, log=None):
+    """Package the newest version of an existing bundle as an update on top
+    of the version before it. Only the newest can be cut out this way: the
+    bundle's lists already name every version it holds, so an older one would
+    carry lists from after it."""
+    if not os.path.isfile(os.path.join(bundle_dir, "patch.cfg")):
+        raise PolpatchError(f"{bundle_dir} is not a patch bundle (no patch.cfg).")
+    versions = sort_versions(r["version"] for r in _cfg_rows(bundle_dir))
+    if len(versions) < 2:
+        raise PolpatchError(f"{bundle_dir} holds one version only, so there is no update "
+                            f"in it; pack it whole with from-bundle.")
+    return package_bundle(bundle_dir, out, "update", versions=[versions[-1]],
+                          base_version=versions[-2], note=note, limits=limits, log=log)
+
+
 def _run_tool(fn, *args):
     try:
         rc = fn(*args)

@@ -856,8 +856,12 @@ access code is damaged or incomplete; copy it again, whole.", and one that
 starts `olx2.` or later with "This access code is for a newer version of
 OpenLobby; update OpenLobby first, then enter it again."
 
+A code that also opens the developers' patch feed ("Patches from the dev
+channel" below) starts `olx2.` and has one more field, `p`, the feed's
+`host/owner`. An OpenLobby too old to know `olx2.` says to update first.
+
 The developers make codes with `python tools/stack.py dev-code --registry
-HOST/PATH [--token-file FILE] [--source URL]`. The token is read from the
+HOST/PATH [--token-file FILE] [--source URL] [--patches HOST/OWNER]`. The token is read from the
 first line of FILE, or from stdin with `--token-file -`, never from the
 command line. `stack.py dev-code --decode` reads a code on stdin and says
 what is in it, the token left out.
@@ -927,6 +931,31 @@ link goes through the panel (`/api/deploy/channel/source`), which answers
 with a redirect to the address: the catalog's own `https://` address, or
 the image's `source` under the code's `s` (or `POL_DEV_SOURCE`, or
 `https://<registry>`), so the page itself never holds it.
+
+### Patches from the dev channel
+
+The developers may also keep patch bundles for the servers they hand codes
+to. An access code with a patch feed in it opens them; the panel's Install
+games tab then shows "From the developers" under Patch bundles, with each
+title the feed has, the version this server has, the feed's newest, and a
+Get or Update button. Without such a code, or on the stable channel, the
+section is not there and nothing asks the feed.
+
+The feed is a Forgejo or Gitea package registry the code's token can read.
+Each bundle is a generic package `polpatch-<REGION>-<PRODUCT>`, each patch
+version a version of it, holding `full.polpatch` (the whole bundle up to
+that version), `update-from-<VERSION>.polpatch` (that version on top of
+VERSION), or both. To bring a title up to date the deployer takes the chain
+of updates from the version the server has when every link is there, else
+the newest full file and the updates after it. A server that has versions
+the feed does not know ("Own versions") is not offered anything, since a
+full file would leave them out.
+
+Each file is downloaded into the deployer's volume, its size and SHA-256
+checked against what the registry lists, then checked and applied exactly
+as an imported `.polpatch` is. The patch service is restarted once at the
+end, after any downloads in progress ("Patch bundles" above). The job log
+never names the feed's address or the token.
 
 ### By hand and from the setup scripts
 
@@ -1032,7 +1061,27 @@ the endpoint answers 409 `{"error"}`.
 {"action": "patch_rollback", "region": "W2U", "product": "0002", "to": "20030429_0"}
 {"action": "patch_remove", "region": "W2U", "product": "0002"}
 {"action": "patch_check"}
+{"action": "patch_fetch", "region": "W2U", "product": "0002"}
 ```
+
+`patch_fetch` brings the bundle to the patch feed's newest version ("Patches
+from the dev channel"). It answers 409 `{"error", "feed": false}` when the
+install is not on the dev channel or its code has no feed.
+`GET /api/patches/feed[?refresh=1]` lists what the feed offers (the listing
+is reused for five minutes unless `refresh=1`):
+
+```
+200 {"feed": true, "bundles": [{"region": "W2U", "product": "0002",
+     "title": "Tetra Master (Windows, North America and Europe)",
+     "latest": "20040714_0", "have": "20030429_0", "status": "behind",
+     "files": 1, "size": 2318, "why": null}]}
+```
+
+`status` is `new` (not here), `behind`, `current`, `ahead` (newer here),
+`custom` (versions here the feed lacks) or `unavailable` (no file reaches
+the newest); `files` and `size` are what fetching takes, and `why` says why
+for the last two. It answers 409 `{"error", "feed": false}` as above, and
+502 `{"error"}` when the feed refuses the code or does not answer.
 
 `patch_build` takes three optional fields. `version` is the version to
 build (default `auto`, read from the install's `patch.ver`). With `walk`

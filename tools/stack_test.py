@@ -700,21 +700,29 @@ def check_channel(catalog, root, parent):
     code = devchannel.make_code("registry.example.org/kart", "kart-token-0123", "https://code.example.org/kart")
     ok(code.startswith("olx1.") and "=" not in code and "kart-token" not in code
        and devchannel.parse_code(code) == {"kind": "olx1", "registry": "registry.example.org/kart",
-                                           "token": "kart-token-0123", "source": "https://code.example.org/kart"},
+                                           "token": "kart-token-0123", "source": "https://code.example.org/kart",
+                                           "feed": None},
        "code: round trip (%s)" % code[:20])
     pub = devchannel.make_code("registry.example.org/kart")
     ok(devchannel.parse_code(pub)["token"] is None and devchannel.token_of(pub) is None
        and devchannel.token_of(code) == "kart-token-0123", "code: one without a token reads as public")
     ok(devchannel.parse_code("kart-plain-token", registry="registry.example.org/kart")
-       == {"kind": "plain", "registry": "registry.example.org/kart", "token": "kart-plain-token", "source": None},
+       == {"kind": "plain", "registry": "registry.example.org/kart", "token": "kart-plain-token", "source": None,
+           "feed": None},
        "code: a plain token with a registry still works (the old way)")
+    feed = devchannel.make_code("registry.example.org/kart", "kart-token-0123", feed="code.example.org/kart-patches")
+    ok(feed.startswith("olx2.") and devchannel.parse_code(feed)["feed"] == "code.example.org/kart-patches"
+       and devchannel.parse_code(feed)["kind"] == "olx2" and devchannel.token_of(feed) == "kart-token-0123",
+       "code: one with a patch feed is olx2. and carries it")
     import base64 as _b64
 
-    def enc(raw):
-        return "olx1." + _b64.urlsafe_b64encode(raw).decode().rstrip("=")
-    for bad, want in (("", "Type the access code"), ("kart-plain-token", "start with olx1"),
+    def enc(raw, v=1):
+        return "olx%d." % v + _b64.urlsafe_b64encode(raw).decode().rstrip("=")
+    for bad, want in (("", "Type the access code"), ("kart-plain-token", "start with olx"),
                       ("olx1.", "damaged"), ("olx1.%%%%%%%%", "damaged"), (code[:-3], "damaged"),
-                      (code + "=", "damaged"), (code + " x", "damaged"), ("olx2." + code[5:], "newer"),
+                      (code + "=", "damaged"), (code + " x", "damaged"), ("olx3." + code[5:], "newer"),
+                      ("olx2." + code[5:], "damaged"), (enc(b'{"r":"registry.example.org/kart","p":"x"}', 2), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","p":"h.example.org/o"}'), "damaged"),
                       ("olx0." + code[5:], "damaged"), (enc(b"[1,2]"), "damaged"), (enc(b"not json"), "damaged"),
                       (enc(b'{"r":"Not A Registry"}'), "damaged"), (enc(b'{"t":"x"}'), "damaged"),
                       (enc(b'{"r":"registry.example.org/kart","x":1}'), "damaged"),
@@ -747,6 +755,14 @@ def check_channel(catalog, root, parent):
         r = subprocess.run([sys.executable, sp, "dev-code", "--registry", "registry.example.org/kart"],
                            capture_output=True, text=True)
         ok(r.returncode == 0 and r.stdout.strip() == pub, "dev-code with no token: a public code")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--registry", "registry.example.org/kart",
+                            "--token-file", tf, "--patches", "code.example.org/kart-patches"],
+                           capture_output=True, text=True)
+        ok(r.returncode == 0 and r.stdout.strip() == feed, "dev-code --patches: the olx2. code")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--decode"], input=feed + "\n",
+                           capture_output=True, text=True)
+        ok(r.returncode == 0 and "patches:  code.example.org/kart-patches" in r.stdout,
+           "dev-code --decode names the patch feed")
         r = subprocess.run([sys.executable, sp, "dev-code", "--decode"], input=code + "\n",
                            capture_output=True, text=True)
         ok(r.returncode == 0 and "registry.example.org/kart" in r.stdout and "token:    yes" in r.stdout

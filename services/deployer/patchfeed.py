@@ -1,0 +1,204 @@
+"""The developers' patch feed: .polpatch files kept as generic packages on a
+Forgejo or Gitea server, which only an access code with a feed in it (an olx2.
+code, see devchannel.py) can read. docs/deployer.md, "Patches from the dev
+channel".
+
+One package per bundle, named polpatch-<REGION>-<PRODUCT>, one package version
+per patch version. A version holds one or both of
+
+    full.polpatch                  the whole bundle up to that version
+    update-from-<VERSION>.polpatch that version on top of VERSION
+
+and the deployer takes the chain of updates from the version a server has when
+every link is there, else the newest full file and the updates after it.
+Nothing from the feed is trusted: names and versions are checked here, the
+sizes and SHA-256 sums the server lists are checked on download, and every
+file then goes through the same checks as an upload.
+
+Standard library only.
+"""
+import base64
+import hashlib
+import json
+import os
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PACKAGE = re.compile(r"^polpatch-([A-Z0-9]{3})-([0-9]{4})$")
+VERSION = re.compile(r"^[0-9]{8}_[0-9A-Za-z]$")
+FULL = "full.polpatch"
+UPDATE = re.compile(r"^update-from-([0-9]{8}_[0-9A-Za-z])\.polpatch$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+TIMEOUT = 20.0
+PAGE = 50
+MAX_PAGES = 40          # 2000 package versions; a feed is a few dozen bundles
+CHUNK = 1 << 20
+
+NO_ACCESS = "The access code no longer opens the patch feed; ask for a new one."
+NO_ANSWER = "The patch feed did not answer; try again later."
+
+
+class FeedError(Exception):
+    """A sentence for the panel; never names the feed's host."""
+
+
+class Feed:
+    def __init__(self, feed, token=None, user="dev", scheme="https", timeout=TIMEOUT):
+        self.host, self.owner = feed.split("/", 1)
+        self.token, self.user = token, user
+        self.base = "%s://%s" % (scheme, self.host)
+        self.timeout = timeout
+
+    def _headers(self):
+        h = {"Accept": "application/json", "User-Agent": "openlobby-deployer"}
+        if self.token:
+            user, secret = self.token.split(":", 1) if ":" in self.token else (self.user, self.token)
+            h["Authorization"] = "Basic " + base64.b64encode(
+                ("%s:%s" % (user, secret)).encode()).decode()
+        return h
+
+    def _open(self, path):
+        req = urllib.request.Request(self.base + path, headers=self._headers())
+        try:
+            return urllib.request.urlopen(req, timeout=self.timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise FeedError(NO_ACCESS)
+            if exc.code == 404:
+                return None
+            raise FeedError(NO_ANSWER)
+        except (OSError, ValueError):
+            raise FeedError(NO_ANSWER)
+
+    def _json(self, path):
+        resp = self._open(path)
+        if resp is None:
+            return None
+        with resp:
+            try:
+                return json.loads(resp.read(4 << 20))
+            except ValueError:
+                raise FeedError(NO_ANSWER)
+
+    def bundles(self):
+        """{(region, product): {version: {filename: {"size", "sha256"}}}} for every
+        well-formed package version and file in the feed."""
+        owner = urllib.parse.quote(self.owner)
+        found = {}
+        for page in range(1, MAX_PAGES + 1):
+            rows = self._json("/api/v1/packages/%s?type=generic&q=polpatch-&page=%d&limit=%d"
+                              % (owner, page, PAGE))
+            if rows is None:
+                if page == 1:
+                    raise FeedError(NO_ACCESS)
+                break
+            if not isinstance(rows, list):
+                raise FeedError(NO_ANSWER)
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                m = PACKAGE.match(str(row.get("name") or ""))
+                v = str(row.get("version") or "")
+                if m and VERSION.match(v):
+                    found.setdefault((m.group(1), m.group(2)), {})[v] = None
+            if len(rows) < PAGE:
+                break
+        for (region, product), versions in found.items():
+            for v in list(versions):
+                files = self._json("/api/v1/packages/%s/generic/polpatch-%s-%s/%s/files"
+                                   % (owner, region, product, v)) or []
+                ok = {}
+                for f in files if isinstance(files, list) else []:
+                    name = str(f.get("name") or "") if isinstance(f, dict) else ""
+                    size, sha = f.get("size") if isinstance(f, dict) else None, \
+                        str(f.get("sha256") or "").lower() if isinstance(f, dict) else ""
+                    if (name == FULL or UPDATE.match(name)) and isinstance(size, int) \
+                            and size > 0 and SHA256.match(sha):
+                        ok[name] = {"size": size, "sha256": sha}
+                if ok:
+                    versions[v] = ok
+                else:
+                    del versions[v]
+        return {k: v for k, v in found.items() if v}
+
+    def download(self, region, product, version, name, want, dest, max_size):
+        """Fetch one file to dest, checking its size and SHA-256 against `want`."""
+        if want["size"] > max_size:
+            raise FeedError("The %s/%s %s file is bigger than this server takes (%d bytes)."
+                            % (region, product, version, want["size"]))
+        resp = self._open("/api/packages/%s/generic/polpatch-%s-%s/%s/%s"
+                          % (urllib.parse.quote(self.owner), region, product, version, name))
+        if resp is None:
+            raise FeedError("The %s/%s %s file is no longer in the patch feed."
+                            % (region, product, version))
+        h, n = hashlib.sha256(), 0
+        with resp, open(dest, "wb") as out:
+            while True:
+                try:
+                    chunk = resp.read(CHUNK)
+                except OSError:
+                    raise FeedError(NO_ANSWER)
+                if not chunk:
+                    break
+                n += len(chunk)
+                if n > want["size"]:
+                    break
+                h.update(chunk)
+                out.write(chunk)
+        if n != want["size"] or h.hexdigest() != want["sha256"]:
+            os.remove(dest)
+            raise FeedError("The %s/%s %s file came down damaged; try again."
+                            % (region, product, version))
+        return dest
+
+
+def plan(versions, have):
+    """What to fetch to bring a bundle to the feed's newest version.
+
+    versions is one bundle's {version: {filename: info}} from Feed.bundles(),
+    have the versions the server has (empty when it has no such bundle).
+    Returns {"status", "latest", "steps": [(version, filename, info), ...],
+    "size", "why"}: status is "current", "behind" (steps take it to latest),
+    "new" (it has none; steps install it), "ahead" (it has a newer one),
+    "custom" (it has versions the feed does not, so no file fits) or
+    "unavailable" (no full file or update chain reaches it)."""
+    order = sorted(versions)
+    latest = order[-1]
+    have = sorted(have)
+    out = {"latest": latest, "steps": [], "size": 0, "why": None}
+    if have and have[-1] > latest:
+        return dict(out, status="ahead")
+    if have and have[-1] == latest:
+        return dict(out, status="current")
+    if have and set(have) - set(order):
+        return dict(out, status="custom",
+                    why="This server has version(s) the feed does not (%s), so a file from "
+                        "the feed would leave them out." % ", ".join(sorted(set(have) - set(order))))
+
+    def chain(base):
+        steps, prev = [], base
+        for v in order:
+            if v <= base:
+                continue
+            name = "update-from-%s.polpatch" % prev
+            if name not in versions[v]:
+                return None
+            steps.append((v, name, versions[v][name]))
+            prev = v
+        return steps
+
+    steps = chain(have[-1]) if have else None
+    if steps is None:
+        for v in reversed(order):
+            if FULL in versions[v]:
+                rest = chain(v)
+                if rest is not None:
+                    steps = [(v, FULL, versions[v][FULL])] + rest
+                    break
+    if steps is None:
+        return dict(out, status="unavailable",
+                    why="The feed has no full file or chain of updates that reaches %s." % latest)
+    return dict(out, status="behind" if have else "new", steps=steps,
+                size=sum(s[2]["size"] for s in steps))

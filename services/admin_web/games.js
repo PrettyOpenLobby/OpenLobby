@@ -1222,7 +1222,7 @@ function jobWhen(j) {
 // ---- Install games > Patch bundles (the deployer's patch actions) ----
 let PATCHES = null;
 const PATCH_WORD = { patch_import: "Import bundle", patch_build: "Build bundle", patch_rollback: "Roll back",
-                     patch_remove: "Remove bundle", patch_check: "Check bundles" };
+                     patch_remove: "Remove bundle", patch_check: "Check bundles", patch_fetch: "Get from the developers" };
 Object.assign(ACT_WORD, PATCH_WORD);
 
 async function loadPatches(recheck) {
@@ -1258,6 +1258,39 @@ async function loadPatches(recheck) {
   }).join("") || '<tr><td colspan="6" class="muted">No bundles in the mirrors folder yet.</td></tr>';
 }
 
+// ---- Install games > From the developers (the dev channel's patch feed) ----
+let FEED = null;
+const FEED_STATE = { new: ["Not here", "env"], behind: ["Behind", "wait"], current: ["Up to date", "live"],
+                     ahead: ["Newer here", "live"], custom: ["Own versions", "off"], unavailable: ["Cannot get", "off"] };
+
+async function loadFeed(refresh) {
+  const panel = $("#feedPanel");
+  if (!DEPLOY || !DEPLOY.available) { panel.hidden = true; return; }
+  let r;
+  try { r = await api("/api/deploy/patches/feed" + (refresh ? "?refresh=1" : "")); }
+  catch (e) {
+    panel.hidden = false;
+    $("#feedBody").innerHTML = `<tr><td colspan="5" class="muted">${esc(e.message)}</td></tr>`;
+    return;
+  }
+  FEED = r;
+  panel.hidden = !r.feed;
+  if (!r.feed) return;
+  const busy = ((DEPLOY || {}).jobs || []).some((j) => !JOB_DONE.has(j.state));
+  $("#feedRefresh").disabled = busy;
+  $("#feedBody").innerHTML = (r.bundles || []).map((b) => {
+    const key = `${b.region}-${b.product}`;
+    const [word, pill] = FEED_STATE[b.status] || [b.status, "env"];
+    const can = (b.status === "new" || b.status === "behind") && b.files > 0;
+    return `<tr><td class="strong">${esc(b.title || key)}<div class="muted mono">${esc(key)}</div></td>`
+      + `<td><span class="mono">${esc(b.have || "-")}</span></td>`
+      + `<td><span class="mono">${esc(b.latest)}</span></td>`
+      + `<td><span class="pill ${pill}">${esc(word)}</span>${b.why ? `<div class="patch-why">${esc(b.why)}</div>` : ""}</td>`
+      + `<td>${can ? `<button class="act sm" data-feedget="${esc(key)}"${busy ? " disabled" : ""}>`
+        + `${b.status === "new" ? "Get" : "Update"} (${esc(impBytes(b.size))})</button>` : ""}</td></tr>`;
+  }).join("") || '<tr><td colspan="5" class="muted">The developers have no patches up yet.</td></tr>';
+}
+
 async function patchAct(body, sure) {
   if (sure === false) return;
   try {
@@ -1272,6 +1305,15 @@ document.addEventListener("click", (e) => {
   if (e.target.closest("#patchImport")) return openPatchDialog("patch_import");
   if (e.target.closest("#patchBuild")) return openPatchDialog("patch_build");
   if (e.target.closest("#patchCheck")) return loadPatches(true);
+  if (e.target.closest("#feedRefresh")) return loadFeed(true);
+  const get = e.target.closest("[data-feedget]");
+  if (get) {
+    const b = (FEED.bundles || []).find((x) => `${x.region}-${x.product}` === get.dataset.feedget);
+    return patchAct({ action: "patch_fetch", region: b.region, product: b.product },
+      confirm(`${b.status === "new" ? "Get" : "Update"} ${b.title || get.dataset.feedget} from the developers?\n\n`
+        + `This downloads ${impBytes(b.size)} and brings it to ${b.latest}. Players who are updating `
+        + `are let finish before the patch service restarts.`));
+  }
   const rm = e.target.closest("[data-patchrm]");
   if (rm) {
     const b = (PATCHES.bundles || []).find((x) => `${x.region}-${x.product}` === rm.dataset.patchrm);
@@ -1298,6 +1340,7 @@ async function loadDeploy() {
   await probeDeploy();
   renderDeploy();
   loadPatches();
+  loadFeed();
   if (!DEPLOY || !DEPLOY.available) { renderChannel(); return; }
   loadChannel();
   loadUpdates(false);
@@ -1352,7 +1395,7 @@ async function followJob(id) {
         if (done) UPD_RUN[done.game || j.game] = { job: id, state: done.state, summary: done.summary || "" };
         loadUpdates(false);
       }
-      if (String(j.action || "").startsWith("patch_") || PATCHES) loadPatches();
+      if (String(j.action || "").startsWith("patch_") || PATCHES) { loadPatches(); if (FEED && FEED.feed) loadFeed(); }
     }
   }, 1500);
 }

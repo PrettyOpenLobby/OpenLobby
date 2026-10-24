@@ -2073,6 +2073,17 @@
         <div class="tablewrap"><table class="cards"><thead><tr><th>Title</th><th>Versions</th><th>Served</th>
           <th>Self-check</th><th>Size</th><th></th></tr></thead><tbody id="patchBody"></tbody></table></div>
       </div>
+      <div class="panel" id="feedPanel" hidden>
+        <h2>From the developers</h2>
+        <p class="hint">Patch bundles the developers keep for servers on the dev channel. Your access
+          code opens them; nobody else can see them. Getting one brings a title to the newest version
+          here, a few files at a time when you already have it.</p>
+        <div class="toolbar">
+          <button class="ghost sm" id="feedRefresh">Look again</button>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Title</th><th>Here</th><th>Newest</th>
+          <th>State</th><th></th></tr></thead><tbody id="feedBody"></tbody></table></div>
+      </div>
       <div class="panel" id="deployJobPanel" hidden>
         <h2>Job <span class="mono" id="deployJobTitle"></span> <span class="pill" id="deployJobState"></span></h2>
         <p class="hint" id="deployJobSummary"></p>

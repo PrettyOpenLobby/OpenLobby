@@ -960,8 +960,9 @@ def cmd_channel(catalog, args):
 
 
 def cmd_dev_code(catalog, args):
-    """dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL]: print an access
-    code for the dev channel (docs/deployer.md, "Dev channel"). The token, when the images
+    """dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL] [--patches
+    HOST/OWNER]: print an access code for the dev channel (docs/deployer.md, "Dev channel");
+    --patches makes it an olx2. code that also unlocks that patch feed. The token, when the images
     need one, is read from FILE's first line or from stdin (-), never from the command
     line. dev-code --decode reads a code on stdin and says what is in it, the token left
     out."""
@@ -975,9 +976,10 @@ def cmd_dev_code(catalog, args):
         print("token:    %s" % ("yes" if info["token"] else "none (public images)"))
         print("source:   %s" % (info["source"] or devchannel.default_source(info["registry"])
                                 + " (the default)"))
+        print("patches:  %s" % (info["feed"] or "none"))
         return 0
     opts = {}
-    for name in ("--registry", "--token-file", "--source"):
+    for name in ("--registry", "--token-file", "--source", "--patches"):
         if name in args:
             i = args.index(name)
             if i + 1 >= len(args):
@@ -985,8 +987,8 @@ def cmd_dev_code(catalog, args):
             opts[name] = args[i + 1]
             del args[i:i + 2]
     if args:
-        raise StackError("dev-code takes only --registry, --token-file and --source; the "
-                         "token is never given on the command line")
+        raise StackError("dev-code takes only --registry, --token-file, --source and --patches; "
+                         "the token is never given on the command line")
     if not opts.get("--registry"):
         raise StackError("dev-code needs --registry HOST/PATH")
     token = None
@@ -1008,7 +1010,8 @@ def cmd_dev_code(catalog, args):
         if not token:
             raise StackError("the token file is empty")
     try:
-        print(devchannel.make_code(opts["--registry"], token, opts.get("--source")))
+        print(devchannel.make_code(opts["--registry"], token, opts.get("--source"),
+                                   opts.get("--patches")))
     except devchannel.ChannelError as exc:
         raise StackError(str(exc))
     return 0
