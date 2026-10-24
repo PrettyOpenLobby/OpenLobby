@@ -701,19 +701,33 @@ def check_channel(catalog, root, parent):
     ok(code.startswith("olx1.") and "=" not in code and "kart-token" not in code
        and devchannel.parse_code(code) == {"kind": "olx1", "registry": "registry.example.org/kart",
                                            "token": "kart-token-0123", "source": "https://code.example.org/kart",
-                                           "feed": None},
+                                           "feed": None, "name": None},
        "code: round trip (%s)" % code[:20])
     pub = devchannel.make_code("registry.example.org/kart")
     ok(devchannel.parse_code(pub)["token"] is None and devchannel.token_of(pub) is None
        and devchannel.token_of(code) == "kart-token-0123", "code: one without a token reads as public")
     ok(devchannel.parse_code("kart-plain-token", registry="registry.example.org/kart")
        == {"kind": "plain", "registry": "registry.example.org/kart", "token": "kart-plain-token", "source": None,
-           "feed": None},
+           "feed": None, "name": None},
        "code: a plain token with a registry still works (the old way)")
     feed = devchannel.make_code("registry.example.org/kart", "kart-token-0123", feed="code.example.org/kart-patches")
     ok(feed.startswith("olx2.") and devchannel.parse_code(feed)["feed"] == "code.example.org/kart-patches"
        and devchannel.parse_code(feed)["kind"] == "olx2" and devchannel.token_of(feed) == "kart-token-0123",
        "code: one with a patch feed is olx2. and carries it")
+    named = devchannel.make_code("registry.example.org/kart", "kart-token-0123", name="kart-server")
+    named2 = devchannel.make_code("registry.example.org/kart", None, feed="code.example.org/kart-patches",
+                                  name="kart.server_2")
+    ok(devchannel.parse_code(named)["name"] == "kart-server" and devchannel.parse_code(named)["kind"] == "olx1"
+       and devchannel.parse_code(named2)["name"] == "kart.server_2" and devchannel.parse_code(named2)["kind"] == "olx2",
+       "code: a name round-trips in olx1. and olx2.")
+    ok(devchannel.parse_code(code)["name"] is None and devchannel.parse_code(feed)["name"] is None,
+       "code: one made without a name (as every older one) still parses, name None")
+    for badname in ("Kart", "-kart", "", "k" * 65, "kart server", "kart/server", 7):
+        try:
+            devchannel.make_code("registry.example.org/kart", name=badname)
+            ok(False, "code: make_code refuses the name %r" % (badname,))
+        except devchannel.ChannelError:
+            ok(True, "code: make_code refuses the name %r" % (badname,))
     import base64 as _b64
 
     def enc(raw, v=1):
@@ -724,6 +738,10 @@ def check_channel(catalog, root, parent):
                       ("olx2." + code[5:], "damaged"), (enc(b'{"r":"registry.example.org/kart","p":"x"}', 2), "damaged"),
                       (enc(b'{"r":"registry.example.org/kart","p":"h.example.org/o"}'), "damaged"),
                       ("olx0." + code[5:], "damaged"), (enc(b"[1,2]"), "damaged"), (enc(b"not json"), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","n":"Kart"}'), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","n":7}'), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","n":""}'), "damaged"),
+                      (enc(b'{"r":"registry.example.org/kart","p":"h.example.org/o","n":"a b"}', 2), "damaged"),
                       (enc(b'{"r":"Not A Registry"}'), "damaged"), (enc(b'{"t":"x"}'), "damaged"),
                       (enc(b'{"r":"registry.example.org/kart","x":1}'), "damaged"),
                       (enc(b'{"r":"registry.example.org/kart","t":"has space"}'), "damaged"),
@@ -763,6 +781,16 @@ def check_channel(catalog, root, parent):
                            capture_output=True, text=True)
         ok(r.returncode == 0 and "patches:  code.example.org/kart-patches" in r.stdout,
            "dev-code --decode names the patch feed")
+        ok("name:     none" in r.stdout, "dev-code --decode: no name in a code without one")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--registry", "registry.example.org/kart",
+                            "--token-file", tf, "--name", "kart-server"], capture_output=True, text=True)
+        ok(r.returncode == 0 and r.stdout.strip() == named, "dev-code --name: the named code")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--decode"], input=named + "\n",
+                           capture_output=True, text=True)
+        ok(r.returncode == 0 and "name:     kart-server" in r.stdout, "dev-code --decode shows the name")
+        r = subprocess.run([sys.executable, sp, "dev-code", "--registry", "registry.example.org/kart",
+                            "--name", "Bad Name"], capture_output=True, text=True)
+        ok(r.returncode == 2 and "name" in r.stderr, "dev-code --name with a bad name: refused (%s)" % r.stderr.strip())
         r = subprocess.run([sys.executable, sp, "dev-code", "--decode"], input=code + "\n",
                            capture_output=True, text=True)
         ok(r.returncode == 0 and "registry.example.org/kart" in r.stdout and "token:    yes" in r.stdout

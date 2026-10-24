@@ -39,6 +39,7 @@ import collections
 import hashlib
 import http.cookies
 import inspect
+import ipaddress
 import json
 import os
 import posixpath
@@ -1193,6 +1194,48 @@ def _auth_required():
 
 
 ADMIN_BIND = os.environ.get("POL_ADMIN_BIND", "0.0.0.0")
+
+
+def _proxy_addr(text):
+    """POL_ADMIN_TRUSTED_PROXY parsed: one address, or None (unset or not an address)."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return ipaddress.ip_address(text)
+    except ValueError:
+        print(f"[admin] POL_ADMIN_TRUSTED_PROXY {text!r} is not one address; ignored", flush=True)
+        return None
+
+
+#: The one reverse proxy whose X-Forwarded-For is believed (docs/deployer.md, "Redeeming a
+#: code"): it lets a panel behind a forwarder that exposes only POST /api/dev-code/redeem count
+#: tries and audit by the real client address. It is used for that route alone, and only when the
+#: connection comes from exactly this address. Unset (the default): the header is never read.
+TRUSTED_PROXY = _proxy_addr(os.environ.get("POL_ADMIN_TRUSTED_PROXY"))
+
+
+def forwarded_client(peer, forwarded, proxy=TRUSTED_PROXY):
+    """The client address for the dev code redeem route. `peer` is the connection's own address;
+    `forwarded` the X-Forwarded-For values (a list, as headers.get_all gives them, or None). The
+    header counts only when `peer` is the trusted proxy, and then its LAST entry is taken: the one
+    that proxy wrote, whatever a client put in front of it. Anything that is not an address gives
+    the peer back."""
+    if proxy is None or not forwarded:
+        return peer
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if getattr(addr, "ipv4_mapped", None):
+        addr = addr.ipv4_mapped
+    if addr != proxy:
+        return peer
+    last = ",".join(forwarded).split(",")[-1].strip()
+    try:
+        return str(ipaddress.ip_address(last))
+    except ValueError:
+        return peer
 
 
 def _open_panel_refused():
@@ -2792,6 +2835,19 @@ class Handler(BaseHTTPRequestHandler):
                    detail=dict({k: body.get(k) for k in ("to", "version", "source") if body.get(k)}, job=out.get("job")),
                    ok=status == 202, addr=self._addr())
             return self._send(status, out)
+        if path == "/api/deploy/patches/feed":
+            # Patches from the developers on or off. Like /api/deploy/channel, not in
+            # _AUDIT_ACTIONS: the code goes to the deployer only and never into the log.
+            body = self._json_body()
+            status, out = admindeploy.patch_feed_set(body)
+            user, role, _p = self._caller()
+            on = body.get("enabled") is True
+            detail = {} if status == 200 else {"error": str(out.get("error") or "")[:300]}
+            _audit(user, role, ("turned patches from the developers %s" if status == 200 else
+                                "tried to turn patches from the developers %s") % ("on" if on else "off"),
+                   detail=detail, ok=status == 200, addr=self._addr())
+            self._jb = {}
+            return self._send(status, out)
         if path == "/api/deploy/channel":
             # The access code goes to the deployer only. This path is not in _AUDIT_ACTIONS on
             # purpose: the automatic audit would make a body's "code" the row's target.
@@ -2996,13 +3052,15 @@ class Handler(BaseHTTPRequestHandler):
         as it refuses everything else."""
         if not _auth_required() and _open_panel_refused():
             return self._authed("/api/dev-code/redeem")
-        ok, wait = admindevcodes.LIMIT.allow(self._addr())
+        # behind POL_ADMIN_TRUSTED_PROXY: the real client's address, for this route only
+        addr = forwarded_client(self._addr(), self.headers.get_all("X-Forwarded-For"))
+        ok, wait = admindevcodes.LIMIT.allow(addr)
         if not ok:
             return self._send(429, {"error": "Too many tries from this address. Try again in %d seconds." % wait},
                               headers=[("Retry-After", str(wait))])
         status, out, aud = admindevcodes.redeem(self._json_body())
         if aud is not None:
-            _audit("dev code", "install", aud[0], target=None, ok=aud[1], addr=self._addr())
+            _audit("dev code", "install", aud[0], target=None, ok=aud[1], addr=addr)
         return self._send(status, out)
 
     def _pair(self, path):

@@ -877,7 +877,10 @@ compact JSON:
 `r` is the registry, host and path, where the dev images are. `t` is the
 token that reads them; a code without one is for public images and signs
 in as nobody. `s` is where their source repositories are (default
-`https://<r>`). Nothing else may be in it: a code with another field, a
+`https://<r>`). `n` is optional: a name a game's own setup uses for its
+repository and image, 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, starting
+with a letter or digit; OpenLobby itself ignores it, and an issuer hands it
+on as its base code has it. Nothing else may be in it: a code with another field, a
 field of the wrong kind, a damaged string or padding is refused with "This
 access code is damaged or incomplete; copy it again, whole.", and one that
 starts `olx2.` or later with "This access code is for a newer version of
@@ -888,7 +891,7 @@ channel" below) starts `olx2.` and has one more field, `p`, the feed's
 `host/owner`. An OpenLobby too old to know `olx2.` says to update first.
 
 The developers make codes with `python tools/stack.py dev-code --registry
-HOST/PATH [--token-file FILE] [--source URL] [--patches HOST/OWNER]`. The token is read from the
+HOST/PATH [--token-file FILE] [--source URL] [--patches HOST/OWNER] [--name NAME]`. The token is read from the
 first line of FILE, or from stdin with `--token-file -`, never from the
 command line. `stack.py dev-code --decode` reads a code on stdin and says
 what is in it, the token left out.
@@ -1017,7 +1020,10 @@ and 2 to 9 without O, I or L, in any case, with or without dashes or
 spaces. `install_id` names the server the code is for: 16 to 64 of A to Z,
 a to z, 0 to 9, `_` and `-`. Make it once at random, keep it, and send the
 same one every time; a deployer's is `ol-` and 32 hex digits. The code is
-bound to the first install id that redeems it.
+bound to the first install id that redeems it. Send a `User-Agent` of your
+own: a front such as Cloudflare may refuse an HTTP library's default one
+(Python's `Python-urllib` gets error 1010), and the deployer sends
+`openlobby-deployer`.
 
 Every answer is JSON. A refusal carries `error`, a sentence to show the
 user as it is; no sentence repeats the code.
@@ -1037,6 +1043,30 @@ user as it is; no sentence repeats the code.
 `access_code` is an `olx1.` or `olx2.` code, as described in "Access codes"
 above: use it as if the user had typed it. Treat it as a secret
 (with a token per code it holds one), and do not log it.
+
+#### Taking redeems from the internet
+
+Installs run by other people reach the issuer over the internet, and the
+panel itself should not be on the internet. Put a reverse proxy in front of
+it that passes on exactly one request, `POST /api/dev-code/redeem`: no other
+method, no other path (not even one that starts with this one or adds a
+query string), a small body (4 KB is plenty) and short timeouts. Have it
+limit tries per client address too, and send only the JSON body and an
+`X-Forwarded-For` header it writes itself, never the client's own.
+
+The panel counts tries (the 429 above) and writes the activity log by client
+address. Behind a proxy every request comes from the proxy, so one client
+would use up the tries for everyone. Set `POL_ADMIN_TRUSTED_PROXY` on the
+panel to the one address the proxy connects from: for that route only, and
+only on a connection from exactly that address, the panel takes the client's
+address from the last entry of `X-Forwarded-For`. Unset, the header is never
+read. It takes a single address, not a range; anything else is ignored with a
+line in the panel's log. Anything else on the same host that connects from
+that address can name its own client address on this route, so pick an
+address only the proxy uses where you can.
+
+Give users the proxy's public base URL as the issuer (`POL_DEV_ISSUER`), for
+example `https://example.org`.
 
 ### Switching
 

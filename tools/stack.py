@@ -22,7 +22,7 @@ chain the title plugins need. docs/games.md explains the design.
     python tools/stack.py channel [--json]       which update channel this install follows
     python tools/stack.py channel dev --registry HOST/PATH [--source URL]
     python tools/stack.py channel stable
-    python tools/stack.py dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL]
+    python tools/stack.py dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL] [--name NAME]
                                                  make an access code for the dev channel
 
 Standard library only. Works from any directory.
@@ -961,8 +961,9 @@ def cmd_channel(catalog, args):
 
 def cmd_dev_code(catalog, args):
     """dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL] [--patches
-    HOST/OWNER]: print an access code for the dev channel (docs/deployer.md, "Dev channel");
-    --patches makes it an olx2. code that also unlocks that patch feed. The token, when the images
+    HOST/OWNER] [--name NAME]: print an access code for the dev channel (docs/deployer.md, "Dev
+    channel"); --patches makes it an olx2. code that also unlocks that patch feed, and --name
+    puts in the repository and image name a game's own setup uses (OpenLobby ignores it). The token, when the images
     need one, is read from FILE's first line or from stdin (-), never from the command
     line. dev-code --decode reads a code on stdin and says what is in it, the token left
     out."""
@@ -977,9 +978,10 @@ def cmd_dev_code(catalog, args):
         print("source:   %s" % (info["source"] or devchannel.default_source(info["registry"])
                                 + " (the default)"))
         print("patches:  %s" % (info["feed"] or "none"))
+        print("name:     %s" % (info["name"] or "none"))
         return 0
     opts = {}
-    for name in ("--registry", "--token-file", "--source", "--patches"):
+    for name in ("--registry", "--token-file", "--source", "--patches", "--name"):
         if name in args:
             i = args.index(name)
             if i + 1 >= len(args):
@@ -987,7 +989,7 @@ def cmd_dev_code(catalog, args):
             opts[name] = args[i + 1]
             del args[i:i + 2]
     if args:
-        raise StackError("dev-code takes only --registry, --token-file, --source and --patches; "
+        raise StackError("dev-code takes only --registry, --token-file, --source, --patches and --name; "
                          "the token is never given on the command line")
     if not opts.get("--registry"):
         raise StackError("dev-code needs --registry HOST/PATH")
@@ -1011,7 +1013,7 @@ def cmd_dev_code(catalog, args):
             raise StackError("the token file is empty")
     try:
         print(devchannel.make_code(opts["--registry"], token, opts.get("--source"),
-                                   opts.get("--patches")))
+                                   opts.get("--patches"), opts.get("--name")))
     except devchannel.ChannelError as exc:
         raise StackError(str(exc))
     return 0

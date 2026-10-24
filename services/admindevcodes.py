@@ -246,7 +246,7 @@ def _access_code(k, token):
     if not token:
         return k["code"]
     b = k["base"]
-    return devchannel.make_code(b["registry"], token, b["source"], b["feed"])
+    return devchannel.make_code(b["registry"], token, b["source"], b["feed"], b.get("name"))
 
 
 def shown(code):

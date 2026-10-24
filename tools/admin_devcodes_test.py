@@ -340,7 +340,7 @@ def minting(tmp, base_env, fj, auth):
 
 KART_BASE = devchannel.make_code("kart.example.org/dev", None, "https://code.example.org/kart")
 DERBY_BASE = devchannel.make_code("derby.example.org/dev", None, "https://code.example.org/derby",
-                                  "derby.example.org/patches")
+                                  "derby.example.org/patches", "derby-server")
 DERBY_READER, DERBY_PW = "derbydev", "derby reader password 2"
 
 
@@ -405,9 +405,10 @@ def kinds(tmp, base_env, kart, derby):
               {"name": "openlobby-dev-kart-" + devchannel.short_code(k1), "scopes": ["read:package"]})])
         code, r = redeem(anon, d1, INSTALL_A)
         info = devchannel.parse_code(r.get("access_code") or "x" * 9) if code == 200 else {}
-        chk("the same install redeems a Derby Night code too: the derby base code, its patch feed, its token",
-            (code, info.get("registry"), info.get("feed"), info.get("token")),
-            (200, "derby.example.org/dev", "derby.example.org/patches", derby.user + ":derby-token-0001"))
+        chk("the same install redeems a Derby Night code too: the derby base code, its patch feed, its name, its token",
+            (code, info.get("registry"), info.get("feed"), info.get("name"), info.get("token")),
+            (200, "derby.example.org/dev", "derby.example.org/patches", "derby-server", derby.user + ":derby-token-0001"))
+        chk("  a kart code (no name in its base) still has none", devchannel.parse_code(KART_BASE)["name"], None)
         chk("  minted on the derby Forgejo with both scopes, nothing more on the kart one",
             ([(c[2]["name"], c[2]["scopes"]) for c in derby.calls if c[0] == "POST"],
              len([c for c in kart.calls if c[0] == "POST"])),
@@ -516,6 +517,66 @@ def limited(tmp, base_env):
         stop(proc)
 
 
+def redeem_via(url, xff, code="ZZZZ-ZZZZ-ZZZZ"):
+    """A redeem with X-Forwarded-For set (a list sends the header once per entry)."""
+    import http.client
+    from urllib.parse import urlsplit
+    u = urlsplit(url)
+    c = http.client.HTTPConnection(u.hostname, u.port, timeout=15)
+    c.putrequest("POST", "/api/dev-code/redeem")
+    body = json.dumps({"code": code, "install_id": INSTALL_A}).encode()
+    c.putheader("Content-Type", "application/json")
+    c.putheader("Content-Length", str(len(body)))
+    for one in ([xff] if isinstance(xff, str) else xff or []):
+        c.putheader("X-Forwarded-For", one)
+    c.endheaders(body)
+    r = c.getresponse()
+    status = r.status
+    r.read()
+    c.close()
+    return status
+
+
+def audit_addrs_since(n):
+    return [r["addr"] for r in sql("SELECT * FROM admin_audit WHERE id > %s ORDER BY id", (n,))]
+
+
+def forwarded(tmp, base_env):
+    print("behind a reverse proxy (POL_ADMIN_TRUSTED_PROXY)")
+    env = dict(base_env, POL_DEV_ISSUER_CODE=BASE)
+    env.pop("POL_ADMIN_PAIR_TRIES", None)
+    proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=dict(env, POL_ADMIN_TRUSTED_PROXY="127.0.0.1"))
+    try:
+        n = audit_top()
+        codes = [redeem_via(url, "203.0.113.5") for _ in range(5)]
+        chk("from the trusted proxy: five tries for one forwarded client, 404 each", codes, [404] * 5)
+        chk("  the sixth from that client: 429", redeem_via(url, "203.0.113.5"), 429)
+        chk("  another client through the same proxy is not limited by it", redeem_via(url, "198.51.100.7"), 404)
+        chk("  nor is the proxy itself (no header)", redeem_via(url, None), 404)
+        chk("  the activity log has the clients' own addresses",
+            audit_addrs_since(n), ["203.0.113.5"] * 5 + ["198.51.100.7", "127.0.0.1"])
+        n = audit_top()
+        chk("  a client that writes its own header in front: the proxy's last entry counts",
+            (redeem_via(url, "192.0.2.1, 192.0.2.50"), redeem_via(url, ["192.0.2.2", "192.0.2.51"]),
+             audit_addrs_since(n)), (404, 404, ["192.0.2.50", "192.0.2.51"]))
+        n = audit_top()
+        chk("  a header that is not an address: the peer's own",
+            (redeem_via(url, "not-an-address"), audit_addrs_since(n)), (404, ["127.0.0.1"]))
+    finally:
+        stop(proc)
+    for what, extra in (("unset", {}), ("another address", {"POL_ADMIN_TRUSTED_PROXY": "192.0.2.200"}),
+                        ("not one address", {"POL_ADMIN_TRUSTED_PROXY": "127.0.0.0/8"})):
+        proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=dict(env, **extra))
+        try:
+            n = audit_top()
+            codes = [redeem_via(url, "203.0.113.%d" % i) for i in range(6)]
+            chk("trusted proxy %s: X-Forwarded-For is ignored, the sixth try is 429 whatever it says" % what,
+                codes, [404] * 5 + [429])
+            chk("  the activity log has the connection's address", set(audit_addrs_since(n)), {"127.0.0.1"})
+        finally:
+            stop(proc)
+
+
 def main():
     seed()
     tmp = tempfile.mkdtemp(prefix="admindevcodes-")
@@ -529,6 +590,7 @@ def main():
         minting(tmp, base_env, fj, "siteadmin:admin password 1")
         kinds(tmp, base_env, Forgejo(), Forgejo(DERBY_READER, DERBY_PW, "derby-token"))
         limited(tmp, base_env)
+        forwarded(tmp, base_env)
     finally:
         fj.stop()
     print("admin_devcodes_test: %d failed" % bad)

@@ -7,7 +7,9 @@ deployer needs (make_code, parse_code below): "olx1." and then, base64url withou
 the compact JSON {"r": "<registry host/path>", "t": "<token>", "s": "<source base URL>"},
 "t" and "s" optional. A code that also unlocks the developers' patch feed is "olx2." with
 one more optional field, "p": "<host/owner>" of the feed's generic packages (patchfeed.py),
-so an older deployer given one says to update OpenLobby first instead of calling it damaged. The panel never shows the registry; it says "dev builds". A plain
+so an older deployer given one says to update OpenLobby first instead of calling it damaged.
+Either may carry "n": an optional name a game's own setup uses for its repository and image
+(NAME below); OpenLobby itself ignores it. The panel never shows the registry; it says "dev builds". A plain
 token with POL_DEV_REGISTRY (or a registry given beside it) still works, as before. The
 catalog says which images have a dev build: each games/*.json may carry
 
@@ -60,6 +62,8 @@ FEED_PREFIX = "olx2."
 FEED = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _VERSIONED = re.compile(r"^olx([0-9]{1,3})\.")
 _B64URL = re.compile(r"^[A-Za-z0-9_-]{4,2043}$")
+#: "n" in an access code: the repository and image name a game's own setup uses.
+NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SOURCE = re.compile(r"^https?://[A-Za-z0-9._~:/%+@-]{1,400}$")
 _NAME = re.compile(r"^[a-z0-9]([a-z0-9._/-]{0,126}[a-z0-9])?$")
 _TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
@@ -173,13 +177,19 @@ def registry_host(registry):
 
 # ------------------------------------------------------------------ access codes
 
-def make_code(registry, token=None, source=None, feed=None):
+def make_code(registry, token=None, source=None, feed=None, name=None):
     """The access code for `registry` (host/path), signing in with `token` (None: the
     images are public and need none), their source under `source` (None: the default,
     https://<registry>), and the patch feed at `feed` (host/owner; None: no patches, and
-    the code is an olx1. one). For the operator's `tools/stack.py dev-code`."""
+    the code is an olx1. one), and `name` the repository and image name a game's own setup
+    uses (None: none; OpenLobby ignores it). For the operator's `tools/stack.py dev-code`."""
     check_registry(registry)
     doc = {"r": registry}
+    if name is not None:
+        if not isinstance(name, str) or not NAME.match(name):
+            raise ChannelError("the name must be 1 to 64 of a-z, 0-9, '.', '_' and '-', starting "
+                               "with a letter or digit (got %r)" % (name,))
+        doc["n"] = name
     if feed is not None:
         if not isinstance(feed, str) or not FEED.match(feed):
             raise ChannelError("the patch feed must be host/owner (got %r)" % (feed,))
@@ -201,11 +211,11 @@ def make_code(registry, token=None, source=None, feed=None):
 
 
 def parse_code(code, registry=None):
-    """What an access code says: {"kind", "registry", "token", "source", "feed"}.
+    """What an access code says: {"kind", "registry", "token", "source", "feed", "name"}.
 
     An olx1. code carries its registry, its token (None when it has none: public images)
     and its source base URL (None: the default); an olx2. code also the patch feed, else
-    "feed" is None. Anything else is a plain token for
+    "feed" is None. Either may carry a name for a game's own setup ("name", else None). Anything else is a plain token for
     `registry` (POL_DEV_REGISTRY, or one given beside the code), the way codes worked
     before; with no such registry it is refused. ChannelError carries the sentence the
     panel shows; no sentence repeats the code."""
@@ -220,7 +230,7 @@ def parse_code(code, registry=None):
     if m:
         if m.group(0) not in (CODE_PREFIX, FEED_PREFIX):
             raise ChannelError(NEWER if int(m.group(1)) > 2 else DAMAGED)
-        fields = {"r", "t", "s"} | ({"p"} if m.group(0) == FEED_PREFIX else set())
+        fields = {"r", "t", "s", "n"} | ({"p"} if m.group(0) == FEED_PREFIX else set())
         payload = code[len(m.group(0)):]
         if not _B64URL.match(payload) or len(payload) % 4 == 1:
             raise ChannelError(DAMAGED)
@@ -233,16 +243,18 @@ def parse_code(code, registry=None):
                 or not isinstance(doc.get("r"), str) or not REGISTRY.match(doc["r"])
                 or ("t" in doc and not (isinstance(doc["t"], str) and TOKEN.match(doc["t"])))
                 or ("s" in doc and not (isinstance(doc["s"], str) and SOURCE.match(doc["s"])))
+                or ("n" in doc and not (isinstance(doc["n"], str) and NAME.match(doc["n"])))
                 or (m.group(0) == FEED_PREFIX
                     and not (isinstance(doc.get("p"), str) and FEED.match(doc["p"])))):
             raise ChannelError(DAMAGED)
         return {"kind": m.group(0)[:-1], "registry": doc["r"], "token": doc.get("t"),
                 "source": doc["s"].rstrip("/") if doc.get("s") else None,
-                "feed": doc.get("p")}
+                "feed": doc.get("p"), "name": doc.get("n")}
     if not registry:
         raise ChannelError(NOT_OURS)
     check_registry(registry)
-    return {"kind": "plain", "registry": registry, "token": code, "source": None, "feed": None}
+    return {"kind": "plain", "registry": registry, "token": code, "source": None, "feed": None,
+            "name": None}
 
 
 def short_code(text):
@@ -278,7 +290,10 @@ def redeem(issuer, code, install_id, timeout=TIMEOUT):
         raise ChannelError("This server has no install id to redeem the code with.")
     body = json.dumps({"code": code, "install_id": install_id}).encode("utf-8")
     req = urllib.request.Request(issuer.rstrip("/") + "/api/dev-code/redeem", data=body,
-                                 method="POST", headers={"Content-Type": "application/json"})
+                                 method="POST", headers={"Content-Type": "application/json",
+                                                         # Cloudflare's browser check refuses
+                                                         # Python-urllib's own (error 1010)
+                                                         "User-Agent": "openlobby-deployer"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             st, raw = r.status, r.read(16384)
