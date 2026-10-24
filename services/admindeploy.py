@@ -101,7 +101,7 @@ OLD_DEPLOYER = "This deployer has no update channels yet; update the core first,
 
 #: what the panel passes on of the deployer's channel answer and of each image row: never
 #: the registry's address, which the page does not show (it says "dev builds")
-CHANNEL_KEYS = ("channel", "since", "code_stored", "ghcr", "problem")
+CHANNEL_KEYS = ("channel", "since", "code_stored", "ghcr", "problem", "install_id", "short_codes")
 CHANNEL_ROW = ("key", "name", "stable", "dev_name", "applies", "what", "license", "note",
                "enabled", "has_source")
 _SHORT = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
@@ -155,9 +155,8 @@ def set_channel(body):
         return 400, {"error": "Pick Stable or Dev."}
     out = {"channel": want}
     if want == "dev":
-        code = body.get("code")
-        code = code.strip() if isinstance(code, str) else ""
-        if not devchannel.CODE.match(code):
+        code = clean_code(body.get("code"))
+        if code is None:
             return 400, {"error": "The access code is 8 to 2048 characters, with no spaces."}
         out["code"] = code
         # advanced: the registry of a plain token (an olx1. code carries its own)
@@ -223,16 +222,40 @@ def action(act, game, item=None, source=None):
     return status, out
 
 
-def run_updater(key, title, rec):
+def clean_code(code):
+    """An access code as the deployer takes it: an olx1. code (or a plain token) as typed, a
+    short dev code (ABCD EFGH JKMN, any case) as ABCD-EFGH-JKMN; None when it cannot be one."""
+    if not isinstance(code, str):
+        return None
+    short = devchannel.short_code(code)
+    if short:
+        return devchannel.show_short(short)
+    code = code.strip()
+    return code if devchannel.CODE.match(code) else None
+
+
+def run_updater(key, title, rec, channel=None, switch=False, code=None):
     """Ask the deployer to run a paired game's updater (docs/deployer.md, "Updaters of paired
     games"). `rec` is the panel's stored record the owner approved, never anything a browser
-    sent; the deployer checks every field of it again with the same rules."""
+    sent; the deployer checks every field of it again with the same rules. `channel` appends
+    "--channel <name>"; `switch` says it is a channel switch, and `code` (a switch to a channel
+    other than stable only) is the access code the deployer hands the updater in its
+    environment. The code goes there and nowhere else."""
     if not isinstance(key, str) or not _KEY.match(key):
         return 400, {"error": "Unknown game."}
-    body = {"game": key, "title": str(title or key)[:80],
-            "updater": {"folder": rec["folder"], "command": list(rec["command"]),
-                        "timeout_minutes": rec["timeout_minutes"]}}
-    status, out = _call("POST", "/api/updater", body)
+    upd = {"folder": rec["folder"], "command": list(rec["command"]),
+           "timeout_minutes": rec["timeout_minutes"]}
+    if rec.get("channels"):
+        upd["channels"] = list(rec["channels"])
+    body = {"game": key, "title": str(title or key)[:80], "updater": upd}
+    if channel is not None:
+        body["channel"] = channel
+    if switch:
+        body["switch"] = True
+    if code:
+        body["code"] = code
+    status, out = _call("POST", "/api/updater", body, timeout=CHANNEL_TIMEOUT if code else TIMEOUT)
+    body.pop("code", None)
     if status == 409:
         out.setdefault("error", "Another job is still running; it is shown below.")
     elif status == 404:

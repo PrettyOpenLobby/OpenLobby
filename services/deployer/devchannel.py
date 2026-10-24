@@ -17,6 +17,12 @@ catalog says which images have a dev build: each games/*.json may carry
              "source": "<its repository under the dev source URL, or a full https:// URL>",
              "what": "<what it is, for the panel>", "license": "<SPDX id>"}]
 
+A developer may also hand out a short dev code instead (ABCD-EFGH-JKMN, 12 characters):
+single-use, bound to the first install that redeems it. The deployer sends it with its own
+install id (InstallId below) to the issuer named by POL_DEV_ISSUER, a panel that makes such
+codes (services/admindevcodes.py), and gets an ordinary olx1. code back (redeem below). The
+same install asking again gets the same answer; any other install is refused.
+
 Which channel an install is on lives in the core checkout's .channel file (JSON, written by
 `tools/stack.py channel`), so tools/stack.py, the deployer and the setup scripts all read the
 same thing. The access code never goes there: the deployer keeps it in its own state
@@ -29,6 +35,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import shutil
 import time
 import urllib.error
@@ -71,10 +78,25 @@ NEWER = ("This access code is for a newer version of OpenLobby; update OpenLobby
 NOT_OURS = "That is not an OpenLobby access code (they start with olx); copy it again, whole."
 NO_CODE = ("The dev channel is on but no access code is stored here; switch to Dev again with "
            "a code, or back to Stable.")
+NO_ISSUER = ("That is a short dev code, and this server does not know where to redeem one "
+             "(POL_DEV_ISSUER is not set). Ask for a full access code (it starts with olx), or "
+             "set POL_DEV_ISSUER to the address the developers gave you.")
+
+#: a short dev code: 12 characters with no 0/O or 1/I/L, shown in three groups of four
+SHORT_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+SHORT_LEN = 12
+_SHORT = re.compile(r"^[%s]{%d}$" % (SHORT_ALPHABET, SHORT_LEN))
+#: an install id: what InstallId makes, and what an issuer accepts
+INSTALL_ID = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+ISSUER = re.compile(r"^https?://[A-Za-z0-9._~:%@\[\]-]{1,300}(/[A-Za-z0-9._~/%-]{0,200})?$")
 
 
 class ChannelError(Exception):
     pass
+
+
+class IssuerDown(ChannelError):
+    """The dev code issuer did not answer (the panel says 502, not 400)."""
 
 
 # ------------------------------------------------------------------ the .channel file
@@ -221,6 +243,103 @@ def parse_code(code, registry=None):
         raise ChannelError(NOT_OURS)
     check_registry(registry)
     return {"kind": "plain", "registry": registry, "token": code, "source": None, "feed": None}
+
+
+def short_code(text):
+    """The short dev code `text` is, as its 12 characters (case, spaces and dashes taken out),
+    or None when it is not one. Only a code typed in groups of four (ABCD-EFGH-JKMN, or with
+    spaces) or as exactly 12 characters counts, so a plain registry token is never taken for
+    one."""
+    if not isinstance(text, str):
+        return None
+    t = text.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{4}([ -]?[A-Z0-9]{4}){2}", t):
+        return None
+    t = re.sub(r"[ -]", "", t)
+    return t if _SHORT.match(t) else None
+
+
+def show_short(code):
+    """ABCDEFGHJKMN as ABCD-EFGH-JKMN."""
+    return "-".join(code[i:i + 4] for i in range(0, len(code), 4))
+
+
+def redeem(issuer, code, install_id, timeout=TIMEOUT):
+    """Redeem the short dev code `code` (short_code's form) at the issuer `issuer` (a panel's
+    base URL) for this install: the olx1. (or olx2.) code it answers, checked with
+    parse_code. ChannelError with the issuer's own sentence when it refuses, or one of ours
+    when it does not answer; no sentence repeats the code."""
+    if not issuer:
+        raise ChannelError(NO_ISSUER)
+    if not ISSUER.match(issuer):
+        raise ChannelError("POL_DEV_ISSUER must be an http(s) address, such as "
+                           "https://panel.example.org.")
+    if not INSTALL_ID.match(install_id or ""):
+        raise ChannelError("This server has no install id to redeem the code with.")
+    body = json.dumps({"code": code, "install_id": install_id}).encode("utf-8")
+    req = urllib.request.Request(issuer.rstrip("/") + "/api/dev-code/redeem", data=body,
+                                 method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            st, raw = r.status, r.read(16384)
+    except urllib.error.HTTPError as e:
+        st, raw = e.code, e.read(16384)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        raise IssuerDown("The dev code issuer did not answer (%s); try again later."
+                           % str(reason)[:160])
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
+    if st != 200:
+        why = doc.get("error") if isinstance(doc.get("error"), str) else None
+        raise ChannelError((why or "The dev code issuer refused the code (HTTP %d)." % st)[:300])
+    got = doc.get("access_code")
+    if not isinstance(got, str):
+        raise ChannelError("The dev code issuer answered without an access code.")
+    parse_code(got)          # a code we cannot read is refused here, not after a switch
+    return got
+
+
+class InstallId:
+    """This install's id, made once and kept in STATE/install_id (mode 600). Not a secret,
+    but never shown in public: it binds a short dev code to this install. Outside
+    STATE/channel, so switching back to Stable keeps it."""
+
+    def __init__(self, state):
+        self.path = os.path.join(state, "install_id")
+
+    def get(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                v = f.read().strip()
+            if INSTALL_ID.match(v):
+                return v
+        except OSError:
+            pass
+        v = "ol-" + secrets.token_hex(16)
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        tmp = self.path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(v + "\n")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        try:
+            os.link(tmp, self.path)       # a second process that won the race keeps its id
+        except FileExistsError:
+            os.remove(tmp)
+            return self.get()
+        except OSError:
+            os.replace(tmp, self.path)    # no hard links here (some Windows volumes)
+            return v
+        os.remove(tmp)
+        return v
 
 
 def token_of(code):

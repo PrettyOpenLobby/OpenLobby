@@ -988,6 +988,14 @@ if args[0] == "run":
         if a == "-e":
             k, _, v = args[j + 1].partition("=")
             env[k] = v
+        if a == "--env-file":
+            p = args[j + 1]
+            st = os.stat(p)
+            with open(os.path.join(d, "envfile.json"), "w") as f:
+                json.dump({"path": p, "mode": st.st_mode & 0o777, "text": open(p).read()}, f)
+            for line in open(p).read().splitlines():
+                k, _, v = line.partition("=")
+                env[k] = v
     for k in ("SYSTEMROOT", "PATH"):
         if os.environ.get(k):
             env.setdefault(k, os.environ[k])
@@ -1067,6 +1075,177 @@ def test_updater_unit():
         ok(gu.check(block)[1] is not None, "updater check: %s refused" % what)
     ok(gu.shown(["python", "setup.py", "--name", "Kart Club", "it's"]) ==
        "python setup.py --name 'Kart Club' 'it'\"'\"'s'", "updater: the command shell-quoted for showing")
+    rec, bad = gu.check({"folder": "/srv/kart", "command": ["python3", "u.py"], "channels": ["stable", "dev"]})
+    ok(bad is None and rec["channels"] == ["stable", "dev"], "updater check: channels kept")
+    for what, chans in (("no stable", ["dev"]), ("a list of 5", ["stable", "a", "b", "c", "d"]),
+                        ("an upper-case name", ["stable", "Dev"]), ("a name twice", ["stable", "stable"]),
+                        ("not a list", "stable")):
+        ok(gu.check({"folder": "/srv/kart", "command": ["python"], "channels": chans})[1] is not None,
+           "updater check: channels with %s refused" % what)
+    ok(gu.with_channel(rec, "dev") == ["python3", "u.py", "--channel", "dev"] and gu.with_channel(rec, None) ==
+       ["python3", "u.py"] and gu.with_channel(rec, "beta") is None
+       and gu.with_channel({"command": ["python"]}, "dev") is None, "updater: with_channel")
+
+
+class FakeIssuer:
+    """POST /api/dev-code/redeem as a panel answers it: self.codes maps a short code (12
+    characters) to the access code it redeems to; the first install id binds it."""
+
+    def __init__(self):
+        self.codes = {}
+        self.bound = {}
+        self.asked = []
+        iss = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def send(self, code, obj):
+                b = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                iss.asked.append((self.path, body))
+                if self.path != "/api/dev-code/redeem":
+                    return self.send(404, {"error": "not found"})
+                code, inst = body.get("code"), body.get("install_id")
+                if code not in iss.codes:
+                    return self.send(404, {"error": "That dev code is not known here. Check it, or ask for a new one."})
+                if iss.bound.setdefault(code, inst) != inst:
+                    return self.send(409, {"error": "That dev code is already used by another server."})
+                return self.send(200, {"ok": True, "access_code": iss.codes[code]})
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def stop(self):
+        if self.srv is not None:
+            self.srv.shutdown()
+            self.srv.server_close()
+            self.srv = None
+
+
+UPD_SCRIPTS["chan.py"] = ("import json, os, sys\n"
+                          "print('Kart Club: switching channel')\n"
+                          "json.dump({'argv': sys.argv[1:], 'code': os.environ.get('OPENLOBBY_DEV_CODE')},"
+                          " open('chan.json', 'w'))\n"
+                          "print('Kart Club: the code is ' + str(os.environ.get('OPENLOBBY_DEV_CODE')))\n"
+                          "if '--refuse' in sys.argv: print('Kart Club cannot switch: no database backup ' + "
+                          "str(os.environ.get('OPENLOBBY_DEV_CODE'))); raise SystemExit(4)\n")
+
+
+def test_updater_channels(t, servers, dock, d, game):
+    """A paired game's channel switch: --channel appended, the access code in the container's
+    environment through a 600 --env-file that is gone after the run, never in an argument, the
+    log or the job file; a short code redeemed at POL_DEV_ISSUER with the install id first."""
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import devchannel
+    with open(os.path.join(game, "chan.py"), "w") as f:
+        f.write(UPD_SCRIPTS["chan.py"])
+    iss = FakeIssuer()
+    full = devchannel.make_code("kart.example.org/dev", "kart-dev-token-71Xq", "https://code.example.org/kart")
+    iss.codes["KARTZZZZDEV2"] = full
+    state = os.path.join(t.tmp, "state-updchan")
+    s = Server(t, extra_env={"FAKE_UPD_DIR": d, "POL_DEV_ISSUER": iss.url},
+               args=["--container", "c0ffee", "--docker", dock, "--minute", "0.2", "--state", state])
+    servers.append(s)
+    try:
+        c = s.start()
+        inst = c.get("/api/channel")[1].get("install_id")
+        ok(isinstance(inst, str) and devchannel.INSTALL_ID.match(inst) and inst.startswith("ol-"),
+           "install id: made, shown to the panel (%s)" % inst)
+        p = os.path.join(state, "install_id")
+        ok(os.path.isfile(p) and (os.name == "nt" or os.stat(p).st_mode & 0o777 == 0o600),
+           "install id: kept in the state, mode 600")
+        ok(c.get("/api/channel")[1].get("short_codes") is True, "short codes: taken with POL_DEV_ISSUER set")
+        rec = {"folder": game, "command": ["python", "chan.py"], "timeout_minutes": 5, "channels": ["stable", "dev"]}
+
+        def run(body):
+            code, r = c.call("POST", "/api/updater", dict({"game": "kart", "title": "Kart Club", "updater": rec}, **body))
+            if code != 202:
+                return code, r
+            return code, c.wait(r["job"], timeout=90)
+
+        for what, body in (("a channel it does not declare", {"channel": "beta"}),
+                           ("switch without a channel", {"switch": True}),
+                           ("a code on a regular update", {"channel": "dev", "code": full}),
+                           ("a code for stable", {"channel": "stable", "switch": True, "code": full}),
+                           ("a code with a space", {"channel": "dev", "switch": True, "code": "a b c d e f g h"})):
+            code, r = run(body)
+            ok(code == 400 and r.get("error"), "updater channel: %s: 400 (%s)" % (what, r.get("error")))
+        code, r = run({"channel": "dev", "switch": True, "code": "ZZZZ-ZZZZ-ZZZZ"})
+        ok(code == 400 and "not known" in r.get("error", ""), "updater channel: an unknown short code: the issuer's "
+                                                               "sentence, nothing started (%s)" % r)
+
+        before = len(upd_calls(d))
+        code, j = run({"channel": "dev", "switch": True, "code": "kart-zzzz-dev2"})
+        ok(code == 202 and j["state"] == "ok" and j["summary"] == "The updater of Kart Club switched it to the dev channel.",
+           "updater channel: a short code switches to dev (%s)" % (j.get("summary") if code == 202 else j))
+        ok(iss.asked[-1] == ("/api/dev-code/redeem", {"code": "KARTZZZZDEV2", "install_id": inst}),
+           "updater channel: the short code redeemed at the issuer with the install id (%s)" % (iss.asked[-1:],))
+        seen = json.load(open(os.path.join(game, "chan.json")))
+        ok(seen == {"argv": ["--channel", "dev"], "code": full},
+           "updater channel: --channel dev, and the redeemed access code in OPENLOBBY_DEV_CODE (%s)" % seen["argv"])
+        runs = [x["args"] for x in upd_calls(d)[before:] if x["args"][0] == "run" and "--network" not in x["args"]]
+        a = runs[-1] if runs else []
+        ok(not any(full in x or "KARTZZZZDEV2" in x or "kart-dev-token-71Xq" in x for x in a),
+           "updater channel: the code is in no docker argument")
+        ok("--env-file" in a and "-i" not in a, "updater channel: an --env-file, stdin still closed")
+        ef = json.load(open(os.path.join(d, "envfile.json")))
+        ok(ef["text"] == "OPENLOBBY_DEV_CODE=%s\n" % full and (os.name == "nt" or ef["mode"] == 0o600),
+           "updater channel: the env file holds the code alone, mode 600 (%o)" % ef["mode"])
+        ok(not os.path.exists(ef["path"]) and not os.listdir(os.path.join(state, "updater-env")),
+           "updater channel: the env file is deleted after the run")
+        ok(full not in j["log"] and "kart-dev-token-71Xq" not in j["log"] and "kart-zzzz-dev2" not in j["log"]
+           and "the code is [access code]" in j["log"], "updater channel: the job log blanks the code")
+        jf = open(os.path.join(state, "jobs", j["id"] + ".json")).read()
+        ok(full not in jf and "KARTZZZZDEV2" not in jf and "kart-zzzz-dev2" not in jf and '"channel": "dev"' in jf,
+           "updater channel: the job file has the channel and no code")
+        code, pub = c.get("/api/jobs/" + j["id"])
+        ok(pub.get("channel") == "dev", "updater channel: the job says its channel")
+
+        iss.codes["KARTZZZZDEV3"] = full
+        code, j = run({"channel": "dev", "switch": True, "code": full})
+        ok(code == 202 and j["state"] == "ok", "updater channel: a full access code works as it is")
+        rec["command"] = ["python", "chan.py", "--refuse"]
+        code, j = run({"channel": "dev", "switch": True, "code": full})
+        ok(code == 202 and j["state"] == "failed" and j["summary"] == "Kart Club cannot switch: no database backup [access code]"
+           and not os.listdir(os.path.join(state, "updater-env")),
+           "updater channel: a refused switch fails with its sentence, the code blanked, the env file gone (%s)"
+           % (j.get("summary") if code == 202 else j))
+        rec["command"] = ["python", "chan.py"]
+        code, j = run({"channel": "dev"})
+        seen = json.load(open(os.path.join(game, "chan.json")))
+        ok(code == 202 and j["state"] == "ok" and j["summary"] == "The updater of Kart Club finished."
+           and seen == {"argv": ["--channel", "dev"], "code": None},
+           "updater channel: a regular update on dev: --channel dev, no code, no env file (%s)" % seen)
+        code, j = run({"channel": "stable", "switch": True})
+        seen = json.load(open(os.path.join(game, "chan.json")))
+        ok(code == 202 and seen == {"argv": ["--channel", "stable"], "code": None}, "updater channel: back to stable")
+        ok(not [h for h in scan_for_token(t, [s]) if h], "updater channel: the token is in no file")
+        s.stop()
+        s2 = Server(t, extra_env={"FAKE_UPD_DIR": d},
+                    args=["--container", "c0ffee", "--docker", dock, "--minute", "0.2", "--state", state])
+        servers.append(s2)
+        c2 = s2.start()
+        ch = c2.get("/api/channel")[1]
+        ok(ch.get("install_id") == inst and ch.get("short_codes") is False,
+           "install id: the same after a restart; short codes off without POL_DEV_ISSUER")
+        code, r = c2.call("POST", "/api/updater", {"game": "kart", "title": "Kart Club", "updater": rec,
+                                                   "channel": "dev", "switch": True, "code": "KART-ZZZZ-DEV3"})
+        ok(code == 400 and "POL_DEV_ISSUER is not set" in r.get("error", ""),
+           "short codes: refused without an issuer, with a sentence (%s)" % r)
+        s2.stop()
+    finally:
+        iss.stop()
 
 
 def test_updater(t, servers):
@@ -1179,6 +1358,7 @@ def test_updater(t, servers):
        "updater: no output for 15 minutes: stopped (%s)" % j["summary"])
     ok(not os.listdir(os.path.join(d, "running")), "updater: no container left running")
     s.stop()
+    test_updater_channels(t, servers, dock, d, game)
 
     s = Server(t, extra_env={"FAKE_UPD_DIR": d}, args=["--docker", dock, "--minute", "0.2"])
     servers.append(s)
@@ -2598,6 +2778,44 @@ def _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, 
         if st == 202:
             c.wait(r["job"], 60)
         # a POL_DEV_REGISTRY for a plain token does not override a code's own
+        reg.public = False
+        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "KART-ZZZZ-DEV9"})
+        ok(st == 400 and "POL_DEV_ISSUER" in r.get("error", ""), "short code: no issuer set: refused (%s)" % r)
+        s.stop()
+        iss = FakeIssuer()
+        iss.codes["KARTZZZZDEV9"] = code
+        set_valid(token)
+        clear()
+        s = Server(t, extra_env=dict(env, POL_DEV_ISSUER=iss.url),
+                   args=["--state", state, "--docker", dock, "--refresh-gap", "0"])
+        servers.append(s)
+        try:
+            c = s.start()
+            inst = c.get("/api/channel")[1]["install_id"]
+            st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "kart-zzzz-dev9"})
+            j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r), "log": ""}
+            ok(j["state"] == "ok" and iss.asked[-1][1] == {"code": "KARTZZZZDEV9", "install_id": inst},
+               "short code: redeemed with the install id, then on Dev (%s)" % j["summary"])
+            logins = [x for x in dcalls() if x["args"][0] == "login"]
+            ok(len(logins) == 1 and logins[0].get("stdin_sha") == hashlib.sha256(token.encode()).hexdigest(),
+               "short code: docker login with the token of the access code it redeemed to")
+            ok(open(os.path.join(state, "channel", "code")).read() == code,
+               "short code: the deployer keeps the access code, not the short one")
+            ok("kart-zzzz-dev9" not in j["log"] and "KARTZZZZDEV9" not in j["log"] and code not in j["log"],
+               "short code: in no job log")
+            st, r = c.call("POST", "/api/channel", {"channel": "stable"})
+            j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st}
+            ok(j["state"] == "ok" and c.get("/api/channel")[1]["install_id"] == inst,
+               "short code: back to stable keeps the install id")
+            iss.bound["KARTZZZZDEV9"] = "ol-" + "f" * 32
+            st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "KARTZZZZDEV9"})
+            ok(st == 400 and "another server" in r.get("error", ""), "short code: bound to another install: the "
+                                                                    "issuer's sentence (%s)" % r)
+            iss.stop()
+            st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "KARTZZZZDEV9"})
+            ok(st == 502 and "did not answer" in r.get("error", ""), "short code: the issuer away: 502 (%s)" % r)
+        finally:
+            iss.stop()
     finally:
         reg.public = False
         s.stop()

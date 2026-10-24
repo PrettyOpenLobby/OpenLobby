@@ -41,6 +41,8 @@ Settings (environment, or the options of the same meaning):
                          (default https://<registry>)
     POL_DEV_USER         the user name a bare access code signs in under (default dev)
     POL_DEV_REGISTRY_HTTP  1: the registry speaks plain http (tests, a registry on the LAN)
+    POL_DEV_ISSUER       the panel that redeems short dev codes (ABCD-EFGH-JKMN) for this
+                         install, its base URL; empty: only full access codes are taken
     POL_DEPLOY_MIRRORS   the patch service's mirrors folder as mounted here
                          (unset: the patch actions are off)
     POL_DEPLOY_PATCH_HOST  where the patch service answers (default patch)
@@ -180,6 +182,7 @@ class Config:
         self.dev_source = None
         self.dev_user = devchannel.DEFAULT_USER
         self.dev_scheme = "https"
+        self.dev_issuer = None       # POL_DEV_ISSUER: where short dev codes are redeemed
         self.mirrors = None          # realpath of POL_DEPLOY_MIRRORS; None: patch actions are off
         self.mirrors_note = "POL_DEPLOY_MIRRORS is not set, so the patch actions are off"
         self.patch_host = "patch"
@@ -316,6 +319,13 @@ def make_config(args):
         cfg.dev_user = user
     if truthy(os.environ.get("POL_DEV_REGISTRY_HTTP")):
         cfg.dev_scheme = "http"
+    issuer = os.environ.get("POL_DEV_ISSUER", "").strip().rstrip("/")
+    if issuer:
+        if devchannel.ISSUER.match(issuer):
+            cfg.dev_issuer = issuer
+        else:
+            say("POL_DEV_ISSUER must be an http(s) address (got %r); ignored, so short dev codes "
+                "are not taken" % issuer)
     clients = args.clients.strip()
     if clients:
         if not os.path.isabs(clients):
@@ -697,6 +707,7 @@ def public(job):
         out["source"] = job.get("source")
     if job.get("action") == "updater":
         out["title"] = job.get("title")
+        out["channel"] = job.get("channel")
     if job.get("action") in PATCH_ACTIONS:
         for k in ("region", "product", "to", "removes", "source"):
             if job.get(k) is not None:
@@ -1533,7 +1544,33 @@ def run_watched(r, argv, total, idle, job_id):
     return rc, st["why"], st["line"]
 
 
-def act_updater(r, job):
+def env_file(r, job_id, values):
+    """A docker --env-file for one updater run: STATE/updater-env/<job>.env, mode 600 in a
+    folder of mode 700, deleted by the caller once docker run has ended. What it holds goes to
+    the one container and to no argument, log line or job file."""
+    d = os.path.join(r.cfg.state, "updater-env")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    path = os.path.join(d, job_id + ".env")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        for k, v in values.items():
+            f.write("%s=%s\n" % (k, v))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
+def act_updater(r, job, code=None):
+    """Run a paired game's updater. With job["channel"] the command gets "--channel <name>"
+    (a switch, or a regular update of a game that is not on stable); `code`, a dev access
+    code for a switch, reaches the command as OPENLOBBY_DEV_CODE through an --env-file that is
+    deleted when the run ends (docs/deployer.md, "Updaters of paired games")."""
     rec, bad = gameupdater.check(job.get("updater"))
     if bad:
         raise JobFailed("The updater the panel sent does not fit: %s" % bad)
@@ -1541,37 +1578,56 @@ def act_updater(r, job):
     title = job.get("title") or key
     minutes = rec["timeout_minutes"]
     seen = gameupdater.daemon_path(rec["folder"])
-    r.log.line("updater of %s: %s in %s, at most %d minutes" % (title, gameupdater.shown(rec["command"]),
-                                                                rec["folder"], minutes))
+    command = gameupdater.with_channel(rec, job.get("channel"))
+    if command is None:
+        raise JobFailed("The updater of %s does not offer the %s channel." % (title, job.get("channel")))
+    r.log.line("updater of %s: %s in %s, at most %d minutes%s" % (
+        title, gameupdater.shown(command), rec["folder"], minutes,
+        ", with the dev access code in %s" % gameupdater.DEV_CODE_ENV if code else ""))
     image = own_image(r)
     left = stop_updaters(r)
     if left:
         r.log.line("stopped %d updater container(s) an earlier deployer left running" % len(left))
     updater_folder_check(r, image, rec["folder"], seen)
+    envf = env_file(r, job["id"], {gameupdater.DEV_CODE_ENV: code}) if code else None
     argv = r.cfg.docker + [
         "run", "--rm", "--pull", "never", "--name", "openlobby-updater-" + job["id"],
         "--label", UPDATER_LABEL + "=" + job["id"], "--label", "org.openlobby.updater.game=" + key,
         "--mount", mount_arg(seen, seen), "-w", seen,
         "--mount", mount_arg("/var/run/docker.sock", "/var/run/docker.sock"),
         "-e", "HOME=/tmp", "-e", "LANG=C.UTF-8", "-e", "PYTHONUNBUFFERED=1",
-        "-e", "PYTHONIOENCODING=utf-8",
-        "--entrypoint", rec["command"][0], image] + rec["command"][1:]
-    rc, why, last = run_watched(r, argv, minutes * r.cfg.minute, UPDATER_IDLE * r.cfg.minute, job["id"])
+        "-e", "PYTHONIOENCODING=utf-8"] + (["--env-file", envf] if envf else []) + [
+        "--entrypoint", command[0], image] + command[1:]
+    try:
+        rc, why, last = run_watched(r, argv, minutes * r.cfg.minute, UPDATER_IDLE * r.cfg.minute, job["id"])
+    finally:
+        if envf:
+            try:
+                os.remove(envf)
+            except OSError:
+                pass
     if why == "timeout":
         raise JobFailed("The updater of %s was stopped after %d minutes." % (title, minutes), rc)
     if why == "idle":
         raise JobFailed("The updater of %s was stopped: no output for %d minutes." % (title, UPDATER_IDLE), rc)
     if rc != 0:
         last = last.replace(r.cfg.token, "[token]") if r.cfg.token else last
+        for sec in r.log.secrets:
+            last = last.replace(sec.decode("utf-8", "replace"), "[access code]")
         raise JobFailed(last[:300] if last else "The updater of %s exited with code %d and printed "
                                                 "nothing." % (title, rc), rc)
+    if job.get("switch"):
+        return "ok", "The updater of %s switched it to the %s channel." % (title, job["channel"]), []
     return "ok", "The updater of %s finished." % title, []
 
 
 def updater_request(body):
-    """(None, (game, title, record)) for a POST /api/updater body that fits, else (error, None).
-    Only {"game", "title", "updater"}, and the updater checked with the panel's own rules."""
-    extra = sorted(set(body) - {"game", "title", "updater"})
+    """(None, (game, title, record, channel, switch, code)) for a POST /api/updater body that
+    fits, else (error, None). Only {"game", "title", "updater"}, the updater checked with the
+    panel's own rules, and optionally "channel" (one the updater declares), "switch" (true: a
+    channel switch, not a regular update) and "code" (a dev access code or a short dev code,
+    for a switch to a channel other than stable)."""
+    extra = sorted(set(body) - {"game", "title", "updater", "channel", "switch", "code"})
     if extra:
         return "unknown fields: %s" % ", ".join(str(k)[:40] for k in extra[:5]), None
     game = body.get("game")
@@ -1582,7 +1638,20 @@ def updater_request(body):
     rec, bad = gameupdater.check(body.get("updater"))
     if bad:
         return bad, None
-    return None, (game, title or game, rec)
+    channel = body.get("channel")
+    if channel is not None and gameupdater.with_channel(rec, channel) is None:
+        return "channel must be one the updater declares (%s)" % ", ".join(rec.get("channels") or ["none"]), None
+    switch = body.get("switch", False)
+    if not isinstance(switch, bool) or (switch and channel is None):
+        return "switch is true only with a channel", None
+    code = body.get("code")
+    if code is not None:
+        code = code.strip() if isinstance(code, str) else ""
+        if not switch or channel == "stable":
+            return "a code goes only with a switch to a channel other than stable", None
+        if not devchannel.CODE.match(code):
+            return "The access code is 8 to 2048 characters, with no spaces.", None
+    return None, (game, title or game, rec, channel, switch, code or None)
 
 
 # --------------------------------------------------------------- updates
@@ -2346,7 +2415,8 @@ class Deployer:
         self.current = None
         self.current_game = None
         self.current_upload = None    # the upload the running import reads
-        self.secrets = {}             # job id -> the access code a channel job signs in with
+        self.secrets = {}             # job id -> (the access code a job uses, more to blank)
+        self.install_id = devchannel.InstallId(cfg.state).get()
         self.games_cache = (0.0, None)
         self.uploads = clientdata.Uploads(cfg.state)
         self.checks = patches.Checks(cfg.state)
@@ -2364,9 +2434,10 @@ class Deployer:
     def expire_uploads(self):
         self.uploads.expire(keep=[self.current_upload] if self.current_upload else [])
 
-    def start(self, action, game, extra=None, secret=None):
+    def start(self, action, game, extra=None, secret=None, also=()):
         """(202, {"job"}) or (409, {"job": running id}). `secret` (an access code) is
-        handed to the job in memory; it is never part of the job's file."""
+        handed to the job in memory; it is never part of the job's file. `also`: more
+        strings its log blanks (the short dev code the access code was redeemed with)."""
         upload = ((extra or {}).get("source") or {}).get("upload")
         with self.lock:
             if self.current:
@@ -2376,7 +2447,7 @@ class Deployer:
             self.current_game = game
             self.current_upload = upload
             if secret:
-                self.secrets[job["id"]] = secret
+                self.secrets[job["id"]] = (secret, tuple(a for a in also if a))
         if upload:
             self.uploads.touch(upload, now_iso())
         self.store.prune()
@@ -2740,9 +2811,9 @@ class Deployer:
                      "problems": probs}
 
     def _run(self, job):
-        secret = self.secrets.pop(job["id"], None)
+        secret, also = self.secrets.pop(job["id"], (None, ()))
         log = JobLog(self.store, job, self.cfg.token,
-                     secrets=[secret, devchannel.Store(self.cfg.state).code()],
+                     secrets=[secret, devchannel.Store(self.cfg.state).code()] + list(also),
                      hide=[job.get("registry"), devchannel.read_channel(self.cfg.core).get("registry"),
                            self.cfg.dev_registry, self.feed_host()])
         r = Runner(self.cfg, load_catalog(self.cfg.core), log)
@@ -2758,7 +2829,7 @@ class Deployer:
             if job["action"] == "channel":
                 state, summary, missing = act_channel(r, job, secret)
             elif job["action"] == "updater":
-                state, summary, missing = act_updater(r, job)
+                state, summary, missing = act_updater(r, job, secret)
             elif job["action"] in PATCH_ACTIONS:
                 state, summary, missing = PATCH_ACT[job["action"]](r, job, self)
             elif job["action"] == "import":
@@ -2885,7 +2956,19 @@ class Deployer:
             shown.append(one)
         return {"channel": ch["channel"], "since": ch.get("since") if dev else None,
                 "code_stored": bool(devchannel.Store(self.cfg.state).code()) if dev else False,
-                "ghcr": self.cfg.ghcr, "problem": ch.get("problem"), "images": shown}
+                "ghcr": self.cfg.ghcr, "problem": ch.get("problem"), "images": shown,
+                "install_id": self.install_id, "short_codes": bool(self.cfg.dev_issuer)}
+
+    def resolve_code(self, code):
+        """(access code, the short code it came from or None) for what someone typed: a short
+        dev code is redeemed at POL_DEV_ISSUER with this install's id, anything else is as it
+        is. ChannelError (IssuerDown when the issuer did not answer) with the sentence."""
+        short = devchannel.short_code(code)
+        if short is None:
+            return code, None
+        got = devchannel.redeem(self.cfg.dev_issuer, short, self.install_id)
+        say("dev channel: short dev code redeemed at the issuer for this install")
+        return got, short
 
     def channel_source(self, stable):
         """GET /api/channel/source?stable=<image>: (status, {"url"}) of the source of the dev
@@ -2920,7 +3003,10 @@ class Deployer:
         if given and not devchannel.REGISTRY.match(given):
             return 400, {"error": "The dev registry must look like registry.example.org/team."}
         try:
+            code, short = self.resolve_code(code)
             info = devchannel.parse_code(code, registry=given or self.cfg.dev_registry)
+        except devchannel.IssuerDown as exc:
+            return 502, {"error": str(exc)}
         except devchannel.ChannelError as exc:
             return 400, {"error": str(exc)}
         reg = info["registry"]
@@ -2937,7 +3023,32 @@ class Deployer:
         extra = {"channel": "dev", "registry": reg}
         if info["source"]:
             extra["dev_source"] = info["source"]
-        return self.start("channel", "core", extra, secret=code)
+        return self.start("channel", "core", extra, secret=code,
+                          also=[short, short and devchannel.show_short(short)])
+
+    def updater_start(self, body):
+        """POST /api/updater: (status, answer)."""
+        bad, got = updater_request(body)
+        if bad:
+            return 400, {"error": bad}
+        game, title, rec, channel, switch, code = got
+        if self.current:
+            return 409, {"job": self.current, "error": "another job is running"}
+        short = None
+        if code:
+            try:
+                code, short = self.resolve_code(code)
+            except devchannel.IssuerDown as exc:
+                return 502, {"error": str(exc)}
+            except devchannel.ChannelError as exc:
+                return 400, {"error": str(exc)}
+        extra = {"title": title, "updater": rec}
+        if channel is not None:
+            extra["channel"] = channel
+        if switch:
+            extra["switch"] = True
+        return self.start("updater", game, extra, secret=code,
+                          also=[short, short and devchannel.show_short(short)])
 
     def jobs(self, limit):
         jobs = self.store.all()
@@ -3194,11 +3305,7 @@ def make_handler(dep):
                 return self.send_json(*dep.channel_request(body))
             if path == "/api/updater":
                 # a paired game's updater, as the panel's owner approved it; checked again here
-                bad, got = updater_request(body)
-                if bad:
-                    return self.send_json(400, {"error": bad})
-                game, title, rec = got
-                return self.send_json(*dep.start("updater", game, {"title": title, "updater": rec}))
+                return self.send_json(*dep.updater_start(body))
             action, game = body.get("action"), body.get("game")
             if action not in ACTIONS:
                 return self.send_json(400, {"error": "unknown action %r; one of %s"

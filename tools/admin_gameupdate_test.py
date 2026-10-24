@@ -14,7 +14,12 @@ when running.commit equals latest.commit and the update is "current", a failure 
 activity log once, and a game that stays away (POL_ADMIN_UPDATE_LOST shortened) "has not come
 back". Then the deployer-run updater (path A): the panel offers it only once the owner approved
 it and a deployer is set up, and what the stand-in deployer receives is the stored, approved
-record, never what the browser sent. Before both, a game the host's ops runner updates (its
+record, never what the browser sent. Then the channel switch of a paired game whose updater
+declares channels (docs/installs.md, "Update channels"): the stand-in deployer gets the approved
+record with "channel" and "switch", and the access code only for a channel other than stable;
+the code is in no activity log row and no panel log; a switch whose job fails keeps the channel,
+one that ends ok stores it; a regular Update of a game on dev passes "channel": "dev". Before
+both, a game the host's ops runner updates (its
 status's "updates"): the item it gets, Update now and the timer setting filed for the runner by
 the owner only, a second Update refused while one runs, and the request and how it ended in the
 activity log. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
@@ -135,10 +140,13 @@ class Game:
 
 
 class Deployer:
-    """A stand-in deployer: answers /api/games and /api/jobs, keeps every POST /api/updater."""
+    """A stand-in deployer: answers /api/games and /api/jobs, keeps every POST /api/updater.
+    Each job answers with self.ends (state, summary) as it was when the job was started."""
 
     def __init__(self):
         self.got = []
+        self.ends = ("failed", "Update failed: the disk is full.")
+        self.jobs = {}
         dep = self
 
         class H(BaseHTTPRequestHandler):
@@ -162,9 +170,10 @@ class Deployer:
                 if self.path == "/api/games":
                     return self.send(200, {"games": [], "core": {"running": True}, "options": {}})
                 if self.path.startswith("/api/jobs/"):
-                    return self.send(200, {"id": self.path.rsplit("/", 1)[-1], "action": "updater",
-                                           "game": "kart", "state": "failed",
-                                           "summary": "Update failed: the disk is full."})
+                    jid = self.path.rsplit("/", 1)[-1]
+                    st, summary = dep.jobs.get(jid, ("failed", "Update failed: the disk is full."))
+                    return self.send(200, {"id": jid, "action": "updater", "game": "kart", "state": st,
+                                           "summary": summary})
                 if self.path.startswith("/api/jobs"):
                     return self.send(200, {"jobs": []})
                 if self.path.startswith("/api/updates"):
@@ -178,7 +187,9 @@ class Deployer:
                 body = json.loads(self.rfile.read(n) or b"{}")
                 if self.path == "/api/updater":
                     dep.got.append(body)
-                    return self.send(202, {"job": "20261023T080000-abcdef"})
+                    jid = "20261023T080000-abcdef" if len(dep.got) == 1 else "20261023T0800%02d-abcdef" % len(dep.got)
+                    dep.jobs[jid] = dep.ends
+                    return self.send(202, {"job": jid})
                 self.send(404, {"error": "not found"})
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
@@ -433,6 +444,93 @@ def path_a(owner, anon, dep):
         game.stop()
 
 
+CHAN_CODE = "ABCD-EFGH-JKMN"
+FULL_CODE = "olx1.eyJyIjoia2FydC5leGFtcGxlLm9yZy9kZXYiLCJ0Ijoia2FydC10b2tlbi1zZWNyZXQtNDQifQ"
+
+
+def wait_audit(n, count):
+    for _ in range(60):
+        if len(audit_since(n)) >= count:
+            break
+        time.sleep(0.25)
+    return audit_since(n)
+
+
+def path_channel(owner, anon, upd, dep, tmp):
+    print("the update channel of a paired game")
+    game = Game()
+    try:
+        owner.call("api/modules/game", {"action": "remove", "key": "kart"})
+        pc = owner.call("api/pair/code", {})[1]["code"]
+        updater = {"folder": "/srv/kart", "command": ["python", "setup.py", "--update", "--yes"],
+                   "timeout_minutes": 30, "channels": ["stable", "dev"]}
+        code, r = anon.call("api/pair", {"code": pc, "key": "kart", "title": "Kart Club",
+                                         "url": "http://127.0.0.1:%d" % game.port, "token": TOKEN, "updater": updater})
+        added = {a["key"]: a for a in owner.call("api/modules?fresh=1")[1].get("added", [])}
+        owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": added["kart"]["updater"]["id"]})
+        chk("paired with channels and approved", (code, sql("SELECT state, channel FROM admin_game_updater")),
+            (200, [{"state": "approved", "channel": "stable"}]))
+        chk("a moderator with game.kart.update cannot switch it",
+            upd.call("api/updates/channel", {"key": "kart", "channel": "dev", "code": CHAN_CODE})[0], 403)
+        del dep.got[:]
+        n = audit_top()
+        dep.ends = ("failed", "Update failed: the dev builds did not accept the access code.")
+        code, r = owner.call("api/updates/channel", {"key": "kart", "channel": "dev", "code": "abcd efgh jkmn",
+                                                     "command": ["python", "-c", "evil"]})
+        chk("switch to Dev: the deployer's job", (code, bool(r.get("job"))), (202, True))
+        chk("  the deployer got the approved record, the channel, switch, the code as ABCD-EFGH-JKMN",
+            dep.got, [{"game": "kart", "title": "Kart Club", "updater": updater, "channel": "dev", "switch": True,
+                       "code": CHAN_CODE}])
+        rows = wait_audit(n, 2)
+        chk("  the job failed: said so, under who switched", rows,
+            [(OWNER, "asked the deployer to switch Kart Club to the dev channel", True),
+             (OWNER, "Kart Club: switch to the dev channel failed: the dev builds did not accept the access code.",
+              False)])
+        chk("  and the game stays on stable", sql("SELECT channel FROM admin_game_updater")[0]["channel"], "stable")
+
+        dep.ends = ("ok", "The updater of Kart Club switched it to the dev channel.")
+        n = audit_top()
+        code, r = owner.call("api/updates/channel", {"key": "kart", "channel": "dev", "code": FULL_CODE})
+        chk("switch to Dev with a full code: the code as given", (code, dep.got[-1].get("code")), (202, FULL_CODE))
+        rows = wait_audit(n, 2)
+        chk("  ended ok: switched, stored", (rows[1:], sql("SELECT channel, channel_by FROM admin_game_updater")),
+            ([(OWNER, "switched Kart Club to the dev channel", True)], [{"channel": "dev", "channel_by": OWNER}]))
+        u = {a["key"]: a for a in owner.call("api/modules?fresh=1")[1].get("added", [])}["kart"]["updater"]
+        chk("  the Modules page says dev", (u["channel"], u["channel_by"]), ("dev", OWNER))
+        everything = json.dumps(sql("SELECT * FROM admin_audit"))
+        chk("the code is in no activity log row",
+            [c for c in (CHAN_CODE, "ABCDEFGHJKMN", "abcd efgh jkmn", FULL_CODE) if c in everything], [])
+        logs = ""
+        for name in os.listdir(tmp):
+            if name.endswith(".log"):
+                with open(os.path.join(tmp, name), encoding="utf-8", errors="replace") as f:
+                    logs += f.read()
+        chk("  nor in the panel's own log", [c for c in (CHAN_CODE, FULL_CODE) if c in logs], [])
+
+        game.update = dict(report(), apply=False)
+        dep.ends = ("ok", "The updater of Kart Club finished.")
+        n = audit_top()
+        code, r = owner.call("api/updates/run", {"key": "kart"})
+        chk("Update on dev: --channel dev passed, no switch, no code", (code, dep.got[-1]),
+            (202, {"game": "kart", "title": "Kart Club", "updater": updater, "channel": "dev"}))
+        chk("  the activity log shows the command with it", sql(
+            "SELECT detail FROM admin_audit WHERE id > %s ORDER BY id LIMIT 1", (n,))[0]["detail"].count("--channel dev"), 1)
+        wait_audit(n, 2)
+
+        dep.ends = ("ok", "The updater of Kart Club switched it to the stable channel.")
+        n = audit_top()
+        code, r = owner.call("api/updates/channel", {"key": "kart", "channel": "stable", "code": CHAN_CODE})
+        chk("back to Stable: no code goes with it", (code, dep.got[-1]),
+            (202, {"game": "kart", "title": "Kart Club", "updater": updater, "channel": "stable", "switch": True}))
+        wait_audit(n, 2)
+        chk("  stored stable", sql("SELECT channel FROM admin_game_updater")[0]["channel"], "stable")
+        code, r = owner.call("api/updates/run", {"key": "kart"})
+        chk("Update on stable: no channel at all", "channel" in dep.got[-1], False)
+        owner.call("api/modules/game", {"action": "remove", "key": "kart"})
+    finally:
+        game.stop()
+
+
 def main():
     game = Game()
     dep = Deployer()
@@ -454,6 +552,7 @@ def main():
         path_ops(owner, upd, see, tmp)
         path_b(owner, upd, see, game)
         path_a(owner, anon, dep)
+        path_channel(owner, anon, upd, dep, tmp)
     finally:
         stop(proc)
         dep.stop()

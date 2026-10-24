@@ -499,6 +499,22 @@ minutes. Anything else is a 400 and starts nothing. A good request starts a
 job (`"action": "updater"`, with `title`), one at a time like every other
 job: 202 `{"job"}`, or 409 while another runs.
 
+A game whose updater declares `channels` (docs/installs.md, "Update
+channels") may be sent three more fields:
+
+    {"game": "kart", "title": "Kart Club", "updater": {..., "channels": ["stable", "dev"]},
+     "channel": "dev", "switch": true, "code": "ABCD-EFGH-JKMN"}
+
+`channel` must be one of the updater's `channels`; the command then runs
+with `--channel <channel>` appended. `switch` is true for a channel switch
+(the panel's switch button) and false or absent for a regular update of a
+game that is not on `stable`. `code` goes only with a switch to a channel
+other than `stable`: an `olx1.` access code, or a short dev code that the
+deployer redeems first, as for its own channel ("Dev access codes" below).
+A short code that cannot be redeemed is a 400 with the issuer's sentence,
+or a 502 when the issuer does not answer, and nothing starts. The job's
+`channel` is in its public fields.
+
 The job:
 
 1. asks Docker for the deployer's own image (`docker inspect` of its own
@@ -519,9 +535,19 @@ The job:
    `-i`, so stdin is closed. Its environment is the image's own plus
    `HOME=/tmp`, `LANG=C.UTF-8`, `PYTHONUNBUFFERED=1` and
    `PYTHONIOENCODING=utf-8`: none of the deployer's settings, and no token.
-   Its output goes into the job log as it comes.
+   Its output goes into the job log as it comes. With a `code`, the
+   deployer also writes `OPENLOBBY_DEV_CODE=<the olx1. code>` to
+   `updater-env/<job>.env` in its volume (mode 600, in a folder of mode 700)
+   and adds `--env-file` with that file; the file is deleted as soon as
+   `docker run` returns, whatever the outcome. The code is not in the
+   arguments, and the job log blanks it (and the token inside it, and the
+   short code it came from) if the command ever prints it. A container's
+   environment shows in `docker inspect` while it runs, so the code is
+   visible there to anyone who can already use the Docker socket, for as
+   long as the `--rm` container lives.
 
-Exit 0 ends the job `ok` ("The updater of Kart Club finished."); any other
+Exit 0 ends the job `ok` ("The updater of Kart Club finished.", or for a
+switch "The updater of Kart Club switched it to the dev channel."); any other
 exit ends it `failed`, with the last line the command printed as the
 summary. The deployer kills the container (`docker kill`, by its label)
 after `timeout_minutes` ("stopped after 60 minutes") or when it has printed
@@ -595,7 +621,8 @@ not HTTP errors: the job ends `failed` with a sentence in `summary`.
 
 `POST /api/updater` starts the updater of a paired game (body and checks in
 "Updaters of paired games" above): 202 `{"job"}`, 400 for a body that does
-not fit, 409 while another job runs.
+not fit or a short code the issuer refused, 502 when the issuer did not
+answer, 409 while another job runs.
 
 `GET /api/jobs?limit=20` lists jobs: queued and running ones first, then
 the rest newest first, at most 50. Each job is
@@ -872,10 +899,74 @@ the code to `POST /api/channel`, `deployer.py --channel dev --registry`
 or the setup scripts' `--registry`. That is how codes worked before; an
 `olx1.` code always uses its own registry.
 
+### Dev access codes
+
+The developers can also hand out short dev codes, such as
+`ABCD-EFGH-JKMN`: 12 characters, no 0, O, 1, I or L, typed with or
+without the dashes in any case. A short code unlocks one server. The
+first server that enters it keeps it, any other server is refused, and
+the developers can revoke it for that one server.
+
+Each deployer makes a random install id once (`ol-` and 32 hex digits)
+and keeps it in `install_id` in its volume, mode 600. Switching channel
+keeps it. It is not a secret, but the panel shows it only to the owner
+(`GET /api/channel` has it as `install_id`).
+
+Wherever the deployer takes an access code (its own switch to Dev, and a
+paired game's switch), it takes a short code too. It sends the code and
+its install id to the issuer named by `POL_DEV_ISSUER`, the developers'
+panel:
+
+    POST <POL_DEV_ISSUER>/api/dev-code/redeem
+    {"code": "ABCDEFGHJKMN", "install_id": "ol-..."}
+
+and uses the `olx1.` (or `olx2.`) code it answers with
+(`{"ok": true, "access_code": "olx1...."}`) as if it had been typed. With
+`POL_DEV_ISSUER` empty, the default, a short code is refused with a
+sentence saying so. `GET /api/channel` says `"short_codes": true` when it
+is set.
+
+The issuer is any OpenLobby admin panel with `POL_DEV_ISSUER_CODE` set:
+the access code its short codes redeem to. Its owner makes 1 to 100 codes
+at a time with a note in Settings, Modules, "Dev access codes", lists them
+(unused, in use, revoked, with when and which install redeemed them) and
+revokes them; each of those is in the activity log. The table is
+`dev_codes` (polcore migration 0021): `code` (the key), `note`, `made_by`,
+`created_at`, `redeemed_at`, `install_id`, `token_ref`, `token` and
+`revoked_at`, with one live code per install.
+
+`/api/dev-code/redeem` needs no panel login and gets the same limit as
+`/api/pair` (`POL_ADMIN_PAIR_TRIES` a minute from one address, then 429).
+It locks the code's row, then answers
+
+- 200 with the access code, and binds the code to the install, for an
+  unused code. The same install asking again gets the same access code, so
+  a reinstalled panel is not locked out;
+- 404 for a code it does not know, 403 for a revoked code, 409 for a code
+  another install redeemed, or when this install already holds another
+  live code;
+- 404 when the panel issues no codes (`POL_DEV_ISSUER_CODE` unset).
+
+By default every short code redeems to `POL_DEV_ISSUER_CODE` itself, which
+suits public packages that need no token: the short code then only
+records who has dev, and revoking one stops that server from redeeming it
+again but not from using the access code it already has. With
+`POL_DEV_ISSUER_FORGEJO_URL`, `POL_DEV_ISSUER_FORGEJO_USER` and
+`POL_DEV_ISSUER_FORGEJO_AUTH` set, the issuer instead makes a token of its
+own for each code on Forgejo, named `openlobby-dev-<code>`, for that user
+(one that may only read the dev packages), with the `read:package` scope,
+and answers with the base code's registry, source and patch feed and that
+token. Revoking the code deletes the token, so the server's next pull fails
+with "The access code no longer works" while every other server keeps
+working. Forgejo makes tokens only for a password sign-in, so
+`POL_DEV_ISSUER_FORGEJO_AUTH` is `name:password`: that user's own, or a
+site admin's, who then acts for the user (the `Sudo` header). The owner's
+page says which of the two ways the panel works.
+
 ### Switching
 
 In the admin panel, Settings > Install games > Update channel (the owner
-only): choose Dev and paste the access code. The panel hands the code to
+only): choose Dev and paste the access code, or a short dev code. The panel hands the code to
 the deployer and keeps nothing; the field is cleared as soon as it is sent.
 The deployer then
 
@@ -983,7 +1074,7 @@ answers
 
 ```
 {"channel": "dev", "since": "2026-10-23T09:14:00Z", "code_stored": true,
- "ghcr": true, "problem": null,
+ "ghcr": true, "problem": null, "install_id": "ol-5f0c...", "short_codes": true,
  "images": [{"key": "ffxi", "name": "...", "stable": "ghcr.io/landsandboat/server",
              "dev_name": "lsb-server (dev)", "applies": true, "license": "GPL-3.0-or-later",
              "what": "...", "note": null, "enabled": true, "has_source": true}, ...]}
@@ -1133,6 +1224,12 @@ written from the folder they are in (`mirrors/`, `clients/`,
 | `POL_DEV_SOURCE` | `https://<registry>` | Where the dev images' source repositories are, when the access code does not say. |
 | `POL_DEV_USER` | `dev` | The user name an access code without one (`name:code`) signs in under. |
 | `POL_DEV_REGISTRY_HTTP` | empty | `1`: the registry speaks plain http (tests, a registry on your network). |
+| `POL_DEV_ISSUER` | empty | The panel that redeems short dev codes for this install, its base URL ("Dev access codes"). Empty: only full access codes are taken. |
+
+The issuer's own settings are the admin service's, not the deployer's:
+`POL_DEV_ISSUER_CODE`, `POL_DEV_ISSUER_FORGEJO_URL`,
+`POL_DEV_ISSUER_FORGEJO_USER` and `POL_DEV_ISSUER_FORGEJO_AUTH` ("Dev access
+codes" above).
 
 ## The image
 

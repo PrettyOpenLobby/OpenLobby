@@ -389,6 +389,12 @@ services:
       # Without the deployer profile started, the panel says it is not there.
       POL_DEPLOYER_URL: "${POL_DEPLOYER_URL:-http://deployer:8099}"
       POL_DEPLOYER_TOKEN: "${POL_DEPLOYER_TOKEN:-}"
+      # This panel as an issuer of single-use dev codes (docs/deployer.md, "Dev access
+      # codes"); unset on almost every install.
+      POL_DEV_ISSUER_CODE: "${POL_DEV_ISSUER_CODE:-}"
+      POL_DEV_ISSUER_FORGEJO_URL: "${POL_DEV_ISSUER_FORGEJO_URL:-}"
+      POL_DEV_ISSUER_FORGEJO_USER: "${POL_DEV_ISSUER_FORGEJO_USER:-}"
+      POL_DEV_ISSUER_FORGEJO_AUTH: "${POL_DEV_ISSUER_FORGEJO_AUTH:-}"
     ports:
       - "127.0.0.1:8090:8090"
     # The Overview's service checks dial the published ports on the host as
@@ -484,6 +490,8 @@ services:
       POL_DEV_REGISTRY: "${POL_DEV_REGISTRY:-}"
       POL_DEV_SOURCE: "${POL_DEV_SOURCE:-}"
       POL_DEV_USER: "${POL_DEV_USER:-}"
+      # where short dev codes (ABCD-EFGH-JKMN) are redeemed: the developers' panel
+      POL_DEV_ISSUER: "${POL_DEV_ISSUER:-}"
       POL_DEPLOY_MIRRORS: /mirrors
       # patch actions wait for downloads in progress before restarting patch
       POL_VALKEY_URL: "valkey://valkey:6379/0"

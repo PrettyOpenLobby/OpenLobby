@@ -4,7 +4,15 @@ docs/deployer.md, "Updaters of paired games").
 
     {"folder": "C:\\Users\\x\\Kart Club",          the install folder as the host sees it
      "command": ["python", "setup.py", "--update"],  first item exactly python or python3
-     "timeout_minutes": 60}                          5 to 240, default 60
+     "timeout_minutes": 60,                          5 to 240, default 60
+     "channels": ["stable", "dev"]}                  optional: the update channels it can switch to
+
+"channels", when given, is a list of 1 to 4 names of 1 to 12 lower-case letters, "stable" among
+them. The panel then offers the game a channel switch, which runs the same command with
+"--channel <name>" appended (with_channel below); a regular update of a game that is not on
+"stable" gets "--channel <its channel>" too. A dev access code for a switch goes to the
+command in the environment variable DEV_CODE_ENV, from a file docker reads (--env-file), never
+in an argument (docs/installs.md, "Update channels").
 
 The panel checks a setup program's block with check() before it stores it, and the deployer
 checks the record the panel sends it again with the same function before it runs anything:
@@ -18,13 +26,17 @@ import json
 import re
 import shlex
 
-FIELDS = ("folder", "command", "timeout_minutes")
+FIELDS = ("folder", "command", "timeout_minutes", "channels")
 PROGRAMS = ("python", "python3")
 MAX_ITEMS = 16
 MAX_ITEM = 199            # each argument is under 200 characters
 MAX_FOLDER = 400
 TIMEOUT_MIN, TIMEOUT_MAX, TIMEOUT_DEFAULT = 5, 240, 60
 DESKTOP_MNT = "/run/desktop/mnt/host/"
+MAX_CHANNELS = 4
+CHANNEL_RE = re.compile(r"^[a-z]{1,12}$")
+#: the environment variable that carries a dev access code into a channel switch
+DEV_CODE_ENV = "OPENLOBBY_DEV_CODE"
 
 _WIN = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 _WIN_BAD = re.compile(r'[<>:"|?*]')
@@ -104,11 +116,25 @@ def _timeout(v):
     return v, None
 
 
+def _channels(v):
+    if v is None:
+        return None, None
+    if not isinstance(v, list) or not v or len(v) > MAX_CHANNELS:
+        return None, "updater.channels must be a list of 1 to %d channel names." % MAX_CHANNELS
+    if not all(isinstance(c, str) and CHANNEL_RE.match(c) for c in v):
+        return None, "Every item of updater.channels must be 1 to 12 lower-case letters."
+    if len(set(v)) != len(v):
+        return None, "updater.channels names a channel twice."
+    if "stable" not in v:
+        return None, 'updater.channels must include "stable".'
+    return list(v), None
+
+
 def check(block):
     """(record, None) for a block that fits, with timeout_minutes filled in; else (None, a
     sentence saying what does not fit)."""
     if not isinstance(block, dict):
-        return None, "updater must be an object: folder, command and timeout_minutes."
+        return None, "updater must be an object: folder, command, timeout_minutes and, optionally, channels."
     extra = sorted(k for k in block if k not in FIELDS)
     if extra:
         return None, "updater has fields the panel does not know: %s." % ", ".join(str(k)[:40] for k in extra[:5])
@@ -121,7 +147,23 @@ def check(block):
     minutes, bad = _timeout(block.get("timeout_minutes"))
     if bad:
         return None, bad
-    return {"folder": folder, "command": command, "timeout_minutes": minutes}, None
+    channels, bad = _channels(block.get("channels"))
+    if bad:
+        return None, bad
+    rec = {"folder": folder, "command": command, "timeout_minutes": minutes}
+    if channels is not None:
+        rec["channels"] = channels
+    return rec, None
+
+
+def with_channel(rec, channel):
+    """The command to run for `channel`: the record's own when `channel` is None, else with
+    "--channel <name>" appended; None for a channel the record does not declare."""
+    if channel is None:
+        return list(rec["command"])
+    if channel not in (rec.get("channels") or ()):
+        return None
+    return list(rec["command"]) + ["--channel", channel]
 
 
 def shown(command):
@@ -130,7 +172,10 @@ def shown(command):
 
 
 def fingerprint(rec):
-    """A short id of exactly this folder, command and timeout: the panel's Approve names it, so
+    """A short id of exactly this folder, command, timeout and channels: the panel's Approve names it, so
     an owner approves what they saw and not a command that changed in between."""
-    raw = json.dumps([rec["folder"], rec["command"], rec["timeout_minutes"]], separators=(",", ":"))
+    parts = [rec["folder"], rec["command"], rec["timeout_minutes"]]
+    if rec.get("channels"):
+        parts.append(rec["channels"])      # left out when absent, so older ids stay the same
+    raw = json.dumps(parts, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

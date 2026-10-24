@@ -385,7 +385,7 @@ def main():
             (200, True, "stable", ["kart (dev)"]))
         chk("...and the registry's address is nowhere in the answer, though the deployer sent it",
             ("registry.example.org" in json.dumps(ch), sorted(ch), sorted(ch["images"][0])),
-            (False, ["available", "channel", "code_stored", "ghcr", "images", "problem", "since"],
+            (False, ["available", "channel", "code_stored", "ghcr", "images", "install_id", "problem", "short_codes", "since"],
              ["applies", "dev_name", "enabled", "has_source", "key", "license", "name", "note", "stable", "what"]))
 
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -433,6 +433,10 @@ def main():
             [{"channel": "dev", "code": CODE, "registry": "registry.example.org/kart"}])
         chk("...with the panel's token", all(a == "Bearer " + TOKEN for m, pth, a in
                                              [x for x in SEEN[n:] if len(x) == 3]), True)
+        n = len(SEEN)
+        owner.call("api/deploy/channel", {"channel": "dev", "code": "abcd efgh jkmn"})
+        chk("...a short dev code typed with spaces reaches it as ABCD-EFGH-JKMN",
+            [s[1] for s in SEEN[n:] if s[0] == "CHANNEL"], [{"channel": "dev", "code": "ABCD-EFGH-JKMN"}])
         code, out = owner.call("api/deploy/channel", {"channel": "dev", "code": "kart-wrong-code-0000"})
         chk("a code the deployer refuses comes back with its sentence",
             (code, "did not accept" in (out.get("error") or "")), (400, True))

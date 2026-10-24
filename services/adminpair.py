@@ -17,8 +17,11 @@ A paired game's setup program may also send an "updater" (docs/installs.md, "Upd
 install folder as the host sees it, a python command and a timeout, for the deployer to run
 when the owner presses Update. It is stored as "requested" (polcore migration 0019,
 admin_game_updater) and runs only once the owner has approved exactly that folder, command and
-timeout in Settings > Modules; any change to one of them makes it "requested" again, and
-unpairing or removing the game removes it. gameupdater.check() (services/deployer) is the one
+timeout in Settings > Modules (and the update channels it declares, polcore migration 0020); any change
+to one of them makes it "requested" again, and unpairing or removing the game removes it. A
+game whose updater declares channels gets a channel switch in Settings > Modules (the owner):
+the deployer runs the updater with "--channel <name>", and the channel is stored here only once
+that job ended ok (set_channel; docs/installs.md, "Update channels"). gameupdater.check() (services/deployer) is the one
 set of rules, here and in the deployer.
 
 Tokens are never sent back to a browser: listing() says only whether one is set. The two
@@ -103,10 +106,13 @@ def _rec(row):
     (a row is never run unchecked)."""
     try:
         cmd = json.loads(row["command"])
+        chans = json.loads(row["channels"]) if row["channels"] else None
     except (TypeError, ValueError):
         return None
-    rec, bad = gameupdater.check({"folder": row["folder"], "command": cmd,
-                                  "timeout_minutes": row["timeout_minutes"]})
+    block = {"folder": row["folder"], "command": cmd, "timeout_minutes": row["timeout_minutes"]}
+    if chans is not None:
+        block["channels"] = chans
+    rec, bad = gameupdater.check(block)
     return None if bad else rec
 
 
@@ -117,7 +123,9 @@ def _updater_view(row):
     return {"folder": rec["folder"], "command": rec["command"], "shown": gameupdater.shown(rec["command"]),
             "timeout_minutes": rec["timeout_minutes"], "state": row["state"],
             "id": gameupdater.fingerprint(rec), "requested_at": row["requested_at"],
-            "approved_by": row["approved_by"], "approved_at": row["approved_at"]}
+            "approved_by": row["approved_by"], "approved_at": row["approved_at"],
+            "channels": rec.get("channels"), "channel": row["channel"] or "stable",
+            "channel_by": row["channel_by"], "channel_at": row["channel_at"]}
 
 
 def listing():
@@ -155,6 +163,34 @@ def approved_updater(key):
         return None
     rec = _rec(row)
     return (row["title"] or key, rec) if rec else None
+
+
+def game_channel(key):
+    """The channel the panel last switched `key` to ("stable" when never), or None when the
+    game has no updater."""
+    db = adminusers.connect()
+    try:
+        row = db.execute("SELECT channel FROM admin_game_updater WHERE key = %s", (key,)).fetchone()
+    finally:
+        db.close()
+    return (row["channel"] or "stable") if row is not None else None
+
+
+def set_channel(key, channel, actor):
+    """Store `key`'s channel after a switch job ended ok. False when the updater is gone or
+    no longer declares that channel (it changed while the job ran)."""
+    db = adminusers.connect()
+    try:
+        row = db.execute("SELECT * FROM admin_game_updater WHERE key = %s", (key,)).fetchone()
+        rec = _rec(row) if row is not None else None
+        if rec is None or channel not in (rec.get("channels") or ()):
+            return False
+        db.execute("UPDATE admin_game_updater SET channel = %s, channel_by = %s, channel_at = %s"
+                   " WHERE key = %s", (channel, actor, _now(), key))
+        db.commit()
+    finally:
+        db.close()
+    return True
 
 
 def approved_keys():
@@ -205,13 +241,15 @@ def _same_updater(a, b):
     """The same updater after normalisation: the folder as the daemon sees it (separators,
     a trailing slash, the drive letter's case), the command and the timeout."""
     return (gameupdater.daemon_path(a["folder"]) == gameupdater.daemon_path(b["folder"])
-            and a["command"] == b["command"] and a["timeout_minutes"] == b["timeout_minutes"])
+            and a["command"] == b["command"] and a["timeout_minutes"] == b["timeout_minutes"]
+            and a.get("channels") == b.get("channels"))
 
 
 def _store_updater(db, key, rec):
     """Store a setup program's updater for `key` (rec None: take it away). Answers (state,
-    changed): its state now, and whether the folder, command or timeout differ from before,
-    which makes it "requested" again."""
+    changed): its state now, and whether the folder, command, timeout or channels differ from
+    before, which makes it "requested" again. The channel the game is on stays, unless the new
+    record no longer declares it (then it is "stable")."""
     row = db.execute("SELECT * FROM admin_game_updater WHERE key = %s", (key,)).fetchone()
     if rec is None:
         if row is not None:
@@ -221,12 +259,18 @@ def _store_updater(db, key, rec):
     if before is not None and _same_updater(before, rec):
         # an identical re-send (setup programs send it on every start) keeps its state
         return row["state"], False
-    db.execute("INSERT INTO admin_game_updater (key, folder, command, timeout_minutes, state, requested_at)"
-               " VALUES (%s,%s,%s,%s,'requested',%s)"
+    chans = rec.get("channels")
+    now_on = (row["channel"] or "stable") if row is not None else "stable"
+    if now_on not in (chans or ("stable",)):
+        now_on = "stable"
+    db.execute("INSERT INTO admin_game_updater (key, folder, command, timeout_minutes, channels, state,"
+               " requested_at, channel) VALUES (%s,%s,%s,%s,%s,'requested',%s,%s)"
                " ON CONFLICT (key) DO UPDATE SET folder = excluded.folder, command = excluded.command,"
-               " timeout_minutes = excluded.timeout_minutes, state = 'requested',"
-               " requested_at = excluded.requested_at, approved_by = NULL, approved_at = NULL",
-               (key, rec["folder"], json.dumps(rec["command"]), rec["timeout_minutes"], _now()))
+               " timeout_minutes = excluded.timeout_minutes, channels = excluded.channels,"
+               " state = 'requested', requested_at = excluded.requested_at, approved_by = NULL,"
+               " approved_at = NULL, channel = excluded.channel",
+               (key, rec["folder"], json.dumps(rec["command"]), rec["timeout_minutes"],
+                json.dumps(chans) if chans else None, _now(), now_on))
     return "requested", True
 
 
@@ -246,7 +290,10 @@ def _asked(title, rec):
 
 
 def _asked_detail(rec):
-    return {"folder": rec["folder"], "timeout_minutes": rec["timeout_minutes"]}
+    out = {"folder": rec["folder"], "timeout_minutes": rec["timeout_minutes"]}
+    if rec.get("channels"):
+        out["channels"] = rec["channels"]
+    return out
 
 
 # --------------------------------------------------------------------------- #

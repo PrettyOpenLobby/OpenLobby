@@ -855,6 +855,21 @@
     }
     /* Install games > Update channel (games.js) */
     .pill.dev { background: rgba(229,166,62,.16); color: var(--warn); }
+    .ga-chan { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 10px;
+               padding-top: 10px; border-top: 1px solid var(--line); }
+    .ga-chan-lab { font-weight: 600; }
+    .ga-chan .muted { font-size: 12.5px; }
+    .ga-chan .seg button { padding: 5px 14px; }
+    .ga-chan-form { margin-top: 10px; background: var(--panel); }
+    .ga-chan-form input[type=password] { background: var(--panel2); }
+    .ga-upd-box .upd-why { margin-top: 8px; }
+    .dc-form { align-items: flex-end; }
+    .dc-go { flex: 0 0 auto; padding-bottom: 8px; }
+    #dcNew { margin-top: 12px; }
+    .nowrap { white-space: nowrap; }
+    .dc-new { margin: 8px 0 10px; font-size: 15px; letter-spacing: .06em; white-space: pre-wrap;
+              background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
+    .dc-code { font-size: 13px; white-space: nowrap; }
     .chan-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 4px 0 10px; }
     .chan-top .seg button { padding: 6px 16px; font-size: 13px; }
     .chan-warn { color: var(--bad); }
@@ -2032,12 +2047,13 @@
         <p class="hint chan-warn" id="chanWarn" hidden></p>
         <div class="ga-box" id="chanForm" hidden>
           <h3>Switch to Dev</h3>
-          <p class="hint" style="margin-top:0">Paste the access code the developers gave you. The panel hands it
-            to the deployer, which checks it and keeps it; it is not stored here and never shown again.
+          <p class="hint" style="margin-top:0">Paste the access code the developers gave you: a long one that
+            starts with olx, or a short dev code like <span class="nowrap">ABCD-EFGH-JKMN</span>, which works for one server only. The panel
+            hands it to the deployer, which checks it and keeps it; it is not stored here and never shown again.
             Switching pulls the dev builds and restarts what runs them.</p>
           <div class="row">
             <div style="flex:1 1 280px"><label for="chanCode">Access code</label>
-              <input type="password" id="chanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="olx1..."></div>
+              <input type="password" id="chanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="olx1... or ABCD-EFGH-JKMN"></div>
           </div>
           <div class="ga-result bad" id="chanResult" role="alert" hidden></div>
           <div class="toolbar" style="margin-top:12px">
@@ -2139,6 +2155,33 @@
         <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>Admin address</th>
           <th>Added</th><th>Token</th><th></th></tr></thead>
           <tbody id="addedBody"></tbody></table></div>
+      </div>
+      <!-- Single-use dev access codes, this panel as their issuer (admindevcodes.py): shown once
+           POL_DEV_ISSUER_CODE is set, or while codes exist. -->
+      <div class="panel" id="devCodesPanel" hidden>
+        <h2>Dev access codes</h2>
+        <p class="hint">Short codes that unlock the dev channel for one server each. The first server to
+          enter one keeps it; any other server is refused, so a code that was passed on after use unlocks
+          nothing. Revoke one to lock that server out.</p>
+        <p class="hint" id="dcWhy"></p>
+        <div class="row dc-form">
+          <div style="flex:0 1 110px"><label for="dcCount">How many</label>
+            <input type="text" id="dcCount" value="1" inputmode="numeric" maxlength="3"></div>
+          <div style="flex:2 1 240px"><label for="dcNote">For</label>
+            <input type="text" id="dcNote" maxlength="120" autocomplete="off" placeholder="who gets them, e.g. Kart Club testers"></div>
+          <div class="dc-go"><button class="act sm" id="dcMake">Make codes</button></div>
+        </div>
+        <div class="ga-result bad" id="dcResult" role="alert" hidden></div>
+        <div class="ga-box" id="dcNew" hidden>
+          <h3 id="dcNewHead"></h3>
+          <pre class="mono dc-new" id="dcNewList"></pre>
+          <div class="toolbar">
+            <button class="act sm" id="dcCopy">Copy</button>
+            <button class="ghost sm" id="dcNewClose">Close</button>
+          </div>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Code</th><th>For</th><th>State</th>
+          <th>Redeemed</th><th></th></tr></thead><tbody id="dcBody"></tbody></table></div>
       </div>
       <!-- Update notices when there is no deployer (the Install games tab is hidden then). -->
       <div class="panel upd-panel" id="updModules" hidden></div>

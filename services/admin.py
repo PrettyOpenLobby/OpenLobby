@@ -94,6 +94,7 @@ import admingames  # noqa: E402  -- the Games section's tool proxy
 import adminmodules  # noqa: E402  -- one module per game (adminmodules/)
 import admindeploy  # noqa: E402  -- installing games through the deployer (owner only)
 import adminpair  # noqa: E402  -- games added by hand or paired by their setup program
+import admindevcodes  # noqa: E402  -- single-use dev access codes, this panel as their issuer
 import adminupdates  # noqa: E402  -- update notices: the core and each game (owner only)
 import webpush  # noqa: E402
 
@@ -1488,10 +1489,12 @@ _AUDIT_SECRET = {"password", "current", "pw", "token", "confirm",
 _AUDIT_TARGETS = ("polid", "code", "username", "id", "room")
 
 
-def _follow_updater(job_id, key, title, actor, role, addr, timeout_minutes, every=10.0):
+def _follow_updater(job_id, key, title, actor, role, addr, timeout_minutes, every=10.0, switch=None):
     """Watch a paired game's updater job to its end and write how it ended to the activity
     log, under whoever pressed Update, whether or not anyone keeps the page open. Gives up
-    quietly a while after the job's own timeout could have stopped it."""
+    quietly a while after the job's own timeout could have stopped it. With `switch` (a
+    channel name) it was a channel switch: the game's channel is stored only when it ended ok,
+    and a failure keeps the one it was on."""
     deadline = time.time() + timeout_minutes * 60 + 30 * 60
     while time.time() < deadline:
         time.sleep(every)
@@ -1502,6 +1505,18 @@ def _follow_updater(job_id, key, title, actor, role, addr, timeout_minutes, ever
         if status != 200 or not isinstance(j, dict) or j.get("state") not in ("ok", "failed", "needs_data"):
             continue
         summary = str(j.get("summary") or "")[:300]
+        if switch:
+            if j.get("state") == "ok":
+                stored = adminpair.set_channel(key, switch, actor)
+                _audit(actor, role, "switched %s to the %s channel" % (title, switch), target=key[:32],
+                       detail={"job": job_id} if stored else
+                       {"job": job_id, "error": "its updater changed while the job ran; the channel was not stored"},
+                       ok=stored, addr=addr)
+            else:
+                why = summary.split("Update failed:", 1)[-1].strip() or "the updater stopped with an error"
+                _audit(actor, role, "%s: switch to the %s channel failed: %s" % (title, switch, why),
+                       target=key[:32], detail={"job": job_id}, ok=False, addr=addr)
+            return
         if j.get("state") == "ok":
             _audit(actor, role, "updated %s" % title, target=key[:32], detail={"job": job_id},
                    ok=True, addr=addr)
@@ -2509,6 +2524,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/pair/code":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._send(*adminpair.code_state(q.get("code", [""])[0]))
+        if path == "/api/devcodes":
+            return self._send(*admindevcodes.listing())
         if path == "/api/deploy/patches":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._send(*admindeploy.patches(q.get("recheck", [""])[0] == "1"))
@@ -2618,6 +2635,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._logout()
         if path in ("/api/pair", "/api/pair/update"):
             return self._pair(path)              # a setup program: a code or a secret, no login
+        if path == "/api/dev-code/redeem":
+            return self._dev_redeem()            # an install's deployer: a dev code, no login
         if not self._authed(path):
             return
         if CORE_OFF and _pol_route("POST", path):
@@ -2710,6 +2729,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._update_apply()
         if path == "/api/updates/run":
             return self._update_run()
+        if path == "/api/updates/channel":
+            return self._update_channel()
+        if path == "/api/devcodes":
+            return self._dev_codes()
         if path == "/api/updates/ops":
             return self._update_ops()
         if path == "/api/deploy/action":
@@ -2884,15 +2907,100 @@ class Handler(BaseHTTPRequestHandler):
         if got is None:
             return self._send(404, {"error": "That game has no approved updater."})
         title, rec = got
-        status, out = admindeploy.run_updater(key, title, rec)
+        # a game on another channel than stable stays on it: --channel <its channel>
+        on = adminpair.game_channel(key)
+        channel = on if on and on != "stable" and on in (rec.get("channels") or ()) else None
+        status, out = admindeploy.run_updater(key, title, rec, channel=channel)
+        command = adminpair.gameupdater.with_channel(rec, channel)
         _audit(user, role, "asked the deployer to update %s with its updater" % title, target=key[:32],
-               detail={"job": out.get("job"), "command": adminpair.gameupdater.shown(rec["command"])[:300]},
+               detail={"job": out.get("job"), "command": adminpair.gameupdater.shown(command)[:300]},
                ok=status == 202, addr=self._addr())
         if status == 202 and out.get("job"):
             threading.Thread(target=_follow_updater, daemon=True,
                              args=(str(out["job"]), key, title, user, role, self._addr(),
                                    int(rec.get("timeout_minutes") or 60),
                                    float(os.environ.get("POL_ADMIN_UPDATER_FOLLOW", "10")))).start()
+        return self._send(status, out)
+
+    def _update_channel(self):
+        """{"key", "channel", "code"}: switch a paired game to another update channel (docs/
+        installs.md, "Update channels"), owner only. The deployer runs the approved updater with
+        "--channel <name>"; the channel is stored only once that job ended ok (_follow_updater).
+        The code, for a channel other than stable, goes to the deployer and nowhere else: this
+        path is not in _AUDIT_ACTIONS, and no audit row or answer carries it."""
+        body = self._json_body()
+        key, want = str(body.get("key") or ""), body.get("channel")
+        user, role, _p = self._caller()
+        got = adminpair.approved_updater(key)
+        if got is None:
+            self._jb = {}
+            return self._send(404, {"error": "That game has no approved updater."})
+        title, rec = got
+        chans = rec.get("channels") or []
+        if not isinstance(want, str) or want not in chans:
+            self._jb = {}
+            return self._send(400, {"error": "%s offers no such channel." % title if chans else
+                                    "%s's updater offers no update channels." % title})
+        code = None
+        if want != "stable" and body.get("code") not in (None, ""):
+            code = admindeploy.clean_code(body.get("code"))
+            if code is None:
+                self._jb = {}
+                return self._send(400, {"error": "The access code is 8 to 2048 characters, with no spaces."})
+        status, out = admindeploy.run_updater(key, title, rec, channel=want, switch=True, code=code)
+        detail = {"job": out.get("job"), "code": "given" if code else "none"}
+        if status != 202:
+            detail["error"] = str(out.get("error") or "")[:300]
+        _audit(user, role, ("asked the deployer to switch %s to the %s channel" if status == 202 else
+                            "tried to switch %s to the %s channel") % (title, want),
+               target=key[:32], detail=detail, ok=status == 202, addr=self._addr())
+        self._jb = {}
+        if status == 202 and out.get("job"):
+            threading.Thread(target=_follow_updater, daemon=True,
+                             args=(str(out["job"]), key, title, user, role, self._addr(),
+                                   int(rec.get("timeout_minutes") or 60),
+                                   float(os.environ.get("POL_ADMIN_UPDATER_FOLLOW", "10"))),
+                             kwargs={"switch": want}).start()
+        return self._send(status, out)
+
+    def _dev_codes(self):
+        """Settings > Modules, "Dev access codes" (owner): {"action": "make", "count", "note"}
+        or {"action": "revoke", "code"}. Audited here; the codes themselves are not secrets
+        once made, but the row names only the note and how many."""
+        body = self._json_body()
+        act = body.get("action")
+        user, role, _p = self._caller()
+        if act == "make":
+            status, out = admindevcodes.make(body.get("count"), body.get("note"), user)
+            n = len(out.get("codes") or [])
+            what = ("made %d dev access code%s for %s" % (n, "" if n == 1 else "s", out.get("note"))
+                    if status == 200 else "could not make dev access codes")
+            detail = {"codes": out.get("codes")} if status == 200 else {"error": out.get("error")}
+            target = None
+        elif act == "revoke":
+            status, out = admindevcodes.revoke(body.get("code"), user)
+            what = "revoked the dev access code for %s" % (out.get("note") or out.get("code") or "?")
+            detail = {"error": out["error"]} if out.get("error") else (
+                {"token": "deleted"} if out.get("token_deleted") else None)
+            target = out.get("code") or str(body.get("code") or "")[:20]
+        else:
+            return self._send(400, {"error": "Unknown action."})
+        _audit(user, role, what, target=target, detail=detail, ok=status == 200, addr=self._addr())
+        return self._send(status, out)
+
+    def _dev_redeem(self):
+        """POST /api/dev-code/redeem (docs/deployer.md, "Dev access codes"): an install's
+        deployer, no login. The same limit as /api/pair; an open panel off loopback refuses it
+        as it refuses everything else."""
+        if not _auth_required() and _open_panel_refused():
+            return self._authed("/api/dev-code/redeem")
+        ok, wait = admindevcodes.LIMIT.allow(self._addr())
+        if not ok:
+            return self._send(429, {"error": "Too many tries from this address. Try again in %d seconds." % wait},
+                              headers=[("Retry-After", str(wait))])
+        status, out, aud = admindevcodes.redeem(self._json_body())
+        if aud is not None:
+            _audit("dev code", "install", aud[0], target=None, ok=aud[1], addr=self._addr())
         return self._send(status, out)
 
     def _pair(self, path):

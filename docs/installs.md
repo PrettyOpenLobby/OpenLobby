@@ -269,6 +269,7 @@ may send:
 - `command`: the argument list, never a shell line. The first item is exactly `python` or
   `python3`; at most 16 items, each a string under 200 characters, no NUL.
 - `timeout_minutes`: a whole number from 5 to 240, 60 when left out.
+- `channels`: optional, the update channels the game can follow ("Update channels" below).
 
 Nothing else is allowed in the object. A block that does not fit is refused with `400` and
 a sentence saying what is wrong, and nothing is paired or changed. `"updater": null` takes
@@ -301,6 +302,60 @@ stays as it is. Stdin is closed, and the environment is the image's own plus `HO
 `LANG=C.UTF-8`, `PYTHONUNBUFFERED=1` and `PYTHONIOENCODING=utf-8`. The Docker socket is mounted
 too, so the command can rebuild and restart the game's containers; that is why it runs only
 once the owner approved it ([deployer.md](deployer.md), "Updaters of paired games").
+
+### Update channels
+
+An updater may also say which update channels the game can follow:
+
+```json
+"updater": {"folder": "C:\\Users\\you\\Kart Club",
+            "command": ["python", "setup.py", "--update", "--yes"],
+            "timeout_minutes": 60,
+            "channels": ["stable", "dev"]}
+```
+
+`channels` is a list of 1 to 4 names, each 1 to 12 lower-case letters, no name twice, and
+`stable` must be one of them. Leaving it out means the game has no channels, and the panel
+offers no switch. The channels are part of what the owner approves: they are shown with the
+folder, command and timeout, and a change to them makes the updater `requested` again, like a
+change to any other field.
+
+Once the updater is approved and a deployer is set up, Settings, Modules shows the game's
+update channel under its updater, with a button for each channel (the owner only). Switching
+runs the approved command with `--channel <name>` appended, as a deployer job with the same
+rules as an update: its own container of the deployer's image, the folder mounted, stdin
+closed, the timeout and the 15 minutes without output, the log live in Settings, Install
+games. Switching to Kart Club's `dev` channel runs
+
+    python setup.py --update --yes --channel dev
+
+The panel stores the game's channel only when that job ends `ok`. A switch that fails leaves
+the game on the channel it was on, and the panel says why with the updater's last line. The
+activity log gets "asked the deployer to switch Kart Club to the dev channel" when the owner
+starts it, then "switched Kart Club to the dev channel" or "Kart Club: switch to the dev
+channel failed: <why>". From then on the regular Update button of a game that is not on
+`stable` runs the command with `--channel <its channel>` too, so the updater stays on it.
+
+For a channel other than `stable` the switch form asks for an access code, if the developers
+gave one: a short dev code (`ABCD-EFGH-JKMN`, one server each) or a full `olx1.` code, typed
+into a password field the browser does not keep. The panel hands it to the deployer, which
+redeems a short code first ([deployer.md](deployer.md), "Dev access codes") and passes the
+resulting `olx1.` code to the command in the environment variable `OPENLOBBY_DEV_CODE`. It is
+never an argument, and no log, job file, answer or activity log line holds it. Without a code
+the variable is not set. Switching to `stable` never carries one.
+
+What the game's updater must do with `--channel <name>`:
+
+- switch everything that differs between the channels itself: which images or releases it
+  follows, signing in to a registry with the code (`stack.py dev-code --decode` reads an
+  `olx1.` code, and `services/deployer/devchannel.py` has `parse_code`), and its database. A
+  game whose dev build changes the database should take a backup before switching to dev and
+  restore it when switching back to stable;
+- refuse a switch it cannot do safely (a missing backup, a code that does not read the dev
+  builds, a disk too full for the dump) by exiting non-zero after printing one sentence that
+  says why, before changing anything. That sentence is what the panel shows;
+- remember its channel, so an `--update` run by hand without `--channel` still follows it;
+- print a line now and then, as an update does.
 
 ## A setup program like the others
 

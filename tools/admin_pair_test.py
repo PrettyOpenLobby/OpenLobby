@@ -17,7 +17,10 @@ and a wrong secret and an unknown key, and unpairing, which ends the secret. The
 updater (docs/installs.md, "Updates"): every rule of the "updater" block refused with a sentence,
 stored as requested, shown on the Modules page, approved only by the owner and only as shown,
 requested again when its folder, command or timeout changes, revoked, taken away with null, and
-gone with an unpair or a remove, each step in the activity log. A moderator gets 403
+gone with an unpair or a remove, each step in the activity log. Then its update channels
+(docs/installs.md, "Update channels"): every rule of "channels" refused, stored and shown, part
+of what is approved (a change makes it requested again, a re-send keeps it), the id of an updater
+without channels unchanged by them, and the switch the owner's only. A moderator gets 403
 for everything here, /api/updates included. Then the rate limit (five tries a minute from one
 address, then 429) on a panel with the default, and a panel without the PlayOnline core
 (POL_ADMIN_CORE=none) pairing the same way. Throwaway PostgreSQL (tools/pgtest.py); the panels run
@@ -439,6 +442,85 @@ def updaters(owner, mod, anon, kport):
     chk("removing the game removes it", (code, updater_row()), (200, None))
 
 
+def channels(owner, mod, anon, kport):
+    """An updater's "channels" (docs/installs.md, "Update channels")."""
+    print("an updater's update channels")
+    sys.path.insert(0, os.path.join(SERVICES, "deployer"))
+    import gameupdater
+    kurl = "http://127.0.0.1:%d" % kport
+    pc = owner.call("api/pair/code", {})[1]["code"]
+    body = {"code": pc, "key": "kart", "title": "Kart Club", "url": kurl, "token": TOKEN}
+    for what, chans, said in (
+            ("channels that are not a list", "stable,dev", "must be a list of 1 to 4 channel names"),
+            ("no channels", [], "must be a list of 1 to 4 channel names"),
+            ("five channels", ["stable", "dev", "beta", "next", "old"], "must be a list of 1 to 4"),
+            ("an upper-case name", ["stable", "Dev"], "1 to 12 lower-case letters"),
+            ("a 13-letter name", ["stable", "d" * 13], "1 to 12 lower-case letters"),
+            ("a digit in a name", ["stable", "dev2"], "1 to 12 lower-case letters"),
+            ("a name that is not text", ["stable", 2], "1 to 12 lower-case letters"),
+            ("a name twice", ["stable", "dev", "dev"], "names a channel twice"),
+            ("no stable", ["dev", "beta"], 'must include "stable"')):
+        code, r = anon.call("api/pair", dict(body, updater=dict(UPDATER, channels=chans)))
+        chk("updater with %s: 400 with a sentence" % what, (code, said in r.get("error", "")), (400, True))
+    chk("  nothing paired", sql("SELECT count(*) AS n FROM admin_game")[0]["n"], 0)
+
+    plain, _bad = gameupdater.check(UPDATER)
+    old_id = hashlib.sha256(json.dumps([plain["folder"], plain["command"], plain["timeout_minutes"]],
+                                       separators=(",", ":")).encode()).hexdigest()[:16]
+    chk("an updater without channels keeps the id it had before channels existed",
+        gameupdater.fingerprint(plain), old_id)
+
+    withch = dict(UPDATER, channels=["stable", "dev"])
+    n = audit_top()
+    code, r = anon.call("api/pair", dict(body, updater=withch))
+    secret = r.get("pairing") or ""
+    chk("pairing with channels: 200, requested", (code, r.get("updater")), (200, "requested"))
+    row = updater_row() or {}
+    chk("  stored, on stable", (json.loads(row.get("channels") or "null"), row.get("channel")),
+        (["stable", "dev"], "stable"))
+    u = added_updater(owner) or {}
+    chk("  the Modules page shows them and the channel it is on", (u.get("channels"), u.get("channel")),
+        (["stable", "dev"], "stable"))
+    chk("  its id is not the one without channels", u.get("id") != old_id, True)
+    chk("  the activity log says which channels", sql("SELECT detail FROM admin_audit WHERE id > %s ORDER BY id",
+                                                       (n,))[-1]["detail"].count('"dev"'), 1)
+    chk("a switch before it is approved: 404", owner.call("api/updates/channel", {"key": "kart", "channel": "dev"})[0], 404)
+    owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": u["id"]})
+    chk("approved", updater_row()["state"], "approved")
+    chk("a moderator cannot switch it", mod.call("api/updates/channel", {"key": "kart", "channel": "dev"})[0], 403)
+    code, r = owner.call("api/updates/channel", {"key": "kart", "channel": "beta"})
+    chk("a channel it does not declare: 400", (code, r.get("error")), (400, "Kart Club offers no such channel."))
+    code, r = owner.call("api/updates/channel", {"key": "kart", "channel": "dev"})
+    chk("  no deployer here: 503, and the channel stays", (code, updater_row()["channel"]), (503, "stable"))
+
+    upd = {"key": "kart", "pairing": secret, "token": TOKEN}
+    code, r = anon.call("api/pair/update", dict(upd, updater=dict(withch)))
+    chk("the same channels sent again: still approved", (code, r.get("updater")), (200, "approved"))
+    db = accounts.connect()
+    db.execute("UPDATE admin_game_updater SET channel = 'dev' WHERE key = 'kart'")
+    db.commit()
+    db.close()
+    n = audit_top()
+    code, r = anon.call("api/pair/update", dict(upd, updater=dict(UPDATER, channels=["stable", "dev", "beta"])))
+    chk("a changed list: requested again, the channel it is on kept",
+        (code, r.get("updater"), updater_row()["state"], updater_row()["channel"]),
+        (200, "requested", "requested", "dev"))
+    chk("  in the activity log", [a[1] for a in audit_since(n)],
+        ["Kart Club asked to update itself with python setup.py --update --yes"])
+    u = added_updater(owner)
+    owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": u["id"]})
+    code, r = anon.call("api/pair/update", dict(upd, updater=dict(UPDATER)))
+    chk("channels taken out: requested again, back to stable, no switch offered",
+        (code, r.get("updater"), updater_row()["channels"], updater_row()["channel"],
+         (added_updater(owner) or {}).get("channels")), (200, "requested", None, "stable", None))
+    u = added_updater(owner)
+    owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": u["id"]})
+    code, r = owner.call("api/updates/channel", {"key": "kart", "channel": "stable"})
+    chk("  a switch on an updater without channels: 400", (code, r.get("error")),
+        (400, "Kart Club's updater offers no update channels."))
+    owner.call("api/modules/game", {"action": "remove", "key": "kart"})
+
+
 def updates(owner):
     print("update notices")
     code, r = owner.call("api/updates")
@@ -463,6 +545,7 @@ def main():
         hand_added(owner, mod, kport, dport, dead)
         pairing(owner, mod, anon, kport, dport)
         updaters(owner, mod, anon, kport)
+        channels(owner, mod, anon, kport)
         updates(owner)
     finally:
         stop(proc)

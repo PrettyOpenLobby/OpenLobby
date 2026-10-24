@@ -444,6 +444,7 @@ async function loadModules() {
   $("#modulesProblemList").innerHTML = probs.map((p) => `<li>${esc(p)}</li>`).join("");
   ADDED = r.added || [];
   renderAdded();
+  loadDevCodes();
 }
 
 // ---- Settings > Modules: games added here, by hand or by their setup program (adminpair.py) ----
@@ -457,18 +458,205 @@ function updaterRow(g) {
     : (u.requested_at ? `Sent by its setup program ${ago(u.requested_at * 1000)}` : "Sent by its setup program");
   const noDeployer = !(DEPLOY && DEPLOY.available)
     ? `<span class="muted">No deployer is set up on this server, so it cannot run yet.</span>` : "";
+  const chans = u.channels || [];
   return `<tr class="ga-upd"><td colspan="5" data-label=""><div class="ga-upd-box${ok ? " ok" : ""}">`
     + `<div class="ga-upd-head">Updater <span class="pill ${ok ? "live" : "wait"}">${ok ? "Approved" : "Waiting for your approval"}</span>`
     + `<span class="muted">${esc(when)}</span></div>`
     + `<dl class="ga-upd-grid"><dt>Folder</dt><dd><code class="mono">${esc(u.folder)}</code></dd>`
     + `<dt>Command</dt><dd><code class="mono">${esc(u.shown)}</code></dd>`
-    + `<dt>Timeout</dt><dd>${esc(u.timeout_minutes)} minutes</dd></dl>`
+    + `<dt>Timeout</dt><dd>${esc(u.timeout_minutes)} minutes</dd>`
+    + (chans.length ? `<dt>Channels</dt><dd>${esc(chans.map(chanWord).join(", "))}</dd>` : "") + `</dl>`
     + `<div class="ga-upd-acts">${ok
       ? `<button class="ghost sm" data-ga-revoke="${esc(g.key)}">Revoke</button>`
       : `<button class="act sm" data-ga-approve="${esc(g.key)}">Approve</button>`}`
     + `<span class="muted">An approved updater runs with full Docker access.</span>${noDeployer}</div>`
+    + (ok && chans.length > 1 && DEPLOY && DEPLOY.available ? gaChanBox(g, u) : "")
     + `</div></td></tr>`;
 }
+
+// ---- a paired game's update channel (docs/installs.md, "Update channels"), owner only ----
+// The switch runs the approved updater with --channel <name> as a deployer job; the panel stores
+// the channel only once that job ended ok. A dev access code typed here goes to the deployer,
+// which hands it to the updater in its environment; the field is cleared as soon as it is sent.
+const GA_SW = {};          // key -> {job, want, state, summary}: a switch started from this page
+let GA_CHAN_FORM = null;   // {key, want}: the switch form that is open
+const chanWord = (c) => c.charAt(0).toUpperCase() + c.slice(1);
+
+function gaChanBox(g, u) {
+  const key = g.key, on = u.channel || "stable", sw = GA_SW[key];
+  const busy = sw && !JOB_DONE.has(sw.state);
+  const segs = u.channels.map((c) => `<button type="button" data-ga-chan="${esc(key)}" data-to="${esc(c)}"`
+    + `${c === on ? ' class="on" aria-pressed="true"' : ' aria-pressed="false"'}${busy ? " disabled" : ""}>${esc(chanWord(c))}</button>`).join("");
+  const when = u.channel_at ? `Switched by ${u.channel_by || "the owner"}, ${ago(u.channel_at * 1000)}`
+    : "It has not been switched from this panel.";
+  let live = "";
+  if (busy) {
+    live = `<div class="upd-live"><span class="spin" aria-hidden="true"></span>`
+      + `<span>Switching ${esc(g.title)} to ${esc(chanWord(sw.want))}: its updater is running.</span>`
+      + ` <button class="ghost sm" data-ga-chanlog="${esc(sw.job)}">Follow the log</button></div>`;
+  } else if (sw && sw.state !== "ok") {
+    live = `<div class="upd-why bad">Switch to ${esc(chanWord(sw.want))} failed: ${esc(String(sw.summary || "").replace(/^Update failed:\s*/i, "") || "the updater stopped with an error")}.`
+      + ` ${esc(g.title)} stays on ${esc(chanWord(on))}. <button class="ghost sm" data-ga-chanlog="${esc(sw.job)}">Show the log</button></div>`;
+  }
+  const f = GA_CHAN_FORM && GA_CHAN_FORM.key === key ? GA_CHAN_FORM.want : null;
+  const form = f ? `<div class="ga-box ga-chan-form"><h3>Switch ${esc(g.title)} to ${esc(chanWord(f))}</h3>`
+    + `<p class="hint" style="margin-top:0">The deployer runs the approved updater with <code class="mono">--channel ${esc(f)}</code>. `
+    + `${esc(g.title)}'s own setup program switches its images and looks after its database, and refuses a switch it cannot `
+    + `do safely. Everyone playing it may be disconnected.</p>`
+    + `<div class="row"><div style="flex:1 1 260px"><label for="gaChanCode">Access code, if the developers gave you one</label>`
+    + `<input type="password" id="gaChanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH-JKMN or olx1..."></div></div>`
+    + `<div class="hint">It goes to the deployer and the updater only; it is not stored here and never shown again.</div>`
+    + `<div class="ga-result bad" id="gaChanResult" role="alert" hidden></div>`
+    + `<div class="toolbar" style="margin-top:12px"><button class="act sm" data-ga-chango="${esc(key)}">Switch to ${esc(chanWord(f))}</button>`
+    + `<button class="ghost sm" data-ga-chancancel>Cancel</button></div></div>` : "";
+  return `<div class="ga-chan"><span class="ga-chan-lab">Update channel</span>`
+    + `<div class="seg" role="group" aria-label="Update channel of ${esc(g.title)}">${segs}</div>`
+    + `<span class="muted">${esc(when)}</span></div>${live}${form}`;
+}
+
+async function gaChanSwitch(key, want, code) {
+  const g = ADDED.find((x) => x.key === key) || { title: key };
+  const res = $("#gaChanResult");
+  try {
+    const r = await api("/api/updates/channel", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(code ? { key, channel: want, code } : { key, channel: want }) });
+    GA_CHAN_FORM = null;
+    GA_SW[key] = { job: r.job, want, state: "running" };
+    toast(`Switching ${g.title} to ${chanWord(want)}: started`);
+    renderAdded();
+    gaChanFollow(key);
+  } catch (e) {
+    if (res) { res.hidden = false; res.textContent = e.message; } else toast(e.message, true);
+  }
+}
+
+function gaChanFollow(key) {
+  const sw = GA_SW[key];
+  if (!sw || JOB_DONE.has(sw.state)) return;
+  setTimeout(async () => {
+    let j = null;
+    try { j = await api("/api/deploy/job?id=" + encodeURIComponent(sw.job)); } catch (e) { /* restarting: ask again */ }
+    if (j && JOB_DONE.has(j.state)) {
+      sw.state = j.state; sw.summary = j.summary || "";
+      if (j.state === "ok") toast(`${(ADDED.find((x) => x.key === key) || { title: key }).title} is on ${chanWord(sw.want)}`);
+      // the panel stores the channel once it has seen the job end: give it a moment
+      setTimeout(() => { if (CUR_TAB === "modules") loadModules(); }, 1200);
+      if (CUR_TAB === "modules") renderAdded();
+      return;
+    }
+    gaChanFollow(key);
+  }, 2000);
+}
+
+// ---- Settings > Modules, "Dev access codes": this panel as the issuer (admindevcodes.py) ----
+let DEVCODES = null;
+
+async function loadDevCodes() {
+  const box = $("#devCodesPanel");
+  if (!box || !isOwner()) return;
+  try { DEVCODES = await api("/api/devcodes"); } catch (e) { box.hidden = true; return; }
+  renderDevCodes();
+}
+
+const DC_WORD = { unused: ["live", "Unused"], used: ["env", "In use"], revoked: ["off", "Revoked"] };
+
+function renderDevCodes() {
+  const d = DEVCODES || {}, box = $("#devCodesPanel");
+  const codes = d.codes || [];
+  box.hidden = !d.issuing && !codes.length;
+  if (box.hidden) return;
+  $("#dcWhy").textContent = d.why || "";
+  $("#dcMake").disabled = !d.issuing;
+  $("#dcBody").innerHTML = codes.map((c) => {
+    const [cls, word] = DC_WORD[c.state] || DC_WORD.unused;
+    const used = c.redeemed_at ? `${ago(c.redeemed_at * 1000)}<div class="muted mono">${esc(c.install || "")}</div>` : '<span class="muted">-</span>';
+    const act = c.state !== "revoked" || c.token_left
+      ? `<button class="${c.token_left ? "ghost" : "danger"} sm" data-dc-revoke="${esc(c.code)}">${c.token_left ? "Delete its token again" : "Revoke"}</button>` : "";
+    return `<tr><td class="strong" data-label="Code"><code class="mono dc-code">${esc(c.code)}</code></td>`
+      + `<td data-label="For">${esc(c.note || "")}<div class="muted">${esc([c.made_by, c.created_at ? ago(c.created_at * 1000) : ""].filter(Boolean).join(", "))}</div></td>`
+      + `<td data-label="State"><span class="pill ${cls}">${esc(word)}</span>${c.token ? ' <span class="muted">own token</span>' : ""}</td>`
+      + `<td data-label="Redeemed">${used}</td>`
+      + `<td data-label="">${act}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">No codes yet.</td></tr>`;
+}
+
+async function dcMake() {
+  const count = parseInt($("#dcCount").value, 10), note = $("#dcNote").value.trim();
+  const res = $("#dcResult");
+  res.hidden = true;
+  try {
+    const r = await api("/api/devcodes", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "make", count, note }) });
+    $("#dcNote").value = "";
+    $("#dcNew").hidden = false;
+    $("#dcNewList").textContent = r.codes.join("\n");
+    $("#dcNewHead").textContent = `${r.codes.length} new code${r.codes.length === 1 ? "" : "s"} for ${r.note}`;
+    loadDevCodes();
+  } catch (e) { res.hidden = false; res.textContent = e.message; }
+}
+
+async function dcRevoke(code) {
+  const c = ((DEVCODES || {}).codes || []).find((x) => x.code === code) || { code };
+  const sure = c.token_left ? true : confirm(`Revoke ${code}${c.note ? ` (for ${c.note})` : ""}?\n\n`
+    + (c.state === "used" ? "The server that redeemed it can no longer pull the dev builds"
+      + (c.token ? "; its registry token is deleted." : " once its access code is changed; with the shared code it keeps working.")
+      : "Nobody can redeem it any more."));
+  if (!sure) return;
+  try {
+    await api("/api/devcodes", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "revoke", code }) });
+    toast(`${code} revoked`);
+  } catch (e) { toast(e.message, true); }
+  loadDevCodes();
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  const ch = t.closest("[data-ga-chan]");
+  if (ch && !ch.disabled) {
+    const key = ch.dataset.gaChan, want = ch.dataset.to;
+    const g = ADDED.find((x) => x.key === key);
+    const on = ((g || {}).updater || {}).channel || "stable";
+    if (want === on) { GA_CHAN_FORM = null; renderAdded(); return; }
+    if (want === "stable") {
+      if (!confirm(`Switch ${g.title} back to Stable?\n\nThe deployer runs its updater with --channel stable. `
+        + `${g.title}'s setup program decides what that means for its data; what changed on another channel may be lost.`)) return;
+      return gaChanSwitch(key, want, "");
+    }
+    GA_CHAN_FORM = { key, want };
+    renderAdded();
+    const inp = $("#gaChanCode");
+    if (inp) inp.focus();
+    return;
+  }
+  if (t.closest("[data-ga-chancancel]")) { GA_CHAN_FORM = null; renderAdded(); return; }
+  const go = t.closest("[data-ga-chango]");
+  if (go) {
+    const inp = $("#gaChanCode");
+    const code = inp ? inp.value.trim() : "";
+    if (inp) inp.value = "";
+    const was = go.textContent;
+    go.disabled = true;
+    go.textContent = "Starting...";
+    return gaChanSwitch(go.dataset.gaChango, GA_CHAN_FORM ? GA_CHAN_FORM.want : "", code).finally(() => {
+      go.disabled = false; go.textContent = was;
+    });
+  }
+  const lg = t.closest("[data-ga-chanlog]");
+  if (lg) { showTab("deploy"); followJob(lg.dataset.gaChanlog); return; }
+  if (t.closest("#dcMake")) return dcMake();
+  if (t.closest("#dcCopy")) return copyText($("#dcNewList").textContent, "the codes");
+  if (t.closest("#dcNewClose")) { $("#dcNew").hidden = true; return; }
+  const rv = t.closest("[data-dc-revoke]");
+  if (rv) return dcRevoke(rv.dataset.dcRevoke);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.id === "gaChanCode") {
+    e.preventDefault();
+    const b = document.querySelector("[data-ga-chango]");
+    if (b) b.click();
+  }
+});
 
 async function gaUpdater(key, approve) {
   const g = ADDED.find((x) => x.key === key);

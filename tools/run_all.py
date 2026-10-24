@@ -395,6 +395,7 @@ SUITES = [
     # Games added by hand in Settings > Modules, and paired through their setup program.
     ("admin_pair",    [sys.executable, "admin_pair_test.py"], TOOLS, {}),
     ("admin_gameupdate", [sys.executable, "admin_gameupdate_test.py"], TOOLS, {}),
+    ("admin_devcodes", [sys.executable, "admin_devcodes_test.py"], TOOLS, {}),
     # Self-host tools: the setup checker, the games launcher and its catalog,
     # and the patch publisher's revert guard.
     ("doctor",        [sys.executable, "doctor_test.py"], TOOLS, {}),
