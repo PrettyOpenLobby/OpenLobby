@@ -290,7 +290,8 @@ def overview(refresh=False, ops=None):
 # running their own deploy job ("updates": {key: {"action", "timer", "running", "last"}}). Such
 # a game's item gets "ops": its Update action, whether it updates by itself (the job's timer)
 # and when it checks next, the update running now and the last one's result and log. A game
-# the runner lists that reports no version of its own still gets an item, as unknown. The
+# the runner lists that reports no version of its own gets its item from the runner's
+# "version" (the same shape, read from the checkout the job deploys), else as unknown. The
 # panel files the runner's actions (adminops.ops_request); ops_asked() remembers who asked, and
 # the runner's history says how it ended, for the activity log.
 
@@ -359,8 +360,11 @@ def ops_merge(items, ops):
         it = by_key.get(key)
         if it is None:
             title = (shown or {}).get(key) or _text(u.get("name"), 80) or key
-            it = updatecheck.unknown(updatecheck.item(key, title),
-                                     "%s does not report which version it runs." % title)
+            # the runner reads the version from the checkout the game's sync deploys
+            it = clean_item(u["version"], key=key, name=title) if isinstance(u.get("version"), dict) else None
+            if it is None or (it["update"] == "unknown" and not it["why"]):
+                it = updatecheck.unknown(updatecheck.item(key, title),
+                                         "%s does not report which version it runs." % title)
             items.append(it)
             by_key[key] = it
         it["ops"] = view

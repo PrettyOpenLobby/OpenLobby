@@ -462,6 +462,15 @@ class SetupShTest(unittest.TestCase):
         self.assertIn("docker compose --profile deployer exec -T deployer python /app/deployer.py --channel stable",
                       self.calls())
 
+    def test_stable_switches_back_from_per_server_dev(self):
+        # the .channel of per-server switches (version 2): unlocked counts as on Dev
+        with open(os.path.join(self.checkout, ".channel"), "w", newline="\n") as f:
+            f.write('{\n "version": 2,\n "unlocked": true,\n "registry": "registry.example.org/kart",\n'
+                    ' "dev": [\n  "ffxi"\n ]\n}\n')
+        self.run_sh("--yes", "--reach", "lan", "--channel", "stable")
+        self.assertIn("docker compose --profile deployer exec -T deployer python /app/deployer.py --channel stable",
+                      self.calls())
+
     def test_build_locally_without_deployer(self):
         out = self.run_sh("--yes", "--reach", "lan", "--images", "build", "--no-deployer")
         _, env = self.env()

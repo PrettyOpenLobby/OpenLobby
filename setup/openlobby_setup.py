@@ -1650,8 +1650,10 @@ def parse_args(argv=None):
                     help="remove the containers; the data stays unless --delete-data is given")
     ap.add_argument("--delete-data", action="store_true", help="with --uninstall: delete the data too")
     ap.add_argument("--channel", choices=("stable", "dev"),
-                    help="the update channel: dev follows the developers' preview builds and asks for "
-                         "an access code (not shown); docs/deployer.md, \"Dev channel\"")
+                    help="the update channel: dev asks for an access code (not shown), unlocks the "
+                         "developers' preview builds and puts everything that has one on Dev (the "
+                         "panel then switches each server on its own); stable puts all back; "
+                         "docs/deployer.md, \"Dev channel\"")
     ap.add_argument("--registry", default="",
                     help="advanced, with --channel dev and a plain token: its registry, host/path "
                          "(an access code carries its own)")

@@ -205,16 +205,17 @@ curl -fsSL https://raw.githubusercontent.com/PrettyOpenLobby/OpenLobby/main/setu
 | `--admin-user NAME` | `OPENLOBBY_ADMIN_USER` | The admin panel's user name on a new `.env`. Default: `admin`. |
 | `--install-docker` | `OPENLOBBY_INSTALL_DOCKER=1` | With `--yes`, allow the Docker and git install commands. Without it, `--yes` prints them and stops. |
 | `--no-start` | | Write `.env` and stop. |
-| `--channel stable\|dev` | `OPENLOBBY_CHANNEL` | The update channel. `dev` follows the developers' preview builds; it asks for the access code without showing it and needs the deployer. |
+| `--channel stable\|dev` | `OPENLOBBY_CHANNEL` | The update channel. `dev` asks for the access code without showing it, unlocks the developers' preview builds and puts everything that has one on Dev; it needs the deployer. `stable` puts everything back. |
 | `--registry HOST/PATH` | `OPENLOBBY_DEV_REGISTRY` | Advanced: the registry a plain token is for, kept in `.env` as `POL_DEV_REGISTRY`. An access code (`olx1.`...) carries its own, so this is not needed with one. |
 | `--code-file FILE` | `OPENLOBBY_DEV_CODE_FILE` | With `--yes`, read the access code from the file's first line; it is never taken on the command line. |
 
-The dev channel (docs/deployer.md, "Dev channel") is switched by the
+The dev builds (docs/deployer.md, "Dev channel") are switched by the
 deployer: the script hands it the code on stdin once the stack is up, and
 `--channel stable` switches back. Only the code is asked for. setup.ps1
 takes the same as `-Channel`, `-Registry` and `-CodeFile`, and the setup
-program as `--channel`, `--registry` and `--code-file`. Switching from the admin panel, Settings >
-Install games > Update channel, does the same.
+program as `--channel`, `--registry` and `--code-file`. In the admin panel,
+Settings > Install games > Update channel, the code is entered once and
+each server then has its own Stable/Dev switch.
 
 `python tools/setup_test.py` tests both scripts offline, with stand-ins for
 `docker`, `git` and the address tools.

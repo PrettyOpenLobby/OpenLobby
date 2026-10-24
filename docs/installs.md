@@ -321,7 +321,10 @@ folder, command and timeout, and a change to them makes the updater `requested` 
 change to any other field.
 
 Once the updater is approved and a deployer is set up, Settings, Modules shows the game's
-update channel under its updater, with a button for each channel (the owner only). Switching
+update channel under its updater, with a button for each channel (the owner only). A game
+that offers `dev` is also in the list under Settings, Install games, Update channel, beside
+OpenLobby's own servers, with the same switch ([deployer.md](deployer.md), "Dev channel").
+Switching
 runs the approved command with `--channel <name>` appended, as a deployer job with the same
 rules as an update: its own container of the deployer's image, the folder mounted, stdin
 closed, the timeout and the 15 minutes without output, the log live in Settings, Install
@@ -337,7 +340,8 @@ channel failed: <why>". From then on the regular Update button of a game that is
 `stable` runs the command with `--channel <its channel>` too, so the updater stays on it.
 
 For a channel other than `stable` the switch form asks for an access code, if the developers
-gave one: a short dev code (`ABCD-EFGH-JKMN`, one server each) or a full `olx1.` code, typed
+gave one (with the dev builds unlocked under Update channel and nothing typed, the deployer
+hands the updater the code it keeps): a short dev code (`ABCD-EFGH-JKMN`, one server each) or a full `olx1.` code, typed
 into a password field the browser does not keep. The panel hands it to the deployer, which
 redeems a short code first ([deployer.md](deployer.md), "Dev access codes") and passes the
 resulting `olx1.` code to the command in the environment variable `OPENLOBBY_DEV_CODE`. It is

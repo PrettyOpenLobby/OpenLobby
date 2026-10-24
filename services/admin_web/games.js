@@ -1266,7 +1266,7 @@ function renderDeploy() {
         + `data-deploy="${esc(a)}" data-game="${esc(g.key)}"${busy ? " disabled" : ""}>${esc(ACT_WORD[a])}</button>`).join("")}</div></td></tr>`;
   }).join("");
   $("#deployJobs").innerHTML = (d.jobs || []).map((j) =>
-    `<li data-job="${esc(j.id)}"><span class="t1">${j.action === "channel" ? "Update channel"
+    `<li data-job="${esc(j.id)}"><span class="t1">${j.action === "channel" ? (j.key ? `Update channel: ${esc(j.key)} to ${j.to === "dev" ? "Dev" : "Stable"}` : "Update channel")
       : `${esc(ACT_WORD[j.action] || j.action)} ${esc(j.title || j.game)}`}: `
     + `${esc(JOB_WORD[j.state] || j.state)}${j.summary ? " - " + esc(j.summary) : ""}</span>`
     + `<span class="t2">${esc(jobWhen(j))}</span></li>`).join("")
@@ -1274,9 +1274,10 @@ function renderDeploy() {
   if (CHAN) renderChannel();
 }
 
-// ---- Install games > Update channel (owner): stable, or the dev builds with an access code ----
-// The code goes from the form to the deployer (admindeploy.set_channel) and is cleared from the
-// page at once; the deployer keeps it and no answer carries it back.
+// ---- Install games > Update channel (owner): an access code unlocks the dev builds, then each ----
+// server (the core, each installed game with a dev build, each paired game whose updater offers dev)
+// has its own Stable/Dev switch. The code goes from the form to the deployer (admindeploy.set_channel)
+// and is cleared from the page at once; the deployer keeps it and no answer carries it back.
 let CHAN = null;
 
 async function loadChannel() {
@@ -1285,11 +1286,29 @@ async function loadChannel() {
   renderChannel();
 }
 
-function chanForm(open) {
+function chanForm(open, again) {
   $("#chanForm").hidden = !open;
   $("#chanResult").hidden = true;
   $("#chanCode").value = "";
+  $("#chanFormHead").textContent = again ? "Enter a new access code" : "Unlock the dev builds";
   if (open) $("#chanCode").focus();
+}
+
+// every row of the list: the deployer's keys, then the paired games
+function chanRows(c) {
+  const imgs = c.images || [];
+  const rows = (c.keys || []).map((k) => ({
+    kind: "key", key: k.key, name: k.key === "core" ? "OpenLobby (this server)" : k.name, sub: k.key === "core" ? k.name : "",
+    on: k.on, since: k.since, enabled: k.enabled, applies: k.applies, note: k.note, problem: k.problem,
+    would: k.would || [], back: k.back, services: k.services || [],
+    images: imgs.filter((r) => r.key === k.key && r.dev_name)
+  }));
+  for (const p of c.paired || []) {
+    rows.push({ kind: "paired", key: p.key, name: p.title, sub: "Paired game", on: p.on === "dev" ? "dev" : "stable",
+                other: p.on !== "dev" && p.on !== "stable" ? p.on : null, note: p.note, problem: null,
+                would: p.would || [], images: [], enabled: true, applies: true });
+  }
+  return rows;
 }
 
 function renderChannel() {
@@ -1297,114 +1316,186 @@ function renderChannel() {
   const c = CHAN;
   if (!(DEPLOY && DEPLOY.available) || !c) { box.hidden = true; return; }
   box.hidden = false;
-  const dev = c.channel === "dev";
   const busy = (DEPLOY.jobs || []).some((j) => !JOB_DONE.has(j.state));
-  $("#chanPill").className = "pill " + (dev ? "dev" : "env");
-  $("#chanPill").textContent = dev ? "Dev" : "Stable";
-  $("#chanSeg").hidden = c.available === false;
-  $("#chanSeg").querySelectorAll("button").forEach((b) => {
-    b.classList.toggle("on", b.dataset.chan === (dev ? "dev" : "stable"));
-    b.setAttribute("aria-pressed", String(b.dataset.chan === (dev ? "dev" : "stable")));
-    b.disabled = busy;
-  });
-  $("#chanNewCode").hidden = !dev || c.available === false;
-  $("#chanNewCode").disabled = busy;
-  $("#chanGo").disabled = busy;
-  if (c.available === false) {
-    $("#chanHint").textContent = c.why || "The deployer did not say which channel it is on.";
-    $("#chanWarn").hidden = true;
+  const old = c.available !== false && !Array.isArray(c.keys);
+  if (c.available === false || old) {
+    $("#chanPill").className = "pill env";
+    $("#chanPill").textContent = "Stable";
+    $("#chanHint").textContent = old ? "This deployer switches everything at once; update the core to switch each server on its own."
+      : (c.why || "The deployer did not say what it follows.");
+    ["#chanBar", "#chanWarn", "#chanForm", "#chanGaps", "#chanSource", "#chanAdv"].forEach((s) => { $(s).hidden = true; });
     $("#chanBody").innerHTML = "";
-    $("#chanSource").hidden = true;
-    $("#chanGaps").hidden = true;
     return;
   }
+  const rows = chanRows(c);
+  const onDev = rows.filter((r) => r.on === "dev");
+  $("#chanPill").className = "pill " + (onDev.length ? "dev" : "env");
+  $("#chanPill").textContent = onDev.length ? `Dev: ${onDev.length}` : (c.unlocked ? "Unlocked" : "Stable");
+  $("#chanBar").hidden = false;
+  $("#chanUnlock").hidden = !!c.unlocked;
+  $("#chanNewCode").hidden = !c.unlocked;
+  $("#chanLock").hidden = !c.unlocked;
+  const keysOnDev = (c.keys || []).filter((k) => k.on === "dev");
+  $("#chanLock").disabled = busy || keysOnDev.length > 0;
+  $("#chanLock").title = keysOnDev.length ? "Switch everything back to Stable first" : "";
+  ["#chanUnlock", "#chanNewCode", "#chanGo"].forEach((s) => { $(s).disabled = busy; });
   const since = c.since ? updDate(c.since) : "";
-  $("#chanHint").textContent = dev
-    ? `This server follows the dev builds${since ? " since " + since : ""}. Updates and installs use the dev `
-      + "build wherever there is one; everything else stays on the published images."
-    : "Stable follows the published releases. Dev follows the developers' preview builds before they are "
-      + "released; they give you access with an access code.";
-  const warn = c.problem || (dev && !c.code_stored
-    ? "No access code is stored here, so the dev builds cannot be updated. Enter a new access code, or switch back to Stable." : "");
+  $("#chanHint").textContent = c.unlocked
+    ? `The dev builds are unlocked${since ? " since " + since : ""}. Pick Dev for each server that should follow them; `
+      + "anything left on Stable keeps the published images."
+    : "Everything follows the published releases. With an access code from the developers you can let each server "
+      + "follow their preview builds on its own.";
+  // a code that no longer works is said on each row on Dev; here only what .channel itself says
+  const warn = c.problem || "";
   $("#chanWarn").hidden = !warn;
   $("#chanWarn").textContent = warn;
-  const rows = (c.images || []);
-  const devRows = rows.filter((r) => r.dev_name);
-  const gaps = rows.filter((r) => !r.dev_name);
-  // an image name breaks only after a slash
   const img = (ref) => `<code class="mono chan-img">${esc(ref).replace(/\//g, "/<wbr>")}</code>`;
-  const who = (r) => (r.key === "core" ? "OpenLobby (this server)" : r.name || r.key);
   // The source offer (GPL, AGPL) for the owner on Dev: the panel redirects to it, so the
   // address is in no answer this page reads.
-  const srcLink = (r) => r.has_source
-    ? `<a href="/api/deploy/channel/source?stable=${encodeURIComponent(r.stable)}" target="_blank" `
-      + `rel="noopener noreferrer">${esc(r.license ? r.license + " source" : "Source")}</a>`
-    : '<span class="muted">-</span>';
-  $("#chanSrcHead").hidden = !dev;
-  $("#chanBody").innerHTML = devRows.map((r) => {
-    const onDev = (r.applies ? img(r.dev_name) : `<span class="muted">${esc(r.note || "")}</span>`)
-      + (r.what ? `<span class="chan-what">${esc(r.what)}</span>` : "");
-    return `<tr><td class="strong" data-label="Runs">${esc(who(r))}</td>`
-      + `<td data-label="Stable image">${img(r.stable)}</td>`
-      + `<td data-label="On Dev"><div>${onDev}</div></td>`
-      + (dev ? `<td data-label="Source"><div>${srcLink(r)}</div></td>` : "") + "</tr>";
-  }).join("") || `<tr><td colspan="${dev ? 4 : 3}" class="muted">Nothing installed here has a dev build yet.</td></tr>`;
-  const gapNames = [...new Set(gaps.map((r) => r.stable.split("/").pop()))];
+  const srcLinks = (r) => r.images.filter((x) => x.has_source).map((x) =>
+    `<a href="/api/deploy/channel/source?stable=${encodeURIComponent(x.stable)}" target="_blank" `
+    + `rel="noopener noreferrer">${esc(x.license ? x.license + " source" : "Source")}</a>`).join("<br>");
+  const anyDev = onDev.length > 0;
+  $("#chanSrcHead").hidden = !anyDev;
+  $("#chanBody").innerHTML = rows.map((r) => {
+    const dev = r.on === "dev";
+    let build;
+    if (r.kind === "paired") build = '<span class="muted">Its own setup program switches it.</span>';
+    else {
+      build = r.images.map((x) => (x.applies ? img(x.dev_name) : `${img(x.dev_name)}<span class="chan-what">${esc(x.note || "")}</span>`)
+        + (x.what ? `<span class="chan-what">${esc(x.what)}</span>` : "")).join("<br>");
+      if (!r.enabled) build += '<span class="chan-what">Not turned on: it follows its switch once it is.</span>';
+    }
+    const lockedOut = r.kind === "key" && !c.unlocked && !dev;
+    const seg = ["stable", "dev"].map((to) => {
+      const here = r.on === to;
+      const off = busy || (to === "dev" && lockedOut && !here);
+      return `<button type="button" data-ck="${esc(r.key)}" data-kind="${r.kind}" data-to="${to}"`
+        + `${here ? ' class="on" aria-pressed="true"' : ' aria-pressed="false"'}${off ? " disabled" : ""}`
+        + `${to === "dev" && lockedOut ? ' title="Enter an access code first"' : ""}>${to === "dev" ? "Dev" : "Stable"}</button>`;
+    }).join("");
+    const notes = (r.problem ? `<span class="chan-note bad">${esc(r.problem)}</span>` : "")
+      + (r.note ? `<span class="chan-note warn">${esc(r.note)}</span>` : "")
+      + (r.other ? `<span class="chan-note">On its ${esc(r.other)} channel (Settings, Modules).</span>` : "");
+    return `<tr><td class="strong" data-label="Server"><div>${esc(r.name)}${r.sub ? `<div class="muted">${esc(r.sub)}</div>` : ""}${notes}</div></td>`
+      + `<td data-label="Dev build"><div>${build || '<span class="muted">-</span>'}</div></td>`
+      + `<td data-label="Follows"><div><div class="seg" role="group" aria-label="${esc(r.name)} follows">${seg}</div>`
+      + `${dev && r.since ? `<span class="chan-when">On Dev since ${esc(updDate(r.since))}</span>` : ""}</div></td>`
+      + (anyDev ? `<td data-label="Source"><div>${dev && srcLinks(r) ? srcLinks(r) : '<span class="muted">-</span>'}</div></td>` : "")
+      + "</tr>";
+  }).join("") || `<tr><td colspan="${anyDev ? 4 : 3}" class="muted">Nothing installed here has a dev build yet.</td></tr>`;
+  const gapNames = [...new Set((c.images || []).filter((r) => !r.dev_name).map((r) => r.stable.split("/").pop()))];
   $("#chanGaps").hidden = !gapNames.length;
-  $("#chanGaps").innerHTML = `No dev build yet, so ${dev ? "these stay" : "these would stay"} on the published images: `
+  $("#chanGaps").innerHTML = "No dev build yet, so these stay on the published images: "
     + gapNames.map((n) => `<code class="mono">${esc(n)}</code>`).join(", ") + ".";
-  const anySrc = dev && devRows.some((r) => r.has_source);
+  const anySrc = rows.some((r) => r.on === "dev" && r.images.some((x) => x.has_source));
   $("#chanSource").hidden = !anySrc;
   $("#chanSource").textContent = "Each dev build's source code is at its link, under the licence the link names.";
+  renderIssuer(c);
 }
 
-async function chanSwitch(body) {
+const ISSUER_FROM = {
+  env: "Set by POL_DEV_ISSUER in this server's environment, so it cannot be changed here.",
+  state: "Set here.",
+  default: "The project's own issuer, the default."
+};
+
+function renderIssuer(c) {
+  const iss = c.issuer;
+  $("#chanAdv").hidden = !iss;
+  if (!iss) return;
+  const inp = $("#chanIssuer");
+  if (document.activeElement !== inp) inp.value = iss.value;
+  const env = iss.from === "env";
+  inp.readOnly = env;
+  $("#chanIssuerSave").hidden = env;
+  $("#chanIssuerDefault").hidden = env || iss.from === "default";
+  $("#chanIssuerHint").textContent = `${ISSUER_FROM[iss.from] || ""} Short codes (ABCD-EFGH-JKMN) are redeemed there for `
+    + `this server; type off to turn them off. ${iss.value === "off" ? "Short codes are off." : ""}`.trim();
+}
+
+async function chanPost(body, okText) {
+  const r = await api("/api/deploy/channel", { method: "POST", headers: { "Content-Type": "application/json" },
+                                               body: JSON.stringify(body) });
+  if (okText) toast(okText);
+  if (r.job) { await probeDeploy(); renderDeploy(); followJob(r.job); }
+  return r;
+}
+
+async function chanUnlock(code) {
   try {
-    const r = await api("/api/deploy/channel", { method: "POST", headers: { "Content-Type": "application/json" },
-                                                 body: JSON.stringify(body) });
+    await chanPost({ unlock: code }, "Checking the access code: started");
     chanForm(false);
-    toast(body.channel === "dev" ? "Switching to Dev: started" : "Switching to Stable: started");
-    await probeDeploy(); renderDeploy(); renderChannel();
-    followJob(r.job);
     return true;
   } catch (err) {
-    if (body.channel === "dev") {
-      $("#chanResult").hidden = false;
-      $("#chanResult").textContent = err.message;
-    } else toast(err.message, true);
+    $("#chanResult").hidden = false;
+    $("#chanResult").textContent = err.message;
     return false;
   }
 }
 
+function chanConfirm(r, to) {
+  const word = to === "dev" ? "Dev" : "Stable";
+  let text = `Switch ${r.name} to ${word}?\n\n`;
+  if (r.kind === "paired") text += `The deployer runs its approved updater with --channel ${to}; its own setup program `
+    + "switches its images and looks after its data. Everyone playing it may be disconnected.";
+  else if (!r.enabled) text += "It is not turned on, so nothing is restarted now; it follows this once it is.";
+  else text += `The deployer pulls its ${to === "dev" ? "dev builds" : "published images"} and restarts only its services `
+    + `(${r.services.join(", ")}). Everyone playing it may be disconnected.`;
+  if (to === "stable" && r.back) text += "\n\n" + r.back;
+  if ((r.would || []).length) text += "\n\n" + r.would.join("\n");
+  return confirm(text);
+}
+
 document.addEventListener("click", async (e) => {
   const t = e.target;
-  const seg = t.closest("#chanSeg [data-chan]");
-  if (seg) {
-    const want = seg.dataset.chan, dev = (CHAN || {}).channel === "dev";
-    if (want === "dev" && !dev) return chanForm($("#chanForm").hidden);
-    if (want === "stable" && dev) {
-      const backs = "Back to Stable?\n\nThe deployer pulls the published images, restarts what ran a dev image, "
-        + "signs out of the dev builds and forgets the access code.";
-      const ffxi = ((CHAN || {}).images || []).some((r) => r.key === "ffxi" && r.applies && r.enabled);
-      if (!confirm(backs + (ffxi ? "\n\nFFXI's world database keeps what the dev world server changed in it; to go back "
-        + "exactly, restore the backup you took before switching to Dev (docs/deployer.md)." : ""))) return;
-      return chanSwitch({ channel: "stable" });
-    }
-    if (want === "stable") chanForm(false);
+  const sw = t.closest("#chanBody [data-ck]");
+  if (sw && !sw.disabled) {
+    const r = chanRows(CHAN || {}).find((x) => x.key === sw.dataset.ck && x.kind === sw.dataset.kind);
+    const to = sw.dataset.to;
+    if (!r || r.on === to) return;
+    if (!chanConfirm(r, to)) return;
+    try {
+      if (r.kind === "paired") {
+        const j = await api("/api/updates/channel", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                      body: JSON.stringify({ key: r.key, channel: to }) });
+        toast(`Switching ${r.name} to ${to === "dev" ? "Dev" : "Stable"}: started`);
+        await probeDeploy(); renderDeploy(); followJob(j.job);
+      } else {
+        await chanPost({ key: r.key, to }, `Switching ${r.name} to ${to === "dev" ? "Dev" : "Stable"}: started`);
+      }
+    } catch (err) { toast(err.message, true); }
     return;
   }
-  if (t.closest("#chanNewCode")) return chanForm($("#chanForm").hidden);
+  if (t.closest("#chanUnlock")) return chanForm($("#chanForm").hidden, false);
+  if (t.closest("#chanNewCode")) return chanForm($("#chanForm").hidden, true);
   if (t.closest("#chanCancel")) return chanForm(false);
+  if (t.closest("#chanLock")) {
+    if (!confirm("Forget the access code?\n\nThe deployer signs out of the dev builds and forgets the code; "
+      + "entering one again unlocks them again.")) return;
+    try { await chanPost({ lock: true }, "Forgetting the access code: started"); } catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (t.closest("#chanIssuerSave") || t.closest("#chanIssuerDefault")) {
+    const value = t.closest("#chanIssuerDefault") ? "" : $("#chanIssuer").value.trim();
+    const res = $("#chanIssuerResult");
+    res.hidden = true;
+    try {
+      await chanPost({ issuer: value }, value ? "Issuer of short codes saved" : "Issuer of short codes: the default");
+      loadChannel();
+    } catch (err) { res.hidden = false; res.textContent = err.message; }
+    return;
+  }
   if (t.closest("#chanGo")) {
     const code = $("#chanCode").value.trim();
     $("#chanCode").value = "";
     if (!code) { $("#chanResult").hidden = false; $("#chanResult").textContent = "Type the access code."; return; }
-    t.closest("#chanGo").disabled = true;
-    $("#chanResult").hidden = true;
     const btn = t.closest("#chanGo");
+    btn.disabled = true;
+    $("#chanResult").hidden = true;
     btn.textContent = "Checking the code...";
-    await chanSwitch({ channel: "dev", code });
-    btn.textContent = "Switch to Dev";
+    await chanUnlock(code);
+    btn.textContent = "Unlock";
     btn.disabled = false;
   }
 });
@@ -1619,6 +1710,8 @@ async function followJob(id) {
       if (j.action === "updater") {
         if (done) UPD_RUN[done.game || j.game] = { job: id, state: done.state, summary: done.summary || "" };
         loadUpdates(false);
+        // a paired game's switch: the panel stores its channel once it has seen the job end
+        setTimeout(loadChannel, 1500);
       }
       if (String(j.action || "").startsWith("patch_") || PATCHES) { loadPatches(); if (FEED && FEED.feed) loadFeed(); }
     }

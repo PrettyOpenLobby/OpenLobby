@@ -19,9 +19,12 @@ chain the title plugins need. docs/games.md explains the design.
     python tools/stack.py volumes [ffxi|--all]   create and fill the games' data volumes
     python tools/stack.py compose up -d --build  run docker compose
     python tools/stack.py compose --dry-run up -d --build   print, run nothing
-    python tools/stack.py channel [--json]       which update channel this install follows
-    python tools/stack.py channel dev --registry HOST/PATH [--source URL]
-    python tools/stack.py channel stable
+    python tools/stack.py channel [--json]       what follows the dev builds (Stable or Dev per key)
+    python tools/stack.py channel unlock --registry HOST/PATH [--source URL]
+    python tools/stack.py channel set KEY dev|stable   one key (core, ffxi, ...) on Dev or Stable
+    python tools/stack.py channel lock           lock again (everything must be on Stable)
+    python tools/stack.py channel dev --registry HOST/PATH [--source URL]   unlock, all on Dev
+    python tools/stack.py channel stable         everything back on Stable, locked
     python tools/stack.py dev-code --registry HOST/PATH [--token-file FILE|-] [--source URL] [--name NAME]
                                                  make an access code for the dev channel
 
@@ -866,9 +869,9 @@ def cmd_compose(catalog, args):
     for k in keys:
         if not os.path.isdir(checkout_of(catalog[k])):
             raise StackError("%s is enabled but not cloned (stack.py add %s)" % (k, k))
-    channel = read_channel()
+    channel = read_channel(catalog=catalog)
     over = None
-    if channel["channel"] == "dev" and not dry:
+    if channel["dev"] and not dry:
         fd, over = tempfile.mkstemp(prefix="openlobby-channel-", suffix=".yml")
         os.close(fd)
     try:
@@ -878,7 +881,7 @@ def cmd_compose(catalog, args):
             print("stack.py: warning: " + w, file=sys.stderr)
         if dry:
             if p["override"]:
-                print("# the dev channel's images (.channel-compose.yml, written for the command)")
+                print("# the dev builds of what is on Dev (.channel-compose.yml, written for the command)")
                 print(p["override"].rstrip("\n"))
             for step in p["steps"]:
                 print("# " + step["why"])
@@ -889,8 +892,9 @@ def cmd_compose(catalog, args):
         if p["override"]:
             with open(over, "w", encoding="utf-8", newline="\n") as f:
                 f.write(p["override"])
-            print("stack.py: dev channel: the dev builds of %d image(s)"
-                  % len(devchannel.applied(devchannel.image_rows(catalog, channel, ghcr, keys=keys))),
+            print("stack.py: on Dev (%s): the dev builds of %d image(s)"
+                  % (", ".join(channel["dev"]),
+                     len(devchannel.applied(devchannel.image_rows(catalog, channel, ghcr, keys=keys)))),
                   file=sys.stderr)
         for step in p["steps"]:
             print("stack.py: %s" % step["why"], file=sys.stderr)
@@ -908,16 +912,21 @@ def cmd_compose(catalog, args):
                 pass
 
 
-def read_channel(root=ROOT):
-    ch = devchannel.read_channel(root)
+def read_channel(root=ROOT, catalog=None):
+    ch = devchannel.read_channel(root, catalog)
     if ch.get("problem"):
         print("stack.py: warning: " + ch["problem"], file=sys.stderr)
     return ch
 
 
 def cmd_channel(catalog, args):
-    """channel [--json] [--ghcr] | channel dev --registry HOST/PATH [--source URL] |
-    channel stable: show or set the update channel (docs/deployer.md, "Dev channel").
+    """channel [--json] [--ghcr] | channel unlock --registry HOST/PATH [--source URL] |
+    channel set KEY dev|stable | channel lock | channel dev --registry HOST/PATH [--source
+    URL] | channel stable: show or set what follows the dev builds (docs/deployer.md, "Dev
+    channel"). unlock records the registry an access code names and changes nothing else;
+    set puts one key (core, or a game's) on Dev or Stable; lock forgets the registry once
+    everything is on Stable. dev and stable are the whole install at once, as before: dev
+    unlocks and puts every key with a dev build on Dev, stable puts everything back and locks.
     Setting it only writes .channel; the next compose command uses it. Signing in to the
     registry is the deployer's job (or docker login's): no access code passes through here."""
     args = list(args)
@@ -932,30 +941,50 @@ def cmd_channel(catalog, args):
                 raise StackError("%s needs a value" % name)
             opts[name] = args[i + 1]
             del args[i:i + 2]
-    if len(args) > 1 or (args and args[0] not in devchannel.CHANNELS):
-        raise StackError("channel takes stable or dev (got %s)" % " ".join(args))
+    verbs = ("dev", "stable", "unlock", "lock", "set")
+    if args and args[0] not in verbs:
+        raise StackError("channel takes stable or dev, unlock, lock, or set KEY dev|stable "
+                         "(got %s)" % " ".join(args))
+    if args and args[0] == "set":
+        if len(args) != 3 or args[2] not in devchannel.CHANNELS:
+            raise StackError("channel set takes a key and stable or dev (got %s)" % " ".join(args[1:]))
+        if args[1] not in catalog or not devchannel.dev_entries(catalog[args[1]]):
+            raise StackError("%s has no dev build in the catalog" % args[1])
+    elif len(args) > 1:
+        raise StackError("channel %s takes no more arguments (got %s)" % (args[0], " ".join(args[1:])))
     try:
-        if args and args[0] == "dev":
+        if args and args[0] in ("dev", "unlock"):
             if not opts.get("--registry"):
-                raise StackError("channel dev needs --registry HOST/PATH")
-            devchannel.write_channel(ROOT, "dev", opts["--registry"], opts.get("--source"))
-        elif args:
+                raise StackError("channel %s needs --registry HOST/PATH" % args[0])
+            if args[0] == "dev":
+                devchannel.write_channel(ROOT, "dev", opts["--registry"], opts.get("--source"),
+                                         catalog=catalog)
+            else:
+                devchannel.unlock(ROOT, opts["--registry"], opts.get("--source"), catalog=catalog)
+        elif args and args[0] == "stable":
             devchannel.write_channel(ROOT, "stable")
+        elif args and args[0] == "lock":
+            devchannel.lock(ROOT, catalog=catalog)
+        elif args:
+            devchannel.set_key(ROOT, args[1], args[2], catalog=catalog)
     except (devchannel.ChannelError, OSError) as exc:
         raise StackError(str(exc))
-    ch = read_channel()
+    ch = read_channel(catalog=catalog)
     rows = devchannel.image_rows(catalog, ch, ghcr, keys=enabled(catalog))
     if as_json:
         print(json.dumps(dict(ch, images=rows), indent=1))
         return 0
-    if ch["channel"] == "stable":
-        print("channel: stable (the published images)")
+    if not ch["unlocked"]:
+        print("dev builds: locked; everything follows Stable (the published images)")
         return 0
     # the registry is in .channel and --json; this summary names the images only
-    print("channel: dev (the dev builds)")
+    print("dev builds: unlocked; on Dev: %s" % (", ".join(ch["dev"]) or "nothing yet"))
     for r in rows:
-        print("  %-5s %s -> %s" % (r["key"], r["stable"],
-                                   r["dev_name"] if r["applies"] and r["dev_name"] else r["note"]))
+        if r["dev_name"]:
+            what = (r["dev_name"] if r["applies"] else r["note"]) if r["on"] else "Stable"
+        else:
+            what = r["note"]
+        print("  %-5s %s -> %s" % (r["key"], r["stable"], what))
     return 0
 
 

@@ -47,13 +47,19 @@ job at a time, and a deployer outside a container.
 The dev channel (GET and POST /api/channel, docs/deployer.md "Dev channel")
 runs against a stand-in registry on 127.0.0.1 (the registry API's token
 handshake) and a stand-in docker CLI: bad requests and a wrong code are
-refused before any job or docker command, a good code signs in once with
-the secret on stdin into the deployer's own DOCKER_CONFIG, is kept mode
-600, writes .channel, pulls and restarts with DOCKER_CONFIG set; the update
-check compares the dev image's digest with the registry's; a revoked code
-fails the next update and enable with the sentence the panel shows;
-switching back signs out and forgets the code; --channel does the same for
-the setup scripts. The code is in no argument, job file, log or answer.
+refused before any job or docker command; a good code unlocks the dev
+builds (signs in once with the secret on stdin into the deployer's own
+DOCKER_CONFIG, is kept mode 600, writes .channel) and changes nothing else;
+each key then switches on its own, pulling and restarting only its own
+services; the update check compares the dev image's digest with the
+registry's; a revoked code fails the next update of a key on Dev with the
+sentence the panel shows and marks those keys, while a key on Stable goes
+on and switching back to Stable needs no code; forgetting the code signs
+out; a .channel from before reads as every key on Dev; --channel does it
+all at once for the setup scripts; a short code that redeems to an olx2.
+code is offered to the patch store; the issuer of short codes is the
+environment's, then the owner's, then the project's own. The code is in no
+argument, job file, log or answer.
 
 The patch actions run against a third deployer with a mirrors folder and a
 real polserver2 that the stand-in stack.py restarts on loopback ports: a
@@ -161,15 +167,21 @@ elif cmd == "disable":
     with open(os.path.join(core, ".games"), "w") as f:
         f.write("\n".join(keys) + "\n")
 elif cmd == "channel":
-    p = os.path.join(core, ".channel")
+    # the real .channel writer (services/deployer/devchannel.py), as tools/stack.py uses it
+    sys.path.insert(0, os.environ["FAKE_DEVCHANNEL_DIR"])
+    import devchannel
+    reg = args[args.index("--registry") + 1] if "--registry" in args else None
+    src = args[args.index("--source") + 1] if "--source" in args else None
     if args[1] == "dev":
-        reg = args[args.index("--registry") + 1]
-        src = args[args.index("--source") + 1] if "--source" in args else "https://" + reg
-        with open(p, "w") as f:
-            json.dump({"channel": "dev", "registry": reg, "source": src,
-                       "since": "2026-10-23T08:00:00Z"}, f)
-    elif os.path.exists(p):
-        os.remove(p)
+        devchannel.write_channel(core, "dev", reg, src, catalog=cat)
+    elif args[1] == "unlock":
+        devchannel.unlock(core, reg, src, catalog=cat)
+    elif args[1] == "set":
+        devchannel.set_key(core, args[2], args[3], catalog=cat)
+    elif args[1] == "lock":
+        devchannel.lock(core, catalog=cat)
+    else:
+        devchannel.write_channel(core, "stable")
 elif cmd == "volumes":
     keys = args[1].split(",")
     report = args[args.index("--report") + 1]
@@ -317,7 +329,10 @@ class Server:
     def env(self):
         env = dict(os.environ)
         env.update({"POL_DEPLOYER_TOKEN": self.token, "FAKE_STACK_DIR": self.t.fakedir,
-                    "POL_DEPLOY_GHCR": "", "POL_DEPLOY_GITHUB_API": self.t.no_github})
+                    "POL_DEPLOY_GHCR": "", "POL_DEPLOY_GITHUB_API": self.t.no_github,
+                    "FAKE_DEVCHANNEL_DIR": os.path.join(ROOT, "services", "deployer"),
+                    # short codes reach no network unless a test names an issuer
+                    "POL_DEV_ISSUER": "off"})
         env.pop("COMPOSE_PROFILES", None)
         env.pop("POL_DEPLOY_CLIENTS", None)
         env.pop("POL_DEPLOY_UPLOAD_MAX", None)
@@ -1230,6 +1245,24 @@ def test_updater_channels(t, servers, dock, d, game):
         code, j = run({"channel": "stable", "switch": True})
         seen = json.load(open(os.path.join(game, "chan.json")))
         ok(code == 202 and seen == {"argv": ["--channel", "stable"], "code": None}, "updater channel: back to stable")
+        # with the dev builds unlocked, a switch without a code of its own gets the unlock code
+        devchannel.unlock(t.core, "kart.example.org/dev", catalog={})
+        devchannel.Store(state).save_code(full)
+        try:
+            code, j = run({"channel": "dev", "switch": True})
+            seen = json.load(open(os.path.join(game, "chan.json")))
+            ok(code == 202 and j["state"] == "ok" and seen == {"argv": ["--channel", "dev"], "code": full}
+               and full not in j["log"],
+               "updater channel: unlocked, a switch to dev without a code gets the stored one (%s)" % seen["argv"])
+            code, j = run({"channel": "dev"})
+            seen = json.load(open(os.path.join(game, "chan.json")))
+            ok(code == 202 and seen["code"] is None, "updater channel: unlocked, a regular update still carries no code")
+            code, j = run({"channel": "stable", "switch": True})
+            seen = json.load(open(os.path.join(game, "chan.json")))
+            ok(code == 202 and seen["code"] is None, "updater channel: unlocked, back to stable carries no code")
+        finally:
+            devchannel.lock(t.core, catalog={})
+            devchannel.Store(state).forget()
         ok(not [h for h in scan_for_token(t, [s]) if h], "updater channel: the token is in no file")
         s.stop()
         s2 = Server(t, extra_env={"FAKE_UPD_DIR": d},
@@ -1238,11 +1271,11 @@ def test_updater_channels(t, servers, dock, d, game):
         c2 = s2.start()
         ch = c2.get("/api/channel")[1]
         ok(ch.get("install_id") == inst and ch.get("short_codes") is False,
-           "install id: the same after a restart; short codes off without POL_DEV_ISSUER")
+           "install id: the same after a restart; short codes off with POL_DEV_ISSUER=off")
         code, r = c2.call("POST", "/api/updater", {"game": "kart", "title": "Kart Club", "updater": rec,
                                                    "channel": "dev", "switch": True, "code": "KART-ZZZZ-DEV3"})
-        ok(code == 400 and "POL_DEV_ISSUER is not set" in r.get("error", ""),
-           "short codes: refused without an issuer, with a sentence (%s)" % r)
+        ok(code == 400 and "the issuer is off" in r.get("error", ""),
+           "short codes: refused with the issuer off, with a sentence (%s)" % r)
         s2.stop()
     finally:
         iss.stop()
@@ -2520,9 +2553,22 @@ def _test_channel(t, servers, reg):
                 os.remove(p)
         t.clear_calls()
 
+    def compose():
+        return [e for e in senvs() if e["args"][0] == "compose"]
+
+    def switch(c, key, to, timeout=60):
+        st, r = c.call("POST", "/api/channel", {"key": key, "to": to})
+        if st != 202:
+            return {"state": "http %d" % st, "summary": (r or {}).get("error", str(r)), "log": ""}
+        return c.wait(r["job"], timeout)
+
+    def krow(ch, key):
+        return next((k for k in ch.get("keys") or [] if k["key"] == key), {})
+
     registry = "127.0.0.1:%d/kart" % reg.port
     host = "127.0.0.1:%d" % reg.port
     ref = registry + "/lsb-server:stock"
+    lsb_services = ["db-update", "connect", "search", "world", "map"]
     state = os.path.join(t.tmp, "state-channel")
     chstate = os.path.join(state, "channel")
     bridge = os.path.join(t.root, "hippaulbridge")
@@ -2532,6 +2578,11 @@ def _test_channel(t, servers, reg):
     with open(games, "w") as f:
         f.write("ffxi\ntm\n")
     chfile = os.path.join(t.core, ".channel")
+    catalog = {}
+    for n in os.listdir(os.path.join(t.core, "games")):
+        e = json.load(open(os.path.join(t.core, "games", n)))
+        catalog[e["key"]] = e
+    all_dev = devchannel.dev_keys(catalog)
     set_valid(CH_CODE)
     clear()
     env = {"POL_DEV_REGISTRY": registry, "POL_DEV_REGISTRY_HTTP": "1", "FAKE_CH_DIR": chdir}
@@ -2540,87 +2591,132 @@ def _test_channel(t, servers, reg):
     try:
         c = s.start()
         code, ch = c.get("/api/channel")
-        ok(code == 200 and ch["channel"] == "stable" and ch["code_stored"] is False
+        ok(code == 200 and ch["unlocked"] is False and ch["channel"] == "stable" and ch["dev"] == []
+           and ch["code_stored"] is False and ch["code_ok"] is None
            and "registry" not in ch and "registry_default" not in ch and host not in json.dumps(ch),
-           "channel: stable at first, and the answer names no registry")
+           "channel: locked at first, and the answer names no registry")
+        have = [k for k in all_dev if k == "core" or os.path.isdir(os.path.join(t.root, catalog[k]["checkout"]))]
+        ok([k["key"] for k in ch["keys"]] == have and {"core", "ffxi", "tm"} <= set(have)
+           and all(k["on"] == "stable" and k["problem"] is None for k in ch["keys"]),
+           "channel: one row per installed thing with a dev build, the core first, all on Stable (%s)"
+           % [k["key"] for k in ch["keys"]])
+        ok(krow(ch, "ffxi")["services"] == lsb_services + ["bridge"] and krow(ch, "ffxi")["back"]
+           and "restore the backup" in krow(ch, "ffxi")["back"] and krow(ch, "tm")["builds_on_core"] is True
+           and krow(ch, "core")["builds_on_core"] is False,
+           "channel: each row says what it restarts and what Stable does not undo")
+        ok(any("may expect" in w for w in krow(ch, "ffxi")["would"]) and len(krow(ch, "core")["would"]) == len(have) - 1,
+           "channel: the warning a switch would bring (ffxi to Dev alone; core to Dev with the games on Stable)")
         ff = [r for r in ch["images"] if r["key"] == "ffxi" and r["stable"] == "ghcr.io/landsandboat/server"]
         ok(ff and ff[0]["dev_name"] == "lsb-server (dev)" and ff[0]["applies"] and ff[0]["enabled"]
-           and ff[0]["license"] and ff[0]["has_source"] is False and "source" not in ff[0] and "dev" not in ff[0],
+           and ff[0]["on"] is False and ff[0]["license"] and ff[0]["has_source"] is False
+           and "source" not in ff[0] and "dev" not in ff[0],
            "channel: FFXI's world server has a dev image, by short name (%s)" % (ff[:1],))
         ok(any(r["key"] == "core" and r["dev_name"] == "openlobby (dev)" and not r["applies"]
                and "POL_DEPLOY_GHCR" in r["note"] for r in ch["images"]),
            "channel: the core's dev builds are used with published images only")
         ok(c.get("/api/channel/source?stable=ghcr.io/landsandboat/server")[0] == 404,
-           "channel source: none on the stable channel")
+           "channel source: none while nothing is on Dev")
         absent = [k for k in ("fe", "fmo", "doc", "jan")
-                  if not os.path.isdir(os.path.join(t.root, json.load(open(os.path.join(
-                      t.core, "games", k + ".json")))["checkout"]))]
-        ok(absent and not any(r["key"] in absent for r in ch["images"]),
+                  if not os.path.isdir(os.path.join(t.root, catalog[k]["checkout"]))]
+        ok(absent and not any(r["key"] in absent for r in ch["images"] + ch["keys"]),
            "channel: games not installed are left out (%s)" % absent)
         ok(c.get("/api/games")[1]["options"]["channel"] == "stable", "games: options.channel stable")
 
         for body, want in (({"channel": "beta"}, "stable or dev"),
-                           ({"channel": "dev", "code": "short"}, "8 to 2048"),
-                           ({"channel": "dev", "code": "has a space in it"}, "8 to 2048"),
-                           ({"channel": "dev", "code": "olx1.bm90IGpzb24"}, "damaged"),
+                           ({"unlock": "short"}, "8 to 2048"),
+                           ({"unlock": "has a space in it"}, "8 to 2048"),
+                           ({"unlock": "olx1.bm90IGpzb24"}, "damaged"),
                            ({"channel": "dev", "code": "olx7.eyJyIjoieCJ9"}, "newer version"),
-                           ({"channel": "dev", "code": CH_CODE, "extra": 1}, "unknown fields"),
-                           ({"channel": "dev", "code": CH_CODE, "registry": "Not A Registry"},
-                            "registry.example.org")):
+                           ({"unlock": CH_CODE, "extra": 1}, "unknown fields"),
+                           ({"key": "ffxi", "to": "dev", "unlock": CH_CODE}, "unknown fields"),
+                           ({"registry": registry}, "unknown fields"),
+                           ({}, "Say what to do"),
+                           ({"unlock": CH_CODE, "registry": "Not A Registry"}, "registry.example.org"),
+                           ({"key": "ffxi", "to": "dev"}, devchannel.LOCKED),
+                           ({"key": "ffxi", "to": "beta"}, "stable or dev"),
+                           ({"key": "ffxi", "to": "stable"}, "already on Stable"),
+                           ({"key": "jan", "to": "dev"}, "not installed"),
+                           ({"key": "nothing", "to": "dev"}, "no dev build"),
+                           ({"lock": True}, "not unlocked"),
+                           ({"lock": "yes"}, "lock is true")):
             st, r = c.call("POST", "/api/channel", body)
             ok(st == 400 and want in (r or {}).get("error", ""), "channel: %s refused (%s)" % (body, r))
-        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "kart-wrong-code-0000"})
-        ok(st == 400 and "did not accept" in r.get("error", ""), "channel: a wrong code refused at once (%s)" % r)
-        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": CH_CODE,
-                                                "registry": "127.0.0.1:%d/kart" % free_port()})
+        st, r = c.call("POST", "/api/channel", {"unlock": "kart-wrong-code-0000"})
+        ok(st == 400 and "did not accept" in r.get("error", ""), "unlock: a wrong code refused at once (%s)" % r)
+        st, r = c.call("POST", "/api/channel", {"unlock": CH_CODE, "registry": "127.0.0.1:%d/kart" % free_port()})
         ok(st == 502 and "did not answer" in r.get("error", "") and "127.0.0.1" not in r.get("error", ""),
-           "channel: a registry nobody answers: 502, not named (%s)" % r)
+           "unlock: a registry nobody answers: 502, not named (%s)" % r)
         ok(not dcalls() and not os.path.exists(chfile) and not c.get("/api/jobs")[1]["jobs"],
            "channel: refused requests ran no docker command, wrote no .channel, started no job")
 
-        st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": CH_CODE})
-        ok(st == 202 and r.get("job"), "channel: a good code starts the switch (%s)" % r)
+        # unlock: sign in and keep the code, nothing else changes
+        st, r = c.call("POST", "/api/channel", {"unlock": CH_CODE})
+        ok(st == 202 and r.get("job"), "unlock: a good code starts the job (%s)" % r)
         j = c.wait(r["job"], 60)
-        ok(j["state"] == "ok" and "lsb-server (dev)" in j["summary"] and j["action"] == "channel",
-           "channel dev job: ok (%s)" % j["summary"])
-        ok(host not in j["log"] and "[dev builds]" in j["log"] and host not in json.dumps(c.get("/api/jobs")[1]),
-           "channel dev job: the log says [dev builds] where the registry was, never its address")
+        ok(j["state"] == "ok" and "unlocked" in j["summary"] and j["action"] == "channel" and j.get("op") == "unlock",
+           "unlock job: ok (%s)" % j["summary"])
         logins = [x for x in dcalls() if x["args"][0] == "login"]
-        ok(len(logins) == 1 and logins[0]["args"] == ["login", "--username", "dev", "--password-stdin",
-                                                     "127.0.0.1:%d" % reg.port],
-           "channel: one docker login, the code on no argument (%s)" % (logins[:1],))
-        ok(logins and logins[0].get("stdin_sha") == _h.sha256(CH_CODE.encode()).hexdigest(),
-           "channel: the code went to docker login on stdin")
-        ok(logins and logins[0]["docker_config"] == os.path.join(chstate, "docker"),
-           "channel: docker login writes the deployer's own DOCKER_CONFIG, not the host's")
+        ok(len(logins) == 1 and logins[0]["args"] == ["login", "--username", "dev", "--password-stdin", host]
+           and logins[0].get("stdin_sha") == _h.sha256(CH_CODE.encode()).hexdigest()
+           and logins[0]["docker_config"] == os.path.join(chstate, "docker"),
+           "unlock: one docker login, the code on stdin, into the deployer's own DOCKER_CONFIG")
+        ok(not compose(), "unlock: nothing was pulled or restarted (%s)" % compose())
         doc = json.load(open(chfile))
-        ok(doc["channel"] == "dev" and doc["registry"] == registry and CH_CODE not in json.dumps(doc),
-           "channel: .channel says dev and holds no code")
+        ok(doc.get("version") == 2 and doc["unlocked"] is True and doc["dev"] == [] and doc["registry"] == registry
+           and CH_CODE not in json.dumps(doc), "unlock: .channel is unlocked with nothing on Dev, no code in it")
         cp = os.path.join(chstate, "code")
-        ok(open(cp).read() == CH_CODE, "channel: the code is kept in the deployer's state")
+        ok(open(cp).read() == CH_CODE, "unlock: the code is kept in the deployer's state")
         if os.name != "nt":
             ok(stat.S_IMODE(os.stat(cp).st_mode) == 0o600 and stat.S_IMODE(os.stat(chstate).st_mode) == 0o700,
-               "channel: code file 600, its folder 700")
-        comp = [e for e in senvs() if e["args"][0] == "compose"]
-        ok(len(comp) == 2 and comp[0]["args"][1:4] == ["--no-prebuild", "pull", "--ignore-buildable"]
-           and comp[1]["args"][1:3] == ["up", "-d"]
-           and all(e["docker_config"] == os.path.join(chstate, "docker") for e in comp),
-           "channel: pulled and restarted, docker signed in through DOCKER_CONFIG (%s)" % comp)
-        ok(any(e["args"][:2] == ["channel", "dev"] and registry in e["args"] for e in senvs()),
-           "channel: stack.py channel dev wrote .channel")
-        ok("[access code]" in j["log"] and CH_CODE not in j["log"],
-           "channel: the code a tool printed is blanked in the job log")
+               "unlock: code file 600, its folder 700")
+        ok(host not in j["log"] and "[access code]" in j["log"] and CH_CODE not in j["log"],
+           "unlock job: the log blanks the code and names no registry")
         code, ch = c.get("/api/channel")
-        ok(ch["channel"] == "dev" and ch["code_stored"] is True and ch["since"]
-           and CH_CODE not in json.dumps(ch), "channel: GET says dev, a code is stored, never shows it")
-        ok(host not in json.dumps(ch), "channel: GET on dev names no registry")
+        ok(ch["unlocked"] and ch["dev"] == [] and ch["code_stored"] and ch["code_ok"] is True and ch["since"]
+           and all(k["on"] == "stable" for k in ch["keys"]) and CH_CODE not in json.dumps(ch),
+           "unlock: GET says unlocked, the code works, everything still on Stable")
+
+        # one key to Dev: its images only, its services only
+        clear()
+        j = switch(c, "ffxi", "dev")
+        ok(j["state"] == "ok" and "lsb-server (dev)" in j["summary"] and j.get("key") == "ffxi" and j.get("to") == "dev",
+           "ffxi to Dev: ok (%s)" % j["summary"])
+        comp = compose()
+        want_svcs = lsb_services + ["bridge"]
+        ok(len(comp) == 2 and comp[0]["args"][1:5] == ["--no-prebuild", "pull", "--ignore-buildable",
+                                                      "--ignore-pull-failures"]
+           and comp[0]["args"][5:] == want_svcs and comp[1]["args"][1:3] == ["up", "-d"]
+           and comp[1]["args"][-len(want_svcs):] == want_svcs
+           and all(e["docker_config"] == os.path.join(chstate, "docker") for e in comp),
+           "ffxi to Dev: pulls and restarts FFXI's services only, signed in (%s)" % [e["args"] for e in comp])
+        ok(any(e["args"] == ["channel", "set", "ffxi", "dev"] for e in senvs()), "ffxi to Dev: stack.py channel set ffxi dev")
+        ok(host not in j["log"] and "still reads the dev builds" in j["log"],
+           "ffxi to Dev: the code is asked again first; the log names no registry")
+        ok(json.load(open(chfile))["dev"] == ["ffxi"], "ffxi to Dev: .channel has ffxi on Dev only")
+        code, ch = c.get("/api/channel")
+        ok(ch["dev"] == ["ffxi"] and ch["channel"] == "dev" and krow(ch, "ffxi")["on"] == "dev"
+           and krow(ch, "ffxi")["since"] and krow(ch, "core")["on"] == "stable"
+           and "may expect" in (krow(ch, "ffxi")["note"] or "") and krow(ch, "tm")["note"] is None,
+           "GET: ffxi on Dev with a warning (the core is on Stable), the rest on Stable")
+        ok(host not in json.dumps(ch), "GET: names no registry")
         ff = [r for r in ch["images"] if r["stable"] == "ghcr.io/landsandboat/server"]
-        ok(ff and ff[0]["has_source"] is True, "channel: on dev the world server's source is offered")
+        ok(ff and ff[0]["on"] and ff[0]["has_source"] is True, "GET: on Dev the world server's source is offered")
         st, src = c.get("/api/channel/source?stable=ghcr.io/landsandboat/server")
         ok(st == 200 and src.get("url") == "https://%s/lsb-server" % registry and src.get("license"),
            "channel source: the address behind the link (%s)" % src)
-        ok(c.get("/api/channel/source?stable=ghcr.io/example/none")[0] == 404, "channel source: unknown image: 404")
+        ok(c.get("/api/channel/source?stable=ghcr.io/prettyopenlobby/openlobby")[0] == 404,
+           "channel source: none for the core, which is on Stable")
         ok(c.get("/api/games")[1]["options"]["channel"] == "dev", "games: options.channel dev")
+        st, r = c.call("POST", "/api/channel", {"lock": True})
+        ok(st == 409 and "Stable first" in r.get("error", ""), "lock: refused while ffxi is on Dev (%s)" % r)
+
+        # a key whose dev build does not apply here (built from its checkout): recorded, nothing restarted
+        clear()
+        j = switch(c, "tm", "dev")
+        ok(j["state"] == "ok" and "nothing was restarted" in j["summary"] and not compose(),
+           "tm to Dev, built here: on Dev, nothing pulled or restarted (%s)" % j["summary"])
+        j = switch(c, "tm", "stable")
+        ok(j["state"] == "ok" and json.load(open(chfile))["dev"] == ["ffxi"], "tm back to Stable")
 
         # the update check: the dev image's digest against the registry's
         inspect = os.path.join(chdir, "inspect.json")
@@ -2634,49 +2730,97 @@ def _test_channel(t, servers, reg):
         it = by_key(u).get("ffxi") or {}
         ok(u.get("channel") == "dev" and it.get("channel") == "dev" and it.get("update") == "available"
            and "newer dev build" in (it.get("why") or "") and shape_ok(it),
-           "updates: an older dev image here: available on the dev channel (%s)" % it.get("why"))
+           "updates: an older dev image here: available for the key on Dev (%s)" % it.get("why"))
         ok("dev images" in (it.get("how") or ""), "  how: %s" % it.get("how"))
         local(reg.images["kart/lsb-server:stock"])
         time.sleep(0.05)
         code, u, _ = updates(c, refresh=True)
         it = by_key(u).get("ffxi") or {}
         ok(it.get("update") != "available", "updates: the registry's digest here: no dev update (%s)" % it.get("why"))
-        ok(by_key(u).get("tm", {}).get("channel") is None, "updates: a game with no dev image here is not marked dev")
+        ok(by_key(u).get("tm", {}).get("channel") is None and by_key(u).get("core", {}).get("channel") is None,
+           "updates: what is on Stable is not marked dev")
         ok(host not in json.dumps(u), "updates: the answer names no registry")
 
-        # the code is revoked
+        # the code is revoked: the keys on Dev say so and refuse updates; Stable keys go on
         set_valid()
         clear()
         j = c.run("update", "ffxi")
         ok(j["state"] == "failed" and j["summary"] == devchannel.REVOKED,
-           "revoked: update fails with the sentence (%s)" % j["summary"])
-        ok(not [e for e in senvs() if e["args"][0] == "compose"] and "$ git" not in j.get("log", ""),
-           "revoked: nothing was pulled or fetched")
+           "revoked: an update of ffxi (on Dev) fails with the sentence (%s)" % j["summary"])
+        ok(not compose() and "$ git" not in j.get("log", ""), "revoked: nothing was pulled or fetched")
         j = c.run("enable", "tm")
-        ok(j["state"] == "failed" and j["summary"] == devchannel.REVOKED, "revoked: enable fails the same way")
+        ok(j["summary"] != devchannel.REVOKED and j["state"] in ("ok", "needs_data"),
+           "revoked: enabling tm (on Stable) is not refused (%s)" % j["summary"])
+        code, ch = c.get("/api/channel")
+        ok(krow(ch, "ffxi")["problem"] == devchannel.REVOKED and krow(ch, "tm")["problem"] is None
+           and ch["code_ok"] is False and ch["code_why"] == devchannel.REVOKED,
+           "revoked: GET says the access code no longer works on the key on Dev only (%s)" % krow(ch, "ffxi"))
+        st, r = c.call("POST", "/api/channel", {"key": "tm", "to": "dev"})
+        ok(st == 202 or (st == 400 and r.get("error") == devchannel.REVOKED),
+           "revoked: tm to Dev (nothing to pull here) is not asked of the registry, or refused with the sentence")
+        if st == 202:
+            c.wait(r["job"], 60)
+            switch(c, "tm", "stable")
         code, u, _ = updates(c, refresh=True)
         it = by_key(u).get("ffxi") or {}
         ok(it.get("update") == "unknown" and it.get("why") == devchannel.REVOKED,
            "revoked: the update list says so for the dev item")
+
+        # back to Stable without a working code
+        clear()
+        j = switch(c, "ffxi", "stable")
+        ok(j["state"] == "ok" and "Stable" in j["summary"] and "restore the backup" in j["summary"],
+           "revoked: ffxi back to Stable still works, with FFXI's database note (%s)" % j["summary"])
+        comp = compose()
+        ok(len(comp) == 2 and comp[0]["args"][5:] == want_svcs and comp[1]["args"][-len(want_svcs):] == want_svcs,
+           "ffxi to Stable: pulls and restarts FFXI's services only")
+        ok(not any(x["args"][0] == "logout" for x in dcalls()) and os.path.exists(cp)
+           and json.load(open(chfile))["unlocked"] is True and json.load(open(chfile))["dev"] == [],
+           "ffxi to Stable: still unlocked, the code kept")
         ok(not any(host in (x.get("log") or "") for x in [c.get("/api/jobs/" + y["id"])[1]
                                                           for y in c.get("/api/jobs?limit=50")[1]["jobs"]]),
-           "revoked: no job log names the registry")
+           "no job log names the registry")
 
-        # back to stable
+        # lock: sign out and forget
+        clear()
+        st, r = c.call("POST", "/api/channel", {"lock": True})
+        j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r), "log": ""}
+        ok(j["state"] == "ok" and "forgotten" in j["summary"], "lock: ok (%s)" % j["summary"])
+        ok(any(x["args"][0] == "logout" for x in dcalls()) and not os.path.exists(chstate)
+           and not os.path.exists(chfile) and not compose(),
+           "lock: docker logout, code and .channel removed, nothing restarted")
+        ok(host not in j.get("log", ""), "lock: the job log names no registry (docker logout's included)")
+        ok(c.get("/api/channel")[1]["unlocked"] is False, "lock: GET says locked")
+
+        # the file from before: {"channel": "dev"} is every key with a dev build on Dev
+        set_valid(CH_CODE)
+        with open(chfile, "w") as f:
+            json.dump({"channel": "dev", "registry": registry, "source": "https://" + registry,
+                       "since": "2026-10-01T10:00:00Z"}, f)
+        code, ch = c.get("/api/channel")
+        ok(ch["unlocked"] and ch["dev"] == all_dev and all(k["on"] == "dev" for k in ch["keys"])
+           and ch["code_stored"] is False and all(k["problem"] == devchannel.REVOKED for k in ch["keys"]),
+           "old .channel: every key on Dev; with no code stored each says the code no longer works (%s)" % ch["dev"])
+        j = c.run("update", "ffxi")
+        ok(j["state"] == "failed" and j["summary"] == devchannel.NO_CODE,
+           "old .channel, no code: an update refuses with the sentence (%s)" % j["summary"])
+        clear()
+        j = switch(c, "ffxi", "stable")
+        doc = json.load(open(chfile))
+        ok(j["state"] == "ok" and doc.get("version") == 2 and doc["dev"] == [k for k in all_dev if k != "ffxi"]
+           and doc["since"] == "2026-10-01T10:00:00Z",
+           "old .channel: ffxi to Stable without a code; the file is version 2 now, the rest still on Dev (%s)"
+           % doc.get("dev"))
         clear()
         st, r = c.call("POST", "/api/channel", {"channel": "stable"})
         j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r)}
-        ok(j["state"] == "ok" and "stable channel" in j["summary"] and "restore the backup" in j["summary"],
-           "stable: ok, with FFXI's database note (%s)" % j["summary"])
-        ok(any(x["args"][0] == "logout" for x in dcalls()), "stable: docker logout")
-        ok(not os.path.exists(chstate) and not os.path.exists(chfile), "stable: code, sign-in and .channel removed")
-        ok(host not in j.get("log", ""), "stable: the job log names no registry (docker logout's included)")
-        comp = [e for e in senvs() if e["args"][0] == "compose"]
-        ok(comp and all(e["docker_config"] is None for e in comp), "stable: compose runs without DOCKER_CONFIG")
-        code, ch = c.get("/api/channel")
-        ok(ch["channel"] == "stable" and ch["code_stored"] is False, "stable: GET says stable")
+        ok(j["state"] == "ok" and "Everything is on Stable" in j["summary"] and not os.path.exists(chfile),
+           "{channel: stable} (as before): everything back on Stable and locked (%s)" % j["summary"])
+        comp = compose()
+        ok(comp and all(e["docker_config"] is None for e in comp) and comp[0]["args"][-1] == "--ignore-pull-failures",
+           "{channel: stable}: the whole stack pulled again, without DOCKER_CONFIG")
 
-        # --channel for the setup scripts
+        # --channel for the setup scripts: dev is everything with a dev build on Dev
         set_valid(CH_CODE2.split(":", 1)[1])
         clear()
         argv = [sys.executable, DEPLOYER, "--channel", "dev", "--bind", "127.0.0.1:%d" % s.port]
@@ -2684,12 +2828,25 @@ def _test_channel(t, servers, reg):
                              text=True, timeout=120)
         ok(cli.returncode == 1 and "did not accept" in cli.stdout, "--channel dev, a wrong code: exit 1 (%s)" % cli.stdout.strip())
         cli = subprocess.run(argv, input=CH_CODE2 + "\n", env=s.env(), capture_output=True, text=True, timeout=120)
-        ok(cli.returncode == 0 and "dev channel" in cli.stdout, "--channel dev: exit 0 (%s)" % cli.stdout.strip()[-200:])
+        ok(cli.returncode == 0 and "dev channel" in cli.stdout and "lsb-server (dev)" in cli.stdout,
+           "--channel dev: exit 0 (%s)" % cli.stdout.strip()[-200:])
         logins = [x for x in dcalls() if x["args"][0] == "login"]
         ok(logins and logins[-1]["args"][2] == "kartclub", "--channel dev: name:code signs in under that name")
+        doc = json.load(open(chfile))
+        ok(doc["unlocked"] and doc["dev"] == all_dev, "--channel dev: unlocked, every key with a dev build on Dev")
+        comp = compose()
+        ok(len(comp) == 2 and comp[0]["args"][-1] == "--ignore-pull-failures" and comp[1]["args"][1:3] == ["up", "-d"],
+           "--channel dev: the whole stack pulled and restarted, as before")
         cli = subprocess.run([sys.executable, DEPLOYER, "--channel", "stable", "--bind", "127.0.0.1:%d" % s.port],
                              env=s.env(), capture_output=True, text=True, timeout=120)
-        ok(cli.returncode == 0 and "stable channel" in cli.stdout, "--channel stable: exit 0")
+        ok(cli.returncode == 0 and "Stable" in cli.stdout and not os.path.exists(chfile), "--channel stable: exit 0, locked")
+
+        # the issuer of short codes: the environment says off here
+        ch = c.get("/api/channel")[1]
+        ok(ch["issuer"] == {"value": "off", "from": "env", "default": "https://openlobby.fyi"}
+           and ch["short_codes"] is False, "issuer: POL_DEV_ISSUER=off (%s)" % ch["issuer"])
+        st, r = c.call("POST", "/api/channel", {"issuer": "https://codes.example.org"})
+        ok(st == 409 and "POL_DEV_ISSUER" in r.get("error", ""), "issuer: not set here while the environment sets it")
 
         # the code is nowhere it should not be
         secrets = [CH_CODE, CH_CODE2, CH_CODE2.split(":", 1)[1]]
@@ -2707,6 +2864,36 @@ def _test_channel(t, servers, reg):
                     hits.append("%s in %s" % (sec[:9], os.path.relpath(path, t.tmp)))
         ok(not hits, "the access code is in no job file, log, argument or answer (%s)" % hits)
         ok(not any(sec in x for x in reg.paths for sec in secrets), "the access code is in no URL")
+    finally:
+        s.stop()
+
+    # the issuer: the default, the owner's setting, validation
+    istate = os.path.join(t.tmp, "state-issuer")
+    s = Server(t, extra_env=dict(env, POL_DEV_ISSUER=""), args=["--state", istate, "--docker", dock])
+    servers.append(s)
+    try:
+        c = s.start()
+        ch = c.get("/api/channel")[1]
+        ok(ch["issuer"] == {"value": "https://openlobby.fyi", "from": "default", "default": "https://openlobby.fyi"}
+           and ch["short_codes"] is True, "issuer: unset, the project's own (%s)" % ch["issuer"])
+        for bad in ("http://codes.example.org", "codes.example.org", "https://a b", 7, ["x"]):
+            st, r = c.call("POST", "/api/channel", {"issuer": bad})
+            ok(st == 400 and "https" in r.get("error", ""), "issuer: %r refused (%s)" % (bad, r))
+        st, r = c.call("POST", "/api/channel", {"issuer": "https://codes.example.org/"})
+        ok(st == 200 and r["issuer"] == {"value": "https://codes.example.org", "from": "state",
+                                         "default": "https://openlobby.fyi"},
+           "issuer: the owner's https address is kept (%s)" % r)
+        ok(json.load(open(os.path.join(istate, "dev-issuer.json"))) == {"issuer": "https://codes.example.org"},
+           "issuer: kept in the deployer's state")
+        st, r = c.call("POST", "/api/channel", {"issuer": "off"})
+        ch = c.get("/api/channel")[1]
+        ok(st == 200 and ch["issuer"]["value"] == "off" and ch["issuer"]["from"] == "state" and ch["short_codes"] is False,
+           "issuer: off by the owner")
+        st, r = c.call("POST", "/api/channel", {"unlock": "KART-ZZZZ-DEV9"})
+        ok(st == 400 and "the issuer is off" in r.get("error", ""), "issuer off: a short code is refused (%s)" % r)
+        st, r = c.call("POST", "/api/channel", {"issuer": ""})
+        ok(st == 200 and r["issuer"]["from"] == "default" and not os.path.exists(os.path.join(istate, "dev-issuer.json")),
+           "issuer: empty goes back to the default")
     finally:
         s.stop()
     _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, registry, host, state,
@@ -2756,9 +2943,9 @@ def _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, 
         ch = c.get("/api/channel")[1]
         ok(host not in json.dumps(ch) and "code.example.org" not in json.dumps(ch),
            "code: GET /api/channel names neither the registry nor the source host")
-        j = c.run("enable", "tm")
+        j = c.run("enable", "ffxi")
         ok(j["state"] in ("ok", "needs_data") and host not in j.get("log", "") and "still reads the dev builds" in j.get("log", ""),
-           "code: enabling a game asks again with the code's token (%s)" % j["summary"])
+           "code: enabling a game on Dev asks again with the code's token (%s)" % j["summary"])
         st, r = c.call("POST", "/api/channel", {"channel": "stable"})
         j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st}
         ok(j["state"] == "ok", "code: back to stable")
@@ -2772,7 +2959,7 @@ def _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, 
         j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r), "log": ""}
         ok(j["state"] == "ok" and not [x for x in dcalls() if x["args"][0] == "login"]
            and "no sign-in" in j["log"], "code: public images: on Dev with no docker login (%s)" % j["summary"])
-        j = c.run("enable", "tm")
+        j = c.run("enable", "ffxi")
         ok(j["state"] in ("ok", "needs_data") and "still reads the dev builds" in j.get("log", ""), "code: public images: enable asks the registry as nobody (%s)" % j["summary"])
         st, r = c.call("POST", "/api/channel", {"channel": "stable"})
         if st == 202:
@@ -2780,7 +2967,7 @@ def _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, 
         # a POL_DEV_REGISTRY for a plain token does not override a code's own
         reg.public = False
         st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "KART-ZZZZ-DEV9"})
-        ok(st == 400 and "POL_DEV_ISSUER" in r.get("error", ""), "short code: no issuer set: refused (%s)" % r)
+        ok(st == 400 and "the issuer is off" in r.get("error", ""), "short code: the issuer off: refused (%s)" % r)
         s.stop()
         iss = FakeIssuer()
         iss.codes["KARTZZZZDEV9"] = code
@@ -2807,6 +2994,23 @@ def _test_channel_codes(t, servers, reg, chdir, dock, set_valid, dcalls, clear, 
             j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st}
             ok(j["state"] == "ok" and c.get("/api/channel")[1]["install_id"] == inst,
                "short code: back to stable keeps the install id")
+            sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+            import patchfeed as _pf
+            ok(_pf.Store(state).code() is None, "short code to an olx1. code: nothing offered to the patch store")
+            fcode = devchannel.make_code(registry, token, "https://code.example.org/kart",
+                                         feed="code.example.org/kart-patches")
+            iss.codes["KARTZZZZDEV8"] = fcode
+            st, r = c.call("POST", "/api/channel", {"unlock": "KARTZZZZDEV8"})
+            j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st, "summary": str(r), "log": ""}
+            ok(j["state"] == "ok" and open(os.path.join(state, "channel", "code")).read() == fcode,
+               "short code to an olx2. code: unlocks with it (%s)" % j["summary"])
+            ok(_pf.Store(state).code() == fcode and not _pf.Store(state).enabled(),
+               "short code to an olx2. code: offered to the patch store, patches stay off")
+            ok(fcode not in j["log"] and "KARTZZZZDEV8" not in j["log"], "  and in no job log")
+            st, r = c.call("POST", "/api/channel", {"lock": True})
+            j = c.wait(r["job"], 60) if st == 202 else {"state": "http %d" % st}
+            ok(j["state"] == "ok" and _pf.Store(state).code() == fcode,
+               "lock forgets the channel's code, the patch store keeps its own")
             iss.bound["KARTZZZZDEV9"] = "ol-" + "f" * 32
             st, r = c.call("POST", "/api/channel", {"channel": "dev", "code": "KARTZZZZDEV9"})
             ok(st == 400 and "another server" in r.get("error", ""), "short code: bound to another install: the "

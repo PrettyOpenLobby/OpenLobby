@@ -12,7 +12,9 @@ up the page is simply off. The update channel: the owner reads it (by short imag
 registry's address is not passed on, even from a deployer that sends it), a moderator can neither
 read nor switch it, a dev image's source link is a redirect for the owner only, an access code goes to the deployer and nowhere else (not the activity log, not
 the panel's own output), a code that does not fit never leaves the panel, the deployer's refusal
-comes back with its sentence, and a deployer without channels reads as such. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
+comes back with its sentence, and a deployer without channels reads as such. Per server: the
+unlock, a key's switch, forgetting the code and the issuer of short codes reach the deployer as
+they should, owner only, each in the activity log, and an older deployer reads as one. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
 subprocess on a loopback port.
 """
 import hashlib
@@ -50,13 +52,19 @@ UPLOAD_CAP = 3 << 20
 FEED = {"on": False}
 CHANNEL = {"on": True}
 CODE = "kart-dev-7Qm2x9Lp4Vb8"
-CHANNEL_ANSWER = {"channel": "stable", "registry": None, "source": None, "since": None,
-                  "registry_default": "registry.example.org/kart", "code_stored": False, "ghcr": True,
-                  "problem": None, "images": [
+CHANNEL_ANSWER = {"channel": "stable", "unlocked": False, "dev": [], "registry": None, "source": None,
+                  "since": None, "registry_default": "registry.example.org/kart", "code_stored": False,
+                  "code_ok": None, "code_why": None, "ghcr": True, "problem": None, "images": [
                       {"key": "kart", "name": "Kart Club", "stable": "ghcr.io/example/kart", "dev_image": "kart:main",
-                       "dev": "registry.example.org/kart/kart:main", "applies": True, "source":
+                       "dev": "registry.example.org/kart/kart:main", "applies": True, "on": False, "source":
                        "https://registry.example.org/kart/kart", "what": None, "license": "AGPL-3.0-or-later",
-                       "note": None, "enabled": True}]}
+                       "note": None, "enabled": True}],
+                  "keys": [{"key": "kart", "name": "Kart Club", "on": "stable", "since": None, "enabled": True,
+                            "applies": True, "builds_on_core": False, "images": ["kart (dev)"], "services": ["kart"],
+                            "note": None, "problem": None, "would": [], "back": None,
+                            "registry": "registry.example.org/kart"}],
+                  "issuer": {"value": "https://openlobby.fyi", "from": "default", "default": "https://openlobby.fyi",
+                             "registry": "registry.example.org/kart"}}
 
 
 def chk(what, got, want):
@@ -190,6 +198,12 @@ class Deployer(BaseHTTPRequestHandler):
             return self._reply(200, {"feed": FEED["on"], "enabled": FEED["on"]})
         if self.path == "/api/channel":
             SEEN.append(("CHANNEL", body))
+            if "issuer" in body:
+                return self._reply(200, {"issuer": {"value": body["issuer"] or "https://openlobby.fyi",
+                                                    "from": "state" if body["issuer"] else "default",
+                                                    "default": "https://openlobby.fyi"}})
+            if "unlock" in body and body.get("unlock") != CODE:
+                return self._reply(400, {"error": "The dev builds did not accept the access code."})
             if body.get("channel") == "dev" and body.get("code") != CODE:
                 return self._reply(400, {"error": "The dev registry registry.example.org did not accept "
                                                   "the access code. Check it, or ask for a new one."})
@@ -405,9 +419,15 @@ def main():
             (code, ch.get("available"), ch.get("channel"), [r.get("dev_name") for r in ch.get("images", [])]),
             (200, True, "stable", ["kart (dev)"]))
         chk("...and the registry's address is nowhere in the answer, though the deployer sent it",
-            ("registry.example.org" in json.dumps(ch), sorted(ch), sorted(ch["images"][0])),
-            (False, ["available", "channel", "code_stored", "ghcr", "images", "install_id", "problem", "short_codes", "since"],
-             ["applies", "dev_name", "enabled", "has_source", "key", "license", "name", "note", "stable", "what"]))
+            ("registry.example.org" in json.dumps(ch), sorted(ch), sorted(ch["images"][0]), sorted(ch["keys"][0])),
+            (False, ["available", "channel", "code_ok", "code_stored", "code_why", "dev", "ghcr", "images",
+                     "install_id", "issuer", "keys", "paired", "problem", "short_codes", "since", "unlocked"],
+             ["applies", "dev_name", "enabled", "has_source", "key", "license", "name", "note", "on", "stable", "what"],
+             ["applies", "back", "builds_on_core", "enabled", "images", "key", "name", "note", "on", "problem",
+              "services", "since", "would"]))
+        chk("...each thing with a dev build has its own switch, and the issuer is said",
+            (ch["keys"][0]["key"], ch["keys"][0]["on"], ch["issuer"], ch["paired"]),
+            ("kart", "stable", {"value": "https://openlobby.fyi", "from": "default", "default": "https://openlobby.fyi"}, []))
 
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **k):
@@ -469,6 +489,56 @@ def main():
             ("switched to the dev channel" in text, "switched to the stable channel" in text,
              "tried to switch to the dev channel" in text), (True, True, True))
         chk("...and the access code is nowhere in it", CODE in text or "kart-wrong-code-0000" in text, False)
+
+        # per key: unlock once, then each thing on its own
+        n = len(SEEN)
+        code, out = owner.call("api/deploy/channel", {"unlock": " " + CODE + " "})
+        chk("unlocking starts the deployer's job", (code, out), (202, {"job": "j7"}))
+        code, out = owner.call("api/deploy/channel", {"unlock": "abcd efgh jkmn"})
+        code, out = owner.call("api/deploy/channel", {"key": "kart", "to": "dev"})
+        chk("a per-key switch starts the deployer's job", (code, out), (202, {"job": "j7"}))
+        code, out = owner.call("api/deploy/channel", {"lock": True})
+        code, out = owner.call("api/deploy/channel", {"issuer": "https://codes.example.org/"})
+        chk("the issuer is set through the deployer", (code, out.get("issuer", {}).get("from")), (200, "state"))
+        owner.call("api/deploy/channel", {"issuer": ""})
+        chk("...each reaches the deployer as it should, the code trimmed, a short code as ABCD-EFGH-JKMN",
+            [s[1] for s in SEEN[n:] if s[0] == "CHANNEL"],
+            [{"unlock": CODE}, {"unlock": "ABCD-EFGH-JKMN"}, {"key": "kart", "to": "dev"}, {"lock": True},
+             {"issuer": "https://codes.example.org"}, {"issuer": ""}])
+        n = len(SEEN)
+        chk("requests that do not fit never reach the deployer",
+            [owner.call("api/deploy/channel", x)[0] for x in (
+                {"unlock": "short"}, {"key": "Bad Key", "to": "dev"}, {"key": "kart", "to": "beta"},
+                {"lock": "yes"}, {"issuer": "http://codes.example.org"}, {"issuer": "codes.example.org"},
+                {"issuer": 7})],
+            [400] * 7)
+        chk("...not one of them", [s for s in SEEN[n:] if s[0] == "CHANNEL"], [])
+        n = len(SEEN)
+        chk("a moderator can neither switch a key, unlock, forget nor set the issuer",
+            [gm.call("api/deploy/channel", x)[0] for x in (
+                {"key": "kart", "to": "dev"}, {"unlock": CODE}, {"lock": True}, {"issuer": "https://codes.example.org"})],
+            [403] * 4)
+        chk("...and nothing they sent reached the deployer", [s for s in SEEN[n:] if s[0] == "CHANNEL"], [])
+        code, out = owner.call("api/deploy/channel", {"unlock": "kart-wrong-code-0000"})
+        chk("an unlock the deployer refuses comes back with its sentence",
+            (code, "did not accept" in (out.get("error") or "")), (400, True))
+        rows = owner.call("api/audit")[1].get("rows") or []
+        text = json.dumps(rows)
+        chk("each is in the activity log",
+            ("unlocked the dev builds" in text, "switched kart to Dev" in text, "forgot the dev access code" in text,
+             "set the issuer of short dev codes to https://codes.example.org" in text,
+             "set the issuer of short dev codes to https://openlobby.fyi" in text,
+             "tried to unlock the dev builds" in text), (True,) * 6)
+        chk("...and no access code is in it",
+            CODE in text or "kart-wrong-code-0000" in text or "ABCD-EFGH-JKMN" in text, False)
+        saved = dict(CHANNEL_ANSWER)
+        for k in ("keys", "issuer", "unlocked", "dev", "code_ok", "code_why"):
+            CHANNEL_ANSWER.pop(k)
+        code, ch = owner.call("api/deploy/channel")
+        chk("a deployer from before per-key switches: keys null, the page says to update the core",
+            (code, ch.get("available"), ch.get("keys"), ch.get("unlocked"), ch.get("issuer")),
+            (200, True, None, False, None))
+        CHANNEL_ANSWER.update(saved)
         STATE["busy"] = True
         code, out = owner.call("api/deploy/channel", {"channel": "stable"})
         chk("a busy deployer: 409 with a sentence", (code, "still running" in (out.get("error") or "")), (409, True))

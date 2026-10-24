@@ -74,8 +74,11 @@ panel's password. Running it again keeps the existing .env.
                         --deployer is given)
   --clients DIR|none    folder of your own client installs for the deployer
   --channel stable|dev  the update channel (docs/deployer.md, "Dev channel"):
-                        dev follows the developers' preview builds and asks
-                        for an access code (hidden); needs the deployer
+                        dev asks for an access code (hidden), unlocks the
+                        developers' preview builds and puts everything that
+                        has one on Dev (Settings > Install games switches each
+                        server on its own); stable puts all back; needs the
+                        deployer
   --registry HOST/PATH  advanced: the registry a plain token is for (kept in .env
                         as POL_DEV_REGISTRY); an access code carries its own
   --code-file FILE      with --yes: read the access code from FILE's first line
@@ -856,7 +859,8 @@ if ! docker network inspect openlobby >/dev/null 2>&1; then
 fi
 local -a DC=(docker compose)
 local ON_DEV=""
-grep -q '"channel": "dev"' "$CHECKOUT/.channel" 2>/dev/null && ON_DEV=1
+# unlocked (or a .channel from before per-server switches that says dev)
+grep -Eq '"channel": "dev"|"unlocked": true' "$CHECKOUT/.channel" 2>/dev/null && ON_DEV=1
 if [ -n "$GAMES" ] || { [ -n "$ON_DEV" ] && [ -n "$HAVE_PY" ]; }; then
     [ -n "$HAVE_PY" ] || die "games are enabled ($GAMES) and starting them needs python3 (tools/stack.py)"
     DC=(python3 tools/stack.py compose)

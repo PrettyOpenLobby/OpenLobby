@@ -1532,6 +1532,48 @@ _AUDIT_SECRET = {"password", "current", "pw", "token", "confirm",
 _AUDIT_TARGETS = ("polid", "code", "username", "id", "room")
 
 
+def _channel_said(body, out, good):
+    """The activity log line for a request about the dev builds (never the code)."""
+    if not isinstance(body, dict):
+        body = {}
+    if "issuer" in body:
+        iss = (out.get("issuer") or {}).get("value") if good else body.get("issuer")
+        what = str(iss or "the default")[:200]
+        return ("set the issuer of short dev codes to %s" if good else
+                "tried to set the issuer of short dev codes to %s") % what
+    if "lock" in body:
+        return "forgot the dev access code" if good else "tried to forget the dev access code"
+    if "unlock" in body:
+        return "unlocked the dev builds" if good else "tried to unlock the dev builds"
+    if "key" in body:
+        to = "Dev" if body.get("to") == "dev" else "Stable"
+        key = str(body.get("key") or "")[:32]
+        return ("switched %s to %s" if good else "tried to switch %s to %s") % (key, to)
+    want = "dev" if body.get("channel") == "dev" else "stable"
+    return ("switched to the %s channel" if good else "tried to switch to the %s channel") % want
+
+
+def _paired_channels(chan):
+    """The paired games whose approved updater offers a dev channel, for the Update channel
+    list: {"key", "title", "on", "note"}. The switch is POST /api/updates/channel."""
+    try:
+        games = adminpair.listing()
+    except Exception:  # the list is extra; the panel shows the rest without it
+        return []
+    core_dev = "core" in (chan.get("dev") or [])
+    out = []
+    for g in games:
+        u = g.get("updater") or {}
+        if u.get("state") != "approved" or not g.get("paired") or "dev" not in (u.get("channels") or ()):
+            continue
+        on = u.get("channel") or "stable"
+        title = g.get("title") or g["key"]
+        out.append({"key": g["key"], "title": title, "on": on, "channels": list(u["channels"]),
+                    "note": admindeploy.devchannel.paired_note(title, core_dev) if on != "stable" else None,
+                    "would": [n for n in [admindeploy.devchannel.paired_note(title, core_dev)] if n] if on == "stable" else []})
+    return out
+
+
 def _follow_updater(job_id, key, title, actor, role, addr, timeout_minutes, every=10.0, switch=None):
     """Watch a paired game's updater job to its end and write how it ended to the activity
     log, under whoever pressed Update, whether or not anyone keeps the page open. Gives up
@@ -2547,7 +2589,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/deploy/uploads":
             return self._send(*admindeploy.uploads())
         if path == "/api/deploy/channel":
-            return self._send(*admindeploy.channel())
+            st, out = admindeploy.channel()
+            if st == 200 and out.get("available"):
+                out["paired"] = _paired_channels(out)
+            return self._send(st, out)
         if path == "/api/deploy/channel/source":
             # the source of a dev image (the GPL and AGPL offer): a redirect, so its address
             # is in no answer the page reads, only where the owner's click lands
@@ -2854,13 +2899,12 @@ class Handler(BaseHTTPRequestHandler):
             body = self._json_body()
             status, out = admindeploy.set_channel(body)
             user, role, _p = self._caller()
-            want = "dev" if body.get("channel") == "dev" else "stable"
-            detail = {"job": out.get("job")}
-            if status != 202:
+            good = status in (200, 202)
+            detail = {"job": out.get("job")} if out.get("job") else {}
+            if not good:
                 detail["error"] = str(out.get("error") or "")[:300]
-            _audit(user, role, ("switched to the %s channel" if status == 202 else
-                                "tried to switch to the %s channel") % want,
-                   detail=detail, ok=status == 202, addr=self._addr())
+            _audit(user, role, _channel_said(body, out, good), detail=detail or None, ok=good,
+                   addr=self._addr())
             self._jb = {}
             return self._send(status, out)
         if path == "/api/deploy/upload/delete":

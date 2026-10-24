@@ -178,6 +178,9 @@ class Deployer:
                     return self.send(200, {"jobs": []})
                 if self.path.startswith("/api/updates"):
                     return self.send(200, {"checked_at": "2026-10-23T08:00:00Z", "checking": False, "items": []})
+                if self.path == "/api/channel":
+                    return self.send(200, {"channel": "stable", "unlocked": True, "dev": [], "keys": [],
+                                           "images": [], "code_stored": True, "code_ok": True})
                 self.send(404, {"error": "not found"})
 
             def do_POST(self):
@@ -354,6 +357,21 @@ def path_ops(owner, upd, see, tmp):
         (o.get("action"), o.get("auto"), 100 < (o.get("next") or 0) - time.time() < 140, o.get("on"), o.get("off")),
         ("update-kart", True, True, "auto-on-kart", "auto-off-kart"))
     chk("a game the runner lists that this panel does not show: not in the list", item(owner, "ghost"), None)
+    ver = {"running": {"commit": "1a2b3c4d5e6f" * 3 + "1a2b", "built_at": "2026-10-20T08:30:00Z"},
+           "latest": {"commit": "9f8e7d6c5b4a" * 3 + "9f8e", "date": "2026-10-21T09:12:00-04:00"},
+           "behind": 1, "changes": [{"commit": "9f8e7d6c5b4a" * 3 + "9f8e", "date": "2026-10-21T09:12:00-04:00",
+                                     "subject": "Show lap times in the lobby"}],
+           "update": "available", "why": None, "how": "Press Update to put it live."}
+    write_ops(tmp, version=ver)
+    it = item(owner) or {}
+    chk("the runner read its version from the checkout: shown as the game's own",
+        (it.get("update"), it.get("behind"), (it.get("running") or {}).get("commit", "")[:12],
+         [c["subject"] for c in it.get("changes") or []], it.get("how"), "ops" in it),
+        ("available", 1, "1a2b3c4d5e6f", ["Show lap times in the lobby"], "Press Update to put it live.", True))
+    write_ops(tmp, version={"update": "unknown", "why": "kart-sync.service does not name its checkout."})
+    chk("  the runner cannot tell: its reason", (item(owner) or {}).get("why"),
+        "kart-sync.service does not name its checkout.")
+    write_ops(tmp)
     n = audit_top()
     chk("a moderator without game.kart.update: 403", see.call("api/updates/ops", {"key": "kart", "what": "update"})[0], 403)
     chk("  and with it too: the owner only", upd.call("api/updates/ops", {"key": "kart", "what": "update"})[0], 403)
@@ -497,6 +515,11 @@ def path_channel(owner, anon, upd, dep, tmp):
             ([(OWNER, "switched Kart Club to the dev channel", True)], [{"channel": "dev", "channel_by": OWNER}]))
         u = {a["key"]: a for a in owner.call("api/modules?fresh=1")[1].get("added", [])}["kart"]["updater"]
         chk("  the Modules page says dev", (u["channel"], u["channel_by"]), ("dev", OWNER))
+        ch = owner.call("api/deploy/channel")[1]
+        p = (ch.get("paired") or [{}])[0]
+        chk("  the Update channel list has it, on Dev, warned that the core is on Stable",
+            (len(ch.get("paired") or []), p.get("key"), p.get("title"), p.get("on"), "may expect" in (p.get("note") or "")),
+            (1, "kart", "Kart Club", "dev", True))
         everything = json.dumps(sql("SELECT * FROM admin_audit"))
         chk("the code is in no activity log row",
             [c for c in (CHAN_CODE, "ABCDEFGHJKMN", "abcd efgh jkmn", FULL_CODE) if c in everything], [])

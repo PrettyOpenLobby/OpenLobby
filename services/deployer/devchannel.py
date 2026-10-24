@@ -21,19 +21,31 @@ catalog says which images have a dev build: each games/*.json may carry
 
 A developer may also hand out a short dev code instead (ABCD-EFGH-JKMN, 12 characters):
 single-use, bound to the first install that redeems it. The deployer sends it with its own
-install id (InstallId below) to the issuer named by POL_DEV_ISSUER, a panel that makes such
-codes (services/admindevcodes.py), and gets an ordinary olx1. code back (redeem below). The
+install id (InstallId below) to the issuer, a panel that makes such codes
+(services/admindevcodes.py): POL_DEV_ISSUER when set, else the owner's setting (IssuerStore),
+else the project's own DEFAULT_ISSUER; "off" in either turns short codes off (issuer_of). It
+gets an ordinary olx1. code back (redeem below). The
 same install asking again gets the same answer; any other install is refused.
 
-Which channel an install is on lives in the core checkout's .channel file (JSON, written by
-`tools/stack.py channel`), so tools/stack.py, the deployer and the setup scripts all read the
-same thing. The access code never goes there: the deployer keeps it in its own state
-(Store below), file mode 600.
+The code only unlocks the dev builds; each thing that has one then follows Stable or Dev on
+its own: the core (OpenLobby's own images) and each game of the catalog, by key. That lives
+in the core checkout's .channel file (JSON, written by `tools/stack.py channel`), so
+tools/stack.py, the deployer and the setup scripts all read the same thing:
+
+    {"version": 2, "unlocked": true, "registry": "<host/path>", "source": "<base URL>",
+     "since": "<when it was unlocked>", "dev": ["core", "ffxi"],
+     "dev_since": {"core": "<when>", "ffxi": "<when>"}}
+
+No file is locked with everything on Stable. A file from before (version 1, {"channel":
+"dev", "registry", "source", "since"}) reads as unlocked with every key that has a dev build
+on Dev, which is what it meant; the next write turns it into version 2. The access code never
+goes there: the deployer keeps it in its own state (Store below), file mode 600.
 
 Shared by tools/stack.py (which imports this file from services/deployer/) and the deployer.
 Standard library only.
 """
 import base64
+import glob
 import json
 import os
 import re
@@ -46,6 +58,7 @@ import urllib.request
 
 CHANNEL_FILE = ".channel"
 CHANNELS = ("stable", "dev")
+CHANNEL_VERSION = 2
 
 #: host[:port] followed by zero or more path parts, as an image name starts
 REGISTRY = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?"
@@ -80,11 +93,21 @@ DAMAGED = "This access code is damaged or incomplete; copy it again, whole."
 NEWER = ("This access code is for a newer version of OpenLobby; update OpenLobby first, then "
          "enter it again.")
 NOT_OURS = "That is not an OpenLobby access code (they start with olx); copy it again, whole."
-NO_CODE = ("The dev channel is on but no access code is stored here; switch to Dev again with "
-           "a code, or back to Stable.")
-NO_ISSUER = ("That is a short dev code, and this server does not know where to redeem one "
-             "(POL_DEV_ISSUER is not set). Ask for a full access code (it starts with olx), or "
-             "set POL_DEV_ISSUER to the address the developers gave you.")
+NO_CODE = ("No access code is stored here, so the dev builds cannot be updated; enter the access "
+           "code again, or switch back to Stable.")
+LOCKED = "Enter an access code first: it unlocks the dev builds."
+NO_ISSUER = ("That is a short dev code, and short codes are turned off on this server (the issuer "
+             "is off). Ask for a full access code (it starts with olx), or set the issuer of "
+             "short codes under Update channel, Advanced.")
+#: where short dev codes are redeemed when neither POL_DEV_ISSUER nor the owner says: the
+#: project's own public issuer
+DEFAULT_ISSUER = "https://openlobby.fyi"
+#: what turns short codes off, in POL_DEV_ISSUER or the owner's setting
+ISSUER_OFF = "off"
+#: the services that run the title chain's last link when games add a title
+TITLE_SERVICES = ("login", "authsess")
+#: a catalog key
+KEY = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 #: a short dev code: 12 characters with no 0/O or 1/I/L, shown in three groups of four
 SHORT_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -105,57 +128,245 @@ class IssuerDown(ChannelError):
 
 # ------------------------------------------------------------------ the .channel file
 
-def read_channel(core):
-    """{"channel": "stable"|"dev", "registry", "source", "since"} for the checkout `core`.
-    No file, or one that does not fit, is the stable channel; a file that does not fit
-    also carries "problem" with a sentence."""
+def load_catalog(core):
+    """{key: entry} from the checkout `core`'s games/*.json, as the deployer reads it."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(core, "games", "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as f:
+                e = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(e, dict) and e.get("key") and e.get("kind") in ("core", "game"):
+            out[e["key"]] = e
+    return out
+
+
+def ordered_keys(catalog, keys=None):
+    """`keys` (every key when None) in catalog order: the core first, then by "order"."""
+    items = sorted(catalog.items(), key=lambda kv: (kv[1].get("kind") != "core",
+                                                    kv[1].get("order", 0), kv[0]))
+    return [k for k, _e in items if keys is None or k in keys]
+
+
+def dev_keys(catalog):
+    """The keys whose catalog entry has a dev build, in catalog order."""
+    return [k for k in ordered_keys(catalog) if dev_entries(catalog[k])]
+
+
+def _stable(problem=None):
+    out = {"channel": "stable", "unlocked": False, "dev": [], "dev_since": {}}
+    if problem:
+        out["problem"] = problem
+    return out
+
+
+def read_channel(core, catalog=None):
+    """What the checkout `core` follows:
+
+        {"channel": "dev"|"stable", "unlocked": bool, "registry", "source", "since",
+         "dev": [keys on Dev], "dev_since": {key: when}}
+
+    "channel" is "dev" while any key is on Dev (what older callers ask). No file, or one
+    that does not fit, is locked with everything on Stable; a file that does not fit also
+    carries "problem" with a sentence. A version 1 file ("channel": "dev") reads as every
+    key of the catalog (`catalog`, else the checkout's own) that has a dev build on Dev,
+    with "legacy" true."""
     path = os.path.join(core, CHANNEL_FILE)
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except FileNotFoundError:
-        return {"channel": "stable"}
+        return _stable()
     except (OSError, ValueError) as exc:
-        return {"channel": "stable", "problem": "%s cannot be read (%s), so the stable channel "
-                                                "is used." % (CHANNEL_FILE, exc)}
-    if not isinstance(raw, dict) or raw.get("channel") not in CHANNELS:
-        return {"channel": "stable", "problem": "%s does not name a channel, so the stable "
-                                                "channel is used." % CHANNEL_FILE}
-    if raw["channel"] == "stable":
-        return {"channel": "stable"}
+        return _stable("%s cannot be read (%s), so everything stays on Stable." % (CHANNEL_FILE, exc))
+    if not isinstance(raw, dict):
+        return _stable("%s does not say what this server follows, so everything stays on "
+                       "Stable." % CHANNEL_FILE)
+    legacy = "version" not in raw
+    if legacy:
+        if raw.get("channel") not in CHANNELS:
+            return _stable("%s does not name a channel, so everything stays on Stable."
+                           % CHANNEL_FILE)
+        if raw["channel"] == "stable":
+            return _stable()
+    elif raw.get("version") != CHANNEL_VERSION:
+        return _stable("%s is from a newer OpenLobby (version %r), so everything stays on "
+                       "Stable; update OpenLobby." % (CHANNEL_FILE, raw.get("version")))
+    elif raw.get("unlocked") is not True:
+        return _stable()
     reg, src = raw.get("registry"), raw.get("source")
     if not isinstance(reg, str) or not REGISTRY.match(reg):
-        return {"channel": "stable", "problem": "%s names no usable registry, so the stable "
-                                                "channel is used." % CHANNEL_FILE}
-    out = {"channel": "dev", "registry": reg,
+        return _stable("%s names no usable registry, so everything stays on Stable."
+                       % CHANNEL_FILE)
+    out = {"unlocked": True, "registry": reg,
            "source": src if isinstance(src, str) and SOURCE.match(src) else default_source(reg)}
     if isinstance(raw.get("since"), str):
         out["since"] = raw["since"][:32]
+    if legacy:
+        keys = dev_keys(catalog if catalog is not None else load_catalog(core))
+        out["legacy"] = True
+        when = {k: out["since"] for k in keys} if out.get("since") else {}
+    else:
+        got = raw.get("dev") if isinstance(raw.get("dev"), list) else []
+        keys = []
+        for k in got:
+            if isinstance(k, str) and KEY.match(k) and k not in keys:
+                keys.append(k)
+        since = raw.get("dev_since") if isinstance(raw.get("dev_since"), dict) else {}
+        when = {k: since[k][:32] for k in keys if isinstance(since.get(k), str)}
+    out.update(dev=keys, dev_since=when, channel="dev" if keys else "stable")
     return out
 
 
-def write_channel(core, channel, registry=None, source=None, now=None):
-    """Write (or for stable, remove) the .channel file of checkout `core`."""
+def _stamp(now=None):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+
+
+def _write(core, doc):
     path = os.path.join(core, CHANNEL_FILE)
-    if channel == "stable":
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
-        return {"channel": "stable"}
-    if channel != "dev":
-        raise ChannelError("the channel is stable or dev (got %r)" % (channel,))
-    check_registry(registry)
-    if source and not SOURCE.match(source):
-        raise ChannelError("the source URL must be http(s)://... (got %r)" % (source,))
-    doc = {"channel": "dev", "registry": registry, "source": source or default_source(registry),
-           "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(doc, f, indent=1)
         f.write("\n")
     os.replace(tmp, path)
+
+
+def _doc(ch):
+    """The version 2 file for what read_channel answered."""
+    return {"version": CHANNEL_VERSION, "unlocked": True, "registry": ch["registry"],
+            "source": ch.get("source") or default_source(ch["registry"]),
+            "since": ch.get("since") or _stamp(), "dev": list(ch.get("dev") or []),
+            "dev_since": dict(ch.get("dev_since") or {})}
+
+
+def unlock(core, registry, source=None, now=None, dev=None, catalog=None):
+    """Unlock the dev builds in checkout `core`: the registry (and source base) the access
+    code names. What is on Dev stays as it was, unless `dev` lists the keys to put there
+    (added to those already on it)."""
+    check_registry(registry)
+    if source and not SOURCE.match(source):
+        raise ChannelError("the source URL must be http(s)://... (got %r)" % (source,))
+    ch = read_channel(core, catalog)
+    if not ch["unlocked"]:
+        ch = {"dev": [], "dev_since": {}, "since": _stamp(now)}
+    ch = dict(ch, registry=registry, source=source or default_source(registry))
+    doc = _doc(ch)
+    for k in dev or ():
+        if not KEY.match(k):
+            raise ChannelError("not a key: %r" % (k,))
+        if k not in doc["dev"]:
+            doc["dev"].append(k)
+            doc["dev_since"][k] = _stamp(now)
+    _write(core, doc)
     return doc
+
+
+def set_key(core, key, to, now=None, catalog=None):
+    """Put `key` on "dev" or "stable" in checkout `core`. Dev needs the dev builds unlocked;
+    Stable always works."""
+    if to not in CHANNELS:
+        raise ChannelError("a key goes to stable or dev (got %r)" % (to,))
+    if not isinstance(key, str) or not KEY.match(key):
+        raise ChannelError("not a key: %r" % (key,))
+    ch = read_channel(core, catalog)
+    if not ch["unlocked"]:
+        if to == "stable":
+            return _stable()
+        raise ChannelError(LOCKED)
+    doc = _doc(ch)
+    if to == "dev" and key not in doc["dev"]:
+        doc["dev"].append(key)
+        doc["dev_since"][key] = _stamp(now)
+    elif to == "stable" and key in doc["dev"]:
+        doc["dev"].remove(key)
+        doc["dev_since"].pop(key, None)
+    _write(core, doc)
+    return doc
+
+
+def lock(core, catalog=None):
+    """Lock the dev builds again (remove .channel). Refused while a key is on Dev."""
+    ch = read_channel(core, catalog)
+    if ch["dev"]:
+        raise ChannelError("switch everything back to Stable first (on Dev: %s)" % ", ".join(ch["dev"]))
+    try:
+        os.remove(os.path.join(core, CHANNEL_FILE))
+    except FileNotFoundError:
+        pass
+    return _stable()
+
+
+def write_channel(core, channel, registry=None, source=None, now=None, catalog=None):
+    """The whole install at once, as before: "dev" unlocks and puts every key with a dev
+    build on Dev; "stable" puts everything back on Stable and locks again."""
+    if channel == "stable":
+        try:
+            os.remove(os.path.join(core, CHANNEL_FILE))
+        except FileNotFoundError:
+            pass
+        return _stable()
+    if channel != "dev":
+        raise ChannelError("the channel is stable or dev (got %r)" % (channel,))
+    cat = catalog if catalog is not None else load_catalog(core)
+    return unlock(core, registry, source, now=now, dev=dev_keys(cat), catalog=cat)
+
+
+def builds_on_core(entry):
+    """Whether a game's image is built FROM the core's: a game that adds a title."""
+    return bool(entry.get("title"))
+
+
+def fit_notes(catalog, dev, keys):
+    """{key: sentence} for the keys in `keys` whose builds may not fit together with `dev`
+    (the keys on Dev): a game on Dev while the core is on Stable, and a game on Stable whose
+    image builds on the core while the core is on Dev. A warning, never a refusal."""
+    out = {}
+    core_dev = "core" in dev
+    core_has = bool(dev_entries(catalog.get("core") or {}))
+    for k in keys:
+        e = catalog.get(k)
+        if k == "core" or not e:
+            continue
+        name = e.get("name") or k
+        if k in dev and not core_dev and core_has:
+            out[k] = ("May not fit: the dev builds of %s may expect OpenLobby's own dev builds, "
+                      "and OpenLobby is on Stable." % name)
+        elif k not in dev and core_dev and builds_on_core(e):
+            out[k] = ("May not fit: %s's image builds on OpenLobby's, and OpenLobby is on Dev "
+                      "while %s stays on Stable." % (name, name))
+    return out
+
+
+def switch_notes(catalog, dev, keys, key, to):
+    """The fit_notes a switch of `key` to `to` would leave that concern it: the key's own,
+    or for the core every game's."""
+    after = [k for k in dev if k != key] + ([key] if to == "dev" else [])
+    notes = fit_notes(catalog, after, keys)
+    if key == "core":
+        return [notes[k] for k in ordered_keys(catalog, notes)]
+    return [notes[key]] if key in notes else []
+
+
+def paired_note(title, core_dev):
+    """fit_notes for a paired game on Dev (its own setup program's builds)."""
+    if core_dev:
+        return None
+    return ("May not fit: the dev builds of %s may expect OpenLobby's own dev builds, and "
+            "OpenLobby is on Stable." % title)
+
+
+def services_of(entry):
+    """Every service the dev builds of a catalog entry run, and for a game whose published
+    image is a title link the title chain's services too (they run it, or build on it)."""
+    out = []
+    for d in dev_entries(entry):
+        for s in d["services"]:
+            if s not in out:
+                out.append(s)
+    if entry.get("kind") == "game" and (entry.get("title") or {}).get("ghcr_image"):
+        out += [s for s in TITLE_SERVICES if s not in out]
+    return out
 
 
 def check_registry(registry):
@@ -319,6 +530,75 @@ def redeem(issuer, code, install_id, timeout=TIMEOUT):
     return got
 
 
+#: what the owner may set as the issuer: an https address (the issuer is on the internet)
+ISSUER_SET = re.compile(r"^https://[A-Za-z0-9._~:%@\[\]-]{1,300}(/[A-Za-z0-9._~/%-]{0,200})?$")
+
+
+def check_issuer(value):
+    """The owner's issuer setting as it is kept: None (the default), "off", or an https
+    address without a trailing slash. ChannelError with the sentence when it does not fit."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ChannelError("The issuer is an https address, or off.")
+    v = value.strip().rstrip("/")
+    if not v:
+        return None
+    if v.lower() == ISSUER_OFF:
+        return ISSUER_OFF
+    if not ISSUER_SET.match(v):
+        raise ChannelError("The issuer must be an https address, such as https://openlobby.fyi, "
+                           "or off.")
+    return v
+
+
+def issuer_of(env, stored):
+    """(issuer or None when short codes are off, where it comes from: "env", "state" or
+    "default"). `env` is POL_DEV_ISSUER as given (empty or None: not set), `stored` the
+    owner's setting (IssuerStore.get). The environment wins, then the owner's setting, then
+    DEFAULT_ISSUER."""
+    e = (env or "").strip().rstrip("/")
+    if e:
+        if e.lower() == ISSUER_OFF:
+            return None, "env"
+        return (e if ISSUER.match(e) else None), "env"
+    if stored:
+        return (None if stored == ISSUER_OFF else stored), "state"
+    return DEFAULT_ISSUER, "default"
+
+
+class IssuerStore:
+    """The owner's issuer of short codes, STATE/dev-issuer.json ({"issuer": "<https address>"
+    or "off"}). Outside STATE/channel, so forgetting the access code keeps it."""
+
+    def __init__(self, state):
+        self.path = os.path.join(state, "dev-issuer.json")
+
+    def get(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                doc = json.load(f)
+            return check_issuer(doc.get("issuer")) if isinstance(doc, dict) else None
+        except (OSError, ValueError, ChannelError):
+            return None
+
+    def set(self, value):
+        """Keep `value` (check_issuer's form); None goes back to the default."""
+        value = check_issuer(value)
+        if value is None:
+            try:
+                os.remove(self.path)
+            except FileNotFoundError:
+                pass
+            return None
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"issuer": value}, f)
+        os.replace(tmp, self.path)
+        return value
+
+
 class InstallId:
     """This install's id, made once and kept in STATE/install_id (mode 600). Not a secret,
     but never shown in public: it binds a short dev code to this install. Outside
@@ -416,17 +696,23 @@ def image_rows(catalog, channel, ghcr, keys=None, registry=None):
     """One row per stable image of the core and the games `keys` (every entry when None), in
     catalog order: what the dev channel puts in its place, or why nothing:
 
-        {"key", "name", "stable", "dev_image", "dev_name", "dev", "applies", "services",
+        {"key", "name", "stable", "dev_image", "dev_name", "dev", "applies", "on", "services",
          "source", "what", "license", "note"}
 
     dev_image is name:tag under the registry, dev_name what the panel shows ("lsb-server
-    (dev)"), dev the full reference (None while no registry is known).
+    (dev)"), dev the full reference (None while no registry is known). applies says the dev
+    build can be used here, on that its key is on Dev; swapped() gives the rows that run.
 
-    `registry` names the dev registry when the channel is stable (the panel shows what Dev
-    would use); on the dev channel it is the channel's."""
-    reg = channel.get("registry") if channel.get("channel") == "dev" else registry
-    src_base = channel.get("source") if channel.get("channel") == "dev" else \
+    `registry` names the dev registry while the dev builds are locked (the panel shows what
+    Dev would use); once unlocked it is the channel's."""
+    if "unlocked" not in channel and channel.get("channel") == "dev":
+        # the shape from before ({"channel": "dev", "registry"}): everything on Dev
+        channel = dict(channel, unlocked=True, dev=list(catalog))
+    unlocked = bool(channel.get("unlocked"))
+    reg = channel.get("registry") if unlocked else registry
+    src_base = channel.get("source") if unlocked and channel.get("source") else \
         (default_source(reg) if reg else None)
+    on_dev = set(channel.get("dev") or ()) if unlocked else set()
     own = own_images(catalog)
     rows = []
     for key, e in sorted(catalog.items(), key=lambda kv: (kv[1].get("order", 0), kv[0])):
@@ -445,8 +731,8 @@ def image_rows(catalog, channel, ghcr, keys=None, registry=None):
             seen.add(s)
             d = devs.get(s)
             row = {"key": key, "name": e.get("name") or key, "stable": s, "dev_image": None,
-                   "dev_name": None, "dev": None, "applies": False, "services": [], "source": None,
-                   "what": None, "license": None, "note": None}
+                   "dev_name": None, "dev": None, "applies": False, "on": key in on_dev,
+                   "services": [], "source": None, "what": None, "license": None, "note": None}
             if d is None:
                 row["note"] = "No dev build yet; it stays on the published image."
             else:
@@ -469,9 +755,14 @@ def image_rows(catalog, channel, ghcr, keys=None, registry=None):
     return rows
 
 
+def swapped(rows):
+    """The rows whose dev build runs: their key is on Dev and the build can be used here."""
+    return [r for r in rows if r.get("on") and r["applies"] and r["dev"]]
+
+
 def applied(rows):
     """{stable image: dev ref} of the rows the dev channel swaps."""
-    return {r["stable"]: r["dev"] for r in rows if r["applies"] and r["dev"]}
+    return {r["stable"]: r["dev"] for r in swapped(rows)}
 
 
 def override_text(rows, skip=(), extra=None):
@@ -482,9 +773,7 @@ def override_text(rows, skip=(), extra=None):
     lines = []
     seen = set(skip)
     done = set()
-    for r in rows:
-        if not (r["applies"] and r["dev"]):
-            continue
+    for r in swapped(rows):
         for s in r["services"]:
             if s in seen:
                 continue
@@ -497,7 +786,7 @@ def override_text(rows, skip=(), extra=None):
             lines.append("  %s:\n    image: %s\n" % (s, image))
     if not lines:
         return ""
-    return ("# The dev channel (docs/deployer.md): written by tools/stack.py for one command.\n"
+    return ("# What is on Dev (docs/deployer.md): written by tools/stack.py for one command.\n"
             "services:\n" + "".join(lines))
 
 

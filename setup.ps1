@@ -88,8 +88,10 @@ Options:
                     to import game data from (default: clients beside the
                     checkout; none: uploads only)
   -Channel stable|dev  the update channel (docs/deployer.md, "Dev channel"):
-                    dev follows the developers' preview builds and asks for
-                    an access code (not shown); needs the deployer
+                    dev asks for an access code (not shown), unlocks the
+                    developers' preview builds and puts everything that has
+                    one on Dev (Settings > Install games switches each server
+                    on its own); stable puts all back; needs the deployer
   -Registry HOST/PATH  advanced: the registry a plain token is for (kept in .env
                     as POL_DEV_REGISTRY); an access code carries its own
   -CodeFile FILE    with -Yes: read the access code from FILE's first line
@@ -790,7 +792,8 @@ if ($UseDeployer -and -not $DryRun) {
 # The update channel: switched by the deployer, the access code handed to it on stdin
 $onDev = $false
 $chFile = Join-Path $Checkout '.channel'
-if (Test-Path -LiteralPath $chFile) { $onDev = [bool](Select-String -LiteralPath $chFile -Pattern '"channel": "dev"' -Quiet) }
+# unlocked (or a .channel from before per-server switches that says dev)
+if (Test-Path -LiteralPath $chFile) { $onDev = [bool](Select-String -LiteralPath $chFile -Pattern '"channel": "dev"|"unlocked": true' -Quiet) }
 if ($Channel -eq 'dev' -or ($Channel -eq 'stable' -and $onDev)) {
     Step "Update channel: $Channel"
     $chArgs = @('compose', '--profile', 'deployer', 'exec', '-T', 'deployer', 'python', '/app/deployer.py', '--channel', $Channel)

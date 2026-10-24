@@ -182,7 +182,8 @@ class Config:
         self.dev_source = None
         self.dev_user = devchannel.DEFAULT_USER
         self.dev_scheme = "https"
-        self.dev_issuer = None       # POL_DEV_ISSUER: where short dev codes are redeemed
+        self.dev_issuer = None       # POL_DEV_ISSUER as given: where short dev codes are redeemed
+                                     # (None: not set; the owner's setting or the default)
         self.mirrors = None          # realpath of POL_DEPLOY_MIRRORS; None: patch actions are off
         self.mirrors_note = "POL_DEPLOY_MIRRORS is not set, so the patch actions are off"
         self.patch_host = "patch"
@@ -321,11 +322,12 @@ def make_config(args):
         cfg.dev_scheme = "http"
     issuer = os.environ.get("POL_DEV_ISSUER", "").strip().rstrip("/")
     if issuer:
-        if devchannel.ISSUER.match(issuer):
+        if issuer.lower() == devchannel.ISSUER_OFF or devchannel.ISSUER.match(issuer):
             cfg.dev_issuer = issuer
         else:
-            say("POL_DEV_ISSUER must be an http(s) address (got %r); ignored, so short dev codes "
+            say("POL_DEV_ISSUER must be an http(s) address or off (got %r), so short dev codes "
                 "are not taken" % issuer)
+            cfg.dev_issuer = devchannel.ISSUER_OFF
     clients = args.clients.strip()
     if clients:
         if not os.path.isabs(clients):
@@ -708,6 +710,10 @@ def public(job):
     if job.get("action") == "updater":
         out["title"] = job.get("title")
         out["channel"] = job.get("channel")
+    if job.get("action") == "channel":
+        for k in ("op", "key", "to"):
+            if job.get(k) is not None:
+                out[k] = job[k]
     if job.get("action") in PATCH_ACTIONS:
         for k in ("region", "product", "to", "removes", "source"):
             if job.get(k) is not None:
@@ -790,21 +796,26 @@ class Runner:
     def __init__(self, cfg, catalog, log):
         self.cfg, self.catalog, self.log = cfg, catalog, log
         self.last_rc = None
-        self.channel = devchannel.read_channel(cfg.core)
+        self.channel = devchannel.read_channel(cfg.core, catalog)
         self.chstore = devchannel.Store(cfg.state)
+        self.on_check = None      # called with each check_access answer (the panel's code state)
+        self.last_lines = []      # the last lines the latest run() printed
 
     def dev(self):
-        return self.channel.get("channel") == "dev"
-        self.last_lines = []      # the last lines the latest run() printed
+        """Whether anything is on Dev."""
+        return bool(self.channel.get("dev"))
+
+    def unlocked(self):
+        return bool(self.channel.get("unlocked"))
 
     def child_env(self, as_owner=False):
         env = {k: v for k, v in os.environ.items()
                if k != "POL_DEPLOYER_TOKEN" and v != self.cfg.token}
         if as_owner:
             env["HOME"] = "/tmp"
-        # on the dev channel every docker command signs in with the deployer's own
-        # client config (STATE/channel/docker), never the host's
-        if self.dev() and os.path.isdir(self.chstore.docker_dir):
+        # with the dev builds unlocked every docker command signs in with the deployer's
+        # own client config (STATE/channel/docker), never the host's
+        if self.unlocked() and os.path.isdir(self.chstore.docker_dir):
             env["DOCKER_CONFIG"] = self.chstore.docker_dir
         return env
 
@@ -965,28 +976,34 @@ class Runner:
     # ---- the dev channel
 
     def dev_rows(self, keys=None):
-        """The image rows of the core and `keys` (the enabled games by default) on the
-        channel this job started on."""
+        """The image rows of the core and `keys` (the enabled games by default) as this
+        job started."""
         keys = [k for k in self.enabled() if k in self.catalog] if keys is None else keys
         return devchannel.image_rows(self.catalog, self.channel, self.cfg.ghcr, keys=keys)
 
-    def dev_gate(self, strict):
-        """On the dev channel, before anything pulls: the stored access code must still
-        read the dev images this stack runs. A refused code fails the job with the
-        sentence the panel shows; a registry that does not answer fails it only when
-        `strict` (an update), else the job goes on with the images it has."""
-        if not self.dev():
+    def dev_gate(self, strict, keys=None, rows=None):
+        """Before anything pulls the dev builds of `keys` (those on Dev; every one on Dev by
+        default): the stored access code must still read them. A refused code fails the job
+        with the sentence the panel shows; a registry that does not answer fails it only when
+        `strict` (an update), else the job goes on with the images it has. `rows`: the image
+        rows to ask about instead (a switch to Dev, before .channel says so)."""
+        if rows is None:
+            rows = [x for x in devchannel.swapped(self.dev_rows())
+                    if keys is None or x["key"] in keys]
+        if not rows:
             return
         code = self.chstore.code()
         if not code:
             raise JobFailed(devchannel.NO_CODE)
         res = devchannel.check_access(self.channel["registry"], devchannel.token_of(code),
-                                      devchannel.probes_of(self.dev_rows()),
+                                      devchannel.probes_of(rows),
                                       scheme=self.cfg.dev_scheme, user=self.cfg.dev_user)
+        if self.on_check:
+            self.on_check(res)
         if res["state"] == "ok":
-            self.log.line("dev channel: the access code still reads the dev builds")
+            self.log.line("the access code still reads the dev builds")
             return
-        self.log.line("dev channel: %s" % res["why"])
+        self.log.line("dev builds: %s" % res["why"])
         if res["state"] in ("wrong", "denied"):
             raise JobFailed(devchannel.REVOKED)
         if strict:
@@ -1203,7 +1220,7 @@ def act_enable(r, key):
     state, summary, missing = evaluate(r.catalog, r.check_report([key]), "")
     if state != "ok":
         return state, summary + (". It was not enabled." if state == "needs_data" else ""), missing
-    r.dev_gate(strict=False)
+    r.dev_gate(strict=False, keys=[key])
     if r.stack(["enable", key], owner=r.cfg.core) != 0:
         raise JobFailed("stack.py enable %s failed; the log has its message." % key, r.last_rc)
     r.up()
@@ -1223,7 +1240,7 @@ def act_update(r, key):
     if not os.path.isdir(d):
         raise JobFailed("%s is not installed; install it first." % r.name(key))
     r.need_git()
-    r.dev_gate(strict=True)
+    r.dev_gate(strict=True, keys=[key])
     rc, out = r.capture(["git", "-C", d, "status", "--porcelain", "--untracked-files=no"], owner=d)
     if rc != 0:
         raise JobFailed("%s is not a git checkout, so it cannot be updated from here." % rel, rc)
@@ -1251,7 +1268,7 @@ def act_update(r, key):
         catalog = load_catalog(r.cfg.core)
         failed = r.fill_volumes([k for k in r.enabled() if k in catalog], catalog)
     if r.cfg.ghcr or r.dev():
-        # on the dev channel a dev image keeps its tag while it moves, so it is pulled
+        # a dev image keeps its tag while it moves, so with anything on Dev it is pulled
         # even when the rest is built here
         r.compose(["pull", "--ignore-buildable", "--ignore-pull-failures"], prebuild=False)
     r.up()
@@ -1347,65 +1364,175 @@ def act_import(r, key, job):
     return "ok", "Imported %s's %s. %s%s" % (r.name(key), what, then, note), []
 
 
+def active_profiles(cfg):
+    """The compose profiles that are on: COMPOSE_PROFILES in the environment, else the core's .env."""
+    val = os.environ.get("COMPOSE_PROFILES")
+    if val is None:
+        val = read_dotenv(os.path.join(cfg.core, ".env")).get("COMPOSE_PROFILES", "")
+    return {p.strip() for p in val.split(",") if p.strip()}
+
+
+def key_services(cfg, catalog, enabled, key):
+    """The services a switch of `key` restarts: what its dev builds run (and the title chain
+    for a game whose published image is a title link), without those of a profile that is
+    off (naming one would start it). `enabled`: the games that are on."""
+    on = active_profiles(cfg)
+    off = set()
+    for k in ["core"] + [x for x in enabled if x in catalog]:
+        for prof, svcs in (catalog[k].get("profiles") or {}).items():
+            if prof not in on:
+                off.update(svcs)
+    return [s for s in devchannel.services_of(catalog[key]) if s not in off]
+
+
+def channel_login(r, reg, code):
+    """Sign in to the dev builds with the access code `code` into the deployer's own client
+    config, and keep the code."""
+    if not code:
+        raise JobFailed("The access code did not reach the job; enter it again.")
+    host = devchannel.registry_host(reg)
+    token = devchannel.token_of(code)
+    if token:
+        user, secret = devchannel.split_code(token, r.cfg.dev_user)
+        r.log.line("unlocking the dev builds: signing in to them as %s" % user)
+        if r.docker_login(host, user, secret) != 0:
+            raise JobFailed("Docker could not sign in to the dev builds with the access code; "
+                            "the log has its message. Nothing was changed.", r.last_rc)
+    else:
+        r.log.line("unlocking the dev builds: they are public, no sign-in")
+        r.chstore.docker_config()     # an empty client config, so no host sign-in is used
+    r.chstore.save_code(code)
+
+
+def channel_forget(r, before):
+    """Sign out of the dev builds and forget the access code."""
+    if before.get("unlocked") and before.get("registry"):
+        r.docker_logout(devchannel.registry_host(before["registry"]))
+    r.chstore.forget()
+    r.log.line("the access code and the registry sign-in are removed")
+
+
 def act_channel(r, job, code):
-    """Switch the stack to the dev channel (sign in, write .channel, pull, restart) or
-    back to stable (write .channel, sign out, forget the code, pull, restart)."""
-    want, reg = job.get("channel"), job.get("registry")
+    """What follows the dev builds (docs/deployer.md, "Dev channel"). job["op"] is
+
+        unlock  sign in with the access code, keep it, record the registry (stack.py
+                channel unlock); nothing else changes
+        switch  put job["key"] on job["to"] (dev or stable), pull its images and restart
+                only its services
+        lock    sign out and forget the code, once everything is on Stable
+        all     the whole install on Dev at once, as before (setup's --channel dev): unlock,
+                every key with a dev build on Dev, pull and restart
+        stable  the whole install back on Stable and locked, as before"""
+    op = job.get("op") or ("all" if job.get("channel") == "dev" else "stable")
     before = r.channel
-    if want == "dev":
-        if not code:
-            raise JobFailed("The access code did not reach the job; switch to Dev again.")
-        host = devchannel.registry_host(reg)
-        token = devchannel.token_of(code)
-        if token:
-            user, secret = devchannel.split_code(token, r.cfg.dev_user)
-            r.log.line("switching to the dev channel: signing in to the dev builds as %s" % user)
-            if r.docker_login(host, user, secret) != 0:
-                raise JobFailed("Docker could not sign in to the dev builds with the access code; "
-                                "the log has its message. Nothing was changed.", r.last_rc)
-        else:
-            r.log.line("switching to the dev channel: the dev builds are public, no sign-in")
-            r.chstore.docker_config()     # an empty client config, so no host sign-in is used
-        r.chstore.save_code(code)
-        args = ["channel", "dev", "--registry", reg]
+    if op in ("unlock", "all"):
+        reg = job.get("registry")
+        channel_login(r, reg, code)
+        args = ["channel", "dev" if op == "all" else "unlock", "--registry", reg]
         src = job.get("dev_source") or r.cfg.dev_source
         if src:
             args += ["--source", src]
         if r.stack(args, owner=r.cfg.core) != 0:
-            raise JobFailed("stack.py channel dev failed; the log has its message.", r.last_rc)
-        r.channel = devchannel.read_channel(r.cfg.core)
-        if not r.dev():
-            raise JobFailed("stack.py did not record the dev channel in %s." % devchannel.CHANNEL_FILE)
-    else:
-        r.log.line("switching to the stable channel")
+            raise JobFailed("stack.py channel %s failed; the log has its message." % args[1], r.last_rc)
+        r.channel = devchannel.read_channel(r.cfg.core, r.catalog)
+        if not r.unlocked():
+            raise JobFailed("stack.py did not record the dev builds in %s." % devchannel.CHANNEL_FILE)
+        if op == "unlock":
+            on = [r.name(k) for k in r.channel["dev"] if k in r.catalog]
+            return "ok", ("The dev builds are unlocked. Nothing was switched: pick Dev for each "
+                          "server that should follow them." if not on else
+                          "The access code is replaced; still on Dev: %s." % ", ".join(on)), []
+    elif op == "lock":
+        if before.get("dev"):
+            raise JobFailed("Switch everything back to Stable first; on Dev: %s."
+                            % ", ".join(r.name(k) if k in r.catalog else k for k in before["dev"]))
+        if r.stack(["channel", "lock"], owner=r.cfg.core) != 0:
+            raise JobFailed("stack.py channel lock failed; the log has its message.", r.last_rc)
+        channel_forget(r, before)
+        r.channel = devchannel.read_channel(r.cfg.core, r.catalog)
+        return "ok", "The access code is forgotten; the dev builds are locked again.", []
+    elif op == "stable":
+        r.log.line("everything back on Stable")
         if r.stack(["channel", "stable"], owner=r.cfg.core) != 0:
             raise JobFailed("stack.py channel stable failed; the log has its message.", r.last_rc)
-        if before.get("channel") == "dev":
-            r.docker_logout(devchannel.registry_host(before["registry"]))
-        r.chstore.forget()
-        r.log.line("the access code and the registry sign-in are removed")
-        r.channel = devchannel.read_channel(r.cfg.core)
+        channel_forget(r, before)
+        r.channel = devchannel.read_channel(r.cfg.core, r.catalog)
+    elif op == "switch":
+        return act_switch(r, job, before)
+    else:
+        raise JobFailed("Unknown channel job.")
+    want = "dev" if op == "all" else "stable"
     rows = devchannel.image_rows(r.catalog, r.channel if want == "dev" else before, r.cfg.ghcr,
                                  keys=[k for k in r.enabled() if k in r.catalog])
-    swapped = [x for x in rows if x["applies"] and x["dev"]]
+    swapped = devchannel.swapped(rows)
     r.compose(["pull", "--ignore-buildable", "--ignore-pull-failures"], prebuild=False)
     r.up()
     if want == "dev":
         if not swapped:
-            return "ok", ("On the dev channel. Nothing this server runs has a dev build yet, so "
-                          "the published images stay; a game installed later follows its dev "
-                          "image when it has one."), []
+            return "ok", ("Everything with a dev build is on Dev. Nothing this server runs has one "
+                          "yet, so the published images stay; a game installed later follows its "
+                          "dev build when it has one."), []
         names = sorted(set(x["name"] for x in swapped))
-        return "ok", "On the dev channel: %s now run%s the dev image%s (%s)." % (
+        return "ok", "Everything is on Dev: %s now run%s the dev image%s (%s)." % (
             ", ".join(names), "s" if len(names) == 1 else "",
             "" if len(swapped) == 1 else "s", ", ".join(x["dev_name"] for x in swapped)), []
-    note = ""
     backs = [d.get("back") for k in set(x["key"] for x in swapped)
              for d in devchannel.dev_entries(r.catalog.get(k, {})) if isinstance(d.get("back"), str)]
-    if backs:
-        note = " " + " ".join(sorted(set(backs)))
-    return "ok", ("On the stable channel: the published images run again, and the access code "
+    note = (" " + " ".join(sorted(set(backs)))) if backs else ""
+    return "ok", ("Everything is on Stable: the published images run again, and the access code "
                   "is forgotten.%s" % note), []
+
+
+def act_switch(r, job, before):
+    """One key to Dev or Stable: record it, then pull its images and restart its services only
+    (nothing when it is not turned on)."""
+    key, to = job.get("key"), job.get("to")
+    if key not in r.catalog or not devchannel.dev_entries(r.catalog[key]):
+        raise JobFailed("%s has no dev build." % key)
+    name = r.name(key)
+    if to == "dev":
+        if not r.unlocked():
+            raise JobFailed(devchannel.LOCKED)
+        after = dict(before, dev=sorted(set(before.get("dev") or ()) | {key}))
+        rows = [x for x in devchannel.swapped(devchannel.image_rows(
+            r.catalog, after, r.cfg.ghcr, keys=[key])) if x["key"] == key]
+        r.dev_gate(strict=True, rows=rows)
+    if r.stack(["channel", "set", key, to], owner=r.cfg.core) != 0:
+        raise JobFailed("stack.py channel set %s %s failed; the log has its message." % (key, to),
+                        r.last_rc)
+    r.channel = devchannel.read_channel(r.cfg.core, r.catalog)
+    if (key in r.channel["dev"]) != (to == "dev"):
+        raise JobFailed("stack.py did not record %s on %s in %s." % (name, to.capitalize(),
+                                                                       devchannel.CHANNEL_FILE))
+    word = "Dev" if to == "dev" else "Stable"
+    shown = devchannel.image_rows(r.catalog, r.channel if to == "dev" else before, r.cfg.ghcr,
+                                  keys=[key])
+    mine = [x for x in devchannel.swapped(shown) if x["key"] == key]
+    if key != "core" and key not in r.enabled():
+        return "ok", "%s is on %s. It is not turned on, so nothing was restarted; it %s when it " \
+            "is." % (name, word, "follows its dev build" if to == "dev" else "runs the published "
+                     "images"), []
+    if not mine:
+        why = [x["note"] for x in shown if x["key"] == key and x["dev_name"] and not x["applies"]]
+        return "ok", "%s is on %s. Nothing it runs changes here%s, so nothing was restarted." % (
+            name, word, (": " + why[0].rstrip(".")) if why else ""), []
+    services = key_services(r.cfg, r.catalog, r.enabled(), key)
+    r.log.line("%s to %s: pulling and restarting %s" % (name, word, ", ".join(services)))
+    r.compose(["pull", "--ignore-buildable", "--ignore-pull-failures"] + services, prebuild=False)
+    r.up(services)
+    images = ", ".join(x["dev_name"] for x in mine)
+    ran = []
+    for x in mine:
+        ran += [s for s in x["services"] if s in services and s not in ran]
+    if to == "dev":
+        return "ok", "%s is on Dev: %s now run%s the dev build%s (%s)." % (
+            name, ", ".join(ran), "s" if len(ran) == 1 else "",
+            "" if len(mine) == 1 else "s", images), []
+    backs = sorted(set(d["back"] for d in devchannel.dev_entries(r.catalog[key])
+                       if isinstance(d.get("back"), str)))
+    return "ok", "%s is on Stable: %s run%s the published image%s again.%s" % (
+        name, ", ".join(ran), "s" if len(ran) == 1 else "",
+        "" if len(mine) == 1 else "s", (" " + " ".join(backs)) if backs else ""), []
 
 
 ACT = {"install": act_install, "enable": act_enable, "disable": act_disable,
@@ -1784,7 +1911,7 @@ class Updates:
                     it["module"] = catalog[key].get("admin_module")
             out.append(it)
         ans = {"checked_at": checked, "checking": busy, "items": out,
-               "channel": devchannel.read_channel(self.cfg.core)["channel"]}
+               "channel": devchannel.read_channel(self.cfg.core, catalog)["channel"]}
         if limited:
             ans["limited"] = True
             ans["retry_after"] = wait
@@ -1793,13 +1920,12 @@ class Updates:
     # ---- the dev channel
 
     def dev_state(self, catalog, have):
-        """None on the stable channel; else the swapped rows of the installed items and
+        """None with nothing on Dev; else the swapped rows of the installed items and
         what the registry says of them (devchannel.check_access), asked once per check."""
-        ch = devchannel.read_channel(self.cfg.core)
-        if ch["channel"] != "dev":
+        ch = devchannel.read_channel(self.cfg.core, catalog)
+        if not ch["dev"]:
             return None
-        rows = [r for r in devchannel.image_rows(catalog, ch, self.cfg.ghcr, keys=have)
-                if r["applies"] and r["dev"]]
+        rows = devchannel.swapped(devchannel.image_rows(catalog, ch, self.cfg.ghcr, keys=have))
         code = devchannel.Store(self.cfg.state).code()
         if not rows:
             res = {"state": "ok", "why": None, "digests": {}}
@@ -1809,6 +1935,7 @@ class Updates:
             res = devchannel.check_access(ch["registry"], devchannel.token_of(code),
                                           devchannel.probes_of(rows),
                                           scheme=self.cfg.dev_scheme, user=self.cfg.dev_user)
+            self.dep.note_code(res)
             if res["state"] in ("wrong", "denied"):
                 res["why"] = devchannel.REVOKED
         return {"rows": rows, "res": res}
@@ -2417,6 +2544,9 @@ class Deployer:
         self.current_upload = None    # the upload the running import reads
         self.secrets = {}             # job id -> (the access code a job uses, more to blank)
         self.install_id = devchannel.InstallId(cfg.state).get()
+        self.issuers = devchannel.IssuerStore(cfg.state)
+        self.code_state = None        # {"state", "why", "at"}: the access code's last check
+        self.code_checking = False
         self.games_cache = (0.0, None)
         self.uploads = clientdata.Uploads(cfg.state)
         self.checks = patches.Checks(cfg.state)
@@ -2861,6 +2991,7 @@ class Deployer:
                      hide=[job.get("registry"), devchannel.read_channel(self.cfg.core).get("registry"),
                            self.cfg.dev_registry, self.feed_host()])
         r = Runner(self.cfg, load_catalog(self.cfg.core), log)
+        r.on_check = self.note_code
         try:
             job["state"] = "running"
             job["started"] = now_iso()
@@ -2869,7 +3000,8 @@ class Deployer:
                                              if job.get(k)) or "every bundle"
             log.line("deployer %s: %s %s%s%s" % (VERSION, job["action"], target,
                                                   " (published images)" if self.cfg.ghcr else "",
-                                                  ", dev channel" if r.dev() else ""))
+                                                  ", on Dev: " + ", ".join(r.channel["dev"])
+                                                  if r.dev() else ""))
             if job["action"] == "channel":
                 state, summary, missing = act_channel(r, job, secret)
             elif job["action"] == "updater":
@@ -2972,106 +3104,278 @@ class Deployer:
             self.games_cache = (time.time(), out)
         return out
 
-    # ---- the dev channel (docs/deployer.md, "Dev channel")
+    # ---- the dev builds (docs/deployer.md, "Dev channel")
 
     #: what GET /api/channel says of each image; never its registry or its source address
-    CHANNEL_ROW = ("key", "name", "stable", "dev_name", "applies", "what", "license", "note")
+    CHANNEL_ROW = ("key", "name", "stable", "dev_name", "applies", "on", "what", "license", "note")
+    #: how long a check of the access code holds for the panel's list
+    CODE_FRESH = 300
+
+    def note_code(self, res):
+        """Keep what the registry last said of the stored access code (check_access)."""
+        if isinstance(res, dict) and res.get("state"):
+            self.code_state = {"state": res["state"], "why": res.get("why"), "at": time.time()}
+
+    def code_refresh(self, ch, rows, code):
+        """Ask the registry about the stored code in the background when the last answer is
+        older than CODE_FRESH, so the list says when it stopped working."""
+        st = self.code_state
+        if not rows or not code or self.code_checking or (st and time.time() - st["at"] < self.CODE_FRESH):
+            return
+        self.code_checking = True
+
+        def run():
+            try:
+                self.note_code(devchannel.check_access(ch["registry"], devchannel.token_of(code),
+                                                       devchannel.probes_of(rows),
+                                                       scheme=self.cfg.dev_scheme, user=self.cfg.dev_user))
+            finally:
+                self.code_checking = False
+        threading.Thread(target=run, daemon=True, name="code-check").start()
+
+    def issuer(self):
+        """(where short dev codes are redeemed, or None when they are off; "env", "state" or
+        "default")."""
+        return devchannel.issuer_of(self.cfg.dev_issuer, self.issuers.get())
 
     def channel_rows(self):
         catalog = load_catalog(self.cfg.core)
-        ch = devchannel.read_channel(self.cfg.core)
+        ch = devchannel.read_channel(self.cfg.core, catalog)
         installed = [k for k, e in catalog.items() if e["kind"] == "game"
                      and os.path.isdir(os.path.join(self.cfg.root, e["checkout"]))]
-        return catalog, ch, devchannel.image_rows(catalog, ch, self.cfg.ghcr, keys=installed)
+        return catalog, ch, installed, devchannel.image_rows(catalog, ch, self.cfg.ghcr, keys=installed,
+                                                             registry=None)
 
     def channel_info(self):
-        """GET /api/channel: the channel and what each image of the core and the installed
-        games is on it, by short name. Never the access code, and never the registry's
-        address: the panel says "dev builds". On the dev channel a row whose source is
-        known says has_source; GET /api/channel/source gives the address."""
-        catalog, ch, rows = self.channel_rows()
+        """GET /api/channel: whether the dev builds are unlocked, each thing that has a dev
+        build (the core and the installed games, "keys") and whether it is on Dev, and what
+        each image of them is, by short name. Never the access code, and never the registry's
+        address: the panel says "dev builds". A row on Dev whose source is known says
+        has_source; GET /api/channel/source gives the address."""
+        catalog, ch, installed, rows = self.channel_rows()
         on = Runner(self.cfg, catalog, None).enabled()
-        dev = ch["channel"] == "dev"
+        code = devchannel.Store(self.cfg.state).code() if ch["unlocked"] else None
         shown = []
         for row in rows:
             one = {k: row.get(k) for k in self.CHANNEL_ROW}
             one["enabled"] = row["key"] == "core" or row["key"] in on
-            one["has_source"] = bool(dev and row.get("dev_name") and row.get("source"))
+            one["has_source"] = bool(row["on"] and row.get("dev_name") and row.get("source"))
             shown.append(one)
-        return {"channel": ch["channel"], "since": ch.get("since") if dev else None,
-                "code_stored": bool(devchannel.Store(self.cfg.state).code()) if dev else False,
-                "ghcr": self.cfg.ghcr, "problem": ch.get("problem"), "images": shown,
-                "install_id": self.install_id, "short_codes": bool(self.cfg.dev_issuer)}
+        swapped = devchannel.swapped(rows)
+        self.code_refresh(ch, swapped, code)
+        st = self.code_state
+        code_ok = None
+        if ch["unlocked"]:
+            if not code:
+                code_ok = False
+            elif st:
+                code_ok = False if st["state"] in ("wrong", "denied") else \
+                    (True if st["state"] == "ok" else None)
+        have = ["core"] + installed
+        keys = [k for k in devchannel.dev_keys(catalog) if k in have]
+        notes = devchannel.fit_notes(catalog, ch["dev"], keys)
+        key_rows = []
+        for k in keys:
+            e = catalog[k]
+            mine = [r for r in rows if r["key"] == k and r["dev_name"]]
+            dev = k in ch["dev"]
+            key_rows.append({
+                "key": k, "name": e.get("name") or k, "on": "dev" if dev else "stable",
+                "since": ch["dev_since"].get(k) if dev else None,
+                "enabled": k == "core" or k in on,
+                "applies": any(r["applies"] for r in mine),
+                "builds_on_core": k != "core" and devchannel.builds_on_core(e),
+                "images": [r["dev_name"] for r in mine],
+                "services": key_services(self.cfg, catalog, on, k),
+                "note": notes.get(k),
+                "problem": devchannel.REVOKED if dev and code_ok is False else None,
+                "would": devchannel.switch_notes(catalog, ch["dev"], keys, k,
+                                                 "stable" if dev else "dev"),
+                "back": " ".join(sorted(set(d["back"] for d in devchannel.dev_entries(e)
+                                            if isinstance(d.get("back"), str)))) or None})
+        issuer, where = self.issuer()
+        return {"unlocked": ch["unlocked"], "channel": ch["channel"], "dev": list(ch["dev"]),
+                "since": ch.get("since") if ch["unlocked"] else None,
+                "code_stored": bool(code), "code_ok": code_ok,
+                "code_why": devchannel.REVOKED if code_ok is False else None,
+                "ghcr": self.cfg.ghcr, "problem": ch.get("problem"), "keys": key_rows,
+                "images": shown, "install_id": self.install_id, "short_codes": bool(issuer),
+                "issuer": {"value": issuer or devchannel.ISSUER_OFF, "from": where,
+                           "default": devchannel.DEFAULT_ISSUER}}
 
     def resolve_code(self, code):
         """(access code, the short code it came from or None) for what someone typed: a short
-        dev code is redeemed at POL_DEV_ISSUER with this install's id, anything else is as it
-        is. ChannelError (IssuerDown when the issuer did not answer) with the sentence."""
+        dev code is redeemed at the issuer with this install's id, anything else is as it
+        is. ChannelError (IssuerDown when the issuer did not answer) with the sentence. A
+        redeemed code with a patch feed is offered to the patch store (kept when none is
+        kept yet, never turned on)."""
         short = devchannel.short_code(code)
         if short is None:
             return code, None
-        got = devchannel.redeem(self.cfg.dev_issuer, short, self.install_id)
-        say("dev channel: short dev code redeemed at the issuer for this install")
+        issuer, _where = self.issuer()
+        got = devchannel.redeem(issuer, short, self.install_id)
+        say("dev builds: short dev code redeemed at the issuer for this install")
+        try:
+            if patchfeed.offer_code(self.cfg.state, got):
+                say("dev builds: the redeemed code opens a patch feed; kept for it (patches stay off)")
+        except (OSError, ValueError, patchfeed.FeedError) as exc:
+            say("dev builds: the redeemed code could not be kept for the patch feed (%s)" % exc)
         return got, short
 
     def channel_source(self, stable):
         """GET /api/channel/source?stable=<image>: (status, {"url"}) of the source of the dev
-        image that replaces `stable`, on the dev channel only (the GPL and AGPL source offer)."""
-        _catalog, ch, rows = self.channel_rows()
-        if ch["channel"] != "dev":
-            return 404, {"error": "This server is not on the dev channel."}
+        image that replaces `stable`, while its key is on Dev only (the GPL and AGPL source
+        offer)."""
+        _catalog, ch, _inst, rows = self.channel_rows()
+        if not ch["dev"]:
+            return 404, {"error": "Nothing on this server is on Dev."}
         for row in rows:
-            if row["stable"] == stable and row.get("dev_name") and row.get("source"):
+            if row["stable"] == stable and row["on"] and row.get("dev_name") and row.get("source"):
                 return 200, {"url": row["source"], "license": row.get("license")}
         return 404, {"error": "No dev image there has a source address."}
 
-    def channel_request(self, body):
-        """POST /api/channel: (status, answer). {"channel": "dev", "code"} (an olx1. access
-        code; or, advanced, a plain token with "registry" or POL_DEV_REGISTRY) checks the
-        code against its registry first and answers 400 with the sentence when it does not
-        read it; then, as {"channel": "stable"}, starts the channel job."""
-        want = body.get("channel")
-        if want not in devchannel.CHANNELS:
-            return 400, {"error": "channel must be stable or dev"}
-        if set(body) - {"channel", "code", "registry"}:
-            return 400, {"error": "unknown fields: %s" % ", ".join(sorted(set(body) - {
-                "channel", "code", "registry"}))}
-        if self.current:
-            return 409, {"job": self.current, "error": "another job is running"}
-        if want == "stable":
-            return self.start("channel", "core", {"channel": "stable"})
-        code = body.get("code")
+    def check_new_code(self, body, field):
+        """(None, (code, info, short)) for the access code in body[field], or (status, answer)
+        when it is refused: parsed, then asked of its registry for the dev images the
+        installed things would run."""
+        code = body.get(field)
         code = code.strip() if isinstance(code, str) else ""
         given = body.get("registry")
         given = given.strip() if isinstance(given, str) else ""
         if given and not devchannel.REGISTRY.match(given):
-            return 400, {"error": "The dev registry must look like registry.example.org/team."}
+            return (400, {"error": "The dev registry must look like registry.example.org/team."}), None
         try:
             code, short = self.resolve_code(code)
             info = devchannel.parse_code(code, registry=given or self.cfg.dev_registry)
         except devchannel.IssuerDown as exc:
-            return 502, {"error": str(exc)}
+            return (502, {"error": str(exc)}), None
         except devchannel.ChannelError as exc:
-            return 400, {"error": str(exc)}
+            return (400, {"error": str(exc)}), None
         reg = info["registry"]
         catalog = load_catalog(self.cfg.core)
-        rows = devchannel.image_rows(catalog, {"channel": "dev", "registry": reg}, self.cfg.ghcr)
+        rows = devchannel.image_rows(catalog, {"unlocked": True, "registry": reg, "dev": []},
+                                     self.cfg.ghcr)
         installed = set(Updates.installed(self.updates, catalog))
         mine = [r for r in rows if r["key"] in installed]
         probes = devchannel.probes_of(mine) or devchannel.probes_of(rows)[:1]
         res = devchannel.check_access(reg, info["token"], probes, scheme=self.cfg.dev_scheme,
                                       user=self.cfg.dev_user)
         if res["state"] != "ok":
-            say("dev channel: the access code was refused (%s)" % res["state"])
-            return (502 if res["state"] == "unreachable" else 400), {"error": res["why"]}
-        extra = {"channel": "dev", "registry": reg}
-        if info["source"]:
-            extra["dev_source"] = info["source"]
-        return self.start("channel", "core", extra, secret=code,
-                          also=[short, short and devchannel.show_short(short)])
+            say("dev builds: the access code was refused (%s)" % res["state"])
+            return ((502 if res["state"] == "unreachable" else 400), {"error": res["why"]}), None
+        self.note_code(res)
+        return None, (code, info, short)
+
+    def channel_request(self, body):
+        """POST /api/channel: (status, answer). One of
+
+            {"unlock": "<code>"}           check the access code (an olx1. or olx2. code, a short
+                                           dev code, or, advanced, a plain token with "registry"
+                                           or POL_DEV_REGISTRY) and unlock the dev builds with it
+            {"key": "<key>", "to": "dev"|"stable"}   put one thing on Dev or Stable
+            {"lock": true}                 forget the code, once everything is on Stable
+            {"issuer": "<https address>"|"off"|""}   the issuer of short codes ("": the default)
+            {"channel": "dev", "code"}     as before: unlock and put everything on Dev
+            {"channel": "stable"}          as before: everything back on Stable, locked
+
+        A refused code answers 400 with the sentence (502 when its registry or the issuer
+        does not answer), before any job; a job answers 202."""
+        fields = set(body)
+        shapes = ({"unlock", "registry"}, {"key", "to"}, {"lock"}, {"issuer"},
+                  {"channel", "code", "registry"})
+        if not fields or not any(fields <= s for s in shapes) or \
+                (fields & {"registry"} and not fields & {"unlock", "channel"}):
+            return 400, {"error": "unknown fields: %s" % ", ".join(sorted(fields)) if fields
+                         else "Say what to do: unlock, key and to, lock, or channel."}
+        if "issuer" in body:
+            return self.set_issuer(body["issuer"])
+        if self.current:
+            return 409, {"job": self.current, "error": "another job is running"}
+        catalog = load_catalog(self.cfg.core)
+        ch = devchannel.read_channel(self.cfg.core, catalog)
+        if "channel" in body:
+            want = body.get("channel")
+            if want not in devchannel.CHANNELS:
+                return 400, {"error": "channel must be stable or dev"}
+            if want == "stable":
+                return self.start("channel", "core", {"channel": "stable", "op": "stable"})
+            bad, got = self.check_new_code(body, "code")
+            if bad:
+                return bad
+            code, info, short = got
+            extra = {"channel": "dev", "op": "all", "registry": info["registry"]}
+            if info["source"]:
+                extra["dev_source"] = info["source"]
+            return self.start("channel", "core", extra, secret=code,
+                              also=[short, short and devchannel.show_short(short)])
+        if "unlock" in body:
+            bad, got = self.check_new_code(body, "unlock")
+            if bad:
+                return bad
+            code, info, short = got
+            extra = {"op": "unlock", "registry": info["registry"]}
+            if info["source"]:
+                extra["dev_source"] = info["source"]
+            return self.start("channel", "core", extra, secret=code,
+                              also=[short, short and devchannel.show_short(short)])
+        if "lock" in body:
+            if body["lock"] is not True:
+                return 400, {"error": "lock is true"}
+            if not ch["unlocked"]:
+                return 400, {"error": "The dev builds are not unlocked."}
+            if ch["dev"]:
+                return 409, {"error": "Switch everything back to Stable first; on Dev: %s." % ", ".join(
+                    catalog[k]["name"] if k in catalog else k for k in ch["dev"])}
+            return self.start("channel", "core", {"op": "lock"})
+        key, to = body.get("key"), body.get("to")
+        if to not in devchannel.CHANNELS:
+            return 400, {"error": "to must be stable or dev"}
+        if not isinstance(key, str) or key not in catalog or not devchannel.dev_entries(catalog[key]):
+            return 400, {"error": "That has no dev build."}
+        if key != "core" and key not in Updates.installed(self.updates, catalog):
+            return 400, {"error": "%s is not installed." % catalog[key]["name"]}
+        if to == ("dev" if key in ch["dev"] else "stable"):
+            return 400, {"error": "%s is already on %s." % (catalog[key]["name"], to.capitalize())}
+        if to == "dev":
+            if not ch["unlocked"]:
+                return 400, {"error": devchannel.LOCKED}
+            code = devchannel.Store(self.cfg.state).code()
+            if not code:
+                return 400, {"error": devchannel.REVOKED}
+            after = dict(ch, dev=sorted(set(ch["dev"]) | {key}))
+            rows = [r for r in devchannel.swapped(devchannel.image_rows(catalog, after, self.cfg.ghcr,
+                                                                       keys=[key])) if r["key"] == key]
+            if rows:
+                res = devchannel.check_access(ch["registry"], devchannel.token_of(code),
+                                              devchannel.probes_of(rows),
+                                              scheme=self.cfg.dev_scheme, user=self.cfg.dev_user)
+                if res["state"] in ("wrong", "denied", "ok"):
+                    self.note_code(res)
+                if res["state"] in ("wrong", "denied"):
+                    return 400, {"error": devchannel.REVOKED}
+                if res["state"] != "ok":
+                    return (502 if res["state"] == "unreachable" else 400), {"error": res["why"]}
+        return self.start("channel", key, {"op": "switch", "key": key, "to": to})
+
+    def set_issuer(self, value):
+        """POST /api/channel {"issuer"}: the owner's issuer of short codes. Refused while
+        POL_DEV_ISSUER sets it."""
+        if self.cfg.dev_issuer:
+            return 409, {"error": "POL_DEV_ISSUER sets the issuer on this server; change it there."}
+        try:
+            got = self.issuers.set(value)
+        except devchannel.ChannelError as exc:
+            return 400, {"error": str(exc)}
+        except OSError as exc:
+            return 500, {"error": "The setting could not be kept (%s)." % exc}
+        issuer, where = self.issuer()
+        say("dev builds: the issuer of short codes is now %s" % (got or "the default"))
+        return 200, {"issuer": {"value": issuer or devchannel.ISSUER_OFF, "from": where,
+                                "default": devchannel.DEFAULT_ISSUER}}
 
     def updater_start(self, body):
-        """POST /api/updater: (status, answer)."""
+        """POST /api/updater: (status, answer). A switch to a channel other than stable
+        without a code of its own gets the code the dev builds are unlocked with, if any."""
         bad, got = updater_request(body)
         if bad:
             return 400, {"error": bad}
@@ -3086,6 +3390,9 @@ class Deployer:
                 return 502, {"error": str(exc)}
             except devchannel.ChannelError as exc:
                 return 400, {"error": str(exc)}
+        elif switch and channel not in (None, "stable") and \
+                devchannel.read_channel(self.cfg.core)["unlocked"]:
+            code = devchannel.Store(self.cfg.state).code()
         extra = {"title": title, "updater": rec}
         if channel is not None:
             extra["channel"] = channel
@@ -3487,7 +3794,7 @@ def main(argv=None):
         % (VERSION, cfg.host, srv.server_address[1], cfg.root, cfg.core,
            ", published images" if cfg.ghcr else "",
            ", client folders in %s" % cfg.clients if cfg.clients else "",
-           ", dev channel" if ch["channel"] == "dev" else ""))
+           ", on Dev: " + ", ".join(ch["dev"]) if ch["dev"] else ""))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

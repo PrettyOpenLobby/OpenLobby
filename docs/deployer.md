@@ -592,7 +592,7 @@ is the start-up check's result ("Where Docker sees the checkouts"): `ok`,
 ```
 
 `options.problem` is the same as in `/api/health`. `options.channel` is
-`stable` or `dev` ("Dev channel" below).
+`dev` while anything is on Dev, else `stable` ("Dev channel" below).
 
 - `installed`: the checkout directory exists. `enabled`: the key is in
   `.games`.
@@ -789,8 +789,9 @@ When the branch has newer commits outside the pin, `why` says so.
   for a checkout and for an image that does not say.
 - `how` is set when an update is available.
 - `checking` is true while a check runs.
-- `channel` (top level) is `stable` or `dev`; on the dev channel an item
-  that runs a dev image has `"channel": "dev"` ("Dev channel" below).
+- `channel` (top level) is `dev` while anything is on Dev, else `stable`;
+  an item on Dev that runs a dev image has `"channel": "dev"` ("Dev
+  channel" below).
 
 `GET /api/updates?refresh=1` starts a check now, past the hour's cache,
 and answers at once with `checking` true; ask again until it is false.
@@ -829,13 +830,16 @@ GitHub API, as the tests do.
 
 ## Dev channel
 
-An install follows the stable channel by default: the images published to
-ghcr.io, and the upstream images the games run (FFXI's world server is the
-LandSandBoat team's own image). The dev channel follows preview builds
-instead. The developers hand out an access code; the code says where the
-builds are, so you never type an address, and the panel calls them "the
-dev builds". Only the images that have a dev build change; the rest stay
-on the published images, and the panel lists which.
+An install follows Stable by default: the images published to ghcr.io,
+and the upstream images the games run (FFXI's world server is the
+LandSandBoat team's own image). The developers also keep preview builds,
+"the dev builds", and hand out access codes for them. A code only unlocks
+them; after that each server follows Stable or Dev on its own switch:
+OpenLobby itself, each installed game with a dev build, and each paired
+game whose updater offers one. The code says where the builds are, so you
+never type an address. Only the images that have a dev build change, and
+only for what is on Dev; the rest stay on the published images, and the
+panel lists which.
 
 The catalog says which images have a dev build. A `games/*.json` entry may
 carry a `dev` list:
@@ -851,7 +855,7 @@ carry a `dev` list:
 the dev registry, `services` every service that runs it, `source` its
 repository under the dev source address (or a full `https://` address of
 its own), `license` the licence of that source, and `back`, when given,
-what switching back to Stable does not undo. On the dev channel the image
+what switching back to Stable does not undo. With its key on Dev the image
 becomes `<registry>/<image>:<tag>`. The core's images and each game's own
 image follow the `dev` tag, which the developers' CI moves on every push
 to their main branch; the panel shows each as its short name, such as
@@ -911,23 +915,31 @@ first server that enters it keeps it, any other server is refused, and
 the developers can revoke it for that one server.
 
 Each deployer makes a random install id once (`ol-` and 32 hex digits)
-and keeps it in `install_id` in its volume, mode 600. Switching channel
-keeps it. It is not a secret, but the panel shows it only to the owner
+and keeps it in `install_id` in its volume, mode 600. Forgetting the
+access code keeps it. It is not a secret, but the panel shows it only to the owner
 (`GET /api/channel` has it as `install_id`).
 
-Wherever the deployer takes an access code (its own switch to Dev, and a
-paired game's switch), it takes a short code too. It sends the code and
-its install id to the issuer named by `POL_DEV_ISSUER`, the developers'
-panel:
+Wherever the deployer takes an access code (unlocking the dev builds, and
+a paired game's switch), it takes a short code too. It sends the code and
+its install id to the issuer, the developers' panel:
 
     POST <POL_DEV_ISSUER>/api/dev-code/redeem
     {"code": "ABCDEFGHJKMN", "install_id": "ol-..."}
 
 and uses the `olx1.` (or `olx2.`) code it answers with
 (`{"ok": true, "access_code": "olx1...."}`) as if it had been typed. With
-`POL_DEV_ISSUER` empty, the default, a short code is refused with a
-sentence saying so. `GET /api/channel` says `"short_codes": true` when it
-is set.
+The issuer is `POL_DEV_ISSUER` when it is set; else the owner's setting,
+"Issuer of short codes" under Advanced in the Update channel panel (kept
+in `dev-issuer.json` in the deployer's volume, an `https://` address or
+`off`, each change in the activity log); else the project's own,
+`https://openlobby.fyi`. `off` in either place turns short codes off, and
+a short code is then refused with a sentence saying so. With
+`POL_DEV_ISSUER` set the panel shows it and cannot change it. `GET
+/api/channel` says `"short_codes": true` while there is an issuer, and
+`issuer` says which one and where it comes from (`env`, `state` or
+`default`). If the issuer redeems a short code to an `olx2.` code, the
+deployer also offers it to the patch store ("Patches from the dev channel"
+below), which keeps it when it has none; patches stay off.
 
 The issuer is any OpenLobby admin panel set up to hand out codes. Its
 owner makes 1 to 100 codes at a time with a note in Settings, Modules,
@@ -1068,12 +1080,12 @@ address only the proxy uses where you can.
 Give users the proxy's public base URL as the issuer (`POL_DEV_ISSUER`), for
 example `https://example.org`.
 
-### Switching
+### Unlocking and switching
 
 In the admin panel, Settings > Install games > Update channel (the owner
-only): choose Dev and paste the access code, or a short dev code. The panel hands the code to
-the deployer and keeps nothing; the field is cleared as soon as it is sent.
-The deployer then
+only), "Enter an access code" takes the code once: a full one that starts
+`olx`, or a short dev code. The panel hands it to the deployer and keeps
+nothing; the field is cleared as soon as it is sent. The deployer
 
 1. asks the registry, the way docker does (`/v2/`, then its token
    endpoint with the code's token, or as nobody), whether the code reads
@@ -1081,47 +1093,100 @@ The deployer then
    it does not: a wrong code, a code without read access, an image that is
    not there, or a registry that does not answer. Nothing has changed at
    that point.
-2. starts a `channel` job: with a token, `docker login --password-stdin`
-   with the token on stdin, into a Docker client config of its own
-   (`DOCKER_CONFIG` is `channel/docker` in the deployer's volume, never the
-   host's); keeps the code in `channel/code`, mode 600, in a folder of mode
-   700; runs `stack.py channel dev --registry <registry>` (and `--source`
-   from the code or `POL_DEV_SOURCE`), which writes `.channel` in the
-   checkout (no secret in it); then pulls and restarts the stack as an
-   update does.
+2. starts a `channel` job that unlocks the dev builds: with a token,
+   `docker login --password-stdin` with the token on stdin, into a Docker
+   client config of its own (`DOCKER_CONFIG` is `channel/docker` in the
+   deployer's volume, never the host's); keeps the code in `channel/code`,
+   mode 600, in a folder of mode 700; and runs `stack.py channel unlock
+   --registry <registry>` (and `--source` from the code or
+   `POL_DEV_SOURCE`), which records the registry in `.channel` in the
+   checkout (no secret in it).
+
+Unlocking changes nothing else: everything stays on Stable. The list under
+it then has a row for each thing with a dev build, each with its own
+Stable/Dev switch:
+
+- OpenLobby itself (the core's images: `openlobby`, `openlobby-ssl3`,
+  `openlobby-sslterm`);
+- each installed game whose catalog entry has a `dev` list, such as FFXI's
+  world server;
+- each paired game whose approved updater offers a `dev` channel
+  (docs/installs.md, "Update channels"). Its switch is the same one as in
+  Settings, Modules, and runs its updater; with the dev builds unlocked
+  and no code of its own typed, the deployer hands the updater the code
+  it keeps.
+
+Switching a row to Dev asks the registry again for that row's images,
+then runs a job that records it (`stack.py channel set <key> dev`), pulls
+that row's dev images and restarts only its services (`stack.py compose
+pull ... <services>` and `up -d <services>`); a service of a profile that
+is off is left out, so naming it does not start it. A game that is not
+turned on is only recorded, and follows its switch once it is. A row whose
+dev build cannot be used here (one of OpenLobby's own images on a stack
+built from its checkouts) is recorded too, and nothing restarts. Stable
+does the same the other way, and needs no working code. Anything left on
+Stable keeps the published images; the compose file `stack.py` adds sets
+`image:` only for the services of what is on Dev.
+
+Some combinations may not fit, and the panel says so without refusing
+them, both in the switch's confirmation and on the row: a game on Dev
+while OpenLobby is on Stable ("the dev builds of the game may expect
+OpenLobby's own dev builds"), and OpenLobby on Dev while a game whose
+image builds on OpenLobby's (a game that adds a title) stays on Stable.
 
 No answer the panel reads and no line of a job log names the registry: the
 deployer's sentences say "the dev builds", and a job log shows
 `[dev builds]` where a tool printed its address. The activity log says
-"switched to the dev channel" or "tried to switch to the dev channel" with
-the deployer's sentence. The code is in no log, job file, answer or
+"unlocked the dev builds", "switched ffxi to Dev", "switched core to
+Stable", "forgot the dev access code" (or "tried to ..." with the
+deployer's sentence). The code is in no log, job file, answer or
 argument: the job log blanks it, and the token inside it, if a tool ever
 prints them.
 
 From then on every docker command the deployer runs uses that client
-config, so updates and installs pull the dev images with the same buttons.
-Before an update pulls anything, and before enabling a game, the deployer
-asks the registry again. A code that has been revoked or has expired fails
-the job with "The access code no longer works; ask for a new one or switch
-back to Stable." and nothing is pulled. The update list says "dev channel",
-marks the items that run a dev image, and shows such an item as having an
-update when the registry's digest for its tag is one this host does not
-have. "Enter a new access code" in the same panel replaces the code.
+config, so updates and installs pull the dev images of what is on Dev with
+the same buttons. Before an update of something on Dev pulls anything, and
+before enabling it, the deployer asks the registry again. A code that has
+been revoked or has expired fails that job with "The access code no
+longer works; ask for a new one or switch back to Stable." and nothing is
+pulled; with no code stored at all the sentence says to enter it again.
+Every row on Dev then shows "The access code no longer works", from the
+last time the registry was asked (a job, the update check, or a look the
+list takes when its answer is older than five minutes). Things on Stable
+are not affected. The update list marks the items that run a dev image,
+and shows such an item as having an update when the registry's digest for
+its tag is one this host does not have. "Enter a new access code" in the
+same panel replaces the code and keeps what is on Dev.
 
-Switching back to Stable runs `stack.py channel stable` (which removes
-`.channel`), `docker logout`, deletes the code and the client config, then
-pulls and restarts with the published images.
+"Forget the access code" (once everything is on Stable) runs `stack.py
+channel lock` (which removes `.channel`), `docker logout`, and deletes the
+code and the client config.
 
 A dev image may change a game's database in ways the stable image does
 not undo. FFXI's dev world server runs its own migrations at start, so the
 world database keeps them after a switch back. Back that database up
-before switching to Dev (`docker compose exec db mariadb-dump ...` in the
-FFXI checkout, or a copy of the `crystalbridge_lsb-db` volume), and restore it to go
-back exactly.
+before switching FFXI to Dev (`docker compose exec db mariadb-dump ...` in
+the FFXI checkout, or a copy of the `crystalbridge_lsb-db` volume), and
+restore it to go back exactly. The confirmation of the switch back says so.
+
+### What .channel holds
+
+```
+{"version": 2, "unlocked": true, "registry": "registry.example.org/team",
+ "source": "https://code.example.org/team", "since": "2026-10-24T09:14:00Z",
+ "dev": ["core", "ffxi"], "dev_since": {"core": "...", "ffxi": "..."}}
+```
+
+No file is locked with everything on Stable. A `.channel` from before
+per-server switches, `{"channel": "dev", "registry", "source", "since"}`,
+reads as unlocked with every catalog key that has a dev build on Dev, which
+is what it meant; the first switch after it writes version 2. A file of a
+newer version, or one that does not parse, is read as everything on
+Stable, and `stack.py` and the panel say why.
 
 ### Source
 
-On the dev channel the panel shows the owner a link to the source of each
+For what is on Dev the panel shows the owner a link to the source of each
 dev image, named after its licence (for example "GPL-3.0 source"). The
 link goes through the panel (`/api/deploy/channel/source`), which answers
 with a redirect to the address: the catalog's own `https://` address, or
@@ -1133,8 +1198,8 @@ the image's `source` under the code's `s` (or `POL_DEV_SOURCE`, or
 The developers may also keep patch bundles for the servers they hand codes
 to. An access code with a patch feed in it opens them. Patches have their
 own switch, "Patches from the developers" under Patch bundles on the Install
-games tab, apart from the update channel: they work on Stable as well as
-Dev, and they are off until the owner turns them on, whatever code the
+games tab, apart from the Update channel: they work with everything on
+Stable as well as on Dev, and they are off until the owner turns them on, whatever code the
 install holds. Turning them on takes a code with a feed in it, or uses one
 already kept (from an earlier time, or the dev channel's own code when it
 has a feed), after the feed has answered to it. When on, the section lists
@@ -1143,8 +1208,8 @@ and a Get or Update button. When off, nothing asks the feed.
 
 The patch code is kept apart from the channel's, in `patchfeed/code` in the
 deployer's volume (mode 600), with `patchfeed/state.json` saying whether
-patches are on. Switching the channel back to Stable, which forgets the
-channel's code, leaves it alone; turning patches off keeps it too, unless
+patches are on. Forgetting the access code under Update channel leaves it
+alone; turning patches off keeps it too, unless
 the owner asks to forget it. A short dev code that redeems to an `olx2.`
 code is offered to the patch store (kept when none is kept yet), never
 turned on by itself.
@@ -1167,41 +1232,70 @@ never names the feed's address or the token.
 
 ### By hand and from the setup scripts
 
-`stack.py channel [--json]` shows the channel and what each image is on
-it (`--json` includes the registry); `stack.py channel dev --registry
-HOST/PATH` and `stack.py channel stable` set it. They only write
-`.channel`: signing in to the registry is up to you (`docker login`) when
-you run the stack without the deployer. `stack.py compose` applies the
-channel by adding a compose file that sets `image:` for the services of
-the dev images, last in the `-f` list and removed after the command;
-`--dry-run` prints it.
+`stack.py channel [--json]` shows what is unlocked and what each image is
+on (`--json` includes the registry). `stack.py channel unlock --registry
+HOST/PATH [--source URL]` records the registry, `stack.py channel set KEY
+dev|stable` switches one key, and `stack.py channel lock` removes `.channel`
+once everything is on Stable. `stack.py channel dev --registry HOST/PATH`
+and `stack.py channel stable` are the whole install at once, as before.
+They only write `.channel`: signing in to the registry is up to you
+(`docker login`) when you run the stack without the deployer. `stack.py
+compose` applies it by adding a compose file that sets `image:` for the
+services of the dev images of what is on Dev, last in the `-f` list and
+removed after the command; `--dry-run` prints it.
 
 `setup.sh --channel dev`, `setup.ps1 -Channel dev` and the setup program's
-`--channel dev` ask for the code without showing it (or read it from
-`--code-file` / `-CodeFile` with `--yes`) and hand it to the running
-deployer on stdin: `docker compose --profile deployer exec -T deployer
-python /app/deployer.py --channel dev`. `--channel stable` switches back
-the same way.
+`--channel dev` mean what they meant before per-server switches: unlock,
+and put every key that has a dev build on Dev. They ask for the code
+without showing it (or read it from `--code-file` / `-CodeFile` with
+`--yes`) and hand it to the running deployer on stdin: `docker compose
+--profile deployer exec -T deployer python /app/deployer.py --channel
+dev`. `--channel stable` puts everything back on Stable and forgets the
+code the same way. The panel then switches each server on its own.
 
-`POST /api/channel` with `{"channel": "dev", "code": "olx1...."}` answers
-202 with the job, 400 with a sentence when the request or the code is
-refused, 502 when the registry does not answer, and 409 while another job
-runs. `{"channel": "stable"}` starts the switch back. `GET /api/channel`
-answers
+`POST /api/channel` takes one of
+
+| Body | Does |
+| --- | --- |
+| `{"unlock": "<code>"}` | checks the code and unlocks the dev builds with it (a plain token may carry `"registry"`) |
+| `{"key": "ffxi", "to": "dev"}` | puts one key on Dev or Stable (`"to": "stable"`) |
+| `{"lock": true}` | forgets the code; 409 while anything is on Dev |
+| `{"issuer": "https://..."}` | the issuer of short codes ("Dev access codes"); `"off"`, or `""` for the default; 409 while `POL_DEV_ISSUER` sets it |
+| `{"channel": "dev", "code": "<code>"}` | as before: unlock, and every key with a dev build on Dev |
+| `{"channel": "stable"}` | as before: everything back on Stable, and the code forgotten |
+
+and answers 202 with the job (200 for the issuer), 400 with a sentence
+when the request or the code is refused (a key not installed or without a
+dev build, Dev while locked, a code that no longer works), 502 when the
+registry or the issuer does not answer, and 409 while another job runs.
+`GET /api/channel` answers
 
 ```
-{"channel": "dev", "since": "2026-10-23T09:14:00Z", "code_stored": true,
- "ghcr": true, "problem": null, "install_id": "ol-5f0c...", "short_codes": true,
+{"unlocked": true, "channel": "dev", "dev": ["ffxi"], "since": "2026-10-23T09:14:00Z",
+ "code_stored": true, "code_ok": true, "code_why": null, "ghcr": true, "problem": null,
+ "install_id": "ol-5f0c...", "short_codes": true,
+ "issuer": {"value": "https://openlobby.fyi", "from": "default", "default": "https://openlobby.fyi"},
+ "keys": [{"key": "ffxi", "name": "...", "on": "dev", "since": "...", "enabled": true,
+           "applies": true, "builds_on_core": true, "images": ["lsb-server (dev)", ...],
+           "services": ["db-update", ...], "note": "May not fit: ...", "problem": null,
+           "would": [], "back": "..."}, ...],
  "images": [{"key": "ffxi", "name": "...", "stable": "ghcr.io/landsandboat/server",
-             "dev_name": "lsb-server (dev)", "applies": true, "license": "GPL-3.0-or-later",
-             "what": "...", "note": null, "enabled": true, "has_source": true}, ...]}
+             "dev_name": "lsb-server (dev)", "applies": true, "on": true,
+             "license": "GPL-3.0-or-later", "what": "...", "note": null, "enabled": true,
+             "has_source": true}, ...]}
 ```
 
-with one row per stable image of the core and each installed game; a row
-with no dev build has `dev_name` null and a `note`. `has_source` is only
-ever true on the dev channel. `GET /api/channel/source?stable=<image>`
-answers `{"url", "license"}` for such a row, and 404 on the stable channel
-or for an image without a source address.
+`channel` is `dev` while anything is on Dev. `keys` has the core and each
+installed game with a dev build: `note` is the warning that holds now,
+`would` the ones a switch of that row would bring, `problem` the
+sentence when the row is on Dev and the code no longer works (`code_ok`
+false). `images` has one row per stable image of the core and each
+installed game; a row with no dev build has `dev_name` null and a `note`.
+`has_source` is only ever true for a row on Dev. `GET
+/api/channel/source?stable=<image>` answers `{"url", "license"}` for such
+a row, and 404 otherwise. The panel adds `paired` to the same answer: the
+paired games whose approved updater offers `dev`, with `on`, `note` and
+`would`.
 A client data import from an upload that is a `.polpatch` is a 400.
 
 ### Patch bundles
@@ -1355,7 +1449,7 @@ written from the folder they are in (`mirrors/`, `clients/`,
 | `POL_DEV_SOURCE` | `https://<registry>` | Where the dev images' source repositories are, when the access code does not say. |
 | `POL_DEV_USER` | `dev` | The user name an access code without one (`name:code`) signs in under. |
 | `POL_DEV_REGISTRY_HTTP` | empty | `1`: the registry speaks plain http (tests, a registry on your network). |
-| `POL_DEV_ISSUER` | empty | The panel that redeems short dev codes for this install, its base URL ("Dev access codes"). Empty: only full access codes are taken. |
+| `POL_DEV_ISSUER` | empty | The panel that redeems short dev codes for this install, its base URL ("Dev access codes"). Empty: the owner's setting in the panel, else `https://openlobby.fyi`. `off`: only full access codes are taken. |
 
 The issuer's own settings are the admin service's, not the deployer's:
 `POL_DEV_ISSUER_KINDS`, and for each kind `POL_DEV_ISSUER_<KEY>_CODE`,

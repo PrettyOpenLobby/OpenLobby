@@ -101,9 +101,13 @@ OLD_DEPLOYER = "This deployer has no update channels yet; update the core first,
 
 #: what the panel passes on of the deployer's channel answer and of each image row: never
 #: the registry's address, which the page does not show (it says "dev builds")
-CHANNEL_KEYS = ("channel", "since", "code_stored", "ghcr", "problem", "install_id", "short_codes")
-CHANNEL_ROW = ("key", "name", "stable", "dev_name", "applies", "what", "license", "note",
+CHANNEL_KEYS = ("channel", "unlocked", "dev", "since", "code_stored", "code_ok", "code_why", "ghcr",
+                "problem", "install_id", "short_codes")
+CHANNEL_ROW = ("key", "name", "stable", "dev_name", "applies", "on", "what", "license", "note",
                "enabled", "has_source")
+#: what the panel passes on of each thing with a dev build (the core, a game)
+KEY_ROW = ("key", "name", "on", "since", "enabled", "applies", "builds_on_core", "images",
+           "services", "note", "problem", "would", "back")
 _SHORT = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
@@ -129,6 +133,18 @@ def channel():
         return st, out
     got = {k: out.get(k) for k in CHANNEL_KEYS}
     got["images"] = [_row(r) for r in out.get("images") or [] if isinstance(r, dict)]
+    if "keys" in out:
+        got["keys"] = [{k: r.get(k) for k in KEY_ROW} for r in out.get("keys") or [] if isinstance(r, dict)]
+    else:
+        # a deployer from before per-key switches: one switch for everything
+        got["keys"] = None
+        got["unlocked"] = out.get("channel") == "dev"
+    iss = out.get("issuer")
+    if isinstance(iss, dict) and isinstance(iss.get("value"), str):
+        got["issuer"] = {"value": iss["value"][:300], "from": iss.get("from") if iss.get("from") in (
+            "env", "state", "default") else None, "default": str(iss.get("default") or "")[:300]}
+    else:
+        got["issuer"] = None
     got["available"] = True
     return 200, got
 
@@ -147,34 +163,72 @@ def channel_source(stable):
     return 200, {"url": url}
 
 
+def channel_body(body):
+    """(None, what to send the deployer) for a request of the page, or (sentence, None):
+    {"unlock": code} unlocks the dev builds, {"key", "to"} switches one thing, {"lock": true}
+    forgets the code, {"issuer": "<https address>"|"off"|""} sets the issuer of short codes,
+    and {"channel": "dev", "code"} or {"channel": "stable"} is the whole install at once."""
+    if not isinstance(body, dict):
+        return "Say what to switch.", None
+    if "issuer" in body:
+        try:
+            got = devchannel.check_issuer(body.get("issuer"))
+        except devchannel.ChannelError as exc:
+            return str(exc), None
+        return None, {"issuer": got or ""}
+    if "lock" in body:
+        return (None, {"lock": True}) if body.get("lock") is True else ("Say lock: true.", None)
+    if "key" in body:
+        key, to = body.get("key"), body.get("to")
+        if not isinstance(key, str) or not _KEY.match(key):
+            return "Unknown key.", None
+        if to not in devchannel.CHANNELS:
+            return "Pick Stable or Dev.", None
+        return None, {"key": key, "to": to}
+    field = "unlock" if "unlock" in body else "code"
+    if field == "code":
+        want = body.get("channel")
+        if want not in devchannel.CHANNELS:
+            return "Pick Stable or Dev.", None
+        if want == "stable":
+            return None, {"channel": "stable"}
+        out = {"channel": "dev"}
+    else:
+        out = {}
+    code = clean_code(body.get(field))
+    if code is None:
+        return "The access code is 8 to 2048 characters, with no spaces.", None
+    out[field] = code
+    # advanced: the registry of a plain token (an olx1. code carries its own)
+    reg = body.get("registry")
+    if isinstance(reg, str) and reg.strip():
+        if not devchannel.REGISTRY.match(reg.strip()):
+            return "The dev registry must look like registry.example.org/team.", None
+        out["registry"] = reg.strip()
+    elif reg not in (None, ""):
+        return "The dev registry must look like registry.example.org/team.", None
+    return None, out
+
+
 def set_channel(body):
-    """Pass a channel switch on to the deployer. The access code goes there and nowhere else:
-    it is not stored, logged or sent back here, and a request that does not fit never leaves."""
-    want = body.get("channel")
-    if want not in devchannel.CHANNELS:
-        return 400, {"error": "Pick Stable or Dev."}
-    out = {"channel": want}
-    if want == "dev":
-        code = clean_code(body.get("code"))
-        if code is None:
-            return 400, {"error": "The access code is 8 to 2048 characters, with no spaces."}
-        out["code"] = code
-        # advanced: the registry of a plain token (an olx1. code carries its own)
-        reg = body.get("registry")
-        if isinstance(reg, str) and reg.strip():
-            if not devchannel.REGISTRY.match(reg.strip()):
-                return 400, {"error": "The dev registry must look like registry.example.org/team."}
-            out["registry"] = reg.strip()
-        elif reg not in (None, ""):
-            return 400, {"error": "The dev registry must look like registry.example.org/team."}
+    """Pass a request about the dev builds on to the deployer (channel_body). The access
+    code goes there and nowhere else: it is not stored, logged or sent back here, and a
+    request that does not fit never leaves."""
+    bad, out = channel_body(body)
+    if bad:
+        return 400, {"error": bad}
     status, got = _call("POST", "/api/channel", out, timeout=CHANNEL_TIMEOUT)
     out.pop("code", None)
+    out.pop("unlock", None)
     if status == 409:
         got.setdefault("error", "Another job is still running; switch when it has finished.")
     elif status == 404:
         got = {"error": OLD_DEPLOYER}
     elif status == 400:
         got.setdefault("error", "The deployer refused that.")
+        if ("key" in out or "lock" in out or "issuer" in out) and \
+                str(got.get("error", "")).startswith("unknown fields"):
+            got["error"] = OLD_DEPLOYER       # a deployer from before per-key switches
     return status, got
 
 

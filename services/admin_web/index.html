@@ -874,8 +874,18 @@
     .dc-why .dc-problem { color: var(--bad); }
     .dc-kind select { width: 100%; }
     .chan-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 4px 0 10px; }
-    .chan-top .seg button { padding: 6px 16px; font-size: 13px; }
     .chan-warn { color: var(--bad); }
+    .chan-keys .seg button { padding: 5px 14px; }
+    .chan-keys .seg button:disabled { opacity: .55; cursor: not-allowed; }
+    .chan-note { display: block; font-size: 12px; margin-top: 4px; }
+    .chan-note.warn { color: var(--warn); }
+    .chan-note.bad { color: var(--bad); }
+    .chan-when { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .chan-adv { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+    .chan-adv summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+    .chan-adv-row { margin-top: 10px; align-items: flex-end; }
+    .chan-adv-go { display: flex; gap: 8px; flex: 0 0 auto; padding-bottom: 2px; }
+    .chan-adv input[readonly] { opacity: .7; }
     .chan-img { font-size: 12.5px; }
     #chanBody td { vertical-align: top; }
     #chanGaps code { white-space: nowrap; }
@@ -2037,37 +2047,49 @@
         <h2>Install games</h2>
         <p class="hint" id="deployWhy"></p>
       </div>
-      <!-- Update channel: stable, or the dev builds with an access code (games.js, docs/deployer.md "Dev channel"). -->
+      <!-- Update channel: an access code unlocks the dev builds, then each server has its own
+           Stable/Dev switch (games.js, docs/deployer.md "Dev channel"). -->
       <div class="panel" id="chanPanel" hidden>
         <h2>Update channel <span class="pill env" id="chanPill">Stable</span></h2>
-        <div class="chan-top">
-          <div class="seg" id="chanSeg" role="group" aria-label="Update channel">
-            <button type="button" data-chan="stable">Stable</button><button type="button" data-chan="dev">Dev</button>
-          </div>
-          <button class="ghost sm" id="chanNewCode" hidden>Enter a new access code</button>
-        </div>
         <p class="hint" id="chanHint"></p>
-        <p class="hint chan-warn" id="chanWarn" hidden></p>
+        <div class="chan-top" id="chanBar">
+          <button class="act sm" id="chanUnlock">Enter an access code</button>
+          <button class="ghost sm" id="chanNewCode" hidden>Enter a new access code</button>
+          <button class="ghost sm" id="chanLock" hidden>Forget the access code</button>
+        </div>
+        <p class="hint chan-warn" id="chanWarn" role="alert" hidden></p>
         <div class="ga-box" id="chanForm" hidden>
-          <h3>Switch to Dev</h3>
-          <p class="hint" style="margin-top:0">Paste the access code the developers gave you: a long one that
-            starts with olx, or a short dev code like <span class="nowrap">ABCD-EFGH-JKMN</span>, which works for one server only. The panel
-            hands it to the deployer, which checks it and keeps it; it is not stored here and never shown again.
-            Switching pulls the dev builds and restarts what runs them.</p>
+          <h3 id="chanFormHead">Unlock the dev builds</h3>
+          <p class="hint" style="margin-top:0">The panel hands the code to the deployer, which checks it and
+            keeps it; it is not stored here and never shown again. Unlocking changes nothing by itself: you then
+            pick Dev for each server that should follow the dev builds.</p>
           <div class="row">
-            <div style="flex:1 1 280px"><label for="chanCode">Access code</label>
-              <input type="password" id="chanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="olx1... or ABCD-EFGH-JKMN"></div>
+            <div style="flex:1 1 280px"><label for="chanCode">Access code (a short code like <span class="nowrap">ABCD-EFGH-JKMN</span>, or a full olx code)</label>
+              <input type="password" id="chanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH-JKMN or olx1..."></div>
           </div>
           <div class="ga-result bad" id="chanResult" role="alert" hidden></div>
           <div class="toolbar" style="margin-top:12px">
-            <button class="act sm" id="chanGo">Switch to Dev</button>
+            <button class="act sm" id="chanGo">Unlock</button>
             <button class="ghost sm" id="chanCancel">Cancel</button>
           </div>
         </div>
-        <div class="tablewrap"><table class="cards"><thead><tr><th>Runs</th><th>Stable image</th>
-          <th>On Dev</th><th id="chanSrcHead">Source</th></tr></thead><tbody id="chanBody"></tbody></table></div>
+        <div class="tablewrap"><table class="cards chan-keys"><thead><tr><th>Server</th><th>Dev build</th>
+          <th>Follows</th><th id="chanSrcHead">Source</th></tr></thead><tbody id="chanBody"></tbody></table></div>
         <p class="hint chan-src" id="chanGaps" hidden></p>
         <p class="hint chan-src" id="chanSource" hidden></p>
+        <details class="chan-adv" id="chanAdv">
+          <summary>Advanced</summary>
+          <div class="row chan-adv-row">
+            <div style="flex:1 1 280px"><label for="chanIssuer">Issuer of short codes</label>
+              <input type="text" id="chanIssuer" class="mono" maxlength="520" autocomplete="off" spellcheck="false" placeholder="https://openlobby.fyi"></div>
+            <div class="chan-adv-go">
+              <button class="ghost sm" id="chanIssuerSave">Save</button>
+              <button class="ghost sm" id="chanIssuerDefault">Use the default</button>
+            </div>
+          </div>
+          <p class="hint" id="chanIssuerHint"></p>
+          <div class="ga-result bad" id="chanIssuerResult" role="alert" hidden></div>
+        </details>
       </div>
       <div class="panel upd-panel" id="updDeploy" hidden></div>
       <div class="panel" id="deployPanel" hidden>

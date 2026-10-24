@@ -696,6 +696,27 @@ def check_channel(catalog, root, parent):
         ok(not miss and not any("\n  %s:\n" % s in "\n" + o for s in gone),
            "dev, published %s: the title chain's services are left to the chain (%s)" % (keys or "core", miss))
 
+    # per key: only what is on Dev gets its dev build in the override
+    def on(*keys):
+        return dict(DEV, unlocked=True, dev=list(keys))
+    for dev, want, gone in ((["ffxi"], ("world", "bridge"), ("dns", "tmrank", "login")),
+                            (["core"], ("dns", "sslterm"), ("world", "bridge", "tmrank")),
+                            (["tm"], ("tmrank",), ("dns", "world", "login")),
+                            ([], (), ("dns", "world", "tmrank"))):
+        p = stack.plan(catalog, ["ffxi", "tm"], ["up", "-d"], ghcr=True, root=root, parent=parent,
+                       environ={}, channel=on(*dev))
+        o = "\n" + p["override"]
+        ok(all("\n  %s:\n" % s in o for s in want) and not any("\n  %s:\n" % s in o for s in gone)
+           and (p["override"] == "") == (not dev),
+           "per key, published, %s on Dev: the override covers its services only" % (dev or "nothing"))
+    p = stack.plan(catalog, ["ffxi", "tm"], ["up", "-d"], ghcr=True, root=root, parent=parent, environ={},
+                   channel=on("ffxi"))
+    ok(p["steps"][-1]["env"].get("POL_TITLE_BASE_IMAGE", "").startswith("ghcr.io/"),
+       "per key: with the core on Stable the title chain stays on the published core")
+    p = stack.plan(catalog, ["tm"], ["up", "-d"], ghcr=True, root=root, parent=parent, environ={},
+                   channel=dict(on("ffxi"), unlocked=False))
+    ok(p["override"] == "", "per key: locked, nothing is swapped even with keys listed")
+
     # access codes: olx1. + base64url(JSON), checked strictly
     code = devchannel.make_code("registry.example.org/kart", "kart-token-0123", "https://code.example.org/kart")
     ok(code.startswith("olx1.") and "=" not in code and "kart-token" not in code
@@ -807,30 +828,135 @@ def check_channel(catalog, root, parent):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    # .channel round trip and refusals, in a scratch checkout
+    # .channel round trip, per key, the old file and refusals, in a scratch checkout
     tmp = tempfile.mkdtemp(prefix="stacktest-channel-")
     try:
-        ok(devchannel.read_channel(tmp) == {"channel": "stable"}, ".channel absent: stable")
-        devchannel.write_channel(tmp, "dev", "registry.example.org:5000/kart")
-        ch = devchannel.read_channel(tmp)
-        ok(ch["channel"] == "dev" and ch["registry"] == "registry.example.org:5000/kart"
+        ch = devchannel.read_channel(tmp, catalog)
+        ok(ch["channel"] == "stable" and ch["unlocked"] is False and ch["dev"] == [] and "problem" not in ch,
+           ".channel absent: locked, everything on Stable (%s)" % ch)
+        devchannel.unlock(tmp, "registry.example.org:5000/kart", catalog=catalog)
+        ch = devchannel.read_channel(tmp, catalog)
+        ok(ch["unlocked"] and ch["dev"] == [] and ch["channel"] == "stable"
+           and ch["registry"] == "registry.example.org:5000/kart"
            and ch["source"] == "https://registry.example.org:5000/kart" and ch.get("since"),
-           ".channel dev round trip, default source (%s)" % ch)
+           "unlock: the registry is recorded and nothing is on Dev (%s)" % ch)
+        doc = json.load(open(os.path.join(tmp, ".channel")))
+        ok(doc.get("version") == 2 and doc.get("unlocked") is True and doc.get("dev") == [],
+           ".channel is version 2: {unlocked, dev: [keys]} (%s)" % doc)
+        devchannel.set_key(tmp, "ffxi", "dev", catalog=catalog)
+        devchannel.set_key(tmp, "core", "dev", catalog=catalog)
+        ch = devchannel.read_channel(tmp, catalog)
+        ok(sorted(ch["dev"]) == ["core", "ffxi"] and ch["channel"] == "dev" and set(ch["dev_since"]) == {"core", "ffxi"},
+           "set_key: core and ffxi on Dev, each with its time (%s)" % ch["dev"])
+        try:
+            devchannel.lock(tmp, catalog)
+            ok(False, "lock refuses while a key is on Dev")
+        except devchannel.ChannelError as exc:
+            ok("Stable first" in str(exc), "lock refuses while a key is on Dev (%s)" % exc)
+        devchannel.set_key(tmp, "ffxi", "stable", catalog=catalog)
+        devchannel.unlock(tmp, "registry.example.org/kart2", catalog=catalog)
+        ch = devchannel.read_channel(tmp, catalog)
+        ok(ch["dev"] == ["core"] and ch["registry"] == "registry.example.org/kart2",
+           "a new code (unlock again) keeps what is on Dev (%s)" % ch["dev"])
+        devchannel.set_key(tmp, "core", "stable", catalog=catalog)
+        devchannel.lock(tmp, catalog)
+        ok(not os.path.exists(os.path.join(tmp, ".channel")), "lock with everything on Stable removes .channel")
+        try:
+            devchannel.set_key(tmp, "ffxi", "dev", catalog=catalog)
+            ok(False, "set_key dev refuses while locked")
+        except devchannel.ChannelError as exc:
+            ok(str(exc) == devchannel.LOCKED, "set_key dev refuses while locked (%s)" % exc)
+        ok(devchannel.set_key(tmp, "ffxi", "stable", catalog=catalog)["dev"] == [],
+           "set_key stable works while locked (nothing to do)")
+        # the version 1 file: every key with a dev build on Dev
+        with open(os.path.join(tmp, ".channel"), "w") as f:
+            json.dump({"channel": "dev", "registry": "registry.example.org/kart",
+                       "source": "https://code.example.org/kart", "since": "2026-10-01T10:00:00Z"}, f)
+        ch = devchannel.read_channel(tmp, catalog)
+        want = devchannel.dev_keys(catalog)
+        ok(ch["unlocked"] and ch.get("legacy") and ch["dev"] == want and "core" in want and "ffxi" in want
+           and ch["dev_since"].get("ffxi") == "2026-10-01T10:00:00Z" and ch["source"] == "https://code.example.org/kart",
+           "the old {channel: dev} file reads as every key with a dev build on Dev (%s)" % ch["dev"])
+        devchannel.set_key(tmp, "ffxi", "stable", catalog=catalog)
+        doc = json.load(open(os.path.join(tmp, ".channel")))
+        ok(doc.get("version") == 2 and doc["dev"] == [k for k in want if k != "ffxi"]
+           and doc["registry"] == "registry.example.org/kart" and doc["source"] == "https://code.example.org/kart"
+           and doc["since"] == "2026-10-01T10:00:00Z",
+           "the first write after it is version 2, the rest still on Dev (%s)" % doc["dev"])
+        with open(os.path.join(tmp, ".channel"), "w") as f:
+            json.dump({"channel": "stable"}, f)
+        ok(devchannel.read_channel(tmp, catalog)["dev"] == [], "the old {channel: stable} file: locked")
+        devchannel.write_channel(tmp, "dev", "registry.example.org:5000/kart", catalog=catalog)
+        ch = devchannel.read_channel(tmp, catalog)
+        ok(ch["dev"] == want and ch["unlocked"], "write_channel dev (setup's --channel dev): every key with a dev build")
         for bad in ("Registry.Example.org/kart", "registry.example.org/kart ; rm", "", "https://x.org/a"):
             try:
-                devchannel.write_channel(tmp, "dev", bad)
+                devchannel.write_channel(tmp, "dev", bad, catalog=catalog)
                 ok(False, ".channel refuses registry %r" % bad)
             except devchannel.ChannelError:
                 pass
+        for raw, what in (("{not json", "does not parse"), ('{"version": 3, "unlocked": true}', "newer version"),
+                          ('{"version": 2, "unlocked": true, "registry": "Not A Registry", "dev": ["ffxi"]}',
+                           "no usable registry")):
+            with open(os.path.join(tmp, ".channel"), "w") as f:
+                f.write(raw)
+            ch = devchannel.read_channel(tmp, catalog)
+            ok(ch["channel"] == "stable" and ch["dev"] == [] and ch.get("problem"),
+               "a .channel that %s: everything on Stable, with a sentence" % what)
         with open(os.path.join(tmp, ".channel"), "w") as f:
-            f.write("{not json")
-        ch = devchannel.read_channel(tmp)
-        ok(ch["channel"] == "stable" and ch.get("problem"), "a .channel that does not parse: stable, with a sentence")
+            f.write('{"version": 2, "unlocked": true, "registry": "registry.example.org/kart", '
+                    '"dev": ["ffxi", "Bad Key", 7, "ffxi"]}')
+        ok(devchannel.read_channel(tmp, catalog)["dev"] == ["ffxi"], "keys that do not fit are dropped")
         devchannel.write_channel(tmp, "stable")
         ok(not os.path.exists(os.path.join(tmp, ".channel")), "channel stable removes .channel")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # warnings: a game on Dev with the core on Stable, the core on Dev with a title game on Stable
+    keys = ["core", "ffxi", "tm"]
+    notes = devchannel.fit_notes(catalog, ["ffxi"], keys)
+    ok(set(notes) == {"ffxi"} and "may expect" in notes["ffxi"], "fit: ffxi on Dev, core on Stable (%s)" % notes)
+    notes = devchannel.fit_notes(catalog, ["core"], keys)
+    ok(set(notes) == {"ffxi", "tm"} and "builds on" in notes["tm"],
+       "fit: core on Dev, the games (each adds a title) on Stable (%s)" % notes)
+    ok(devchannel.fit_notes(catalog, ["core", "ffxi", "tm"], keys) == {}, "fit: all on Dev: nothing to say")
+    ok(len(devchannel.switch_notes(catalog, [], keys, "core", "dev")) == 2
+       and devchannel.switch_notes(catalog, ["core"], keys, "ffxi", "dev") == []
+       and len(devchannel.switch_notes(catalog, [], keys, "ffxi", "dev")) == 1,
+       "switch_notes: what a switch would leave")
+    ok(devchannel.services_of(catalog["tm"])[-2:] == ["login", "authsess"] and "world" in devchannel.services_of(catalog["ffxi"])
+       and "login" not in devchannel.services_of(catalog["ffxi"]),
+       "services_of: a published title link restarts the title chain's services too, a built one does not")
+
+    # the issuer of short codes: the environment, then the owner's setting, then the default
+    ok(devchannel.issuer_of("", None) == (devchannel.DEFAULT_ISSUER, "default")
+       and devchannel.DEFAULT_ISSUER == "https://openlobby.fyi", "issuer: the default")
+    ok(devchannel.issuer_of(None, "https://codes.example.org") == ("https://codes.example.org", "state"),
+       "issuer: the owner's setting over the default")
+    ok(devchannel.issuer_of(None, "off") == (None, "state"), "issuer: off by the owner")
+    ok(devchannel.issuer_of("http://127.0.0.1:9/", "https://codes.example.org") == ("http://127.0.0.1:9", "env")
+       and devchannel.issuer_of("OFF", "https://codes.example.org") == (None, "env"),
+       "issuer: POL_DEV_ISSUER wins over the setting, off included")
+    for bad in ("http://codes.example.org", "codes.example.org", "https://", "https://a b", 7, "ftp://x"):
+        try:
+            devchannel.check_issuer(bad)
+            ok(False, "issuer setting refuses %r" % (bad,))
+        except devchannel.ChannelError:
+            ok(True, "issuer setting refuses %r" % (bad,))
+    ok(devchannel.check_issuer(" https://codes.example.org/ ") == "https://codes.example.org"
+       and devchannel.check_issuer("Off") == "off" and devchannel.check_issuer("") is None,
+       "issuer setting: an https address, off, or empty for the default")
+    tmp = tempfile.mkdtemp(prefix="stacktest-issuer-")
+    try:
+        st = devchannel.IssuerStore(tmp)
+        ok(st.get() is None and st.set("https://codes.example.org/") == "https://codes.example.org"
+           and st.get() == "https://codes.example.org" and st.set("") is None and st.get() is None,
+           "IssuerStore: kept, then back to the default")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     for argv, want in ((["channel", "dev"], "--registry"), (["channel", "beta"], "stable or dev"),
+                       (["channel", "unlock"], "--registry"), (["channel", "set", "ffxi"], "a key and"),
+                       (["channel", "set", "nothing", "dev"], "no dev build"),
                        (["channel", "dev", "--registry", "not a registry"], "registry")):
         r = subprocess.run([sys.executable, os.path.join(HERE, "stack.py")] + argv,
                            capture_output=True, text=True)
