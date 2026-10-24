@@ -10,8 +10,9 @@ module folder is read and its mistakes reported rather than fatal, that
 POL_ADMIN_MODULES picks what a server shows, that the status readers turn the
 games' JSON into the panel's shape, and that "{core}" in container names
 becomes the deployment's compose project, and that FFXI's account window lookup asks the
-bridge's Characters tool by member id. No database; the one network call is to a stand-in on
-loopback.
+bridge's Characters tool by member id, and that a module file's own update report reaches the
+status and the Updates list, its slow check run in the background. No database; the one network
+call is to a stand-in on loopback.
 """
 import json
 import os
@@ -301,6 +302,87 @@ chk("...asked for that range with the panel's token",
 srv.shutdown()
 mods = reload(POL_ADMIN_MODULES_DIR=CAL_MODS, POL_ADMIN_MODULES="kart")
 chk("without its tools set up there is nothing to ask", mods["kart"].calendar(mods["kart"], lo, hi), [])
+
+print("a module file's own update report (Module(update=...))")
+UPD_MODS = tempfile.mkdtemp(prefix="updmods-")
+with open(os.path.join(UPD_MODS, "kart.py"), "w") as f:
+    f.write("from adminmodules import Module, sources\n"
+            "REPORT = {'update': 'current', 'running': {'commit': 'abc1234'}, 'latest': {'commit': 'abc1234'}}\n"
+            "MODULE = Module('kart', 'Kart Club', update=lambda m: REPORT)\n")
+with open(os.path.join(UPD_MODS, "derby.py"), "w") as f:
+    f.write("from adminmodules import Module\n"
+            "def _live(m):\n"
+            "    return {'up': True, 'online': 3, 'update': {'update': 'available'}}\n"
+            "MODULE = Module('derby', 'Derby Night', live=_live,\n"
+            "                update=lambda m: {'update': 'unknown', 'why': 'Its own.'})\n")
+mods = reload(POL_ADMIN_MODULES_DIR=UPD_MODS, POL_ADMIN_MODULES="kart,derby")
+got = M.live("kart")
+chk("no live source: a status of its report alone", (got["up"], got["update"]["update"]), (None, "current"))
+got = M.live("derby")
+chk("with a live source: its status, the module's report winning over the status JSON's",
+    (got["online"], got["update"]), (3, {"update": "unknown", "why": "Its own."}))
+spec_m = M.Module("derby2", "Derby Two", update=lambda m: (_ for _ in ()).throw(RuntimeError("no")))
+got = M._read_live(spec_m)
+chk("a report that raises: unknown, saying so",
+    (got["update"]["update"], got["update"]["why"]), ("unknown", "The update check for Derby Two failed (RuntimeError)."))
+chk("a module with neither has no status", M._read_live(M.Module("plain", "Plain")), None)
+import adminupdates  # noqa: E402
+os.environ["POL_ADMIN_UPDATE_REPO"] = "off"
+upd = {i["key"]: i for i in adminupdates.overview()["items"]}
+chk("the Updates list shows it", (upd["kart"]["update"], upd["kart"]["running"]["commit"], upd["derby"]["why"]),
+    ("current", "abc1234", "Its own."))
+
+print("sources.background: the slow check in a thread, the last answer at once")
+import time  # noqa: E402
+CALLS = []
+GATE = threading.Event()
+
+
+def _slow(m):
+    GATE.wait(5)
+    CALLS.append(time.time())
+    return dict(NEXT)
+
+
+NEXT = {"update": "current"}
+bg = sources.background(_slow, ttl=60, retry=1)
+km = M.Module("kart", "Kart Club")
+
+
+def settle():
+    for _ in range(200):
+        if not bg.state["running"]:
+            return
+        time.sleep(0.01)
+
+
+chk("before the first check is in: unknown, saying it runs",
+    bg(km), {"update": "unknown", "why": "The update check for Kart Club is running."})
+chk("...one check started, not one per read", (bg(km)["update"], bg.state["running"]), ("unknown", True))
+GATE.set()
+settle()
+chk("then its report", (bg(km), len(CALLS)), ({"update": "current"}, 1))
+chk("...kept for the ttl", (bg(km), len(CALLS)), ({"update": "current"}, 1))
+bg.state["at"] -= 61
+bg(km)
+settle()
+chk("asked again after the ttl", len(CALLS), 2)
+NEXT = {"update": "unknown", "why": "GitHub could not be reached.", "retry": True}
+bg.state["at"] -= 61
+bg(km)
+settle()
+chk("a report saying retry: shown without its retry flag", bg(km), {"update": "unknown", "why": "GitHub could not be reached."})
+bg.state["at"] -= 1.5
+bg(km)
+settle()
+chk("...and asked again after the shorter retry", len(CALLS), 4)
+chk("pending(m) stands in before the first report", sources.background(_slow, pending=lambda m: {"update": "unknown", "why": "Soon."})(km),
+    {"update": "unknown", "why": "Soon."})
+os.environ["POL_ADMIN_GITHUB_API"] = "http://127.0.0.1:9/"
+gh = sources.github()
+chk("sources.github(): one shared client at POL_ADMIN_GITHUB_API", (gh.api, sources.github() is gh), ("http://127.0.0.1:9", True))
+del os.environ["POL_ADMIN_GITHUB_API"]
+chk("...a new one when the address changes", sources.github().api, "https://api.github.com")
 
 print("all checks passed" if not bad else "%d check(s) FAILED" % bad)
 sys.exit(1 if bad else 0)

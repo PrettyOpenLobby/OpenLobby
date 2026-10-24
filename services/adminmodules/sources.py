@@ -21,6 +21,9 @@ live-session markers the POL titles publish. A module passes `parse` to pick
 out what only its game has.
 """
 import json
+import os
+import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -290,3 +293,64 @@ def tool_calendar(path="calendar.json"):
                         "about": _text(e.get("about"), 300), "times": times})
         return out
     return cal
+
+
+# -- update reports ------------------------------------------------------------ #
+# A module's update is fn(module) -> the "update" object (docs/admin-modules.md), asked with every
+# live read. A report that has to ask GitHub is too slow for that, so background() runs the real
+# check in a thread and answers from what it found last.
+
+_GH = {"client": None, "api": None}
+_gh_lock = threading.Lock()
+
+
+def github():
+    """The GitHub client update checks share (deployer/updatecheck.py's, without a token, every
+    answer kept an hour), at POL_ADMIN_GITHUB_API (tests point it at a stand-in)."""
+    try:
+        import updatecheck
+    except ImportError:
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.append(os.path.join(here, "deployer"))
+        import updatecheck
+    api = os.environ.get("POL_ADMIN_GITHUB_API", "").strip().rstrip("/") or updatecheck.API
+    with _gh_lock:
+        if _GH["client"] is None or _GH["api"] != api:
+            _GH["client"], _GH["api"] = updatecheck.GitHub(api=api), api
+        return _GH["client"]
+
+
+def background(check, ttl=3600.0, retry=300.0, pending=None):
+    """An `update` for MODULE that runs check(module) -> report in a thread at most every `ttl`
+    seconds and answers at once with the last report; `pending(module)` (or a plain "unknown")
+    until the first one is in. A check that raised, or whose report says "retry": true (it could
+    not ask, as opposed to finding the answer unknown), runs again after `retry` seconds."""
+    state = {"at": 0.0, "report": None, "running": False, "retry": False}
+    lock = threading.Lock()
+
+    def run(m):
+        try:
+            got = check(m)
+            again = isinstance(got, dict) and got.pop("retry", None) is True
+        except Exception as exc:                       # noqa: BLE001 -- the report says so
+            got = {"update": "unknown", "why": "The update check for %s failed (%s)."
+                   % (m.title, exc.__class__.__name__)}
+            again = True
+        with lock:
+            state.update(at=time.time(), report=got, running=False, retry=again)
+
+    def update(m):
+        now = time.time()
+        with lock:
+            rep = state["report"]
+            gap = retry if state["retry"] else ttl
+            if not state["running"] and (rep is None or now - state["at"] >= gap):
+                state["running"] = True
+                threading.Thread(target=run, args=(m,), daemon=True,
+                                 name="update-" + m.key).start()
+        if rep is not None:
+            return rep
+        return pending(m) if pending else {"update": "unknown",
+                                           "why": "The update check for %s is running." % m.title}
+    update.state = state
+    return update

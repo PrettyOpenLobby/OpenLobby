@@ -248,6 +248,32 @@ MODULE = Module(
 A module file can offer the player picker too: `Module(..., players=find)`,
 where `find(module, q, limit)` returns the same rows as players.json.
 
+It can also say whether the game runs its newest version, for a game whose
+status JSON has no `update` object or that has no status JSON at all:
+`Module(..., update=report)`, where `report(module)` returns the `update`
+object described under status.json. It is asked with every live read, and
+its answer wins over one the status JSON carried. A check that asks GitHub is
+too slow for that, so wrap it in `sources.background(check)`: it runs
+`check(module)` in a thread at most once an hour and answers at once with the
+last report (an `unknown` saying the check is running, until the first one is
+in). A report with `"retry": true` (the check could not ask, which is not the
+same as finding the answer unknown) is tried again after five minutes.
+`sources.github()` is a GitHub client that asks without a token and keeps
+every answer an hour, at `POL_ADMIN_GITHUB_API` when that is set.
+
+```python
+from adminmodules import Module, sources
+
+def _check(m):
+    gh = sources.github()
+    import updatecheck
+    it = updatecheck.item("kart", m.title, running="1a2b3c4d5e6f")
+    updatecheck.check_github(it, gh, "kart-club/kart-server", "main")
+    return it
+
+MODULE = Module("kart", "Kart Club", update=sources.background(_check))
+```
+
 `sources.board` reads the JSON at `POL_ADMIN_GAME_KART_LIVE` (a URL or a file)
 in the status shape above, then calls `_parse` for anything only this game has.
 Tools are served from `POL_ADMIN_GAME_KART_URL`, as with the protocol.

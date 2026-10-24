@@ -14,7 +14,11 @@ A module is a file in this package (or in POL_ADMIN_MODULES_DIR) that sets
                 a live-session marker, the game's status JSON, or both,
   - actions     things the panel can ask the game to do (announce, kick...),
   - content_ids the PlayOnline content ids that belong to it, so an account's
-                page can say which games the player has.
+                page can say which games the player has,
+  - update      whether the game runs its newest version, for the Updates list:
+                fn(module) -> the "update" object a status JSON may carry
+                (docs/admin-modules.md), for a game whose status JSON has none
+                or that has no status JSON at all.
 
 Every module gets permissions of its own: `game.<key>` to see it, and one
 `game.<key>.<id>` per tool and per action. A moderator holding the old
@@ -149,7 +153,7 @@ class Module:
     def __init__(self, key, title, short="", platform="", kind="game",
                  tools=(), services=None, live=None, actions=(), content_ids=(),
                  about="", markers=(), present=None, self_described=False, calendar=None,
-                 help=None, player=None, players=None, accounts=""):
+                 help=None, player=None, players=None, accounts="", update=None):
         self.key, self.title, self.short = key, title, short or title
         self.platform, self.kind, self.about = platform, kind, about
         self.tools = list(tools)
@@ -168,6 +172,10 @@ class Module:
         #: (one shared by several games, when they sign in with the same login); the
         #: module key when the game has none of its own. The People pages link logins under it.
         self.accounts = accounts or key
+        #: fn(module) -> the game's update report ("update" in docs/admin-modules.md), or None.
+        #: It is asked with every live read (see _read_live), so it answers from what it last
+        #: found and does any slow asking elsewhere (sources.background)
+        self.update = update
         self.actions = list(actions)
         self.content_ids = list(content_ids)
         #: live-session markers (live_sessions.py) that mean this game runs here
@@ -431,6 +439,7 @@ def _remotes(out):
             mod.help = mod.help or file_mod.help
             mod.player = mod.player or file_mod.player
             mod.players = mod.players or file_mod.players
+            mod.update = mod.update or file_mod.update
             if mod.accounts == key:
                 mod.accounts = file_mod.accounts
         _accept(mod, "the game at %s" % url, out, "game")
@@ -605,13 +614,26 @@ _pool = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix=
 
 
 def _read_live(m):
-    if m.live is None:
+    if m.live is None and m.update is None:
         return None
     t0 = time.time()
-    try:
-        got = m.live(m)
-    except Exception as exc:                   # noqa: BLE001 -- a module's fault is its own
-        got = {"up": None, "error": "status unreadable: %s" % (exc.__class__.__name__,)}
+    got = None
+    if m.live is not None:
+        try:
+            got = m.live(m)
+        except Exception as exc:               # noqa: BLE001 -- a module's fault is its own
+            got = {"up": None, "error": "status unreadable: %s" % (exc.__class__.__name__,)}
+    if m.update is not None:
+        # the module's own update report wins over one its status JSON carried; the Updates
+        # list reads it from here (adminupdates.game_reports)
+        try:
+            upd = m.update(m)
+        except Exception as exc:               # noqa: BLE001
+            upd = {"update": "unknown", "why": "The update check for %s failed (%s)."
+                   % (m.title, exc.__class__.__name__)}
+        if upd is not None:
+            got = dict(got) if got is not None else {"up": None}
+            got["update"] = upd
     if got is not None:
         got.setdefault("at", t0)
     return got
