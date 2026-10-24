@@ -53,8 +53,10 @@ and a title is on 53000 plus its content id.
 | `0002` | Tetra Master | 53002 |
 | `0003` | Janhourou | 53003 |
 | `0004` | Front Mission Online | 53004 |
+| `0010` | Dirge of Cerberus: Final Fantasy VII | 53010 |
 | `0011` | Fantasy Earth | 53011 |
 | `0014` | PlayOnline Friend List | 53014 |
+| `0015` | FINAL FANTASY XI Test Server | 53015 |
 
 The compose file publishes 54000 and 53001-53015. A tree on any other port
 needs that port added to the `patch` service's `ports:` list.

@@ -75,8 +75,10 @@ PRODUCTS = {
     "0002": "Tetra Master",
     "0003": "Janhourou",
     "0004": "Front Mission Online",
+    "0010": "Dirge of Cerberus: Final Fantasy VII",
     "0011": "Fantasy Earth",
     "0014": "PlayOnline Friend List",
+    "0015": "FINAL FANTASY XI Test Server",
 }
 
 GIB = 1024 ** 3
