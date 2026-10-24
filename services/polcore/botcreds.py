@@ -22,6 +22,13 @@ of its rows changes; the container's restart policy brings it back on the new
 values. Exiting is the honest reload: a token is baked into Gateway sockets,
 REST clients and feed threads all over a board service.
 
+The same row holds the bot's Fluxer side (migration 0023): a board posts on
+Fluxer beside Discord as a second bot, with its token (fluxer_token) and the
+Fluxer channels each of its feeds posts in (fluxer_channels, {feed key:
+"id,id"}): Fluxer has no slash commands, so channels are named here or in
+POL_BOARDS_<KEY>_FLUXER_CHANNELS, not picked with /<name>board. A board with
+neither keeps its POL_BOARDS_<NAME>_FLUXER_BOT_TOKEN as before.
+
 The token is sealed like accounts' login-password copies: an HMAC-SHA256 key
 stream with a 16-byte HMAC tag, stdlib only (the board images have no crypto
 library). A row sealed under another key unseals to "" and the service falls
@@ -43,6 +50,9 @@ import urllib.request
 
 SEAL_VER = "b1"
 DISCORD_API = "https://discord.com/api/v10"
+#: Fluxer's API is Discord's shape. Its own address, not fluxer.app's: that one
+#: answers with a 308 that Python 3.10's urllib does not follow.
+FLUXER_API = os.environ.get("POL_BOARDS_FLUXER_API", "https://api.fluxer.app/v1")
 _UA = "DiscordBot (https://playonline.invalid/botcreds, 1) polcore-botcreds"
 
 #: what a board bot needs in a channel: view, send, embed links, attach files,
@@ -86,6 +96,36 @@ def known():
     return out
 
 FIELDS = ("token", "app_id", "public_key", "url")
+
+#: a board's extra feeds, each posting a message of its own: KEEP == polboards FEEDS. The
+#: key is <board>_<feed>; the ones in SHARES_MAIN post beside the board when they have no
+#: channels of their own (polboards FEED_SHARES_MAIN), the others are off without them.
+FEEDS = {"tm": ("auction", "live"), "jan": ("live",), "fmo": ("arenas",), "ffxi": ("conquest", "auction")}
+SHARES_MAIN = frozenset({"jan_live", "tm_live", "ffxi_conquest", "ffxi_auction"})
+
+
+def feed_keys(name):
+    """[(key, feed)] of every message board `name` posts: (name, "") first."""
+    return [(name, "")] + [("%s_%s" % (name, f), f) for f in FEEDS.get(name, ())]
+
+
+#: the boards whose game has news (newsgen's contents), and that content: the PlayOnline
+#: bridge posts it in the board's "<name>_news" channels as the board's own bot
+NEWS_BOARDS = {"tm": "tetra", "jan": "jan", "fmo": "fmo", "ffxi": "ffxi", "fe": "fe", "doc": "doc"}
+
+
+def discord_channels(row):
+    """{feed key: "id,id"} from a row's discord_channels; {} when there are none."""
+    return fluxer_channels(row, "discord_channels")
+
+
+def fluxer_channels(row, column="fluxer_channels"):
+    """{feed key: "id,id"} from a row's fluxer_channels; {} when there are none."""
+    try:
+        got = json.loads((row or {}).get(column) or "{}")
+    except ValueError:
+        return {}
+    return {str(k): str(v) for k, v in got.items()} if isinstance(got, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +201,9 @@ def rows():
         r = dict(r)
         sealed = r.pop("token_sealed")
         r.update(has_token=bool(sealed), token_ok=bool(tok), token_hint=hint(tok))
+        fsealed = r.pop("fluxer_token_sealed", "") or ""
+        ftok = unseal(fsealed)
+        r.update(fluxer_has_token=bool(fsealed), fluxer_token_ok=bool(ftok), fluxer_token_hint=hint(ftok))
         out[r["name"]] = r
     return out
 
@@ -174,19 +217,26 @@ def get(name):
     r = dict(r)
     sealed = r.pop("token_sealed")
     r.update(token=unseal(sealed), has_token=bool(sealed))
+    fsealed = r.pop("fluxer_token_sealed", "") or ""
+    r.update(fluxer_token=unseal(fsealed), fluxer_has_token=bool(fsealed))
     return r
 
 
-def save(name, by, token=None, **fields):
-    """Create or update a row. token=None keeps the stored one, "" clears it;
-    other fields (app_id, public_key, username, url, discord_info: the JSON of
-    describe()) are set when given."""
+def save(name, by, token=None, fluxer_token=None, **fields):
+    """Create or update a row. token=None keeps the stored one, "" clears it,
+    and fluxer_token the same for the Fluxer one; other fields (app_id,
+    public_key, username, url, discord_info: the JSON of describe(),
+    fluxer_channels, fluxer_info: the JSON of fluxer_describe(), discord_channels) are set when
+    given."""
     if name not in known():
         raise ValueError("unknown bot %r" % (name,))
     row = {"name": name, "updated_at": time.time(), "updated_by": by}
     if token is not None:
         row["token_sealed"] = seal(token) if token else ""
-    for k in ("app_id", "public_key", "username", "url", "discord_info"):
+    if fluxer_token is not None:
+        row["fluxer_token_sealed"] = seal(fluxer_token) if fluxer_token else ""
+    for k in ("app_id", "public_key", "username", "url", "discord_info", "fluxer_channels",
+              "fluxer_info", "discord_channels"):
         if fields.get(k) is not None:
             row[k] = str(fields[k]).strip()
     _db().upsert("discord_bot", row, "name")
@@ -271,12 +321,12 @@ def watch(names, every=None, exit_fn=None, label="service"):
 # ---------------------------------------------------------------------------
 # Discord
 # ---------------------------------------------------------------------------
-def api(token, method, path, body=None, timeout=10):
-    """(status, parsed JSON or None) for one bot-authenticated call. A 429 is
-    waited out once."""
+def api(token, method, path, body=None, timeout=10, base=None):
+    """(status, parsed JSON or None) for one bot-authenticated call, to Discord
+    or to `base` (FLUXER_API). A 429 is waited out once."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
     for attempt in (0, 1):
-        req = urllib.request.Request(DISCORD_API + path, data=data, method=method)
+        req = urllib.request.Request((base or DISCORD_API) + path, data=data, method=method)
         req.add_header("Authorization", "Bot " + token)
         req.add_header("User-Agent", _UA)
         if data is not None:
@@ -347,6 +397,34 @@ def set_endpoint(token, url):
         detail = json.dumps(errs)[:300] if errs else ""
         msg = (msg + (" " + detail if detail else "")).strip()
     return False, "Discord refused the endpoint (%s): %s" % (st, msg or "no reason given")
+
+
+def fluxer_describe(token, channels=()):
+    """What Fluxer says about the bot behind `token` and the channels it is to post in:
+    {user_id, username, app_name, public, guilds (the servers' names), channels: {id:
+    {"name", "guild"} or {"error"}}, checked_at}, or {"error": text}."""
+    st, me = api(token, "GET", "/users/@me", base=FLUXER_API)
+    if st != 200 or not isinstance(me, dict) or not me.get("id"):
+        msg = (me or {}).get("message") if isinstance(me, dict) else None
+        return {"error": "Fluxer refused the token (%s%s)" % (st, ": " + msg if msg else "")}
+    out = {"user_id": str(me["id"]), "username": me.get("username") or "", "app_name": "",
+           "public": None, "guilds": None, "channels": {}, "checked_at": time.time()}
+    st, app = api(token, "GET", "/applications/@me", base=FLUXER_API)
+    if st == 200 and isinstance(app, dict):
+        out.update(app_name=app.get("name") or "", public=bool(app.get("bot_public")))
+    st, gs = api(token, "GET", "/users/@me/guilds", base=FLUXER_API)
+    names = {}
+    if st == 200 and isinstance(gs, list):
+        names = {str(g.get("id")): g.get("name") or "" for g in gs if isinstance(g, dict)}
+        out["guilds"] = sorted(names.values())
+    for cid in channels:
+        st, ch = api(token, "GET", "/channels/%s" % cid, base=FLUXER_API)
+        if st == 200 and isinstance(ch, dict):
+            out["channels"][cid] = {"name": ch.get("name") or "",
+                                    "guild": names.get(str(ch.get("guild_id")), "")}
+        else:
+            out["channels"][cid] = {"error": "the bot cannot see it (%s)" % st}
+    return out
 
 
 def invite_url(name, app_id):

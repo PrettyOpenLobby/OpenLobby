@@ -1,0 +1,254 @@
+{
+ "about": "Retail patch versions known to exist, per bundle (REGION-PRODUCT), and where each is known from. polpatch_lib.provenance() reads it; docs/patching.md, \"Where each version comes from\". A version a bundle holds that is neither here nor among the versions published into it is retail when the bundle was mirrored from Square Enix's own server.",
+ "sources": {
+  "se-server": "listed by Square Enix's own patch server when it was mirrored",
+  "se-final-list": "named by Square Enix's final patch list for it, as a client kept it after the last update",
+  "console-cache": "Square Enix's real patch, from a console's patch cache",
+  "archive": "an archived copy of Square Enix's patch",
+  "disc": "the version a retail disc installs (nothing to download)",
+  "disc-build": "Square Enix's build that a later retail disc installs",
+  "install": "a retail install's own version",
+  "our-label": "the files of a retail install that was never patched; the version number is ours",
+  "our-build": "built for this server, not a Square Enix release"
+ },
+ "bundles": {
+  "PS2-0001": {
+   "final_list": true,
+   "source": "se-final-list",
+   "versions": [
+    "20020329_3",
+    "20151103_0",
+    "20151103_1",
+    "20151103_2",
+    "20151103_3",
+    "20151204_0",
+    "20151204_1",
+    "20151204_2",
+    "20151215_0",
+    "20151223_0",
+    "20160203_0"
+   ],
+   "note": "The bundle keeps each file's last row only, so older versions are known but not held. Square Enix's longer history (19 versions) is in a donated client archive."
+  },
+  "PS2-0004": {
+   "final_list": true,
+   "source": "se-final-list",
+   "versions": [
+    "20050415_2",
+    "20051101_2",
+    "20051219_2",
+    "20051221_0",
+    "20051221_1",
+    "20060112_0",
+    "20060113_0",
+    "20060124_0",
+    "20060125_0",
+    "20060130_0",
+    "20060131_0",
+    "20060222_0",
+    "20060223_0",
+    "20060223_1",
+    "20060224_0",
+    "20060224_1",
+    "20060224_2",
+    "20060302_0",
+    "20060306_0",
+    "20060306_1",
+    "20060410_0",
+    "20060417_0",
+    "20060508_0",
+    "20060508_1",
+    "20060522_0",
+    "20060526_0",
+    "20060704_0",
+    "20060725_0",
+    "20060726_0",
+    "20060727_0",
+    "20060728_0",
+    "20060729_0",
+    "20060729_1",
+    "20060731_0",
+    "20060731_1",
+    "20060731_2",
+    "20060802_0",
+    "20060802_1",
+    "20060803_0",
+    "20060803_1",
+    "20060803_2",
+    "20060803_3",
+    "20060805_0",
+    "20060807_0",
+    "20060807_1",
+    "20060807_2",
+    "20060808_0",
+    "20060808_1",
+    "20060810_0",
+    "20060810_1",
+    "20060811_0",
+    "20060823_0",
+    "20060919_0",
+    "20060919_1",
+    "20061026_0",
+    "20061030_0",
+    "20061030_1"
+   ]
+  },
+  "P2U-0004": {
+   "final_list": true,
+   "source": "se-final-list",
+   "versions": [
+    "20050415_2",
+    "20051101_2",
+    "20051219_2",
+    "20051221_0",
+    "20051221_1",
+    "20060112_0",
+    "20060113_0",
+    "20060124_0",
+    "20060125_0",
+    "20060130_0",
+    "20060131_0",
+    "20060222_0",
+    "20060223_0",
+    "20060223_1",
+    "20060224_0",
+    "20060224_1",
+    "20060224_2",
+    "20060302_0",
+    "20060306_0",
+    "20060306_1",
+    "20060410_0",
+    "20060417_0",
+    "20060508_0",
+    "20060508_1",
+    "20060522_0",
+    "20060526_0",
+    "20060704_0",
+    "20060725_0",
+    "20060726_0",
+    "20060727_0",
+    "20060728_0",
+    "20060729_0",
+    "20060729_1",
+    "20060731_0",
+    "20060731_1",
+    "20060731_2",
+    "20060802_0",
+    "20060802_1",
+    "20060803_0",
+    "20060803_1",
+    "20060803_2",
+    "20060803_3",
+    "20060805_0",
+    "20060807_0",
+    "20060807_1",
+    "20060807_2",
+    "20060808_0",
+    "20060808_1",
+    "20060810_0",
+    "20060810_1",
+    "20060811_0",
+    "20060823_0",
+    "20060919_0",
+    "20060919_1",
+    "20061026_0",
+    "20061030_0",
+    "20061030_1"
+   ],
+   "note": "Square Enix ran this title in Japan only; these are its Japanese versions."
+  },
+  "PS2-0010": {
+   "final_list": true,
+   "source": "se-final-list",
+   "versions": [
+    "20051209_6",
+    "20060124_0",
+    "20060124_3"
+   ]
+  },
+  "P2U-0010": {
+   "final_list": true,
+   "source": "se-final-list",
+   "versions": [
+    "20051209_6",
+    "20060124_0",
+    "20060124_3"
+   ],
+   "note": "Square Enix ran this title in Japan only; these are its Japanese versions."
+  },
+  "XB2-0001": {
+   "final_list": true,
+   "source": "se-final-list",
+   "versions": [
+    "40060401_0",
+    "40151103_1",
+    "40151103_2",
+    "40151103_3",
+    "40151204_1",
+    "40151204_2",
+    "40151215_0",
+    "40151223_0",
+    "40160203_0"
+   ]
+  },
+  "P2U-0002": {
+   "versions": {
+    "20031021_0": "disc",
+    "20040908_0": "console-cache"
+   }
+  },
+  "PS2-0002": {
+   "versions": {
+    "20020314_0": "install",
+    "20040908_0": "console-cache"
+   }
+  },
+  "W2U-0002": {
+   "versions": {
+    "20030429_0": "install"
+   }
+  },
+  "W20-0002": {
+   "versions": {
+    "20020410_0": "install",
+    "20040909_0": "disc-build"
+   }
+  },
+  "PS2-0003": {
+   "versions": {
+    "20020314_0": "install",
+    "20040727_2": "disc-build"
+   }
+  },
+  "P2U-0003": {
+   "versions": {
+    "20040727_2": "disc-build"
+   }
+  },
+  "W20-0004": {
+   "versions": {
+    "20060823_0": "our-label"
+   }
+  },
+  "W20-0011": {
+   "versions": {
+    "20051220_1": "install"
+   }
+  },
+  "W20-0015": {
+   "versions": {
+    "20110811_A": "install"
+   }
+  },
+  "W2U-0003": {
+   "versions": {
+    "20261009_14": "our-build"
+   }
+  },
+  "W2U-0010": {
+   "versions": {
+    "20261009_1": "our-build"
+   }
+  }
+ }
+}

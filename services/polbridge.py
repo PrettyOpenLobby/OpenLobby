@@ -113,7 +113,30 @@ NEWS_WEBHOOK_NAME = "OpenLobby News"
 GAME_BOTS = {k.strip(): v.strip() for k, _, v in
              (p.partition("=") for p in os.environ.get("POL_BRIDGE_GAME_BOTS", "").split(","))
              if k.strip() and v.strip()}
-#: user id -> (when looked up, {"username", "avatar_url"} or None)
+#: FLUXER, BESIDE Discord: the news posts also go to
+#: Fluxer. Fluxer has no slash commands, so its channels and ping roles are
+#: config, not /playonline announce: channel ids "123,456", roles
+#: "ffxi=789,tetra=790", and its own game bots' user ids (as GAME_BOTS).
+FLUXER_API = getattr(polboards, "FLUXER_API", "https://api.fluxer.app/v1")
+FLUXER_MEDIA = os.environ.get("POL_BRIDGE_FLUXER_MEDIA", "https://fluxerusercontent.com")
+
+
+def _pairs(text):
+    return {k.strip(): v.strip() for k, _, v in
+            (p.partition("=") for p in (text or "").split(",")) if k.strip() and v.strip()}
+
+
+FLUXER_ANNOUNCE = [c.strip() for c in os.environ.get("POL_BRIDGE_FLUXER_ANNOUNCE", "").split(",")
+                   if c.strip()]
+FLUXER_ANNOUNCE_ROLES = _pairs(os.environ.get("POL_BRIDGE_FLUXER_ANNOUNCE_ROLES", ""))
+FLUXER_GAME_BOTS = _pairs(os.environ.get("POL_BRIDGE_FLUXER_GAME_BOTS", ""))
+#: which platform this thread's api() calls go to (use_platform)
+_PLAT = threading.local()
+#: GAME-ONLY news: a game's own channels, on Discord or Fluxer, that get
+#: only that game's news, posted AS THE GAME'S OWN BOT (no webhook). From the Bots tab (each news
+#: board's "<name>_news" channels), filled by use_registry: [{plat, channel, content, bot, token}]
+GAME_NEWS = []
+#: (platform, user id) -> (when looked up, {"username", "avatar_url"} or None)
 _PROFILES = {}
 PROFILE_TTL_S = 3600.0
 #: channel id -> when a webhook could not be made there (retried after an hour)
@@ -179,11 +202,44 @@ def log(text):
 # Discord REST
 # --------------------------------------------------------------------------- #
 
+def on_fluxer():
+    return getattr(_PLAT, "fluxer", False)
+
+
+def use_platform(where):
+    """Point this thread's api() calls at Fluxer or Discord: `where` is a
+    target or post dict ({"plat": "fluxer"}), True / False, or None (Discord).
+    A game-news target or post ({"bot": "tm"}) also makes them that game's bot.
+    Returns what it was, for putting back."""
+    was = (on_fluxer(), getattr(_PLAT, "token", None))
+    token = None
+    if isinstance(where, tuple):                       # what an earlier call returned
+        where, token = where
+    elif isinstance(where, dict):
+        token = where.get("token") or _game_token(where)
+        where = where.get("plat") == "fluxer"
+    _PLAT.fluxer, _PLAT.token = bool(where), token
+    return was
+
+
+def _game_token(where):
+    """The token of the game bot a game-news post was made as, or None."""
+    for g in GAME_NEWS if where.get("bot") else ():
+        if g["bot"] == where["bot"] and g["plat"] == (where.get("plat") or "discord"):
+            return g["token"]
+    return None
+
+
 def api(method, path, payload=None, token=None):
-    """One Discord API call -> (status, json). A 429 is waited out once."""
-    token = token if token is not None else ARGS.token
+    """One Discord API call -> (status, json). A 429 is waited out once. On a
+    thread use_platform() pointed at Fluxer it is a Fluxer call instead."""
+    fluxer = on_fluxer()
+    if token is None:
+        token = (getattr(_PLAT, "token", None)
+                 or (ARGS.fluxer_token if fluxer else ARGS.token))
     for attempt in (0, 1):
-        req = urllib.request.Request(DISCORD_API + path, method=method,
+        req = urllib.request.Request((FLUXER_API if fluxer else DISCORD_API) + path,
+                                     method=method,
                                      data=None if payload is None
                                      else json.dumps(payload).encode("utf-8"))
         req.add_header("User-Agent", _UA)
@@ -554,7 +610,8 @@ def _profile(uid):
     """{"username", "avatar_url"} of Discord user `uid` ("@me" = the bridge),
     cached for an hour; None when it cannot be read."""
     now = time.time()
-    hit = _PROFILES.get(uid)
+    key = ("fluxer" if on_fluxer() else "discord", uid)
+    hit = _PROFILES.get(key)
     if hit and now - hit[0] < PROFILE_TTL_S:
         return hit[1]
     st, data = api("GET", "/users/%s" % uid)
@@ -562,16 +619,20 @@ def _profile(uid):
     if st == 200 and isinstance(data, dict) and data.get("id"):
         prof = {"username": str(data.get("global_name") or data.get("username") or "")[:80],
                 "avatar": data.get("avatar") or None}
-        if data.get("avatar"):
+        if data.get("avatar") and on_fluxer():
+            prof["avatar_url"] = "%s/avatars/%s/%s.png?size=256" % (
+                FLUXER_MEDIA, data["id"], data["avatar"])
+        elif data.get("avatar"):
             prof["avatar_url"] = discordlink.avatar_url(data["id"], data["avatar"], 256)
-    _PROFILES[uid] = (now, prof)
+    _PROFILES[key] = (now, prof)
     return prof
 
 
 def _identity(content):
     """The username / avatar_url a news post for `content` goes out under:
     the game's own bot, else the bridge, else just the content's label."""
-    prof = _profile(GAME_BOTS[content]) if content in GAME_BOTS else _profile("@me")
+    bots = FLUXER_GAME_BOTS if on_fluxer() else GAME_BOTS
+    prof = _profile(bots[content]) if content in bots else _profile("@me")
     out = {"username": (prof or {}).get("username") or _content_label({"content": content})}
     if (prof or {}).get("avatar_url"):
         out["avatar_url"] = prof["avatar_url"]
@@ -579,7 +640,7 @@ def _identity(content):
 
 
 def _hook_key(channel_id):
-    return "news-webhook:%s" % channel_id
+    return "%snews-webhook:%s" % ("fluxer-" if on_fluxer() else "", channel_id)
 
 
 def _news_hook(ldb, channel_id):
@@ -593,7 +654,7 @@ def _news_hook(ldb, channel_id):
         hook = None
     if isinstance(hook, dict) and hook.get("id") and hook.get("token"):
         return hook
-    if time.time() - _HOOK_REFUSED.get(channel_id, 0) < 3600:
+    if time.time() - _HOOK_REFUSED.get(_hook_key(channel_id), 0) < 3600:
         return None
     st, data = api("POST", "/channels/%s/webhooks" % channel_id, {"name": NEWS_WEBHOOK_NAME})
     if st in (200, 201) and isinstance(data, dict) and data.get("id") and data.get("token"):
@@ -601,7 +662,7 @@ def _news_hook(ldb, channel_id):
         discordlink.set_meta(ldb, _hook_key(channel_id), json.dumps(hook))
         log("made the news webhook in channel %s" % channel_id)
         return hook
-    _HOOK_REFUSED[channel_id] = time.time()
+    _HOOK_REFUSED[_hook_key(channel_id)] = time.time()
     log("cannot make a webhook in channel %s (%s %s) -- news posts go out as the "
         "bridge; give it Manage Webhooks there for per-game names"
         % (channel_id, st, str(data)[:120]))
@@ -611,8 +672,9 @@ def _news_hook(ldb, channel_id):
 def news_post(ldb, channel_id, payload, content):
     """Post a news `payload` into `channel_id` under `content`'s game identity.
     Returns (status, data, webhook id or None). A webhook that is gone (deleted
-    in Discord) is forgotten and the post goes out as the bridge instead."""
-    hook = _news_hook(ldb, channel_id)
+    in Discord) is forgotten and the post goes out as the bridge instead. In a
+    game's own news channel the game's bot posts it, as itself (no webhook)."""
+    hook = None if getattr(_PLAT, "token", None) else _news_hook(ldb, channel_id)
     if hook:
         body = dict(payload)
         body.update(_identity(content))
@@ -644,6 +706,50 @@ def _post_announcement(ldb, channel_id, item, roles):
     return False
 
 
+def announce_targets(ldb):
+    """Every announcement channel: each Discord guild's bound one (the
+    discord_announce rows), then each Fluxer channel in the config, filed under
+    the guild "fluxer:<channel>" so its notified names and posts never meet a
+    Discord guild's. A Fluxer channel's last serial lives in discord_meta; None
+    until its first pass sets the baseline."""
+    out = [dict(r, plat="discord") for r in discordlink.announce_rows(ldb)]
+    extra = []
+    if ARGS.fluxer_token:
+        extra += [{"guild_id": "fluxer:%s" % ch, "channel_id": ch, "plat": "fluxer",
+                   "serial_key": "fluxer-announce-serial:%s" % ch} for ch in FLUXER_ANNOUNCE]
+    # a game's own news channels: only that game's posts, as that game's bot
+    extra += [{"guild_id": "game:%s:%s" % (g["plat"], g["channel"]), "channel_id": g["channel"],
+               "plat": g["plat"], "only": g["content"], "bot": g["bot"], "token": g["token"],
+               "serial_key": "game-news-serial:%s:%s" % (g["plat"], g["channel"])}
+              for g in GAME_NEWS]
+    for row in extra:
+        last = discordlink.get_meta(ldb, row["serial_key"], "")
+        row["last_serial"] = int(last) if str(last or "").isdigit() else None
+    return out + extra
+
+
+def _wants(row, content):
+    """Does this target take `content`'s posts? A game's own channel takes its game's only."""
+    return not row.get("only") or row["only"] == (content or "")
+
+
+def target_roles(ldb, row):
+    """{content: role id} to ping in this target."""
+    if row.get("only"):
+        return {}                               # a game's own channel: its bot pings nobody
+    if row.get("plat") == "fluxer":
+        return dict(FLUXER_ANNOUNCE_ROLES)
+    return discordlink.announce_roles(ldb, row["guild_id"])
+
+
+def bump_target_serial(ldb, row, serial):
+    if not row.get("serial_key"):
+        discordlink.bump_announce_serial(ldb, row["guild_id"], serial)
+    elif row.get("last_serial") is None or int(serial) > int(row["last_serial"]):
+        discordlink.set_meta(ldb, row["serial_key"], str(int(serial)))
+        row["last_serial"] = int(serial)
+
+
 def scan_announce(now=None):
     """One pass over the announcement store. Returns how many posts went out
     across all bound channels."""
@@ -653,21 +759,29 @@ def scan_announce(now=None):
     ldb = discordlink.connect()
     sent = 0
     try:
-        for row in discordlink.announce_rows(ldb):
+        for row in announce_targets(ldb):
+            use_platform(row)
+            if row["last_serial"] is None:
+                # a new Fluxer channel starts at what exists, like a bind: no backlog
+                bump_target_serial(ldb, row, max([int(i.get("serial") or 0) for i in items] + [0]))
+                continue
             last = int(row["last_serial"])
             new = sorted((i for i in items if int(i.get("serial") or 0) > last),
                          key=lambda i: int(i.get("serial") or 0))
             if not new:
                 continue
-            roles = discordlink.announce_roles(ldb, row["guild_id"])
+            roles = target_roles(ldb, row)
             for it in new:
+                if not _wants(row, it.get("content")):
+                    bump_target_serial(ldb, row, int(it["serial"] or 0))
+                    continue
                 if not _post_announcement(ldb, row["channel_id"], it, roles):
                     break                        # try again next pass
-                discordlink.bump_announce_serial(ldb, row["guild_id"],
-                                                 int(it["serial"] or 0))
+                bump_target_serial(ldb, row, int(it["serial"] or 0))
                 sent += 1
         return sent
     finally:
+        use_platform(None)
         ldb.close()
 
 
@@ -713,14 +827,16 @@ def scan_event_reminders(now=None):
     sent = 0
     posts = _event_posts(ldb)
     try:
-        for row in discordlink.announce_rows(ldb):
+        for row in announce_targets(ldb):
+            use_platform(row)
             roles = None
             for rem in rems:
                 name = "event-remind:%s:%s" % (row["guild_id"], rem["key"])
-                if discordlink.is_notified(ldb, name):
+                if (discordlink.is_notified(ldb, name)
+                        or not _wants(row, eventremind.eventnews.GAMES[rem["cup"]["game"]][0])):
                     continue
                 if roles is None:
-                    roles = discordlink.announce_roles(ldb, row["guild_id"])
+                    roles = target_roles(ldb, row)
                 content = eventremind.eventnews.GAMES[rem["cup"]["game"]][0]
                 st, data, hook = news_post(ldb, row["channel_id"],
                                            event_reminder_payload(rem, roles.get(content), now),
@@ -741,11 +857,13 @@ def scan_event_reminders(now=None):
                 mid = str((data or {}).get("id") or "")
                 if mid:
                     posts.append({"guild": row["guild_id"], "channel": row["channel_id"],
+                                  "plat": row["plat"], "bot": row.get("bot"),
                                   "id": mid, "cup": cup["id"], "hook": hook,
                                   "end": max(e for _s, e in cup["sessions"])})
                 _save_event_posts(ldb, posts)
         return sent
     finally:
+        use_platform(None)
         ldb.close()
 
 
@@ -787,14 +905,15 @@ def scan_ffxi_posts(now=None):
     sent = 0
     posts = _event_posts(ldb)
     try:
-        for row in discordlink.announce_rows(ldb):
+        for row in announce_targets(ldb):
+            use_platform(row)
             roles = None
             for p in due:
                 name = "ffxi-news:%s:%s" % (row["guild_id"], p["key"])
-                if discordlink.is_notified(ldb, name):
+                if discordlink.is_notified(ldb, name) or not _wants(row, ffxinews.CONTENT):
                     continue
                 if roles is None:
-                    roles = discordlink.announce_roles(ldb, row["guild_id"])
+                    roles = target_roles(ldb, row)
                 st, data, hook = news_post(ldb, row["channel_id"],
                                            ffxi_post_payload(p, roles.get(ffxinews.CONTENT), now),
                                            ffxinews.CONTENT)
@@ -808,6 +927,7 @@ def scan_ffxi_posts(now=None):
                 mid = str((data or {}).get("id") or "")
                 if mid:
                     posts.append({"guild": row["guild_id"], "channel": row["channel_id"],
+                                  "plat": row["plat"], "bot": row.get("bot"),
                                   "id": mid, "cup": p["key"], "feed": ffxinews.CONTENT,
                                   "hook": hook, "end": p["end"]})
                 mine = [q for q in posts if q.get("feed") == ffxinews.CONTENT
@@ -819,6 +939,7 @@ def scan_ffxi_posts(now=None):
                 _save_event_posts(ldb, posts)
         return sent
     finally:
+        use_platform(None)
         ldb.close()
 
 
@@ -860,15 +981,16 @@ def scan_game_posts(now=None):
     sent = 0
     posts = _event_posts(ldb)
     try:
-        for row in discordlink.announce_rows(ldb):
+        for row in announce_targets(ldb):
+            use_platform(row)
             roles = None
             for game, p in due:
                 content = gamenews.GAMES[game][0]
                 name = "game-news:%s:%s" % (row["guild_id"], p["key"])
-                if discordlink.is_notified(ldb, name):
+                if discordlink.is_notified(ldb, name) or not _wants(row, content):
                     continue
                 if roles is None:
-                    roles = discordlink.announce_roles(ldb, row["guild_id"])
+                    roles = target_roles(ldb, row)
                 st, data, hook = news_post(ldb, row["channel_id"],
                                            game_post_payload(p, content, roles.get(content), now),
                                            content)
@@ -882,6 +1004,7 @@ def scan_game_posts(now=None):
                 mid = str((data or {}).get("id") or "")
                 if mid:
                     posts.append({"guild": row["guild_id"], "channel": row["channel_id"],
+                                  "plat": row["plat"], "bot": row.get("bot"),
                                   "id": mid, "cup": p["key"], "feed": "game:" + game,
                                   "hook": hook, "end": p["end"]})
                 mine = [q for q in posts if q.get("feed") == "game:" + game
@@ -893,6 +1016,7 @@ def scan_game_posts(now=None):
                 _save_event_posts(ldb, posts)
         return sent
     finally:
+        use_platform(None)
         ldb.close()
 
 
@@ -913,6 +1037,14 @@ def _delete_event_post(ldb, p, why):
     (404 already gone, 403 no permission), so the caller stops tracking it. A
     post made through the news webhook is deleted through it (the bridge
     itself would need Manage Messages)."""
+    was = use_platform(p)
+    try:
+        return _delete_event_post_here(ldb, p, why)
+    finally:
+        use_platform(was)
+
+
+def _delete_event_post_here(ldb, p, why):
     path = "/channels/%s/messages/%s" % (p["channel"], p["id"])
     if p.get("hook"):
         try:
@@ -1424,6 +1556,9 @@ def build_parser():
                     help="the app's public key: checks every interaction")
     ap.add_argument("--poll", type=float, default=float(env("POL_BRIDGE_POLL", "5")),
                     help="seconds between scans of the message store")
+    ap.add_argument("--fluxer-token", default=env("POL_BRIDGE_FLUXER_BOT_TOKEN", ""),
+                    help="the bridge's Fluxer bot, beside the Discord one: news posts "
+                         "in POL_BRIDGE_FLUXER_ANNOUNCE (a SECRET: prod .env only)")
     return ap
 
 
@@ -1464,11 +1599,16 @@ def start_presence():
         return None
     if (os.environ.get("POL_BRIDGE_PRESENCE", "on") or "").strip().lower() in off:
         return None
-    return polgateway.Presence(
-        "bridge", ARGS.token,
-        status_fn=lambda: polgateway.count_text(
-            "", n=pol_online(), one="player on PlayOnline",
-            many="players on PlayOnline")).start()
+
+    def text():
+        return polgateway.count_text("", n=pol_online(), one="player on PlayOnline",
+                                     many="players on PlayOnline")
+    if ARGS.fluxer_token and hasattr(polboards, "FluxerPresence"):
+        polboards.FluxerPresence("bridge-fluxer", ARGS.fluxer_token, status_fn=text,
+                                 url=polboards.FLUXER_GATEWAY).start()
+    if not ARGS.token:
+        return None
+    return polgateway.Presence("bridge", ARGS.token, status_fn=text).start()
 
 
 def _report_applied(row):
@@ -1476,10 +1616,15 @@ def _report_applied(row):
     (Valkey botcreds:applied:bridge; the boards write the same per bot). The
     card reads "Not running" without it. Never raises: no Valkey, no report."""
     source = "registry" if row and row.get("token") else ("env" if ARGS.token else "")
+    fsource = ("registry" if row and row.get("fluxer_token")
+               else ("env" if ARGS.fluxer_token else ""))
+    running = {"announce": ",".join(FLUXER_ANNOUNCE)} if FLUXER_ANNOUNCE else {}
+    running.update({"role:%s" % c: r for c, r in FLUXER_ANNOUNCE_ROLES.items()})
     try:
         from polcore import kv
         kv.set_json("botcreds:applied:bridge", {
-            "source": source, "at": time.time(), "app_id": (ARGS.app_id or "").strip(),
+            "source": source, "fluxer_source": fsource, "fluxer_channels": running,
+            "at": time.time(), "app_id": (ARGS.app_id or "").strip(),
             "row_at": float((row or {}).get("updated_at") or 0)})
     except Exception:                                  # noqa: BLE001
         pass
@@ -1507,6 +1652,15 @@ def use_registry():
     if row and row.get("has_token") and not row.get("token"):
         log("the registry's bridge token cannot be unsealed here (POL_BOT_KEY missing or "
             "different); using the environment")
+    # the Fluxer side the same way (admin Bots tab): what the row names wins, a field it
+    # leaves empty keeps the environment's, so a token pasted alone never stops the posts
+    if row and row.get("fluxer_token"):
+        ARGS.fluxer_token = row["fluxer_token"]
+    for key, val in botcreds.fluxer_channels(row).items():
+        if key == "announce":
+            FLUXER_ANNOUNCE[:] = [c for c in val.split(",") if c]
+        elif key.startswith("role:") and val:
+            FLUXER_ANNOUNCE_ROLES[key[5:]] = val
     _report_applied(row)
     games = [n for n in botcreds.known() if n != "bridge"]
     for name in games:
@@ -1514,9 +1668,45 @@ def use_registry():
             game = botcreds.get(name)
         except Exception:                              # noqa: BLE001
             game = None
+        content = "tetra" if name == "tm" else name
         if game and game.get("app_id"):
-            GAME_BOTS["tetra" if name == "tm" else name] = game["app_id"]
+            GAME_BOTS[content] = game["app_id"]
+        # a board's Fluxer bot, as the Bots tab last checked it: news for that game posts
+        # under it on Fluxer, with no id to copy by hand
+        try:
+            fid = (json.loads((game or {}).get("fluxer_info") or "{}") or {}).get("user_id")
+        except (ValueError, AttributeError):
+            fid = None
+        if fid:
+            FLUXER_GAME_BOTS[content] = str(fid)
+    GAME_NEWS[:] = game_news_targets(botcreds)
     return botcreds.watch(["bridge"] + games, label="polbridge")
+
+
+def game_news_targets(botcreds):
+    """[{plat, channel, content, bot, token}] for every news board's "<name>_news" channels in
+    the Bots tab, on each platform where that board's bot has a token (its row's, else the
+    board's own .env one, passed to this service by compose)."""
+    out = []
+    for name, content in getattr(botcreds, "NEWS_BOARDS", {}).items():
+        try:
+            row = botcreds.get(name) or {}
+        except Exception:                              # noqa: BLE001
+            row = {}
+        env = "POL_BOARDS_%s_" % name.upper()
+        for plat, chans, token in (
+                ("discord", botcreds.discord_channels(row),
+                 row.get("token") or os.environ.get(env + "DISCORD_BOT_TOKEN", "")),
+                ("fluxer", botcreds.fluxer_channels(row),
+                 row.get("fluxer_token") or os.environ.get(env + "FLUXER_BOT_TOKEN", ""))):
+            ids = [c for c in (chans.get("%s_news" % name) or "").split(",") if c]
+            if ids and not token:
+                log("%s game news on %s: no %s bot token here, so it posts nowhere"
+                    % (name, plat, name))
+                continue
+            out += [{"plat": plat, "channel": c, "content": content, "bot": name,
+                     "token": token.strip()} for c in ids]
+    return out
 
 
 def main(argv=None):
@@ -1527,8 +1717,17 @@ def main(argv=None):
     log("interactions on http://%s:%d/discord/interactions (app %s, key %s, token %s)"
         % (ARGS.bind, ARGS.port, ARGS.app_id or "?", "set" if ARGS.public_key else "MISSING",
            "set" if ARGS.token else "MISSING"))
+    if ARGS.fluxer_token:
+        log("Fluxer: news posts in %d channel(s)" % len(FLUXER_ANNOUNCE))
+    if GAME_NEWS:
+        log("game news: %s" % ", ".join(sorted({"%s on %s" % (g["bot"], g["plat"])
+                                                for g in GAME_NEWS})))
     if not ARGS.token:
         log("no bot token: DMs are OFF until POL_BRIDGE_DISCORD_BOT_TOKEN is set")
+        if ARGS.fluxer_token and newsgen is not None:
+            threading.Thread(target=announce_watch,
+                             name="polbridge-announce", daemon=True).start()
+            start_presence()
     else:
         import gmconsole
         gmconsole.wire(api, logger=log)

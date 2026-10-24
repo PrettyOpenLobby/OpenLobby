@@ -548,6 +548,30 @@
     .botgrid a.btnlink { background: var(--panel2); color: var(--text); text-decoration: none;
       border: 1px solid var(--line); padding: 4px 10px; font-size: 12px; border-radius: 7px; }
     .botgrid button:disabled { opacity: .45; cursor: default; }
+    .bots-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      flex-wrap: wrap; margin-bottom: 6px; }
+    .bots-head h2 { margin: 0; }
+    .bots-head .cnt { color: var(--muted); font-size: 11px; margin-left: 2px; }
+    .bots-head .seg button.on .cnt { color: inherit; opacity: .75; }
+    .bc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .bc-head h3 { margin: 0; }
+    .bc-head .pill { flex: none; }
+    .botgrid .bc-ok, .botgrid .bc-edit { margin-top: 6px; }
+    .botgrid details > summary { cursor: pointer; font-size: 12.5px; color: var(--muted);
+      list-style: none; padding: 4px 0; user-select: none; }
+    .botgrid details > summary::-webkit-details-marker { display: none; }
+    .botgrid details > summary::before { content: "\25B8"; display: inline-block; width: 14px;
+      transition: transform .12s; }
+    .botgrid details[open] > summary::before { transform: rotate(90deg); }
+    .botgrid .bc-ok > summary { color: var(--good); }
+    .botgrid .bc-ok .botcheck { margin-top: 0; }
+    .botgrid .bc-edit > summary { color: var(--text); font-weight: 600; }
+    .botgrid .bc-edit[open] { border-top: 1px solid var(--line); padding-top: 4px; }
+    .bc-roles { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 4px 8px; }
+    .bc-roles label { margin: 0; font-size: 11.5px; color: var(--muted); min-width: 0; }
+    .bc-roles label span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bc-roles input { width: 100%; box-sizing: border-box; }
+    .botgrid .botfeed { font-size: 12px; color: var(--muted); }
     .botcheck { list-style: none; margin: 4px 0 10px; padding: 0; font-size: 12.5px; }
     .botcheck li { display: flex; gap: 8px; padding: 3px 0; overflow-wrap: anywhere; }
     .botcheck .mark { flex: 0 0 16px; text-align: center; font-weight: 700; }
@@ -1380,7 +1404,7 @@
         <button data-tab="gamehelp">Game help</button>
       </nav>
       <nav class="subtabs" data-group="settings" aria-label="Settings" hidden>
-        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts" id="alertsTab">Alerts and checks</button><button data-tab="bots">Discord bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="activity">Activity log</button>
+        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts" id="alertsTab">Alerts and checks</button><button data-tab="bots">Bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="activity">Activity log</button>
       </nav>
   <main>
     <!-- OVERVIEW -->
@@ -2022,22 +2046,29 @@
     </section>
 
     <!-- SECURITY -->
-    <!-- DISCORD BOTS (owner only): adminbots.py, polcore/botcreds.py -->
+    <!-- BOTS (owner only): adminbots.py, polcore/botcreds.py. Discord and Fluxer. -->
     <section id="tab-bots" class="tab">
       <div class="panel">
-        <h2>Discord bots</h2>
-        <p class="hint">Every game's bot in one place. Paste a bot token and Save: Discord fills in the
-          app id and public key, and the bot's service restarts on it within about a minute. A bot with
-          nothing saved here keeps its <code>.env</code> values. Tokens are stored sealed with
-          <code>POL_BOT_KEY</code> and never shown again.</p>
+        <div class="bots-head">
+          <h2>Bots</h2>
+          <div class="seg" id="botsView" role="group" aria-label="Which bots to show">
+            <button data-view="discord" class="on">Discord <span class="cnt" data-cnt="discord"></span></button>
+            <button data-view="fluxer">Fluxer <span class="cnt" data-cnt="fluxer"></span></button>
+          </div>
+        </div>
+        <p class="hint">Every game's bots in one place. Paste a token and Save: the bot's service restarts
+          on it within about a minute. Anything left empty keeps its <code>.env</code> value. Tokens are
+          stored sealed with <code>POL_BOT_KEY</code> and never shown again.</p>
         <div class="note warn" id="botsNoKey" hidden><b>POL_BOT_KEY is not set.</b> Tokens cannot be
           stored until it is in <code>.env</code> for the admin and bot services (any long random string).
-          Page addresses can still be saved.</div>
-        <div class="hint">Setting up a new bot: create an application in the Discord developer portal,
-          copy its bot token here, Save, then use <b>Invite</b> to add it to a server and
-          <b>Set endpoint</b> once the bot shows as running. In the server, run its
-          <code>/&lt;name&gt;board</code> command in the channel it should post in. Each card's checklist
-          says what is still to do; <b>Check</b> asks Discord again.</div>
+          Page addresses and Fluxer channels can still be saved.</div>
+        <p class="hint" data-for="discord">New bot: create an application in the Discord developer portal,
+          paste its bot token, Save, then use <b>Invite</b> to add it to a server and <b>Set endpoint</b>
+          once it shows as running. In the server, run its <code>/&lt;name&gt;board</code> command in the
+          channel it should post in.</p>
+        <p class="hint" data-for="fluxer" hidden>New bot: create it in Fluxer and add it to the server, then
+          paste its token and the ids of the channels it should post in. Fluxer has no slash commands, so
+          the channels are chosen here.</p>
       </div>
       <div class="botgrid" id="botsList"></div>
     </section>
@@ -2120,6 +2151,8 @@
           to; nobody else can see them. Turning them on changes nothing about your update channel:
           they work on Stable too. Getting one brings a title to the newest version here, a few
           files at a time when you already have it.</p>
+        <p class="hint" id="feedHint" hidden><b>Your access code also opens patches from the
+          developers.</b> Turn them on to see what they have.</p>
         <div class="toolbar" id="feedOff">
           <input type="password" id="feedCode" class="mono" style="flex:1 1 280px;max-width:520px;width:auto" maxlength="2048" autocomplete="off"
             spellcheck="false" placeholder="Access code that includes patches (olx2...)">

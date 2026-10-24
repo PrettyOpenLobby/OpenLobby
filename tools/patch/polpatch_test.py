@@ -364,6 +364,33 @@ def main():
               and lib._upstream_mismatches(b"not json") == set(),
               "only mismatches recorded as upstream are excused")
 
+        print("provenance")
+        known = {"sources": {"se-final-list": "final", "disc": "disc", "our-label": "label"},
+                 "bundles": {"W2U-0002": {"versions": {V1: "our-label", "20020101_0": "disc",
+                                                       "20050505_0": "se-final-list"}}}}
+        p = lib.provenance(bundle, known)
+        byv = {r["version"]: r["origin"] for r in p["versions"]}
+        check(byv == {V1: "our-label", V2: "ours"} and [r["version"] for r in p["missing"]] == ["20050505_0"]
+              and [r["version"] for r in p["discs"]] == ["20020101_0"],
+              "catalog versions take their source; a version published into the bundle is ours; "
+              "a known retail version not held is missing, a disc's apart (%s)" % byv)
+        mp = os.path.join(bundle, "meta.json")
+        meta0 = open(mp, "rb").read()
+        meta = json.loads(meta0)
+        meta["host"] = "198.51.100.7"
+        meta["published"] = [{"version": V2, "files": []}]
+        open(mp, "w").write(json.dumps(meta))
+        try:
+            p = lib.provenance(bundle, {"sources": {}, "bundles": {}})
+            check({r["version"]: (r["origin"], r["source"]) for r in p["versions"]}
+                  == {V1: ("retail", "se-server"), V2: ("ours", None)} and p["mirrored"],
+                  "in a mirrored bundle an unlisted version is Square Enix's, a published one ours")
+        finally:
+            open(mp, "wb").write(meta0)
+        real = lib.load_known()
+        check("se-server" in real["sources"] and len(real["bundles"]["PS2-0004"]["versions"]) == 57,
+              "known_versions.json loads (FMO PS2: Square Enix's 57 versions)")
+
         print("command line formats")
         for args, needle in ((["--region", "w2u", "--product", "0002"], "region code"),
                              (["--region", "W2U", "--product", "2"], "product code"),

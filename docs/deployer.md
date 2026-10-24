@@ -1381,6 +1381,15 @@ and answers 200 `{"feed", "enabled", "can_enable"}` (on: also `bundles`, the
 feed's count), 400 for a body of another shape, no code to use, or a code
 with no feed in it, and 502 `{"error"}` when the feed refuses the code or
 does not answer, in which case nothing is changed.
+`GET /api/patches/provenance` says where each version of each bundle comes
+from and which known retail versions it lacks (patching.md, "Where each
+version comes from"): `{"bundles": [{"region", "product", "title",
+"versions": [{"version", "origin", "source", "why"}], "missing": [...],
+"discs": [...], "final_list", "note"}], "sources": {...}}`, `origin` one of
+`retail`, `ours`, `our-label` and `unknown`. While patches from the
+developers are off but the dev channel's own code opens them, the feed's 409
+also has `"from_channel": true`, and the panel says so.
+
 `GET /api/patches/feed[?refresh=1]` lists what the feed offers (the listing
 is reused for five minutes unless `refresh=1`):
 

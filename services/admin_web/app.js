@@ -4339,9 +4339,16 @@ $("#checksSave").onclick = async () => {
   } catch (e) { toast(e.message, true); }
 };
 
-// ---- Discord bots (owner): adminbots.py ----
-// One card per bot. The token field is write-only: the server never sends a
-// token back, only whether one is stored and its last four characters.
+// ---- Bots (owner): adminbots.py ----
+// One card per bot, showing one platform at a time: the header's Discord /
+// Fluxer switch picks which (remembered per browser). A card is its state, what
+// still needs doing, the checks that pass folded into one line, and its fields
+// folded under Settings. The token fields are
+// write-only: the server never sends a token back, only whether one is stored
+// and its last four characters.
+let BOTS = null;
+let BOTS_VIEW = store.get("botsView", "discord") === "fluxer" ? "fluxer" : "discord";
+const BOTS_OPEN = new Set();           // "<view>:<bot>" whose Settings are open, kept across a reload
 function botState(b) {
   const a = b.applied || {};
   if (b.has_token && !b.token_ok) return ["off", "Sealed under another POL_BOT_KEY"];
@@ -4350,19 +4357,43 @@ function botState(b) {
   if (a.source === "env") return ["env", "Running on .env"];
   return ["off", a.at ? "No token" : "Not running"];
 }
-function botCard(b) {
-  const [cls, label] = botState(b);
-  const who = b.username ? `${esc(b.username)} · app ${esc(b.app_id)}` : (b.app_id ? `app ${esc(b.app_id)}` : "not set up here");
-  const when = b.updated_at ? ` · saved ${esc(ago(b.updated_at * 1000))} by ${esc(b.updated_by || "?")}` : "";
+const BOT_MARK = { ok: "✓", todo: "•", warn: "!", info: "i" };
+function botItems(items) {
+  return `<ul class="botcheck">${items.map((c) =>
+    `<li class="${esc(c.state)}"><span class="mark">${BOT_MARK[c.state] || "•"}</span>` +
+    `<span><b>${esc(c.label)}</b> ${esc(c.detail)}</span></li>`).join("")}</ul>`;
+}
+// what still needs doing in full; the checks that pass folded into one line
+function botChecklist(items, checked) {
+  items = items || [];
+  const ok = items.filter((c) => c.state === "ok"), rest = items.filter((c) => c.state !== "ok");
+  const when = checked ? `, checked ${esc(ago(checked * 1000))}` : "";
+  return (rest.length ? botItems(rest) : "")
+    + (ok.length ? `<details class="bc-ok"><summary>${ok.length} check${ok.length === 1 ? "" : "s"} pass${ok.length === 1 ? "es" : ""}${when}</summary>${botItems(ok)}</details>` : "");
+}
+function fluxerState(f) {
+  if (f.has_token && !f.token_ok) return ["off", "Sealed under another POL_BOT_KEY"];
+  if (f.live) return ["live", "Running"];
+  if (f.has_token) return ["wait", "Restarting onto the new values"];
+  if (f.source === "env") return ["env", "Running on .env"];
+  return ["off", "Not set up"];
+}
+function botShell(b, view, state, sub, checklist, settings) {
+  const [cls, label] = state, key = view + ":" + b.bot;
+  const open = BOTS_OPEN.has(key);
   return `<div class="panel" data-bot="${esc(b.bot)}">
-    <h3>${esc(b.title)} <span class="pill ${cls}">${esc(label)}</span></h3>
-    <div class="sub">${who}${when}</div>
-    <div class="sub">${b.port ? `Web page: port <b>${esc(b.port)}</b> on the server` : "Web page: through the Tetra Master board, /pol"}
-      · command <code>/${esc(b.command)}</code></div>
-    <ul class="botcheck">${(b.checklist || []).map((c) =>
-      `<li class="${esc(c.state)}"><span class="mark">${{ ok: "✓", todo: "•", warn: "!", info: "i" }[c.state] || "•"}</span>` +
-      `<span><b>${esc(c.label)}</b> ${esc(c.detail)}</span></li>`).join("")}</ul>
-    ${b.checked_at ? `<div class="hint">Discord checked ${esc(ago(b.checked_at * 1000))}</div>` : ""}
+    <div class="bc-head"><h3>${esc(b.title)}</h3><span class="pill ${cls}">${esc(label)}</span></div>
+    <div class="sub">${sub}</div>
+    ${checklist}
+    <details class="bc-edit" data-open-key="${esc(key)}"${open ? " open" : ""}><summary>Settings</summary>${settings}</details>
+  </div>`;
+}
+function discordCard(b) {
+  const state = botState(b);
+  const who = b.username ? `${esc(b.username)} · app ${esc(b.app_id)}` : (b.app_id ? `app ${esc(b.app_id)}` : "Not set up here");
+  const where = b.port ? `port ${esc(b.port)}` : "through the Tetra Master board, /pol";
+  const sub = `${who} · <code>/${esc(b.command)}</code> · ${where}`;
+  const settings = `
     <label>Bot token ${b.has_token ? `<span class="muted">(saved, ends ${esc(b.token_hint || "?")})</span>` : ""}</label>
     <input type="password" class="botToken" autocomplete="off" spellcheck="false"
       placeholder="${b.has_token ? "Paste a new token to replace it" : "Paste the bot token"}">
@@ -4370,6 +4401,10 @@ function botCard(b) {
     <input type="text" inputmode="url" class="botUrl" value="${esc(b.url)}" spellcheck="false"
       placeholder="${b.bot === "bridge" ? "https://tm.example.com/pol" : `https://${esc(b.bot)}.example.com`}">
     ${b.endpoint ? `<div class="hint">Interactions endpoint: <code>${esc(b.endpoint)}</code></div>` : ""}
+    ${b.news_channels === null || b.news_channels === undefined ? "" : `
+    <label>Channels: Game news <span class="botfeed">(this game's news only, posted by this bot; none = off)</span></label>
+    <input type="text" class="botNews" value="${esc(b.news_channels)}" spellcheck="false"
+      inputmode="numeric" placeholder="Channel ids, comma separated">`}
     <div class="rowacts">
       <button class="act sm" data-act="save">Save</button>
       ${b.invite ? `<a class="ghost sm btnlink" href="${esc(b.invite)}" target="_blank" rel="noopener">Invite</a>` : ""}
@@ -4378,15 +4413,77 @@ function botCard(b) {
       <button class="ghost sm" data-act="refresh" ${b.has_token ? "" : "disabled"}>Check</button>
       <button class="ghost sm" data-act="clear" ${b.has_token ? "" : "disabled"}>Forget token</button>
     </div>
-    <div class="hint">.env fallback: <code>${esc(b.env_prefix)}_DISCORD_BOT_TOKEN</code></div>
-  </div>`;
+    <div class="hint">Left empty: <code>${esc(b.env_prefix)}_DISCORD_BOT_TOKEN</code> from <code>.env</code></div>`;
+  return botShell(b, "discord", state, sub, botChecklist(b.checklist, b.checked_at), settings);
+}
+function fluxerCard(b) {
+  const f = b.fluxer;
+  if (!f) return botShell(b, "fluxer", ["off", "Not on Fluxer"], "This bot has no Fluxer side.", "", "");
+  const envHint = b.bot === "bridge"
+    ? `<code>POL_BRIDGE_FLUXER_BOT_TOKEN</code>, <code>POL_BRIDGE_FLUXER_ANNOUNCE</code>, <code>POL_BRIDGE_FLUXER_ANNOUNCE_ROLES</code>`
+    : `<code>${esc(b.env_prefix)}_FLUXER_BOT_TOKEN</code>, <code>_FLUXER_CHANNELS</code>`;
+  const roles = (f.roles || []).length ? `<label>Ping roles <span class="botfeed">(role id per game; empty = no ping)</span></label>
+    <div class="bc-roles">${f.roles.map((r) => `<label><span>${esc(r.label)}</span>
+    <input type="text" class="fluxChan" data-key="${esc(r.key)}" value="${esc(r.value || "")}"
+      spellcheck="false" inputmode="numeric" placeholder="${r.running ? `.env: ${esc(r.running)}` : "Role id"}"></label>`).join("")}</div>` : "";
+  const chans = f.feeds.map((d) => {
+    const run = (f.running_channels || {})[d.key];
+    return `<label>Channels: ${esc(d.label)}${d.key === b.bot ? "" : `
+      <span class="botfeed">(${d.shares_main ? "none = beside the board" : "none = off"})</span>`}</label>
+    <input type="text" class="fluxChan" data-key="${esc(d.key)}" value="${esc((f.channels || {})[d.key] || "")}"
+      spellcheck="false" inputmode="numeric" placeholder="${run ? `Empty: its .env channels, ${esc(run)}` : "Channel ids, comma separated"}">`;
+  }).join("");
+  const settings = `
+    <label>Bot token ${f.has_token ? `<span class="muted">(saved, ends ${esc(f.token_hint || "?")})</span>` : ""}</label>
+    <input type="password" class="fluxToken" autocomplete="off" spellcheck="false"
+      placeholder="${f.has_token ? "Paste a new token to replace it" : "Paste the Fluxer bot token"}">
+    ${chans}${roles}
+    <div class="rowacts">
+      <button class="act sm" data-act="fluxer-save">Save</button>
+      <button class="ghost sm" data-act="fluxer-check" ${f.has_token ? "" : "disabled"}>Check</button>
+      <button class="ghost sm" data-act="fluxer-clear" ${f.has_token || Object.keys(f.channels || {}).length ? "" : "disabled"}>Forget</button>
+    </div>
+    <div class="hint">Left empty: ${envHint} from <code>.env</code></div>`;
+  const run = Object.values(f.running_channels || {}).filter(Boolean).length;
+  const sub = `${f.username ? esc(f.username) : (f.source === "env" ? "On its .env token" : "Not set up here")}`
+    + (run ? ` · ${run} feed${run === 1 ? "" : "s"} posting` : "");
+  return botShell(b, "fluxer", fluxerState(f), sub, botChecklist(f.checklist, f.checked_at), settings);
+}
+// counts for the switch: the bots set up on each platform (running, on .env, or restarting
+// onto a saved token)
+function botsCounts() {
+  const on = (st) => st[0] === "live" || st[0] === "env" || st[0] === "wait";
+  const d = BOTS.bots.filter((b) => on(botState(b))).length;
+  const fl = BOTS.bots.filter((b) => b.fluxer), f = fl.filter((b) => on(fluxerState(b.fluxer))).length;
+  $("#botsView [data-cnt=discord]").textContent = `${d}/${BOTS.bots.length}`;
+  $("#botsView [data-cnt=fluxer]").textContent = `${f}/${fl.length}`;
+}
+function renderBots() {
+  if (!BOTS) return;
+  document.querySelectorAll("#botsView button").forEach((x) => x.classList.toggle("on", x.dataset.view === BOTS_VIEW));
+  document.querySelectorAll("#tab-bots [data-for]").forEach((x) => { x.hidden = x.dataset.for !== BOTS_VIEW; });
+  botsCounts();
+  $("#botsList").innerHTML = BOTS.bots.map(BOTS_VIEW === "fluxer" ? fluxerCard : discordCard).join("");
 }
 async function loadBots() {
   let r;
   try { r = await api("/api/bots"); } catch (e) { $("#botsList").innerHTML = `<div class="panel muted">${esc(e.message)}</div>`; return; }
   $("#botsNoKey").hidden = r.can_seal;
-  $("#botsList").innerHTML = r.bots.map(botCard).join("");
+  BOTS = r;
+  renderBots();
 }
+$("#botsView").addEventListener("click", (e) => {
+  const v = e.target.closest("button[data-view]");
+  if (!v || v.dataset.view === BOTS_VIEW) return;
+  BOTS_VIEW = v.dataset.view;
+  store.set("botsView", BOTS_VIEW);
+  renderBots();
+});
+$("#botsList").addEventListener("toggle", (e) => {
+  const d = e.target;
+  if (!d.dataset || !d.dataset.openKey) return;
+  if (d.open) BOTS_OPEN.add(d.dataset.openKey); else BOTS_OPEN.delete(d.dataset.openKey);
+}, true);
 $("#botsList").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
@@ -4395,13 +4492,22 @@ $("#botsList").addEventListener("click", async (e) => {
   if (act === "save") {
     body.token = card.querySelector(".botToken").value.trim();
     body.url = card.querySelector(".botUrl").value.trim();
+    const news = card.querySelector(".botNews");
+    if (news) body.news_channels = news.value.trim();
+  }
+  if (act === "fluxer-save") {
+    body.token = card.querySelector(".fluxToken").value.trim();
+    body.channels = {};
+    card.querySelectorAll(".fluxChan").forEach((el) => { body.channels[el.dataset.key] = el.value.trim(); });
   }
   if (act === "clear" && !confirm(`Forget the ${bot} token? Its service goes back to its .env token.`)) return;
+  if (act === "fluxer-clear" && !confirm(`Forget the ${bot} Fluxer token and channels? The ${bot === "bridge" ? "bridge" : "board"} goes back to its .env values for Fluxer.`)) return;
   btn.disabled = true;
   try {
     const r = await post("/api/bots", body);
-    const d = r.discord;
-    toast(d ? `Saved: ${d.username || d.name} (app ${d.app_id})` : (r.detail || "Done"));
+    const d = r.discord, f = r.fluxer;
+    toast(d ? `Saved: ${d.username || d.name} (app ${d.app_id})`
+      : f ? `${r.detail || "Done"} Fluxer: ${f.username || f.user_id}` : (r.detail || "Done"));
     loadBots();
   } catch (err) { toast(err.message, true); btn.disabled = false; }
 });

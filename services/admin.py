@@ -2617,6 +2617,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/deploy/patches":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._send(*admindeploy.patches(q.get("recheck", [""])[0] == "1"))
+        if path == "/api/deploy/patches/provenance":
+            return self._send(*admindeploy.patch_provenance())
         if path == "/api/deploy/patches/feed":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._send(*admindeploy.patch_feed(q.get("refresh", [""])[0] == "1"))

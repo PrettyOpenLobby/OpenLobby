@@ -3090,7 +3090,7 @@ class PatchKit:
         for rel in ("tools/patch", "services"):
             os.makedirs(os.path.join(t.core, *rel.split("/")), exist_ok=True)
         for n in os.listdir(os.path.join(ROOT, "tools", "patch")):
-            if n.endswith(".py"):
+            if n.endswith((".py", ".json")):
                 shutil.copy(os.path.join(ROOT, "tools", "patch", n), os.path.join(t.core, "tools", "patch", n))
         shutil.copy(os.path.join(ROOT, "tools", "patchver.py"), os.path.join(t.core, "tools"))
         for n in ("slc.py", "polbundle.py", "polserver2.py"):
@@ -3694,6 +3694,13 @@ def test_patch_feed(c, k, t):
     try:
         good = dc.make_code("registry.example.org/kart", "feed-token-4567",
                             feed="127.0.0.1:%d/kart-patches" % feed.port)
+        dc.write_channel(t.core, "dev", registry="registry.example.org/kart")
+        store.save_code(good)
+        code, r = pseen(c.get("/api/patches/feed"))
+        ok(code == 409 and r.get("can_enable") is True and r.get("from_channel") is True,
+           "the dev channel's code opens patches: the panel can say so (%s)" % r)
+        store.forget()
+        os.remove(chfile)
         state2 = os.path.join(t.tmp, "offer-state")
         ok(pfd.offer_code(state2, good) and pfd.Store(state2).code() == good and not pfd.Store(state2).enabled()
            and not pfd.offer_code(state2, good + "x"),
@@ -3729,8 +3736,9 @@ def test_patch_feed(c, k, t):
         ok(j["state"] == "ok" and "from the patch feed" in j["summary"],
            "patch_fetch: ok (%s: %s)" % (j["state"], j["summary"]))
         log = j.get("log", "")
-        ok(str(feed.port) not in log and "feed-token" not in log and "127.0.0.1:%d" % feed.port not in log,
-           "  the log names neither the feed's address nor the token")
+        ok(":%d" % feed.port not in log and "feed-token" not in log and "127.0.0.1:%d" % feed.port not in log,
+           "  the log names neither the feed's address nor the token (%s)"
+           % [ln for ln in log.splitlines() if ":%d" % feed.port in ln or "feed-token" in ln][:3])
         code, rows2, _ = patch_rows(c)
         b2 = rows2.get("W2U/0002", {})
         ok(b2.get("versions") == [PV1, PV2, PV3] and b2.get("served") is True and b2.get("selfcheck") == "ok",
@@ -3775,6 +3783,14 @@ def test_patch_feed(c, k, t):
         code, r = pseen(c.get("/api/patches/feed?refresh=1"))
         ok(code == 502 and "no longer opens the patch feed" in r.get("error", ""),
            "a kept code the feed stops taking: 502 with a sentence (%s)" % r.get("error"))
+        code, r = pseen(c.get("/api/patches/provenance"))
+        pb = {"%s-%s" % (b.get("region"), b.get("product")): b for b in r.get("bundles", [])}
+        w = pb.get("W2U-0002", {})
+        ok(code == 200 and [v["version"] for v in w.get("versions", [])] == [PV1, PV2, PV3]
+           and all(v["origin"] in ("retail", "ours", "our-label", "unknown") for v in w["versions"])
+           and "se-server" in r.get("sources", {}) and isinstance(w.get("missing"), list),
+           "GET /api/patches/provenance: each version with where it comes from (%s)"
+           % [(v["version"], v["origin"]) for v in w.get("versions", [])])
         code, r = feed_post({"enabled": False, "forget": True})
         ok(code == 200 and not os.path.exists(kept) and r.get("can_enable") is False, "off with forget removes the code")
     finally:

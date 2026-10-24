@@ -193,6 +193,65 @@ def bundle_info(bundle_dir):
             "path": os.path.abspath(bundle_dir)}
 
 
+KNOWN_VERSIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_versions.json")
+#: what a version is, by the source the catalog names for it
+_ORIGIN = {"our-label": "our-label", "our-build": "ours", "disc": "disc"}
+
+
+def load_known(path=None):
+    """known_versions.json: {"sources": {id: sentence}, "bundles": {REGION-PRODUCT: entry}}."""
+    try:
+        with open(path or KNOWN_VERSIONS, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    return {"sources": data.get("sources") or {}, "bundles": data.get("bundles") or {}}
+
+
+def provenance(bundle_dir, known=None):
+    """Where each version of a bundle comes from, and the retail versions it lacks.
+
+    Each held version is "retail" (Square Enix's, with the source that says so),
+    "ours" (published here and not a Square Enix release), "our-label" (retail
+    files under a version number we chose) or "unknown". A version the catalog
+    does not name is retail when the bundle was mirrored from Square Enix's
+    server, ours when it was published into the bundle, else unknown. "missing"
+    lists the retail versions the catalog knows of that the bundle does not hold
+    (a disc's own version is listed apart: nothing downloads it)."""
+    known = known or load_known()
+    info = bundle_info(bundle_dir)
+    meta = _read_meta(bundle_dir)
+    entry = known["bundles"].get("%s-%s" % (info["region"], info["product"])) or {}
+    listed = entry.get("versions") or {}
+    if isinstance(listed, list):
+        listed = {v: entry.get("source", "se-final-list") for v in listed}
+    published = {p.get("version") for p in meta.get("published") or [] if isinstance(p, dict)}
+    mirrored = bool(meta.get("host"))
+    why = known["sources"]
+
+    def row(v, src, origin):
+        return {"version": v, "origin": origin, "source": src, "why": why.get(src) if src else None}
+    rows = []
+    for v in info["versions"]:
+        if v in listed:
+            src = listed[v]
+            rows.append(row(v, src, _ORIGIN.get(src, "retail")))
+        elif v in published:
+            rows.append(row(v, None, "ours"))
+        elif mirrored:
+            rows.append(row(v, "se-server", "retail"))
+        else:
+            rows.append(row(v, None, "unknown"))
+    held = set(info["versions"])
+    missing = [row(v, s, "retail") for v, s in listed.items()
+               if v not in held and _ORIGIN.get(s, "retail") == "retail"]
+    discs = [row(v, s, "disc") for v, s in listed.items() if v not in held and s == "disc"]
+    return {"region": info["region"], "product": info["product"], "title": info["title"],
+            "versions": rows, "missing": sorted(missing, key=lambda r: version_key(r["version"])),
+            "discs": discs, "final_list": bool(entry.get("final_list")),
+            "mirrored": mirrored, "note": entry.get("note")}
+
+
 def find_bundle(mirrors_dir, region, product):
     """The bundle directory under mirrors_dir serving region/product, or None.
 

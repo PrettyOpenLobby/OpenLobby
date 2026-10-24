@@ -119,6 +119,12 @@ class Deployer(BaseHTTPRequestHandler):
                                      "dirs": [] if rel else ["Kart Club"], "files": [{"name": "data.bin", "size": 4}],
                                      "matches": [{"game": "kart", "item": "disc", "label": "Kart Club: disc data"}]
                                      if rel == "Kart Club" else []})
+        if self.path == "/api/patches/provenance":
+            return self._reply(200, {"bundles": [{"region": "KC1", "product": "0007", "title": "Kart Club (test)",
+                                                  "versions": [{"version": "20030429_0", "origin": "retail",
+                                                                "source": "disc", "why": "a disc"}],
+                                                  "missing": [], "discs": [], "final_list": False}],
+                                     "sources": {"disc": "a disc"}})
         if self.path.startswith("/api/patches/feed"):
             SEEN.append(("FEED", self.path))
             if not FEED["on"]:
@@ -372,6 +378,11 @@ def main():
         rows = owner.call("api/audit")[1].get("rows") or []
         chk("patch actions are in the activity log", any("rolled a patch bundle back" in json.dumps(r) for r in rows), True)
 
+        code, pv = owner.call("api/deploy/patches/provenance")
+        chk("where each version comes from, as the deployer says",
+            (code, [(v["version"], v["origin"]) for b in pv.get("bundles", []) for v in b["versions"]]),
+            (200, [("20030429_0", "retail")]))
+        chk("...owner only", gm.call("api/deploy/patches/provenance")[0], 403)
         print("patch feed")
         code, f = owner.call("api/deploy/patches/feed")
         chk("patches off: the panel reads it as off, with a kept code to turn them on with",

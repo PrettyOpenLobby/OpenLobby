@@ -291,3 +291,31 @@ wrong with it. Run that server without `--pin`, `--list-cap`, `--slim-list`
 or `POLP_CONSOLE_LIST_CAP`, since those change the replies on purpose, and
 restart it after every publish, since it reads `latest_version` at startup.
 Stop it when you are done.
+
+## Where each version comes from
+
+The admin panel can say, for every version a bundle holds, what it is:
+retail (Square Enix's, with what says so), ours (published into the bundle
+and never a Square Enix release), retail files under a version number we
+chose (a retail install that was never patched), or unknown. It also lists
+the retail versions known to exist that the bundle does not hold. On a
+self-hosted panel this is the version count of each row under Install games,
+Patch bundles; the deployer answers it at `GET /api/patches/provenance`.
+
+The labels come from `polpatch_lib.provenance()` and the catalog in
+`tools/patch/known_versions.json`:
+
+- a version the catalog names takes the catalog's source for it (a final
+  Square Enix list a client kept, a console's patch cache, an archived
+  patch, a retail disc or install);
+- any other version is ours when it was published into the bundle
+  (`meta.json`, `published`), retail when the bundle was mirrored from
+  Square Enix's own server, and unknown otherwise;
+- a version the catalog names that the bundle does not hold is listed as
+  not here, except a disc's own version, which nothing downloads.
+
+A catalog entry with `"final_list": true` is the list Square Enix's last
+patch list for that bundle named. It is not always the whole history: a
+final list names only the versions its rows still point at. To add what you
+know, give the bundle an entry with its versions and a source from the
+catalog's `sources`.

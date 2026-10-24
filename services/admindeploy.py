@@ -431,6 +431,12 @@ def patches(recheck=False):
     return st, out
 
 
+def patch_provenance():
+    """Where each version of each bundle comes from (retail, ours) and the retail
+    versions a bundle lacks, as the deployer reads them from the mirrors folder."""
+    return _call("GET", "/api/patches/provenance")
+
+
 def patch_feed(refresh=False):
     """The developers' patch feed, when patches from them are on: what it offers
     and how far this server is from it. Off (the default): {"feed": false,
@@ -439,7 +445,7 @@ def patch_feed(refresh=False):
     st, out = _call("GET", "/api/patches/feed" + ("?refresh=1" if refresh else ""))
     if st == 409 and out.get("feed") is False:
         return 200, {"feed": False, "enabled": False, "can_enable": bool(out.get("can_enable")),
-                     "error": out.get("error")}
+                     "from_channel": bool(out.get("from_channel")), "error": out.get("error")}
     if st == 502:
         out["feed"] = True
         out["enabled"] = True

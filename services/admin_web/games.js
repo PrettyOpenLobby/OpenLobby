@@ -1542,16 +1542,57 @@ async function loadPatches(recheck) {
     const older = (b.versions || []).slice(0, -1);
     return `<tr><td class="strong">${esc(b.title || key)}<div class="muted mono">${esc(key)}${(b.aliases || []).length ? " (also " + esc(b.aliases.join(", ")) + ")" : ""}</div>`
       + `${b.error ? `<div class="patch-why">${esc(b.error)}</div>` : ""}</td>`
-      + `<td><span class="mono">${esc(b.latest || "-")}</span><div class="muted">${esc((b.versions || []).length)} version${(b.versions || []).length === 1 ? "" : "s"}</div></td>`
+      + `<td><span class="mono">${esc(b.latest || "-")}</span><div class="muted"><a href="#" data-prov="${esc(key)}">${esc((b.versions || []).length)} version${(b.versions || []).length === 1 ? "" : "s"}</a></div></td>`
       + `<td>${b.served ? '<span class="pill live">Yes</span>' : '<span class="pill off">No</span>'}</td>`
       + `<td>${sc}${b.selfcheck_at ? `<div class="muted">${esc(jobWhen({ started: b.selfcheck_at }))}</div>` : ""}`
       + `${b.selfcheck_why ? `<div class="patch-why">${esc(b.selfcheck_why)}</div>` : ""}</td>`
       + `<td>${esc(impBytes(b.size))}</td>`
       + `<td><div class="deploy-acts">${older.length ? `<select data-rollto="${esc(key)}"><option value="">Roll back to...</option>`
         + older.slice().reverse().map((v) => `<option>${esc(v)}</option>`).join("") + `</select>` : ""}`
-      + `<button class="danger sm" data-patchrm="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div></td></tr>`;
+      + `<button class="danger sm" data-patchrm="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div></td></tr>`
+      + `<tr class="prov-row" data-provrow="${esc(key)}" hidden><td colspan="6"></td></tr>`;
   }).join("") || '<tr><td colspan="6" class="muted">No bundles in the mirrors folder yet.</td></tr>';
+  PROV = null;
 }
+
+// ---- where each version of a bundle comes from (GET /api/deploy/patches/provenance) ----
+let PROV = null;
+const PROV_WORD = { retail: ["Retail", "live"], ours: ["Ours", "wait"], "our-label": ["Retail files, our number", "env"],
+                    unknown: ["Unknown", "off"], disc: ["Disc version", "env"], missing: ["Not here", "off"] };
+// newest first: the date, then the suffix, shorter first (a same-day _9 before _10)
+const provKey = (v) => [v.slice(0, 8), String(v.length - 9).padStart(2, "0"), v.slice(9)].join("|");
+
+function provHtml(p) {
+  if (p.error) return `<div class="patch-why">${esc(p.error)}</div>`;
+  const row = (r) => {
+    const [word, pill] = PROV_WORD[r.origin] || [r.origin, "env"];
+    return `<tr><td class="mono">${esc(r.version)}</td><td><span class="pill ${pill}">${esc(word)}</span></td>`
+      + `<td class="muted">${esc(r.why || (r.origin === "ours" ? "published here; not a Square Enix release" : r.origin === "unknown" ? "nothing on record says where it came from" : ""))}</td></tr>`;
+  };
+  const held = (p.versions || []).slice().reverse();
+  const lost = (p.missing || []).slice().reverse();
+  return `<div class="muted" style="margin:2px 0 6px">${p.final_list ? "Square Enix's final list for this is known." : "Square Enix's full list for this is not known; the missing list may be short."}`
+    + `${p.note ? " " + esc(p.note) : ""}</div>`
+    + `<table class="cards"><thead><tr><th>Version</th><th>What it is</th><th>Known from</th></tr></thead><tbody>`
+    + [].concat(held, lost.map((r) => Object.assign({}, r, { origin: "missing" })), p.discs || [])
+      .sort((x, y) => (provKey(y.version) < provKey(x.version) ? -1 : provKey(y.version) > provKey(x.version) ? 1 : 0))
+      .map(row).join("") + `</tbody></table>`;
+}
+
+document.addEventListener("click", async (e) => {
+  const a = e.target.closest("[data-prov]");
+  if (!a) return;
+  e.preventDefault();
+  const tr = document.querySelector(`[data-provrow="${a.dataset.prov}"]`);
+  if (!tr) return;
+  if (!tr.hidden) { tr.hidden = true; return; }
+  try {
+    if (!PROV) PROV = await api("/api/deploy/patches/provenance");
+    const p = (PROV.bundles || []).find((x) => `${x.region}-${x.product}` === a.dataset.prov);
+    tr.firstElementChild.innerHTML = p ? provHtml(p) : '<span class="muted">Nothing on record for this bundle.</span>';
+  } catch (x) { tr.firstElementChild.innerHTML = `<span class="patch-why">${esc(x.message)}</span>`; }
+  tr.hidden = false;
+});
 
 // ---- Install games > From the developers (the dev channel's patch feed) ----
 let FEED = null;
@@ -1578,6 +1619,7 @@ async function loadFeed(refresh) {
   $("#feedOnBlock").hidden = !r.feed;
   // a kept code (or the dev channel's, when it opens the patches) needs nothing typed
   $("#feedCode").hidden = !!r.can_enable;
+  $("#feedHint").hidden = !!r.feed || !r.from_channel;
   if (!r.feed) return;
   const busy = ((DEPLOY || {}).jobs || []).some((j) => !JOB_DONE.has(j.state));
   $("#feedRefresh").disabled = busy;

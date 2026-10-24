@@ -2839,8 +2839,11 @@ class Deployer:
         (None, (code, answer)). Independent of the dev channel: on works on Stable."""
         store = patchfeed.Store(self.cfg.state)
         if not store.enabled():
+            cand = self.feed_candidate()
             return None, (409, {"error": "Patches from the developers are off.", "feed": False,
-                                "enabled": False, "can_enable": self.feed_candidate() is not None})
+                                "enabled": False, "can_enable": cand is not None,
+                                # the dev channel's own code opens them: the panel says so
+                                "from_channel": cand is not None and cand != store.code()})
         info = patchfeed.feed_of(store.code(), self.cfg.dev_registry)
         if not info:
             return None, (409, {"error": "The kept access code does not open the patches any "
@@ -2927,6 +2930,29 @@ class Deployer:
                          "status": p["status"], "files": len(p["steps"]),
                          "size": p["size"], "why": p["why"]})
         return 200, {"feed": True, "enabled": True, "bundles": rows}
+
+    def patch_provenance(self):
+        """(code, answer) for GET /api/patches/provenance: per bundle, where each
+        version comes from and the retail versions it lacks (polpatch_lib.provenance,
+        tools/patch/known_versions.json)."""
+        if not self.cfg.mirrors:
+            return 409, {"error": self.cfg.mirrors_note}
+        lib, refused = self.toolkit()
+        if refused:
+            return refused
+        if not hasattr(lib, "provenance"):
+            return 409, {"error": "The core checkout's toolkit is too old to say where versions "
+                                  "come from; update OpenLobby."}
+        known = lib.load_known()
+        rows = []
+        for _, bdir in patches.bundle_dirs(self.cfg.mirrors):
+            try:
+                rows.append(lib.provenance(bdir, known))
+            except (lib.PolpatchError, OSError, ValueError, KeyError) as exc:
+                rows.append({"bundle": os.path.basename(bdir),
+                             "error": hide_paths(str(exc), self.cfg)})
+        rows.sort(key=lambda r: (r.get("product", ""), r.get("region", "")))
+        return 200, {"bundles": rows, "sources": known["sources"]}
 
     def describe_polpatch(self, path):
         lib, refused = self.toolkit()
@@ -3509,6 +3535,8 @@ def make_handler(dep):
                 recheck = (q.get("recheck") or ["0"])[0].strip().lower() in ("1", "true", "yes")
                 code, obj = dep.patch_list(recheck)
                 return self.send_json(code, obj)
+            if parts == ["api", "patches", "provenance"]:
+                return self.send_json(*dep.patch_provenance())
             if parts == ["api", "patches", "feed"]:
                 return self.send_json(*dep.feed_list(truthy((q.get("refresh") or [""])[0])))
             if parts == ["api", "uploads"]:
