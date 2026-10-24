@@ -345,6 +345,25 @@ def main():
                       "--latest-update", "-o", os.path.join(out, "none.polpatch"))
         check(rc != 0 and "one version only" in txt, "a bundle of one version is refused")
 
+        print("versions with a two-character suffix, short blob names, upstream mismatches")
+        check(lib.sort_versions(["20261009_14", "20261009_9", "20261013_0", "20261009_10"])
+              == ["20261009_9", "20261009_10", "20261009_14", "20261013_0"],
+              "a same-day _9 sorts before _10 and _14")
+        check(lib.versions_after(["20261009_9", "20261009_10", "20261009_14"], "20261009_9")
+              == ["20261009_10", "20261009_14"], "versions_after keeps that order")
+        check(lib.check_version("20261009_14") == "20261009_14"
+              and raises(lib.check_version, "20261009_145") is not None,
+              "a suffix of one or two characters is a version, three is not")
+        check(lib._bundle_role("blobs/20151103_0/0.slc") == "slc"
+              and lib._bundle_role("blobs/20151103_0/a/0.slc") is None
+              and lib._bundle_role("blobs/x/0.slc") is None,
+              "a short blob name straight under its version is a blob; deeper or odd ones are not")
+        meta = json.dumps({"mismatches": [{"blob": "20050509_0/Direct/PolFL.exe.slc", "kind": "upstream"},
+                                          {"blob": "20050509_0/Direct/x.slc", "kind": "local"}]}).encode()
+        check(lib._upstream_mismatches(meta) == {"20050509_0/Direct/PolFL.exe.slc"}
+              and lib._upstream_mismatches(b"not json") == set(),
+              "only mismatches recorded as upstream are excused")
+
         print("command line formats")
         for args, needle in ((["--region", "w2u", "--product", "0002"], "region code"),
                              (["--region", "W2U", "--product", "2"], "product code"),

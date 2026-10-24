@@ -27,9 +27,9 @@ import urllib.parse
 import urllib.request
 
 PACKAGE = re.compile(r"^polpatch-([A-Z0-9]{3})-([0-9]{4})$")
-VERSION = re.compile(r"^[0-9]{8}_[0-9A-Za-z]$")
+VERSION = re.compile(r"^[0-9]{8}_[0-9A-Za-z]{1,2}$")
 FULL = "full.polpatch"
-UPDATE = re.compile(r"^update-from-([0-9]{8}_[0-9A-Za-z])\.polpatch$")
+UPDATE = re.compile(r"^update-from-([0-9]{8}_[0-9A-Za-z]{1,2})\.polpatch$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TIMEOUT = 20.0
 PAGE = 50
@@ -38,6 +38,12 @@ CHUNK = 1 << 20
 
 NO_ACCESS = "The access code no longer opens the patch feed; ask for a new one."
 NO_ANSWER = "The patch feed did not answer; try again later."
+
+
+def version_key(v):
+    """Sort key for patch versions: the date, then the suffix, shorter first, so a
+    same-day _9 comes before _10 (SE's suffixes are one character; ours run to two)."""
+    return (v[:8], len(v) - 9, v[9:])
 
 
 class FeedError(Exception):
@@ -165,23 +171,24 @@ def plan(versions, have):
     "new" (it has none; steps install it), "ahead" (it has a newer one),
     "custom" (it has versions the feed does not, so no file fits) or
     "unavailable" (no full file or update chain reaches it)."""
-    order = sorted(versions)
+    order = sorted(versions, key=version_key)
     latest = order[-1]
-    have = sorted(have)
+    have = sorted(have, key=version_key)
     out = {"latest": latest, "steps": [], "size": 0, "why": None}
-    if have and have[-1] > latest:
+    if have and version_key(have[-1]) > version_key(latest):
         return dict(out, status="ahead")
     if have and have[-1] == latest:
         return dict(out, status="current")
     if have and set(have) - set(order):
         return dict(out, status="custom",
                     why="This server has version(s) the feed does not (%s), so a file from "
-                        "the feed would leave them out." % ", ".join(sorted(set(have) - set(order))))
+                        "the feed would leave them out." % ", ".join(sorted(set(have) - set(order),
+                                                                            key=version_key)))
 
     def chain(base):
         steps, prev = [], base
         for v in order:
-            if v <= base:
+            if version_key(v) <= version_key(base):
                 continue
             name = "update-from-%s.polpatch" % prev
             if name not in versions[v]:

@@ -55,7 +55,7 @@ REGION_RE = re.compile(r"[A-Z0-9]{3}")
 PRODUCT_RE = re.compile(r"[0-9]{4}")
 # polserver2's YYYYMMDD_X. Versions of this shape sort in date order as plain
 # strings, which is also the order they were published and are applied in.
-VERSION_RE = re.compile(r"[0-9]{8}_[0-9A-Za-z]")
+VERSION_RE = re.compile(r"[0-9]{8}_[0-9A-Za-z]{1,2}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 CREATED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
@@ -135,7 +135,7 @@ def check_product(product):
 def check_version(version, what="version"):
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise PolpatchError(f"The {what} {version!r} is not a patch version "
-                            f"(YYYYMMDD_X, such as 20040714_0).")
+                            f"(YYYYMMDD_X or YYYYMMDD_XX, such as 20040714_0).")
     return version
 
 
@@ -143,15 +143,21 @@ def title_for(region, product):
     return f"{PRODUCTS.get(product, 'product ' + product)} ({REGIONS.get(region, region)})"
 
 
+def version_key(v):
+    """Sort key for patch versions: the date, then the suffix, shorter first, so a
+    same-day _9 comes before _10 (SE's suffixes are one character; ours run to two)."""
+    return (v[:8], len(v) - 9, v[9:])
+
+
 def sort_versions(versions):
-    """Oldest to newest. Plain string order is date order for YYYYMMDD_X."""
-    return sorted(set(versions))
+    """Oldest to newest (version_key)."""
+    return sorted(set(versions), key=version_key)
 
 
 def versions_after(versions, version):
     """The versions newer than `version`, oldest first: what a roll back to
     `version` would remove."""
-    return [v for v in sort_versions(versions) if v > version]
+    return [v for v in sort_versions(versions) if version_key(v) > version_key(version)]
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +249,13 @@ def _bundle_role(rel):
         if parts[2] == "Direct" and rel.endswith(".slc"):
             return "slc"
         if parts[2] == "Indirect" and rel.endswith(".olc"):
+            return "olc"
+    # A short name straight under the version (<ver>/<name>.slc), which is how a
+    # bundle keeps its list under the PS2 Viewer's 4 MiB limit (POL-1158).
+    if len(parts) == 3 and parts[0] == "blobs" and VERSION_RE.fullmatch(parts[1]):
+        if rel.endswith(".slc"):
+            return "slc"
+        if rel.endswith(".olc"):
             return "olc"
     return None
 
@@ -591,7 +604,8 @@ def _check_structure(m, lists, against):
             p = r[key]
             if p is None:
                 continue
-            if (_bad_name(p) or not p.startswith(f"{r['version']}/{sub}/")
+            short = p.startswith(f"{r['version']}/") and p.count("/") == 1   # see _bundle_role
+            if (_bad_name(p) or not (p.startswith(f"{r['version']}/{sub}/") or short)
                     or not p.endswith(ext)):
                 raise PolpatchError(f"patch.cfg names the blob {p!r} for "
                                     f"{r['path']}, which is not under "
@@ -703,6 +717,7 @@ def _check_content(m, reader, lim, against, deep, problems):
             raise PolpatchError(why)
         lists[rel] = data
     rows, blobs = _check_structure(m, lists, against)
+    upstream = _upstream_mismatches(lists.get("meta.json"))
     for name in sorted(blobs):
         if len(problems) >= MAX_PROBLEMS:
             problems.append("There are more problems; fix these first.")
@@ -716,9 +731,25 @@ def _check_content(m, reader, lim, against, deep, problems):
             continue
         if data is not None:
             bad = _unpack_check(data, row, lim)
+            if bad and name[len(BUNDLE_PREFIX + "blobs/"):] in upstream and "disagrees" in bad:
+                continue      # Square Enix's own server serves it this way (meta.json)
             if bad:
                 problems.append(f"{name} does not match patch.cfg: {bad}.")
     return rows
+
+
+def _upstream_mismatches(meta_bytes):
+    """The blobs a mirrored bundle's meta.json records as not matching Square
+    Enix's own list on Square Enix's own server ("mismatches", kind "upstream"):
+    a faithful copy of their mistake, not damage, so their checksum is not held
+    against them. Nothing else is excused."""
+    try:
+        meta = json.loads(meta_bytes or b"{}")
+    except ValueError:
+        return set()
+    rows = meta.get("mismatches") if isinstance(meta, dict) else None
+    return {r["blob"] for r in rows or [] if isinstance(r, dict)
+            and r.get("kind") == "upstream" and isinstance(r.get("blob"), str)}
 
 
 def verify(path, against=None, limits=None, deep=True):
@@ -1125,7 +1156,7 @@ def build_update(base, files_dir, version, out, note="", limits=None, log=None):
         meta = _read_meta(bundle)
         base_version = meta.get("latest_version", "")
         check_version(base_version, "base bundle's latest_version")
-        if version <= base_version:
+        if version_key(version) <= version_key(base_version):
             raise PolpatchError(f"The new version {version} must be newer than the "
                                 f"base's latest, {base_version}.")
         argv = ["--bundle", bundle, "--version", version, "--overlay", files_dir]

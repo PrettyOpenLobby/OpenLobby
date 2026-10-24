@@ -3449,6 +3449,11 @@ def test_patch_feed_plan():
     p = pf.plan(vs, [PV1])
     ok(p["status"] == "behind" and [s[1] for s in p["steps"]] == ["full.polpatch"],
        "plan: a broken chain falls back to the newest full file")
+    jan = {"20261009_9": {"full.polpatch": full}, "20261009_14": {"update-from-20261009_9.polpatch": f}}
+    p = pf.plan(jan, ["20261009_9"])
+    ok(p["status"] == "behind" and p["latest"] == "20261009_14" and [s[0] for s in p["steps"]] == ["20261009_14"],
+       "plan: a same-day _14 is newer than _9 (%s)" % p["steps"])
+    ok(pf.plan(jan, ["20261009_9", "20261009_14"])["status"] == "current", "plan: and _14 here is current")
     ok(pf.PACKAGE.match("polpatch-W2U-0002") and not pf.PACKAGE.match("polpatch-w2u-0002")
        and not pf.PACKAGE.match("polpatch-W2U-0002/../x") and pf.UPDATE.match("update-from-%s.polpatch" % PV1)
        and not pf.UPDATE.match("update-from-x.polpatch"), "names: only the shapes the feed uses")

@@ -66,6 +66,12 @@ BACKED_UP = ("patch.cfg", "patchlist.raw", "meta.json", "manifest.json")
 VER_RE = re.compile(r"^(\d{8}_\w+) ", re.M)
 
 
+def version_key(v):
+    """Sort key for patch versions: the date, then the suffix, shorter first, so a
+    same-day _9 comes before _10 (SE's suffixes are one character; ours run to two)."""
+    return (v[:8], len(v) - 9, v[9:])
+
+
 def backup(bundle, restore=False):
     for name in BACKED_UP:
         live = os.path.join(bundle, name)
@@ -78,7 +84,7 @@ def backup(bundle, restore=False):
 
 
 def versions_in(cfg):
-    return sorted(set(VER_RE.findall(cfg)))
+    return sorted(set(VER_RE.findall(cfg)), key=version_key)
 
 
 def added_versions(bundle):
@@ -134,7 +140,7 @@ def newest_rows(bundle):
     out = {}
     for r in manifest(bundle):
         cur = out.get(r["path"])
-        if cur is None or r["version"] > cur["version"]:
+        if cur is None or version_key(r["version"]) > version_key(cur["version"]):
             out[r["path"]] = r
     return out
 
@@ -234,14 +240,14 @@ def main(argv=None):
     cfg = open(cfg_path, encoding="latin-1").read()
     if re.search(r"^%s " % re.escape(ver), cfg, re.M):
         raise SystemExit(f"{ver} is already in patch.cfg - --revert first")
-    if ver <= meta.get("latest_version", "") and not a.backfill:
+    if version_key(ver) <= version_key(meta.get("latest_version", "")) and not a.backfill:
         raise SystemExit(
             f"{ver} is not newer than the bundle's latest ({meta['latest_version']}). "
             f"cmd 8 hands the client `latest` and it compares as a STRING, so "
             f"publishing backwards would tell every client it is up to date. "
             f"If this is an older build being added after newer ones, pass "
             f"--backfill: it keeps latest_version where it is.")
-    if a.backfill and ver > meta.get("latest_version", ""):
+    if a.backfill and version_key(ver) > version_key(meta.get("latest_version", "")):
         raise SystemExit(
             f"--backfill is for a version OLDER than latest, but {ver} is newer "
             f"than {meta.get('latest_version')!r}. Publish it normally.")

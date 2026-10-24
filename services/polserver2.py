@@ -674,7 +674,7 @@ def apply_pins(bundles, specs):
         b = bundles.get((region.strip(), prod.strip()))
         if not b:
             raise SystemExit(f"--pin {spec}: no such bundle")
-        if not re.fullmatch(r"\d{8}_[0-9A-Za-z]", version):
+        if not re.fullmatch(r"\d{8}_[0-9A-Za-z]{1,2}", version):
             raise SystemExit(f"--pin {spec}: {version!r} is not a version string "
                              f"(YYYYMMDD_X)")
         try:

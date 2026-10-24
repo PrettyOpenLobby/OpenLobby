@@ -25,7 +25,7 @@ import time
 
 REGION = re.compile(r"[A-Z0-9]{3}")
 PRODUCT = re.compile(r"[0-9]{4}")
-VERSION = re.compile(r"[0-9]{8}_[0-9A-Za-z]")
+VERSION = re.compile(r"[0-9]{8}_[0-9A-Za-z]{1,2}")
 LIST_FILES = ("meta.json", "patch.cfg", "patchlist.raw")
 BACKUP_DIR = ".polpatch-backup"
 PROBE_CLAIM = "20000101_0"     # the version the served probe claims; never a bundle's latest
