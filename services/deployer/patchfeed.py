@@ -161,6 +161,82 @@ class Feed:
         return dest
 
 
+class Store:
+    """Whether patches from the feed are on, and the access code that opens the feed,
+    under STATE/patchfeed. Kept apart from the dev channel's own code (devchannel.Store):
+    patches work on the stable channel too, and switching the channel back to Stable,
+    which forgets the channel's code, leaves this one alone.
+
+        code         the code as given, mode 600
+        state.json   {"enabled": bool, "changed": ISO time}
+    """
+
+    def __init__(self, state):
+        self.dir = os.path.join(state, "patchfeed")
+        self.code_path = os.path.join(self.dir, "code")
+        self.state_path = os.path.join(self.dir, "state.json")
+
+    def _dir(self):
+        os.makedirs(self.dir, mode=0o700, exist_ok=True)
+
+    def code(self):
+        try:
+            with open(self.code_path, encoding="utf-8") as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+
+    def save_code(self, code):
+        self._dir()
+        tmp = self.code_path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(code)
+        os.replace(tmp, self.code_path)
+
+    def enabled(self):
+        try:
+            with open(self.state_path, encoding="utf-8") as f:
+                return json.load(f).get("enabled") is True
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    def set_enabled(self, on, when):
+        self._dir()
+        tmp = self.state_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"enabled": bool(on), "changed": when}, f)
+        os.replace(tmp, self.state_path)
+
+    def forget(self):
+        for p in (self.code_path, self.state_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def feed_of(code, registry=None):
+    """The parsed code when it opens a patch feed, else None."""
+    import devchannel
+    try:
+        info = devchannel.parse_code(code, registry=registry) if code else None
+    except devchannel.ChannelError:
+        return None
+    return info if info and info.get("feed") else None
+
+
+def offer_code(state, code):
+    """Keep `code` as the patch feed's code when it opens a feed and none is kept yet.
+    Patches stay off: turning them on is the owner's choice. For the deployer's redeem
+    of a short dev code, which may answer an olx2. code. True when it was kept."""
+    store = Store(state)
+    if store.code() or not feed_of(code):
+        return False
+    store.save_code(code)
+    return True
+
+
 def plan(versions, have):
     """What to fetch to bring a bundle to the feed's newest version.
 

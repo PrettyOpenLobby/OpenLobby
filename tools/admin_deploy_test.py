@@ -114,8 +114,8 @@ class Deployer(BaseHTTPRequestHandler):
         if self.path.startswith("/api/patches/feed"):
             SEEN.append(("FEED", self.path))
             if not FEED["on"]:
-                return self._reply(409, {"error": "Patches from the developers come with the dev channel.",
-                                         "feed": False})
+                return self._reply(409, {"error": "Patches from the developers are off.",
+                                         "feed": False, "enabled": False, "can_enable": True})
             return self._reply(200, {"feed": True, "bundles": [
                 {"region": "KC1", "product": "0007", "title": "Kart Club (test)", "latest": "20050101_0",
                  "have": "20040714_0", "status": "behind", "files": 1, "size": 700, "why": None}]})
@@ -182,6 +182,12 @@ class Deployer(BaseHTTPRequestHandler):
         SEEN.append(("BODY", body))
         if STATE["busy"]:
             return self._reply(409, {"job": "j2"})
+        if self.path == "/api/patches/feed":
+            SEEN.append(("FEEDSET", body))
+            if body.get("enabled") and body.get("code") not in (None, "olx2.good"):
+                return self._reply(400, {"error": "That access code does not include patches."})
+            FEED["on"] = bool(body.get("enabled"))
+            return self._reply(200, {"feed": FEED["on"], "enabled": FEED["on"]})
         if self.path == "/api/channel":
             SEEN.append(("CHANNEL", body))
             if body.get("channel") == "dev" and body.get("code") != CODE:
@@ -353,8 +359,23 @@ def main():
         chk("patch actions are in the activity log", any("rolled a patch bundle back" in json.dumps(r) for r in rows), True)
 
         print("patch feed")
-        chk("no feed on this install: the panel hides it", owner.call("api/deploy/patches/feed"),
-            (200, {"feed": False}))
+        code, f = owner.call("api/deploy/patches/feed")
+        chk("patches off: the panel reads it as off, with a kept code to turn them on with",
+            (code, f.get("feed"), f.get("enabled"), f.get("can_enable")), (200, False, False, True))
+        n = len(SEEN)
+        code, out = owner.call("api/deploy/patches/feed", {"enabled": True, "code": " olx2.good "})
+        chk("turning them on: the code reaches the deployer, trimmed",
+            (code, [s[1] for s in SEEN[n:] if s[0] == "FEEDSET"]), (200, [{"enabled": True, "code": "olx2.good"}]))
+        rows = owner.call("api/audit")[1].get("rows") or []
+        chk("...the activity log says so, and never holds the code",
+            (any("turned patches from the developers on" in json.dumps(r) for r in rows),
+             any("olx2.good" in json.dumps(r) for r in rows)), (True, False))
+        chk("a code the deployer refuses: its sentence", owner.call("api/deploy/patches/feed",
+            {"enabled": True, "code": "olx1.nope"})[0], 400)
+        chk("bad bodies never reach it", [owner.call("api/deploy/patches/feed", b)[0]
+                                          for b in ({}, {"enabled": "yes"}, {"enabled": True, "code": 7})],
+            [400, 400, 400])
+        chk("a moderator cannot turn them on", gm.call("api/deploy/patches/feed", {"enabled": True})[0], 403)
         FEED["on"] = True
         code, f = owner.call("api/deploy/patches/feed?refresh=1")
         chk("with a feed: what it offers, as the deployer said",

@@ -1131,11 +1131,23 @@ the image's `source` under the code's `s` (or `POL_DEV_SOURCE`, or
 ### Patches from the dev channel
 
 The developers may also keep patch bundles for the servers they hand codes
-to. An access code with a patch feed in it opens them; the panel's Install
-games tab then shows "From the developers" under Patch bundles, with each
-title the feed has, the version this server has, the feed's newest, and a
-Get or Update button. Without such a code, or on the stable channel, the
-section is not there and nothing asks the feed.
+to. An access code with a patch feed in it opens them. Patches have their
+own switch, "Patches from the developers" under Patch bundles on the Install
+games tab, apart from the update channel: they work on Stable as well as
+Dev, and they are off until the owner turns them on, whatever code the
+install holds. Turning them on takes a code with a feed in it, or uses one
+already kept (from an earlier time, or the dev channel's own code when it
+has a feed), after the feed has answered to it. When on, the section lists
+each title the feed has, the version this server has, the feed's newest,
+and a Get or Update button. When off, nothing asks the feed.
+
+The patch code is kept apart from the channel's, in `patchfeed/code` in the
+deployer's volume (mode 600), with `patchfeed/state.json` saying whether
+patches are on. Switching the channel back to Stable, which forgets the
+channel's code, leaves it alone; turning patches off keeps it too, unless
+the owner asks to forget it. A short dev code that redeems to an `olx2.`
+code is offered to the patch store (kept when none is kept yet), never
+turned on by itself.
 
 The feed is a Forgejo or Gitea package registry the code's token can read.
 Each bundle is a generic package `polpatch-<REGION>-<PRODUCT>`, each patch
@@ -1261,8 +1273,20 @@ the endpoint answers 409 `{"error"}`.
 ```
 
 `patch_fetch` brings the bundle to the patch feed's newest version ("Patches
-from the dev channel"). It answers 409 `{"error", "feed": false}` when the
-install is not on the dev channel or its code has no feed.
+from the dev channel"). It answers 409 `{"error", "feed": false}` while
+patches from the developers are off. `POST /api/patches/feed` turns them on
+or off:
+
+```
+{"enabled": true, "code": "olx2...."}     (code optional: the kept one is used)
+{"enabled": false}                        (the code is kept)
+{"enabled": false, "forget": true}        (and removed)
+```
+
+and answers 200 `{"feed", "enabled", "can_enable"}` (on: also `bundles`, the
+feed's count), 400 for a body of another shape, no code to use, or a code
+with no feed in it, and 502 `{"error"}` when the feed refuses the code or
+does not answer, in which case nothing is changed.
 `GET /api/patches/feed[?refresh=1]` lists what the feed offers (the listing
 is reused for five minutes unless `refresh=1`):
 
@@ -1276,7 +1300,9 @@ is reused for five minutes unless `refresh=1`):
 `status` is `new` (not here), `behind`, `current`, `ahead` (newer here),
 `custom` (versions here the feed lacks) or `unavailable` (no file reaches
 the newest); `files` and `size` are what fetching takes, and `why` says why
-for the last two. It answers 409 `{"error", "feed": false}` as above, and
+for the last two. While patches are off it answers 409 `{"error", "feed":
+false, "enabled": false, "can_enable"}`, `can_enable` saying whether a kept
+code would turn them on with nothing typed, and
 502 `{"error"}` when the feed refuses the code or does not answer.
 
 `patch_build` takes three optional fields. `version` is the version to

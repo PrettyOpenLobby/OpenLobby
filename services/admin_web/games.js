@@ -1474,11 +1474,19 @@ async function loadFeed(refresh) {
   try { r = await api("/api/deploy/patches/feed" + (refresh ? "?refresh=1" : "")); }
   catch (e) {
     panel.hidden = false;
+    $("#feedOff").hidden = true;
+    $("#feedOnBlock").hidden = false;
     $("#feedBody").innerHTML = `<tr><td colspan="5" class="muted">${esc(e.message)}</td></tr>`;
     return;
   }
   FEED = r;
-  panel.hidden = !r.feed;
+  panel.hidden = false;
+  $("#feedPill").textContent = r.feed ? "On" : "Off";
+  $("#feedPill").className = "pill " + (r.feed ? "live" : "env");
+  $("#feedOff").hidden = !!r.feed;
+  $("#feedOnBlock").hidden = !r.feed;
+  // a kept code (or the dev channel's, when it opens the patches) needs nothing typed
+  $("#feedCode").hidden = !!r.can_enable;
   if (!r.feed) return;
   const busy = ((DEPLOY || {}).jobs || []).some((j) => !JOB_DONE.has(j.state));
   $("#feedRefresh").disabled = busy;
@@ -1510,6 +1518,19 @@ document.addEventListener("click", (e) => {
   if (e.target.closest("#patchBuild")) return openPatchDialog("patch_build");
   if (e.target.closest("#patchCheck")) return loadPatches(true);
   if (e.target.closest("#feedRefresh")) return loadFeed(true);
+  if (e.target.closest("#feedOn") || e.target.closest("#feedOffBtn")) {
+    const on = !!e.target.closest("#feedOn");
+    const body = { enabled: on };
+    if (on && !$("#feedCode").hidden) body.code = $("#feedCode").value.trim();
+    return (async () => {
+      try {
+        await api("/api/deploy/patches/feed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        $("#feedCode").value = "";
+        toast(on ? "Patches from the developers are on" : "Patches from the developers are off");
+      } catch (x) { toast(x.message, true); }
+      loadFeed();
+    })();
+  }
   const get = e.target.closest("[data-feedget]");
   if (get) {
     const b = (FEED.bundles || []).find((x) => `${x.region}-${x.product}` === get.dataset.feedget);

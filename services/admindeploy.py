@@ -378,15 +378,37 @@ def patches(recheck=False):
 
 
 def patch_feed(refresh=False):
-    """The developers' patch feed (dev channel with a code that has patches in
-    it): what it offers and how far this server is from it. {"feed": false}
-    when this install has no feed, which is most of them."""
+    """The developers' patch feed, when patches from them are on: what it offers
+    and how far this server is from it. Off (the default): {"feed": false,
+    "enabled": false, "can_enable"}, can_enable saying whether a code that opens
+    the patches is already kept, so turning them on needs no code typed."""
     st, out = _call("GET", "/api/patches/feed" + ("?refresh=1" if refresh else ""))
     if st == 409 and out.get("feed") is False:
-        return 200, {"feed": False}
+        return 200, {"feed": False, "enabled": False, "can_enable": bool(out.get("can_enable")),
+                     "error": out.get("error")}
     if st == 502:
         out["feed"] = True
+        out["enabled"] = True
     return st, out
+
+
+def patch_feed_set(body):
+    """Turn patches from the developers on ({"enabled": true, "code"?}) or off
+    ({"enabled": false, "forget"?}). The code goes to the deployer only."""
+    on = body.get("enabled")
+    if not isinstance(on, bool):
+        return 400, {"error": "Say whether patches are on."}
+    out = {"enabled": on}
+    if on:
+        code = body.get("code")
+        if code is not None:
+            if not isinstance(code, str) or len(code.strip()) > 2048:
+                return 400, {"error": "The access code is up to 2048 characters."}
+            if code.strip():
+                out["code"] = code.strip()
+    elif body.get("forget") is True:
+        out["forget"] = True
+    return _call("POST", "/api/patches/feed", out)
 
 
 def patch_action(body):

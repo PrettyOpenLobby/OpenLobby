@@ -2093,15 +2093,24 @@
           <th>Self-check</th><th>Size</th><th></th></tr></thead><tbody id="patchBody"></tbody></table></div>
       </div>
       <div class="panel" id="feedPanel" hidden>
-        <h2>From the developers</h2>
-        <p class="hint">Patch bundles the developers keep for servers on the dev channel. Your access
-          code opens them; nobody else can see them. Getting one brings a title to the newest version
-          here, a few files at a time when you already have it.</p>
-        <div class="toolbar">
-          <button class="ghost sm" id="feedRefresh">Look again</button>
+        <h2>Patches from the developers <span class="pill env" id="feedPill">Off</span></h2>
+        <p class="hint">Patch bundles the developers keep for the servers they give an access code
+          to; nobody else can see them. Turning them on changes nothing about your update channel:
+          they work on Stable too. Getting one brings a title to the newest version here, a few
+          files at a time when you already have it.</p>
+        <div class="toolbar" id="feedOff">
+          <input type="password" id="feedCode" class="mono" style="flex:1 1 280px;max-width:520px;width:auto" maxlength="2048" autocomplete="off"
+            spellcheck="false" placeholder="Access code that includes patches (olx2...)">
+          <button class="act sm" id="feedOn">Turn on</button>
         </div>
-        <div class="tablewrap"><table class="cards"><thead><tr><th>Title</th><th>Here</th><th>Newest</th>
-          <th>State</th><th></th></tr></thead><tbody id="feedBody"></tbody></table></div>
+        <div id="feedOnBlock" hidden>
+          <div class="toolbar">
+            <button class="ghost sm" id="feedRefresh">Look again</button>
+            <button class="ghost sm" id="feedOffBtn">Turn off</button>
+          </div>
+          <div class="tablewrap"><table class="cards"><thead><tr><th>Title</th><th>Here</th><th>Newest</th>
+            <th>State</th><th></th></tr></thead><tbody id="feedBody"></tbody></table></div>
+        </div>
       </div>
       <div class="panel" id="deployJobPanel" hidden>
         <h2>Job <span class="mono" id="deployJobTitle"></span> <span class="pill" id="deployJobState"></span></h2>

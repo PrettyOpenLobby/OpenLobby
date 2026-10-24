@@ -2695,25 +2695,68 @@ class Deployer:
             return code, out
         return 200, out
 
+    def feed_candidate(self):
+        """The code turning patches on would use with none typed: the patch store's
+        own, else the dev channel's when it opens a feed. None when there is none."""
+        for code in (patchfeed.Store(self.cfg.state).code(),
+                     devchannel.Store(self.cfg.state).code()):
+            if patchfeed.feed_of(code, self.cfg.dev_registry):
+                return code
+        return None
+
     def feed_info(self):
-        """The parsed access code when this install is on the dev channel with a
-        code that has a patch feed in it, else (None, (code, answer))."""
-        if devchannel.read_channel(self.cfg.core).get("channel") != "dev":
-            return None, (409, {"error": "Patches from the developers come with the dev "
-                                         "channel. Switch to Dev with an access code that "
-                                         "includes patches.", "feed": False})
-        code = devchannel.Store(self.cfg.state).code()
-        try:
-            info = devchannel.parse_code(code, registry=self.cfg.dev_registry) if code else None
-        except devchannel.ChannelError:
-            info = None
-        if not info or not info.get("feed"):
-            return None, (409, {"error": "This access code does not include patches; ask the "
-                                         "developers for one that does.", "feed": False})
+        """The parsed patch code when patches from the developers are on, else
+        (None, (code, answer)). Independent of the dev channel: on works on Stable."""
+        store = patchfeed.Store(self.cfg.state)
+        if not store.enabled():
+            return None, (409, {"error": "Patches from the developers are off.", "feed": False,
+                                "enabled": False, "can_enable": self.feed_candidate() is not None})
+        info = patchfeed.feed_of(store.code(), self.cfg.dev_registry)
+        if not info:
+            return None, (409, {"error": "The kept access code does not open the patches any "
+                                         "more; turn them on again with a code that includes "
+                                         "patches.", "feed": False, "enabled": False,
+                                "can_enable": False})
         return info, None
 
+    def feed_set(self, body):
+        """POST /api/patches/feed: {"enabled": false} turns patches off (the code is
+        kept, unless "forget": true); {"enabled": true, "code"?} turns them on with the
+        code given, or the kept one, after the feed has answered to it."""
+        store = patchfeed.Store(self.cfg.state)
+        on = body.get("enabled")
+        if not isinstance(on, bool):
+            return 400, {"error": "Say whether patches are on: {\"enabled\": true or false}."}
+        if not on:
+            store.set_enabled(False, now_iso())
+            if body.get("forget") is True:
+                store.forget()
+            self.feed_cache = None
+            return 200, {"feed": False, "enabled": False,
+                         "can_enable": self.feed_candidate() is not None}
+        code = body.get("code")
+        if code is not None and (not isinstance(code, str) or len(code) > 2048):
+            return 400, {"error": "The access code is up to 2048 characters."}
+        code = (code or "").strip() or self.feed_candidate()
+        if not code:
+            return 400, {"error": "Type an access code that includes patches."}
+        info = patchfeed.feed_of(code, self.cfg.dev_registry)
+        if not info:
+            return 400, {"error": "That access code does not include patches; ask the "
+                                  "developers for one that does."}
+        try:
+            listing = patchfeed.Feed(info["feed"], info["token"], self.cfg.dev_user,
+                                     self.cfg.dev_scheme).bundles()
+        except patchfeed.FeedError as exc:
+            return 502, {"error": str(exc)}
+        store.save_code(code)
+        store.set_enabled(True, now_iso())
+        self.feed_cache = (time.time(), listing)
+        say("patches from the developers turned on (%d bundle(s) in the feed)" % len(listing))
+        return 200, {"feed": True, "enabled": True, "bundles": len(listing)}
+
     def feed_host(self):
-        info, _ = self.feed_info()
+        info = patchfeed.feed_of(patchfeed.Store(self.cfg.state).code(), self.cfg.dev_registry)
         return info["feed"].split("/", 1)[0] if info else None
 
     def feed_client(self):
@@ -2753,7 +2796,7 @@ class Deployer:
                          "latest": p["latest"], "have": have[-1] if have else None,
                          "status": p["status"], "files": len(p["steps"]),
                          "size": p["size"], "why": p["why"]})
-        return 200, {"feed": True, "bundles": rows}
+        return 200, {"feed": True, "enabled": True, "bundles": rows}
 
     def describe_polpatch(self, path):
         lib, refused = self.toolkit()
@@ -2813,7 +2856,8 @@ class Deployer:
     def _run(self, job):
         secret, also = self.secrets.pop(job["id"], (None, ()))
         log = JobLog(self.store, job, self.cfg.token,
-                     secrets=[secret, devchannel.Store(self.cfg.state).code()] + list(also),
+                     secrets=[secret, devchannel.Store(self.cfg.state).code(),
+                              patchfeed.Store(self.cfg.state).code()] + list(also),
                      hide=[job.get("registry"), devchannel.read_channel(self.cfg.core).get("registry"),
                            self.cfg.dev_registry, self.feed_host()])
         r = Runner(self.cfg, load_catalog(self.cfg.core), log)
@@ -3286,7 +3330,7 @@ def make_handler(dep):
             path = urllib.parse.urlsplit(self.path).path.rstrip("/")
             if path == "/api/uploads":
                 return self.upload()
-            if path not in ("/api/actions", "/api/channel", "/api/updater"):
+            if path not in ("/api/actions", "/api/channel", "/api/updater", "/api/patches/feed"):
                 return self.send_json(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length") or "0")
@@ -3303,6 +3347,8 @@ def make_handler(dep):
                 return self.send_json(400, {"error": "the body must be a JSON object"})
             if path == "/api/channel":
                 return self.send_json(*dep.channel_request(body))
+            if path == "/api/patches/feed":
+                return self.send_json(*dep.feed_set(body))
             if path == "/api/updater":
                 # a paired game's updater, as the panel's owner approved it; checked again here
                 return self.send_json(*dep.updater_start(body))

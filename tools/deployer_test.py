@@ -3463,23 +3463,45 @@ def test_patch_feed(c, k, t):
     sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
     import devchannel as dc
     lib = polpatch_lib()
+    import patchfeed as pfd
     chfile = os.path.join(t.core, ".channel")
     store = dc.Store(k.state)
+
+    def feed_post(body):
+        return pseen(c.call("POST", "/api/patches/feed", body))
     code, r = pseen(c.get("/api/patches/feed"))
-    ok(code == 409 and r.get("feed") is False and "dev channel" in r.get("error", ""),
-       "feed on the stable channel: 409 (%s)" % r.get("error"))
+    ok(code == 409 and r.get("feed") is False and r.get("enabled") is False and r.get("can_enable") is False,
+       "patches are off by default: 409, nothing to turn them on with (%s)" % r)
     code, r = pseen(c.post({"action": "patch_fetch", "region": "W2U", "product": "0002"}))
-    ok(code == 409, "patch_fetch on the stable channel: 409")
+    ok(code == 409, "patch_fetch while patches are off: 409")
     dc.write_channel(t.core, "dev", registry="registry.example.org/kart")
     store.save_code(dc.make_code("registry.example.org/kart", "kart-token-0123"))
     code, r = pseen(c.get("/api/patches/feed"))
-    ok(code == 409 and "does not include patches" in r.get("error", ""),
-       "feed with an olx1. code: 409 (%s)" % r.get("error"))
+    ok(code == 409 and r.get("can_enable") is False, "a dev channel olx1. code does not make patches possible")
+    code, r = feed_post({"enabled": True})
+    ok(code == 400 and "Type an access code" in r.get("error", ""), "turning on with no code: 400 (%s)" % r)
+    code, r = feed_post({"enabled": True, "code": dc.make_code("registry.example.org/kart", "kart-token-0123")})
+    ok(code == 400 and "does not include patches" in r.get("error", ""), "turning on with an olx1. code: 400")
+    ok(feed_post({"enabled": "yes"})[0] == 400, "enabled must be true or false")
+    store.forget()
+    os.remove(chfile)
 
     feed = FakeFeed("feed-token-4567")
     try:
-        store.save_code(dc.make_code("registry.example.org/kart", "feed-token-4567",
-                                     feed="127.0.0.1:%d/kart-patches" % feed.port))
+        good = dc.make_code("registry.example.org/kart", "feed-token-4567",
+                            feed="127.0.0.1:%d/kart-patches" % feed.port)
+        state2 = os.path.join(t.tmp, "offer-state")
+        ok(pfd.offer_code(state2, good) and pfd.Store(state2).code() == good and not pfd.Store(state2).enabled()
+           and not pfd.offer_code(state2, good + "x"),
+           "offer_code keeps a feed code without turning patches on, and never replaces one")
+        ok(not pfd.offer_code(os.path.join(t.tmp, "offer-2"), dc.make_code("registry.example.org/kart", "x1")),
+           "offer_code refuses a code with no feed")
+        code, r = feed_post({"enabled": True, "code": good})
+        ok(code == 200 and r.get("enabled") is True and not os.path.exists(chfile),
+           "patches turned on with an olx2. code on the STABLE channel (%s)" % r)
+        kept = os.path.join(k.state, "patchfeed", "code")
+        ok(open(kept).read() == good and (os.name == "nt" or (os.stat(kept).st_mode & 0o777) == 0o600),
+           "  the code is kept apart from the channel's, mode 600")
         name = "polpatch-W2U-0002"
         feed.packages[(name, PV1)] = {"full.polpatch": open(k.full, "rb").read()}
         feed.packages[(name, PV2)] = {"update-from-%s.polpatch" % PV1: open(k.up2, "rb").read()}
@@ -3530,11 +3552,27 @@ def test_patch_feed(c, k, t):
         ok(j["state"] == "ok" and rows2["W2U/0002"]["versions"] == [PV1, PV2, PV3],
            "the chain of updates brings it to %s (%s)" % (PV3, j["summary"]))
 
-        store.save_code(dc.make_code("registry.example.org/kart", "wrong-token",
-                                     feed="127.0.0.1:%d/kart-patches" % feed.port))
+        hits = len(feed.hits)
+        code, r = feed_post({"enabled": False})
+        ok(code == 200 and r.get("enabled") is False and r.get("can_enable") is True, "turning patches off")
+        code, r = pseen(c.get("/api/patches/feed?refresh=1"))
+        ok(code == 409 and r.get("can_enable") is True and len(feed.hits) == hits,
+           "  off: 409, and the feed is never asked (%d new requests)" % (len(feed.hits) - hits))
+        code, r = feed_post({"enabled": True})
+        ok(code == 200 and r.get("enabled") is True, "turning them on again uses the kept code")
+        dc.Store(k.state).forget()
+        ok(open(kept).read() == good, "  forgetting the channel's code leaves the patch code")
+        bad = dc.make_code("registry.example.org/kart", "wrong-token", feed="127.0.0.1:%d/kart-patches" % feed.port)
+        code, r = feed_post({"enabled": True, "code": bad})
+        ok(code == 502 and "no longer opens the patch feed" in r.get("error", "") and open(kept).read() == good,
+           "a code the feed refuses: 502 with a sentence, and the good code is still kept (%s)" % r.get("error"))
+        with open(kept, "w") as f:
+            f.write(bad)
         code, r = pseen(c.get("/api/patches/feed?refresh=1"))
         ok(code == 502 and "no longer opens the patch feed" in r.get("error", ""),
-           "a token the feed refuses: 502 with a sentence (%s)" % r.get("error"))
+           "a kept code the feed stops taking: 502 with a sentence (%s)" % r.get("error"))
+        code, r = feed_post({"enabled": False, "forget": True})
+        ok(code == 200 and not os.path.exists(kept) and r.get("can_enable") is False, "off with forget removes the code")
     finally:
         feed.close()
         store.forget()
