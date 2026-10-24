@@ -476,9 +476,32 @@ local NEW_ENV=1
 
 # Detect this machine's addresses. LAN = the default route's interface.
 local DEF_IF="" LAN_ADDR="" LAN_CIDR="" VPN_IF="" VPN_ADDR="" VPN_CIDR="" IF_PUBLIC=""
+# A tool that lives in an sbin folder, which an ordinary user's PATH often lacks.
+find_tool() {
+    local t="$1" d
+    command -v "$t" 2>/dev/null && return 0
+    for d in /usr/sbin /sbin /usr/bin /bin; do
+        [ -x "$d/$t" ] && { printf '%s
+' "$d/$t"; return 0; }
+    done
+    return 1
+}
+IPCMD="$(find_tool ip || true)"
+SSCMD="$(find_tool ss || true)"
+
 detect_addresses() {
-    command -v ip >/dev/null 2>&1 || { warn "the ip command is missing, so addresses are not detected"; return 0; }
-    DEF_IF="$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
+    if [ -z "$IPCMD" ]; then
+        # No ip command: take the first usable address hostname -I reports.
+        local h
+        for h in $(hostname -I 2>/dev/null); do
+            if is_ipv4 "$h" && ! is_special "$h"; then
+                LAN_ADDR="$h"; LAN_CIDR="$(network_of "$h/24")"; break
+            fi
+        done
+        [ -n "$LAN_ADDR" ] || warn "the ip command is missing, so addresses are not detected"
+        return 0
+    fi
+    DEF_IF="$("$IPCMD" -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
     local line ifn cidr a
     while read -r line; do
         [ -n "$line" ] || continue
@@ -508,14 +531,14 @@ detect_addresses() {
         fi
         if ! is_private "$a" && ! is_cgnat "$a" && [ -z "$IF_PUBLIC" ]; then IF_PUBLIC="$a"; fi
     done <<EOF
-$(ip -o -4 addr show 2>/dev/null)
+$("$IPCMD" -o -4 addr show 2>/dev/null)
 EOF
 }
 local LAN_IF_SET=0
 
 port53_busy() {
-    command -v ss >/dev/null 2>&1 || return 1
-    [ -n "$(ss -Hlun 'sport = :53' 2>/dev/null)" ]
+    [ -n "$SSCMD" ] || return 1
+    [ -n "$("$SSCMD" -Hlun 'sport = :53' 2>/dev/null)" ]
 }
 
 # The six address keys, decided below

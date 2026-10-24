@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The deployer: installs, enables, updates and restarts games for the admin
-panel, by running tools/stack.py, and builds a game's client data from a
-client folder or an uploaded archive. docs/deployer.md describes the HTTP
-API and how to run it.
+panel, by running tools/stack.py, builds a game's client data from a client
+folder or an uploaded archive, and installs, rolls back and removes the
+patch service's bundles from .polpatch files. docs/deployer.md describes
+the HTTP API and how to run it.
 
     python deployer.py                 serve (settings from the environment)
     python deployer.py --healthcheck   exit 0 when the local server answers (and
@@ -40,6 +41,12 @@ Settings (environment, or the options of the same meaning):
                          (default https://<registry>)
     POL_DEV_USER         the user name a bare access code signs in under (default dev)
     POL_DEV_REGISTRY_HTTP  1: the registry speaks plain http (tests, a registry on the LAN)
+    POL_DEPLOY_MIRRORS   the patch service's mirrors folder as mounted here
+                         (unset: the patch actions are off)
+    POL_DEPLOY_PATCH_HOST  where the patch service answers (default patch)
+    POL_VALKEY_URL       where the patch service reports downloads in progress; a patch
+                         action waits for them before it restarts the service (unset: no wait)
+    POL_DEPLOY_PATCH_DRAIN  the most seconds that wait lasts (default 1800)
 
 Standard library only.
 """
@@ -57,6 +64,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -70,10 +78,12 @@ import clientdata  # noqa: E402
 import devchannel  # noqa: E402
 import gameupdater  # noqa: E402
 import updatecheck  # noqa: E402
+import patches  # noqa: E402
 
-VERSION = "2.0"
+VERSION = "3.0"
 
-ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import")
+PATCH_ACTIONS = ("patch_import", "patch_build", "patch_remove", "patch_rollback", "patch_check")
+ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import") + PATCH_ACTIONS
 CORE_ACTIONS = ("update", "restart", "check")
 
 KEEP_JOBS = 50
@@ -93,6 +103,12 @@ PROBE_TIMEOUT = 120        # the start-up check that Docker sees the checkout wh
 UPDATER_IDLE = 15          # minutes a paired game's updater may print nothing before it is stopped
 UPDATER_BODY = 16384       # the most a POST /api/updater may hold
 UPDATER_LABEL = "org.openlobby.updater.job"   # on an updater's container: its job id
+VERIFY_TIMEOUT = 3600      # the quick check of an uploaded .polpatch is stopped after this long
+SERVE_WAIT = 90            # seconds the patch service gets to answer again after a restart
+PATCH_DRAIN = 1800         # the most seconds a patch action waits for downloads to finish
+DRAIN_POLL = 10.0          # how often it asks again while it waits
+PATCHTOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patchtool.py")
+POLPATCH_UPLOAD = "upload.polpatch"   # the one file a .polpatch upload's folder holds
 
 JOB_ID = re.compile(r"^[0-9]{8}T[0-9]{6}-[0-9a-f]{6}$")
 ACTIVE = ("queued", "running")
@@ -161,6 +177,14 @@ class Config:
         self.dev_source = None
         self.dev_user = devchannel.DEFAULT_USER
         self.dev_scheme = "https"
+        self.mirrors = None          # realpath of POL_DEPLOY_MIRRORS; None: patch actions are off
+        self.mirrors_note = "POL_DEPLOY_MIRRORS is not set, so the patch actions are off"
+        self.patch_host = "patch"
+        self.patch_offset = 0
+        self.valkey = None           # (host, port, db) of POL_VALKEY_URL; None: no download wait
+        self.kv_prefix = "pol:"
+        self.patch_drain = PATCH_DRAIN
+        self.drain_poll = DRAIN_POLL
 
 
 def parse_args(argv):
@@ -184,6 +208,20 @@ def parse_args(argv):
                     help="the most an upload may hold unpacked, e.g. 8G (POL_DEPLOY_UPLOAD_MAX)")
     ap.add_argument("--max-files", type=int, default=clientdata.MAX_FILES,
                     help="the most files an upload may hold (tests lower it)")
+    ap.add_argument("--mirrors", default=env.get("POL_DEPLOY_MIRRORS", ""),
+                    help="the patch service's mirrors folder as mounted here (POL_DEPLOY_MIRRORS)")
+    ap.add_argument("--patch-host", default=env.get("POL_DEPLOY_PATCH_HOST") or "patch",
+                    help="host name of the patch service (POL_DEPLOY_PATCH_HOST)")
+    ap.add_argument("--valkey", default=env.get("POL_VALKEY_URL", ""),
+                    help="Valkey URL the patch service reports downloads to (POL_VALKEY_URL)")
+    ap.add_argument("--patch-drain", type=float,
+                    default=float(env.get("POL_DEPLOY_PATCH_DRAIN") or PATCH_DRAIN),
+                    help="the most seconds to wait for downloads before restarting the "
+                         "patch service (POL_DEPLOY_PATCH_DRAIN)")
+    ap.add_argument("--drain-poll", type=float, default=DRAIN_POLL,
+                    help="seconds between two download counts while waiting (tests lower it)")
+    ap.add_argument("--patch-port-offset", type=int, default=0,
+                    help="added to the patch service's ports (tests run it with --bind-offset)")
     ap.add_argument("--stack", default="",
                     help="the stack.py to run (default CORE/tools/stack.py; tests point "
                          "this at a stand-in)")
@@ -288,6 +326,29 @@ def make_config(args):
             cfg.clients_note = ""
     if cfg.clients_note:
         say(cfg.clients_note)
+    cfg.patch_host = args.patch_host.strip() or "patch"
+    cfg.patch_offset = args.patch_port_offset
+    cfg.valkey = patches.valkey_address(args.valkey.strip())
+    if args.valkey.strip() and cfg.valkey is None:
+        say("POL_VALKEY_URL (%s) is not a valkey:// URL, so patch actions do not wait for "
+            "downloads" % args.valkey)
+    cfg.kv_prefix = os.environ.get("POL_KV_PREFIX", "pol:")
+    cfg.patch_drain = max(0.0, args.patch_drain)
+    cfg.drain_poll = max(0.05, args.drain_poll)
+    mirrors = args.mirrors.strip()
+    if mirrors:
+        if not os.path.isabs(mirrors):
+            cfg.mirrors_note = ("POL_DEPLOY_MIRRORS must be an absolute path (got %r), so the "
+                                "patch actions are off" % mirrors)
+        elif not os.path.isdir(mirrors):
+            cfg.mirrors_note = ("POL_DEPLOY_MIRRORS (%s) is not a folder inside the container; "
+                                "mount the patch service's mirrors folder there. The patch "
+                                "actions are off" % mirrors)
+        else:
+            cfg.mirrors = os.path.realpath(mirrors)
+            cfg.mirrors_note = ""
+    if cfg.mirrors_note:
+        say(cfg.mirrors_note)
     os.makedirs(os.path.join(cfg.state, "jobs"), exist_ok=True)
     return cfg
 
@@ -633,6 +694,10 @@ def public(job):
         out["source"] = job.get("source")
     if job.get("action") == "updater":
         out["title"] = job.get("title")
+    if job.get("action") in PATCH_ACTIONS:
+        for k in ("region", "product", "to", "removes", "source"):
+            if job.get(k) is not None:
+                out[k] = job[k]
     return out
 
 
@@ -716,6 +781,7 @@ class Runner:
 
     def dev(self):
         return self.channel.get("channel") == "dev"
+        self.last_lines = []      # the last lines the latest run() printed
 
     def child_env(self, as_owner=False):
         env = {k: v for k, v in os.environ.items()
@@ -769,8 +835,12 @@ class Runner:
             timer = threading.Timer(timeout, stop)
             timer.daemon = True
             timer.start()
+        tail = []
         for chunk in iter(p.stdout.readline, b""):
             self.log.write(chunk)
+            tail.append(chunk.decode("utf-8", "replace").rstrip())
+            del tail[:-40]
+        self.last_lines = tail
         p.stdout.close()
         rc = p.wait()
         if timer:
@@ -1018,6 +1088,31 @@ def fill_note(entry, m, fills):
             entry["hint"] = "Setting it up by itself failed: %s By hand: %s" % (
                 failed.get("why", ""), m.get("tool", ""))
     return entry
+def unprivileged(checkout, what, tool):
+    """subprocess kwargs for running a tool on files someone supplied: the
+    checkout's owner (nobody for root's), never root, never a user that may
+    use the Docker socket. Raises JobFailed with the reason."""
+    kw, uid, gids = import_identity(checkout)
+    if uid is not None:
+        if uid == 0:
+            raise JobFailed("%s would run as root; the deployer refuses that." % what)
+        for sock in docker_sockets():
+            if socket_open_to(uid, gids, sock):
+                raise JobFailed("%s would run as uid %d, which may use the Docker "
+                                "socket %s, so it was not started. Give the checkout to a user "
+                                "outside the docker group (docs/deployer.md)." % (tool, uid, sock))
+    return kw
+
+
+def scratch(cfg, name, kw):
+    """A fresh folder under STATE/imports for one child process, owned by
+    the user kw runs it as."""
+    home = os.path.join(cfg.state, "imports", name)
+    shutil.rmtree(home, ignore_errors=True)
+    os.makedirs(home)
+    if kw:
+        os.chown(home, kw["user"], kw["group"])
+    return home
 
 
 def missing_entry(catalog, key, m, required=False):
@@ -1803,6 +1898,377 @@ class Updates:
                          "(git pull --ff-only) %s." % (mine, "" if mine == 1 else "s", up,
                                                        "will refuse" if behind else "has nothing to do"))
         return it
+# ------------------------------------------------------- patch bundles
+
+def patch_lib(r):
+    try:
+        return patches.toolkit(r.cfg.core)
+    except patches.ToolkitMissing as exc:
+        raise JobFailed(str(exc))
+
+
+def toolkit_dir(cfg):
+    return os.path.join(cfg.core, "tools", "patch")
+
+
+def chown_to(paths, ref):
+    """Give paths (and what is under them) to the owner of ref, when we are
+    root and ref is not root's: files the deployer writes into the mirrors
+    folder belong to whoever owns it."""
+    if not hasattr(os, "getuid") or os.getuid() != 0:
+        return
+    st = os.stat(ref)
+    if st.st_uid == 0 and st.st_gid == 0:
+        return
+    for p in paths:
+        if not os.path.lexists(p):
+            continue
+        os.lchown(p, st.st_uid, st.st_gid)
+        if os.path.isdir(p) and not os.path.islink(p):
+            for dirpath, dirs, files in os.walk(p):
+                for n in dirs + files:
+                    os.lchown(os.path.join(dirpath, n), st.st_uid, st.st_gid)
+
+
+def last_fail(lines):
+    """The sentence of the last "[FAIL] ..." line a toolkit command printed,
+    with the line after it when it ends in a colon."""
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("[FAIL]"):
+            text = lines[i][len("[FAIL]"):].strip()
+            if text.endswith(":") and i + 1 < len(lines):
+                text += " " + lines[i + 1].strip()
+            return text
+    return ""
+
+
+def patchtool(r, kw, home, args):
+    """Run patchtool.py as the unprivileged user kw names; its answer."""
+    res = os.path.join(home, "result.json")
+    argv = [r.cfg.python, PATCHTOOL, toolkit_dir(r.cfg)] + args + ["--result", res]
+    rc = r.run(argv, cwd=r.cfg.core, env=import_env(home), kw=kw, timeout=IMPORT_TIMEOUT)
+    try:
+        with open(res, encoding="utf-8") as f:
+            out = json.loads(f.read(1 << 20))
+        if not isinstance(out, dict):
+            raise ValueError(out)
+    except (OSError, ValueError):
+        raise JobFailed("The .polpatch toolkit stopped without an answer (exit %d); the log "
+                        "has its output." % rc, rc or 1)
+    return out
+
+
+def problems_sentence(res, default):
+    probs = [p for p in res.get("problems") or [] if isinstance(p, str)] or [default]
+    return probs[0] + (" (%d more problem(s))" % (len(probs) - 1) if len(probs) > 1 else "")
+
+
+def restart_patch(r):
+    """Restart the patch service once no client is mid-update, since a client
+    cannot resume a cut update. A sentence for the job's summary when the wait
+    ran out and downloads were cut, else ""."""
+    note = ""
+    n = patches.live_downloads(r.cfg.valkey, r.cfg.kv_prefix)
+    if n is None and r.cfg.valkey:
+        r.log.line("the patch service has not reported its downloads recently; not waiting")
+    if n:
+        t = time.time()
+        r.log.line("%d download(s) in progress; waiting up to %d minutes for them to finish"
+                   % (n, round(r.cfg.patch_drain / 60)))
+        while n and time.time() - t < r.cfg.patch_drain:
+            time.sleep(r.cfg.drain_poll)
+            m = patches.live_downloads(r.cfg.valkey, r.cfg.kv_prefix) or 0
+            if m != n:
+                r.log.line("%d download(s) in progress" % m)
+            n = m
+        if n:
+            note = (" %d download(s) were still running after %d minutes and were cut off by "
+                    "the restart." % (n, round(r.cfg.patch_drain / 60)))
+            r.log.line(note.strip())
+    r.log.line("restarting the patch service, which reads its bundles only when it starts")
+    r.compose(["restart", "patch"], prebuild=False)
+    return note
+
+
+def wait_served(r, info, wait):
+    t = time.time()
+    while True:
+        if patches.served(r.cfg.patch_host, r.cfg.patch_offset, info):
+            return True
+        if time.time() - t >= wait:
+            return False
+        time.sleep(1)
+
+
+def selfcheck(r, dep, bdir, info, wait=SERVE_WAIT):
+    """polselfcheck against the running patch service for one bundle, as
+    the mirrors folder's owner. Records and returns (ok, why)."""
+    region, product = info["region"], info["product"]
+    port = (info.get("port") or 0) + r.cfg.patch_offset
+    if not wait_served(r, info, wait):
+        why = ("The patch service at %s:%d did not answer for %s/%s with version %s; "
+               "docker compose logs patch says why." % (r.cfg.patch_host, port, region, product,
+                                                        info.get("meta_latest")))
+        r.log.line(why)
+        dep.checks.put(region, product, info["versions"], False, why)
+        return False, why
+    owner = owner_kwargs(r.cfg.mirrors)
+    home = scratch(r.cfg, "selfcheck-%s-%s" % (region, product), owner)
+    try:
+        argv = [r.cfg.python, os.path.join(toolkit_dir(r.cfg), "polselfcheck.py"),
+                "--bundle", bdir, "--host", r.cfg.patch_host, "--port", str(port)]
+        rc = r.run(argv, cwd=r.cfg.core, env=import_env(home), kw=owner, timeout=IMPORT_TIMEOUT)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    why = None
+    if rc != 0:
+        text = last_fail(r.last_lines)
+        why = ("The self-check of %s/%s failed: %s" % (region, product, text)) if text else \
+              ("The self-check of %s/%s failed (exit %d); the log has its output."
+               % (region, product, rc))
+    dep.checks.put(region, product, info["versions"], rc == 0, why)
+    return rc == 0, why
+
+
+def patch_finish(r, dep, region, product, done, restart=True):
+    lib = patch_lib(r)
+    bdir = lib.find_bundle(r.cfg.mirrors, region, product)
+    if restart:
+        done += restart_patch(r)
+    if bdir is None:
+        raise JobFailed("%s/%s is not in the mirrors folder any more." % (region, product))
+    info = dep.bundles.describe(lib, bdir)
+    if info["error"]:
+        raise JobFailed(info["error"])
+    good, why = selfcheck(r, dep, bdir, info)
+    if good:
+        return "ok", done + " The patch service serves it and the self-check passed.", []
+    return "failed", done + " " + why, []
+
+
+def patch_install(r, job, dep, path, what):
+    """The steps of patch_import: the full check as an unprivileged user,
+    polpatch.py apply as the mirrors folder's owner, a restart of the patch
+    service and the self-check."""
+    lib = patch_lib(r)
+    mirrors = r.cfg.mirrors
+    try:
+        m = lib.read_manifest(path)
+    except lib.PolpatchError as exc:
+        raise JobFailed(str(exc))
+    region, product = m["region"], m["product"]
+    job["region"], job["product"] = region, product
+    dep.store.save(job)
+    r.log.line("%s %s: %s .polpatch for %s/%s, version(s) %s"
+               % (what, m["title"], m["kind"], region, product, ", ".join(m["versions"])))
+    target = lib.find_bundle(mirrors, region, product)
+    kw = unprivileged(r.cfg.core, "The .polpatch check", "The .polpatch check")
+    home = scratch(r.cfg, job["id"] + "-check", kw)
+    try:
+        res = patchtool(r, kw, home, ["verify", path] + (["--against", target] if target else []))
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    if not res.get("ok"):
+        raise JobFailed(problems_sentence(res, "The .polpatch did not pass its check."),
+                        r.last_rc or 1)
+    owner = owner_kwargs(mirrors)
+    home = scratch(r.cfg, job["id"] + "-apply", owner)
+    try:
+        # the full check above unpacked every blob; apply checks every hash again
+        argv = [r.cfg.python, os.path.join(toolkit_dir(r.cfg), "polpatch.py"), "apply", path,
+                "--mirrors", mirrors, "--quick"]
+        rc = r.run(argv, cwd=r.cfg.core, env=import_env(home), kw=owner, timeout=IMPORT_TIMEOUT)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    if rc != 0:
+        raise JobFailed(last_fail(r.last_lines) or
+                        "polpatch.py apply failed (exit %d); the log has its output." % rc, rc)
+    done = next((ln for ln in reversed(r.last_lines) if ln.startswith("[*] ") and ": " in ln), "")
+    action = done[4:].split(":", 1)[0] if done else ""
+    words = {"installed": "Installed", "replaced": "Replaced", "updated": "Added",
+             "unchanged": "Already had"}
+    summary = "%s %s/%s %s." % (words.get(action, "Imported"), region, product,
+                                ", ".join(m["versions"]))
+    unchanged = action == "unchanged"
+    bdir = lib.find_bundle(mirrors, region, product)
+    if unchanged and bdir and patches.served(r.cfg.patch_host, r.cfg.patch_offset,
+                                             dep.bundles.describe(lib, bdir)):
+        return patch_finish(r, dep, region, product, summary, restart=False)
+    return patch_finish(r, dep, region, product, summary)
+
+
+def act_patch_import(r, job, dep):
+    path = job["_file"]
+    if not os.path.isfile(path):
+        raise JobFailed("The .polpatch to import is gone; upload or choose it again.")
+    return patch_install(r, job, dep, path, "importing")
+
+
+def act_patch_build(r, job, dep):
+    folder = job["_input"]
+    if not os.path.isdir(folder):
+        raise JobFailed("The install folder to build from is gone; upload or choose it again.")
+    region, product = job["region"], job["product"]
+    kw = unprivileged(r.cfg.core, "The .polpatch build", "The .polpatch builder")
+    home = scratch(r.cfg, job["id"] + "-build", kw)
+    try:
+        out = os.path.join(home, "%s-%s.polpatch" % (region, product))
+        args = ["build", "--source", folder, "--region", region, "--product", product,
+                "--out", out, "--version", job.get("_version") or "auto"]
+        if job.get("_walk"):
+            args.append("--walk")
+        for a in job.get("_aliases") or []:
+            args += ["--alias", a]
+        res = patchtool(r, kw, home, args)
+        if not res.get("ok") or not os.path.isfile(out):
+            raise JobFailed(problems_sentence(res, "Building the .polpatch failed; the log "
+                                                   "has the toolkit's output."), r.last_rc or 1)
+        return patch_install(r, job, dep, out, "importing the file just built,")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def the_bundle(r, lib, region, product):
+    bdir = lib.find_bundle(r.cfg.mirrors, region, product)
+    if bdir is None:
+        raise JobFailed("There is no %s/%s bundle in the mirrors folder." % (region, product))
+    return bdir
+
+
+def act_patch_remove(r, job, dep):
+    lib = patch_lib(r)
+    region, product = job["region"], job["product"]
+    bdir = the_bundle(r, lib, region, product)
+    versions = dep.bundles.describe(lib, bdir)["versions"]
+    trash = os.path.join(r.cfg.state, "patch-trash")
+    os.makedirs(trash, exist_ok=True)
+    dest = os.path.join(trash, "%s-%s" % (patches.stamp(), os.path.basename(bdir)))
+    r.log.line("moving %s (version(s) %s) to %s" % (bdir, ", ".join(versions) or "none", dest))
+    shutil.move(bdir, dest)
+    r.log.line("moved; the bundle's files are in %s" % dest)
+    dep.checks.drop(region, product)
+    cut = restart_patch(r)
+    return "ok", ("Removed the %s/%s bundle (%s). Its files are in patch-trash/%s in the "
+                  "deployer's volume; delete them there when you no longer need them.%s"
+                  % (region, product, ", ".join(versions) or "no versions",
+                     os.path.basename(dest), cut)), []
+
+
+def act_patch_rollback(r, job, dep):
+    lib = patch_lib(r)
+    mirrors = r.cfg.mirrors
+    region, product, to = job["region"], job["product"], job["to"]
+    bdir = the_bundle(r, lib, region, product)
+    try:
+        versions = lib.bundle_info(bdir)["versions"]
+    except lib.PolpatchError as exc:
+        raise JobFailed(str(exc))
+    if to not in versions:
+        raise JobFailed("%s/%s does not serve %s; its versions are %s."
+                        % (region, product, to, ", ".join(versions)))
+    if to == versions[-1]:
+        raise JobFailed("%s is already the latest version of %s/%s; there is nothing to roll back."
+                        % (to, region, product))
+    drop = lib.versions_after(versions, to)
+    r.log.line("rolling %s/%s back to %s removes %d version(s), oldest to newest: %s"
+               % (region, product, to, len(drop), ", ".join(drop)))
+    with open(os.path.join(bdir, "patch.cfg"), "rb") as f:
+        kept = [x for x in lib.polbundle.parse_cfg(f.read()) if x["version"] not in set(drop)]
+    stuck = patches.blobs_of(kept, drop)
+    if stuck:
+        raise JobFailed("%s/%s cannot be rolled back to %s: %s, which stays, is stored in the "
+                        "folder of a version that would be removed." % (region, product, to, stuck[0]))
+    stage_root = tempfile.mkdtemp(prefix=".polpatch-stage-rollback-", dir=mirrors)
+    stamp = patches.stamp()
+    try:
+        stage = os.path.join(stage_root, "lists")
+        os.makedirs(stage)
+        try:
+            how, src = patches.rollback_lists(lib, mirrors, bdir, to, drop, stage)
+        except (lib.PolpatchError, OSError, ValueError) as exc:
+            raise JobFailed("The list files for %s could not be made: %s" % (to, exc))
+        if how == "backup":
+            r.log.line("the list files come from the copy kept before %s was added: %s"
+                       % (drop[0], src))
+        else:
+            r.log.line("no kept copy of the list files matches %s, so they were rebuilt from "
+                       "the current ones without the removed rows" % to)
+        backup = os.path.join(mirrors, patches.BACKUP_DIR, os.path.basename(bdir),
+                              "%s-before-rollback-to-%s" % (stamp, to))
+        os.makedirs(backup)
+        names = patches.LIST_FILES + ("manifest.json",)
+        for n in names:
+            if os.path.exists(os.path.join(bdir, n)):
+                shutil.copy2(os.path.join(bdir, n), os.path.join(backup, n))
+        r.log.line("the current list files are kept in %s" % backup)
+        for n in names:
+            os.replace(os.path.join(stage, n), os.path.join(bdir, n))
+        chown_to([os.path.join(bdir, n) for n in names], bdir)
+        chown_to([os.path.join(mirrors, patches.BACKUP_DIR)], mirrors)
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
+    trash = os.path.join(r.cfg.state, "patch-trash",
+                         "%s-%s-after-%s" % (stamp, os.path.basename(bdir), to))
+    for v in drop:
+        src = os.path.join(bdir, "blobs", v)
+        if os.path.isdir(src):
+            os.makedirs(os.path.join(trash, "blobs"), exist_ok=True)
+            shutil.move(src, os.path.join(trash, "blobs", v))
+            r.log.line("removed %s: its blobs are in %s" % (v, os.path.join(trash, "blobs", v)))
+        else:
+            r.log.line("removed %s (it had no blobs folder)" % v)
+    done = ("Rolled %s/%s back to %s, removing %s. Their blobs are in patch-trash/%s in the "
+            "deployer's volume." % (region, product, to, ", ".join(drop), os.path.basename(trash)))
+    return patch_finish(r, dep, region, product, done)
+
+
+def act_patch_check(r, job, dep):
+    lib = patch_lib(r)
+    dirs = patches.bundle_dirs(r.cfg.mirrors)
+    if not dirs:
+        return "ok", "There are no patch bundles to check.", []
+    bad = []
+    for name, bdir in dirs:
+        info = dep.bundles.describe(lib, bdir)
+        if info["error"]:
+            bad.append(info["error"])
+            continue
+        r.log.line("checking %s/%s (%s)" % (info["region"], info["product"], info["title"]))
+        good, why = selfcheck(r, dep, bdir, info, wait=5)
+        if not good:
+            bad.append(why)
+    if bad:
+        return "failed", "%d of %d bundle(s) failed: %s" % (len(bad), len(dirs), bad[0]), []
+    return "ok", "All %d bundle(s) are served and pass the self-check." % len(dirs), []
+
+
+PATCH_ACT = {"patch_import": act_patch_import, "patch_build": act_patch_build,
+             "patch_remove": act_patch_remove, "patch_rollback": act_patch_rollback,
+             "patch_check": act_patch_check}
+
+
+def hide_paths(text, cfg):
+    """A sentence for an answer, with the deployer's own folders named
+    instead of spelled out (the job log keeps the full paths)."""
+    if not isinstance(text, str):
+        return text
+    pairs = []
+    for path, label in ((cfg.mirrors, "mirrors"), (cfg.clients, "clients"),
+                        (cfg.state, "deployer-volume"), (cfg.root, "checkouts")):
+        if path:
+            for p in {path, os.path.realpath(path), os.path.abspath(path)}:
+                pairs.append((p, label))
+    for p, label in sorted(pairs, key=lambda x: -len(x[0])):
+        text = text.replace(p + os.sep, label + "/").replace(p + "/", label + "/").replace(p, label)
+    return text
+
+
+def id_error(region, product):
+    if not patches.ok_region(region):
+        return "region must be three capital letters or digits, such as W2U (got %r)" % (region,)
+    if not patches.ok_product(product):
+        return "product must be four digits, such as 0002 (got %r)" % (product,)
+    return None
 
 
 # ---------------------------------------------------------------- server
@@ -1820,6 +2286,9 @@ class Deployer:
         self.secrets = {}             # job id -> the access code a channel job signs in with
         self.games_cache = (0.0, None)
         self.uploads = clientdata.Uploads(cfg.state)
+        self.checks = patches.Checks(cfg.state)
+        self.bundles = patches.BundleCache()
+        self.manifests = patches.ManifestCache()
         shutil.rmtree(os.path.join(cfg.state, "imports"), ignore_errors=True)
         for uid in self.uploads.expire():
             say("upload %s expired and was removed" % uid)
@@ -1872,6 +2341,9 @@ class Deployer:
                 if not meta:
                     return 400, {"error": "there is no upload %r; it may have expired"
                                  % (src["upload"],)}
+                if meta.get("kind") == "polpatch":
+                    return 400, {"error": "upload %s is a .polpatch, not a client archive; "
+                                          "install it with patch_import" % meta["id"]}
                 root = os.path.realpath(self.uploads.tree(meta["id"]))
                 folder, rel = clientdata.resolve_under(root, src.get("subdir") or "")
                 shown = {"upload": meta["id"], "subdir": rel}
@@ -1893,6 +2365,247 @@ class Deployer:
         return self.start("import", game, {"item": item["id"], "source": shown,
                                            "_input": folder, "_input_root": root})
 
+    # ---- patch bundles
+
+    def toolkit(self):
+        """(polpatch_lib, None) or (None, (409, answer))."""
+        try:
+            return patches.toolkit(self.cfg.core), None
+        except patches.ToolkitMissing as exc:
+            return None, (409, {"error": str(exc)})
+
+    def patch_request(self, body):
+        """(code, answer) for POST /api/actions with a patch action."""
+        action = body["action"]
+        if not self.cfg.mirrors:
+            return 409, {"error": self.cfg.mirrors_note}
+        lib, refused = self.toolkit()
+        if refused:
+            return refused
+        if action == "patch_check":
+            return self.start("patch_check", None)
+        if action == "patch_import":
+            code, obj = self.patch_import_request(body, lib)
+        elif action == "patch_build":
+            code, obj = self.patch_build_request(body, lib)
+        else:
+            code, obj = self.patch_bundle_request(action, body, lib)
+        if "error" in obj:
+            obj["error"] = hide_paths(obj["error"], self.cfg)
+        return code, obj
+
+    def source_upload(self, src):
+        meta = self.uploads.load(src["upload"]) if isinstance(src["upload"], str) else None
+        if not meta:
+            return None, (400, {"error": "there is no upload %r; it may have expired"
+                                % (src["upload"],)})
+        return meta, None
+
+    def patch_import_request(self, body, lib):
+        src = body.get("source")
+        if not isinstance(src, dict) or set(src) not in ({"upload"}, {"path"}):
+            return 400, {"error": "source must be {\"upload\": id} or {\"path\": a .polpatch "
+                                  "file under POL_DEPLOY_CLIENTS}"}
+        if "upload" in src:
+            meta, refused = self.source_upload(src)
+            if refused:
+                return refused
+            if meta.get("kind") != "polpatch":
+                return 400, {"error": "upload %s is a client archive, not a .polpatch; upload "
+                                      "the .polpatch file itself" % meta["id"]}
+            path = os.path.join(self.uploads.tree(meta["id"]), POLPATCH_UPLOAD)
+            shown = {"upload": meta["id"]}
+        else:
+            if not self.cfg.clients:
+                return 409, {"error": self.cfg.clients_note}
+            try:
+                path, rel = clientdata.resolve_under(self.cfg.clients, src["path"])
+            except clientdata.PathError as exc:
+                return 400, {"error": "the .polpatch to import is refused: %s" % exc}
+            if not rel.lower().endswith(".polpatch") or not os.path.isfile(path):
+                return 400, {"error": "%s is not a .polpatch file" % (rel or "the top")}
+            shown = {"path": rel}
+        try:
+            m = lib.read_manifest(path)
+        except lib.PolpatchError as exc:
+            return 400, {"error": str(exc)}
+        return self.start("patch_import", None, {"source": shown, "region": m["region"],
+                                                 "product": m["product"], "_file": path})
+
+    def patch_build_request(self, body, lib):
+        region, product = body.get("region"), body.get("product")
+        err = id_error(region, product)
+        if err:
+            return 400, {"error": err}
+        try:
+            lib.check_region(region)
+            lib.check_product(product)
+        except lib.PolpatchError as exc:
+            return 400, {"error": str(exc)}
+        version = body.get("version", "auto")
+        if version != "auto" and not patches.ok_version(version):
+            return 400, {"error": "version must look like 20040714_0 (YYYYMMDD_X) or be auto "
+                                  "(got %r)" % (version,)}
+        walk = body.get("walk", False)
+        if not isinstance(walk, bool):
+            return 400, {"error": "walk must be true or false"}
+        aliases = body.get("aliases", [])
+        if not (isinstance(aliases, list) and len(aliases) <= 8
+                and all(patches.ok_region(a) for a in aliases)):
+            return 400, {"error": "aliases must be a list of region codes such as W20"}
+        src = body.get("source")
+        if not isinstance(src, dict) or len(set(src) & {"upload", "path"}) != 1 \
+                or set(src) - {"upload", "path", "subdir"} \
+                or ("subdir" in src and "upload" not in src):
+            return 400, {"error": "source must be {\"upload\": id, \"subdir\": folder} or "
+                                  "{\"path\": folder under POL_DEPLOY_CLIENTS}"}
+        try:
+            if "upload" in src:
+                meta, refused = self.source_upload(src)
+                if refused:
+                    return refused
+                if meta.get("kind") == "polpatch":
+                    return 400, {"error": "upload %s is a .polpatch; install it with "
+                                          "patch_import" % meta["id"]}
+                root = os.path.realpath(self.uploads.tree(meta["id"]))
+                folder, rel = clientdata.resolve_under(root, src.get("subdir") or "")
+                shown = {"upload": meta["id"], "subdir": rel}
+            else:
+                if not self.cfg.clients:
+                    return 409, {"error": self.cfg.clients_note}
+                folder, rel = clientdata.resolve_under(self.cfg.clients, src["path"])
+                shown = {"path": rel}
+        except clientdata.PathError as exc:
+            return 400, {"error": "the folder to build from is refused: %s" % exc}
+        if not os.path.isdir(folder):
+            return 400, {"error": "%s is not a folder" % (rel or "the top")}
+        return self.start("patch_build", None, {"region": region, "product": product,
+                                                "source": shown, "_input": folder,
+                                                "_version": version, "_walk": walk,
+                                                "_aliases": aliases})
+
+    def patch_bundle_request(self, action, body, lib):
+        region, product = body.get("region"), body.get("product")
+        err = id_error(region, product)
+        if err:
+            return 400, {"error": err}
+        bdir = lib.find_bundle(self.cfg.mirrors, region, product)
+        if not bdir:
+            return 404, {"error": "there is no %s/%s bundle in the mirrors folder"
+                                  % (region, product)}
+        if action == "patch_remove":
+            return self.start("patch_remove", None, {"region": region, "product": product})
+        to = body.get("to")
+        if not patches.ok_version(to):
+            return 400, {"error": "to must be a version such as 20040714_0 (YYYYMMDD_X), "
+                                  "got %r" % (to,)}
+        info = self.bundles.describe(lib, bdir)
+        versions = info["versions"]
+        if info["error"]:
+            return 409, {"error": info["error"]}
+        if to not in versions:
+            return 400, {"error": "%s/%s does not serve %s; its versions are %s"
+                                  % (region, product, to, ", ".join(versions))}
+        if to == versions[-1]:
+            return 400, {"error": "%s is already the latest version of %s/%s, so there is "
+                                  "nothing to roll back" % (to, region, product)}
+        return self.start("patch_rollback", None, {"region": region, "product": product,
+                                                   "to": to,
+                                                   "removes": lib.versions_after(versions, to)})
+
+    def patch_list(self, recheck=False):
+        """(code, answer) for GET /api/patches."""
+        if not self.cfg.mirrors:
+            return 409, {"error": self.cfg.mirrors_note}
+        lib, refused = self.toolkit()
+        if refused:
+            return refused
+        infos = [self.bundles.describe(lib, p) for _, p in patches.bundle_dirs(self.cfg.mirrors)]
+        up = [False] * len(infos)
+
+        def ask(i):
+            if not infos[i]["error"]:
+                up[i] = patches.served(self.cfg.patch_host, self.cfg.patch_offset, infos[i])
+        threads = [threading.Thread(target=ask, args=(i,), daemon=True) for i in range(len(infos))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(patches.PROBE_TIMEOUT * 3)
+        rows = []
+        for i, info in enumerate(infos):
+            row = {k: info[k] for k in ("region", "product", "title", "aliases", "versions",
+                                        "latest")}
+            row["served"] = bool(up[i])
+            row.update(self.checks.get(info["region"], info["product"], info["versions"]))
+            row["size"] = info["size"]
+            if info["error"]:
+                row["error"] = hide_paths(info["error"], self.cfg)
+            rows.append(row)
+        rows.sort(key=lambda x: (x["region"], x["product"]))
+        out = {"bundles": rows}
+        if recheck:
+            code, j = self.start("patch_check", None)
+            out["job"] = j["job"]
+            if code == 409:
+                out["error"] = "another job is running; ask again when it ends"
+            return code, out
+        return 200, out
+
+    def describe_polpatch(self, path):
+        lib, refused = self.toolkit()
+        if refused:
+            return {"error": refused[1]["error"]}
+        out = self.manifests.describe(lib, path)
+        if "error" in out:
+            out = {"error": hide_paths(out["error"], self.cfg)}
+        return out
+
+    def is_polpatch(self, path, name):
+        if name.lower().endswith(".polpatch"):
+            return True
+        if clientdata.sniff(path) != "zip":
+            return False
+        import zipfile
+        try:
+            with zipfile.ZipFile(path) as zf:
+                return "polpatch.json" in zf.namelist()
+        except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, NotImplementedError):
+            return False
+
+    def quick_verify(self, uid, path):
+        """None when the .polpatch at path passes the quick check, run as
+        an unprivileged user; else (code, answer)."""
+        try:
+            kw = unprivileged(self.cfg.core, "The .polpatch check", "The .polpatch check")
+        except JobFailed as exc:
+            return 409, {"error": exc.summary}
+        home = scratch(self.cfg, "upload-" + uid, kw)
+        res = os.path.join(home, "result.json")
+        argv = [self.cfg.python, PATCHTOOL, toolkit_dir(self.cfg), "verify", path, "--quick",
+                "--result", res]
+        try:
+            subprocess.run(argv, cwd=self.cfg.core, env=import_env(home),
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=VERIFY_TIMEOUT, **kw)
+            with open(res, encoding="utf-8") as f:
+                out = json.loads(f.read(1 << 20))
+            if not isinstance(out, dict):
+                raise ValueError(out)
+        except subprocess.TimeoutExpired:
+            return 400, {"error": "Checking the .polpatch took longer than %d seconds."
+                         % VERIFY_TIMEOUT}
+        except (OSError, ValueError):
+            return 400, {"error": "The .polpatch check stopped without an answer."}
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+        if out.get("ok"):
+            return None
+        probs = [hide_paths(p, self.cfg) for p in out.get("problems") or []
+                 if isinstance(p, str)][:10]
+        return 400, {"error": problems_sentence({"problems": probs},
+                                                "The .polpatch did not pass its check."),
+                     "problems": probs}
+
     def _run(self, job):
         secret = self.secrets.pop(job["id"], None)
         log = JobLog(self.store, job, self.cfg.token,
@@ -1904,13 +2617,17 @@ class Deployer:
             job["state"] = "running"
             job["started"] = now_iso()
             self.store.save(job)
-            log.line("deployer %s: %s %s%s%s" % (VERSION, job["action"], job["game"],
+            target = job["game"] or "/".join(job[k] for k in ("region", "product")
+                                             if job.get(k)) or "every bundle"
+            log.line("deployer %s: %s %s%s%s" % (VERSION, job["action"], target,
                                                   " (published images)" if self.cfg.ghcr else "",
                                                   ", dev channel" if r.dev() else ""))
             if job["action"] == "channel":
                 state, summary, missing = act_channel(r, job, secret)
             elif job["action"] == "updater":
                 state, summary, missing = act_updater(r, job)
+            elif job["action"] in PATCH_ACTIONS:
+                state, summary, missing = PATCH_ACT[job["action"]](r, job, self)
             elif job["action"] == "import":
                 log.line("importing %s from %s" % (job["item"], json.dumps(job["source"])))
                 state, summary, missing = act_import(r, job["game"], job)
@@ -1927,6 +2644,8 @@ class Deployer:
             state, summary, missing = "failed", "The deployer hit an internal error: %s" % exc, []
             job["exit"] = 1
         log.line("%s: %s" % (state, summary))
+        if job["action"] in PATCH_ACTIONS:
+            summary = hide_paths(summary, self.cfg)
         job.update(state=state, summary=summary, missing=missing, ended=now_iso())
         upload = (job.get("source") or {}).get("upload")
         if upload:
@@ -2181,7 +2900,8 @@ def make_handler(dep):
                     return self.send_json(409, {"error": cfg.clients_note})
                 rel = (q.get("path") or [""])[0]
                 try:
-                    out = clientdata.browse(cfg.clients, rel, load_catalog(cfg.core))
+                    out = clientdata.browse(cfg.clients, rel, load_catalog(cfg.core),
+                                            describe=dep.describe_polpatch)
                 except clientdata.PathError as exc:
                     return self.send_json(400, {"error": "%s: %s" % (rel, exc)})
                 except (FileNotFoundError, NotADirectoryError):
@@ -2190,6 +2910,10 @@ def make_handler(dep):
                 except PermissionError:
                     return self.send_json(403, {"error": "the deployer may not read %s" % rel})
                 return self.send_json(200, out)
+            if parts == ["api", "patches"]:
+                recheck = (q.get("recheck") or ["0"])[0].strip().lower() in ("1", "true", "yes")
+                code, obj = dep.patch_list(recheck)
+                return self.send_json(code, obj)
             if parts == ["api", "uploads"]:
                 dep.expire_uploads()
                 return self.send_json(200, {"uploads": [clientdata.public_upload(m)
@@ -2247,6 +2971,9 @@ def make_handler(dep):
                     self.close_connection = True
                     return self.send_json(400, {"error": "the upload ended after %d of %d bytes"
                                                 % (got, n)})
+                name = clientdata.clean_name(self.headers.get("X-Filename"))
+                if dep.is_polpatch(part, name):
+                    return self.store_polpatch(uid, part, tmp, n, name)
                 try:
                     size, files = clientdata.extract(part, tmp, cfg.upload_max, cfg.max_files)
                 except clientdata.ArchiveError as exc:
@@ -2274,6 +3001,37 @@ def make_handler(dep):
                 except OSError:
                     pass
                 shutil.rmtree(tmp, ignore_errors=True)
+
+        def store_polpatch(self, uid, part, tmp, n, name):
+            """Keep a .polpatch upload whole, as <id>/upload.polpatch, once
+            its manifest reads and it passes the quick check."""
+            lib, refused = dep.toolkit()
+            if refused:
+                return self.send_json(*refused)
+            ups = dep.uploads
+            os.makedirs(tmp, mode=0o755)
+            os.chmod(tmp, 0o755)
+            dest = os.path.join(tmp, POLPATCH_UPLOAD)
+            os.replace(part, dest)
+            os.chmod(dest, 0o644)
+            try:
+                m = lib.read_manifest(dest)
+            except lib.PolpatchError as exc:
+                return self.send_json(400, {"error": hide_paths(str(exc), cfg)})
+            refused = dep.quick_verify(uid, dest)
+            if refused:
+                return self.send_json(*refused)
+            os.replace(tmp, ups.tree(uid))
+            t = time.time()
+            meta = {"id": uid, "name": name, "created": now_iso(t), "last_import": None,
+                    "size": n, "files": len(m["files"]), "archive_size": n, "matches": [],
+                    "kind": "polpatch", "polpatch": patches.manifest_fields(m),
+                    "_t": t, "_last": None}
+            ups.save(meta)
+            out = clientdata.public_upload(meta)
+            out["upload"] = uid
+            say("upload %s: a .polpatch for %s/%s, %d bytes" % (uid, m["region"], m["product"], n))
+            return self.send_json(201, out)
 
         def do_POST(self):
             if not self.authed():
@@ -2310,6 +3068,9 @@ def make_handler(dep):
             if action not in ACTIONS:
                 return self.send_json(400, {"error": "unknown action %r; one of %s"
                                             % (action, ", ".join(ACTIONS))})
+            if action in PATCH_ACTIONS:
+                code, obj = dep.patch_request(body)
+                return self.send_json(code, obj)
             catalog = load_catalog(cfg.core)
             if not isinstance(game, str) or game not in catalog:
                 known = ", ".join(k for k, e in catalog.items() if e["kind"] == "game")
