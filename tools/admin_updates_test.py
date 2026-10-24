@@ -272,6 +272,13 @@ chk("  the deployer's item wins over the game's own report (matched by module)",
 chk("  its checked_at, and no module field passed on", (out["checked_at"], "module" in it["kartclub"]),
     ("2026-10-21T12:00:00Z", False))
 chk("  the stable channel by default", (out["channel"], "channel" in it["kartclub"]), ("stable", False))
+os.environ["POL_ADMIN_CORE"] = "none"
+it = items(U.overview())
+chk("one game's own panel (POL_ADMIN_CORE=none): the core item is this panel, kept and renamed",
+    (it["core"]["name"], it["core"]["update"]), ("OpenLobby admin panel", "current"))
+os.environ.pop("POL_ADMIN_CORE")
+chk("  with the core on, the deployer's own name", items(U.overview())["core"]["name"],
+    "OpenLobby core (PlayOnline Viewer services)")
 DEP["channel"] = "dev"
 DEP["items"][1] = dict(DEP["items"][1], channel="dev", behind=None, changes=[],
                        why="A newer dev build is published: kart:main.")
@@ -319,6 +326,14 @@ for what, raw in (("not an object", ["available"]),
 chk("no usable key: dropped", (U.clean_item(good), U.clean_item(dict(good, key="../x"))), (None, None))
 c = U.clean_item({"running": {}, "latest": {}, "update": "unknown"}, key="kart", name="Kart Club")
 chk("unknown without a why gets one", (c["update"], c["why"]), ("unknown", "Kart Club cannot tell whether it is up to date."))
+for what, raw in (("null running and latest", {"update": "unknown", "running": None, "latest": None,
+                                                "why": "GitHub could not be reached."}),
+                  ("no running or latest at all", {"update": "unknown", "why": "GitHub could not be reached."})):
+    c = U.clean_item(raw, key="kart", name="Kart Club")
+    chk("unknown with %s keeps its own why" % what, (c["update"], c["why"]),
+        ("unknown", "GitHub could not be reached."))
+c = U.clean_item({"update": "available", "running": None, "latest": None}, key="kart", name="Kart Club")
+chk("available still needs both objects", "expected shape" in (c["why"] or ""), True)
 
 print("a game that applies its own update (path B) keeps its fields")
 c = U.clean_item(dict(good, apply=True, state="updating", message="  Building  the new image. " + "x" * 400),

@@ -158,6 +158,10 @@ class Deployer:
                     return self.send(401, {"error": "token"})
                 if self.path == "/api/games":
                     return self.send(200, {"games": [], "core": {"running": True}, "options": {}})
+                if self.path.startswith("/api/jobs/"):
+                    return self.send(200, {"id": self.path.rsplit("/", 1)[-1], "action": "updater",
+                                           "game": "kart", "state": "failed",
+                                           "summary": "Update failed: the disk is full."})
                 if self.path.startswith("/api/jobs"):
                     return self.send(200, {"jobs": []})
                 if self.path.startswith("/api/updates"):
@@ -320,8 +324,14 @@ def path_a(owner, anon, dep):
         chk("Update: the deployer's job", (code, r.get("job")), (202, "20261023T080000-abcdef"))
         chk("  the deployer got the stored, approved record, not the browser's",
             dep.got, [{"game": "kart", "title": "Kart Club", "updater": updater}])
-        chk("  in the activity log", audit_since(n),
+        chk("  in the activity log", audit_since(n)[:1],
             [(OWNER, "asked the deployer to update Kart Club with its updater", True)])
+        for _ in range(40):
+            if len(audit_since(n)) > 1:
+                break
+            time.sleep(0.25)
+        chk("  and how it ended, under who pressed Update, with the game's own sentence", audit_since(n)[1:],
+            [(OWNER, "Kart Club: update failed: the disk is full.", False)])
         owner.call("api/modules/game", {"action": "revoke_updater", "key": "kart"})
         chk("revoked: not offered again", (item(owner).get("via"), owner.call("api/updates/run", {"key": "kart"})[0]),
             (None, 404))
@@ -334,7 +344,7 @@ def main():
     dep = Deployer()
     seed()
     dead = "http://127.0.0.1:%d" % free_port()
-    env = {"POL_ADMIN_BIND": "127.0.0.1", "POL_ADMIN_LIVE_TTL": "0", "POL_ADMIN_GITHUB_API": dead,
+    env = {"POL_ADMIN_BIND": "127.0.0.1", "POL_ADMIN_UPDATER_FOLLOW": "0.2", "POL_ADMIN_LIVE_TTL": "0", "POL_ADMIN_GITHUB_API": dead,
            "POL_ADMIN_PAIR_TRIES": "1000", "POL_ADMIN_UPDATE_LOST": "6", "POL_ADMIN_UPDATE_REPO": "off",
            "POL_DEPLOYER_URL": dep.url, "POL_DEPLOYER_TOKEN": DEPLOYER_TOKEN}
     tmp = tempfile.mkdtemp(prefix="admingameupdate-")

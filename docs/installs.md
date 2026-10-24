@@ -204,7 +204,9 @@ A game that updates itself (through its own setup program) can report it in its
 ```
 
 `changes` newest first, at most 50, merge commits left out. `update` is `available`,
-`current` or `unknown` (with a `why` sentence when it cannot tell, for example offline).
+`current` or `unknown` (with a `why` sentence when it cannot tell, for example offline). A game that
+answers `unknown` may leave `running` and `latest` out, or send them as `null`; its `why` is shown
+as it is.
 
 The panel can also start the update itself, in one of two ways. For each game it uses the
 first that applies:
@@ -307,3 +309,47 @@ with PyInstaller (`--onefile --console`) and built in CI for Windows, Linux and 
 ask numbered questions with defaults in brackets, confirm with Y/n, show one progress line
 per step, check that Docker is installed and running before anything else, and keep their
 state in one folder (`.env`, data, backups, logs).
+
+## Trying an updater on a throwaway panel
+
+To test a game's update against a real panel and deployer without touching anything else on
+the machine, run a second OpenLobby with its own project name, a port nothing else uses, and
+only the panel, its database and the deployer:
+
+1. Clone this repository into an empty folder, for example `C:\olupdtest\openlobby`.
+2. Next to `docker-compose.yml`, add `updtest.override.yml`:
+
+   ```yaml
+   services:
+     admin:
+       environment:
+         POL_ADMIN_CORE: "none"
+       ports: !override
+         - "127.0.0.1:28090:8090"
+       labels:
+         org.openlobby.panel.url: "http://127.0.0.1:28090"
+   ```
+
+   Pick a port that is free on this machine (`netstat -ano | findstr :28090` shows nothing).
+3. Add `.env` there (on Linux use `:` between the compose files and plain paths):
+
+   ```
+   COMPOSE_PROJECT_NAME=olupdtest
+   COMPOSE_FILE=docker-compose.yml;docker-compose.ghcr.yml;updtest.override.yml
+   POL_DEPLOYER_TOKEN=<32 or more random characters>
+   POL_DEPLOY_ROOT=/run/desktop/mnt/host/c/olupdtest
+   POL_DEPLOY_CORE=/run/desktop/mnt/host/c/olupdtest/openlobby
+   POL_DEPLOY_GHCR=1
+   ```
+
+4. Make the shared network if it is missing (`docker network create openlobby`), then
+   `docker compose --profile deployer up -d postgres valkey admin deployer`. Naming the
+   services keeps the resolver and the web server, and so ports 53, 80 and 443, out of it.
+5. Set the owner's password:
+   `docker compose exec -T -e POL_ADMIN_NEW_PASSWORD=<password> admin python admin.py --set-password admin`,
+   then sign in at the port you chose.
+6. Pair the game with a code from Settings > Modules, approve its updater there, and press
+   Update in Settings > Install games when its report says `available`.
+
+To remove it: `docker compose --profile deployer down -v` in that folder (only that project
+goes; leave the `openlobby` network, other installs use it), then delete the folder.

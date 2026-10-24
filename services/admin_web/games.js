@@ -649,6 +649,8 @@ document.addEventListener("click", (e) => {
 // ---- Updates: the core and each game (adminupdates.py), owner only ----
 // In Install games when a deployer answers (with its Update buttons), else in Settings > Modules.
 let UPD = null, UPD_TIMER = null;
+// the last updater job each paired game ran from this page: its state and the game's own last line
+const UPD_RUN = {};
 const UPD_WORD = { available: ["live", "Update available"], current: ["env", "Up to date"], unknown: ["off", "Unknown"] };
 
 const short12 = (c) => (c ? String(c).slice(0, 12) : "");
@@ -690,6 +692,13 @@ function updItem(it) {
     tail = `<div class="upd-why">${esc(it.why)}</div>`;
   }
   if (it.state === "failed" && !running) tail = `<div class="upd-why bad">Update failed: ${esc(it.why || "")}</div>` + tail;
+  const lastRun = UPD_RUN[it.key];
+  if (lastRun && lastRun.state === "failed" && !running) {
+    // the deployer ran the game's updater and it failed: the game's last line, and its whole log
+    const line = String(lastRun.summary || "").replace(/^Update failed:\s*/i, "");
+    tail = `<div class="upd-why bad">Update failed: ${esc(line || "the updater stopped with an error")}`
+      + ` <button class="ghost sm" data-upd-log="${esc(lastRun.job)}">Show the log</button></div>` + tail;
+  }
   const ch = it.changes || [];
   const li = (c) => `<li><span class="s">${esc(c.subject)}</span><span class="d">${esc(updDate(c.date))}</span></li>`;
   const news = ch.length ? `<details${ch.length <= 3 ? " open" : ""}><summary>What's new (${ch.length})</summary>`
@@ -773,8 +782,11 @@ async function updaterStart(key) {
     const r = await api("/api/updates/run", { method: "POST", headers: { "Content-Type": "application/json" },
                                               body: JSON.stringify({ key }) });
     toast(`Update ${name}: started`);
+    UPD_RUN[key] = { job: r.job, state: "running" };
     await probeDeploy(); renderDeploy();
     followJob(r.job);
+    const panel = $("#deployJobPanel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) { toast(e.message, true); }
 }
 
@@ -846,6 +858,13 @@ async function loadUpdateNotice() {
 document.addEventListener("click", async (e) => {
   const t = e.target;
   if (t.closest("[data-upd-check]")) { t.closest("[data-upd-check]").disabled = true; return loadUpdates(true); }
+  const lg = t.closest("[data-upd-log]");
+  if (lg) {
+    await showJob(lg.dataset.updLog);
+    const panel = $("#deployJobPanel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   const all = t.closest("[data-upd-all]");
   if (all) {
     const it = ((UPD || {}).items || []).find((x) => x.key === all.dataset.updAll);
@@ -1220,11 +1239,14 @@ async function followJob(id) {
       : DEPLOY_OFFSET + new TextEncoder().encode(r.text || "").length;
     if (JOB_DONE.has(r.state)) {
       stopDeployPoll();
-      await showJob(id);
+      const done = await showJob(id);
       await probeDeploy();
       renderDeploy();
       if (j.action === "channel") { loadChannel(); loadUpdates(false); }
-      if (j.action === "updater") loadUpdates(false);
+      if (j.action === "updater") {
+        if (done) UPD_RUN[done.game || j.game] = { job: id, state: done.state, summary: done.summary || "" };
+        loadUpdates(false);
+      }
       if (String(j.action || "").startsWith("patch_") || PATCHES) loadPatches();
     }
   }, 1500);

@@ -1488,6 +1488,30 @@ _AUDIT_SECRET = {"password", "current", "pw", "token", "confirm",
 _AUDIT_TARGETS = ("polid", "code", "username", "id", "room")
 
 
+def _follow_updater(job_id, key, title, actor, role, addr, timeout_minutes, every=10.0):
+    """Watch a paired game's updater job to its end and write how it ended to the activity
+    log, under whoever pressed Update, whether or not anyone keeps the page open. Gives up
+    quietly a while after the job's own timeout could have stopped it."""
+    deadline = time.time() + timeout_minutes * 60 + 30 * 60
+    while time.time() < deadline:
+        time.sleep(every)
+        try:
+            status, j = admindeploy.job(job_id)
+        except Exception:                      # noqa: BLE001 -- the deployer restarting: keep trying
+            continue
+        if status != 200 or not isinstance(j, dict) or j.get("state") not in ("ok", "failed", "needs_data"):
+            continue
+        summary = str(j.get("summary") or "")[:300]
+        if j.get("state") == "ok":
+            _audit(actor, role, "updated %s" % title, target=key[:32], detail={"job": job_id},
+                   ok=True, addr=addr)
+        else:
+            why = summary.split("Update failed:", 1)[-1].strip() or "the updater stopped with an error"
+            _audit(actor, role, "%s: update failed: %s" % (title, why), target=key[:32],
+                   detail={"job": job_id}, ok=False, addr=addr)
+        return
+
+
 def _audit(actor, role, action, target=None, detail=None, ok=True, addr=None):
     """Append to the audit log. Never raises: a full disk or a locked DB must
     not turn an operator's action into an error."""
@@ -2832,6 +2856,11 @@ class Handler(BaseHTTPRequestHandler):
         _audit(user, role, "asked the deployer to update %s with its updater" % title, target=key[:32],
                detail={"job": out.get("job"), "command": adminpair.gameupdater.shown(rec["command"])[:300]},
                ok=status == 202, addr=self._addr())
+        if status == 202 and out.get("job"):
+            threading.Thread(target=_follow_updater, daemon=True,
+                             args=(str(out["job"]), key, title, user, role, self._addr(),
+                                   int(rec.get("timeout_minutes") or 60),
+                                   float(os.environ.get("POL_ADMIN_UPDATER_FOLLOW", "10")))).start()
         return self._send(status, out)
 
     def _pair(self, path):
@@ -5578,9 +5607,13 @@ def _cli(argv):
     """Offline credential management -- the break-glass path when the panel
     itself is unreachable or the password is forgotten:
 
-        docker compose exec admin python services/admin.py --set-password
-        docker compose exec admin python services/admin.py --show-admin
-        docker compose exec admin python services/admin.py --clear-password
+        docker compose exec admin python admin.py --set-password
+        docker compose exec admin python admin.py --show-admin
+        docker compose exec admin python admin.py --clear-password
+
+    Without a terminal (a setup script):
+
+        docker compose exec -T -e POL_ADMIN_NEW_PASSWORD=<password> admin python admin.py --set-password admin
 
     Handled before the server starts, and returns True when it consumed the
     command line (so main() should not go on to listen).

@@ -109,6 +109,10 @@ def _clean_item(raw, key, name):
     if raw.get("channel") == "dev":
         it["channel"] = "dev"
     run, lat, upd = raw.get("running"), raw.get("latest"), raw.get("update")
+    if upd == "unknown":
+        # a game that cannot tell may leave out (or null) what it does not know, and its why stands
+        run = {} if run is None else run
+        lat = {} if lat is None else lat
     if upd not in UPDATES or not isinstance(run, dict) or not isinstance(lat, dict):
         return updatecheck.unknown(it, bad)
     it["running"] = {"commit": updatecheck.commit_id(run.get("commit")),
@@ -236,6 +240,10 @@ def overview(refresh=False):
                 it = clean_item(raw)
                 if it is None or it["key"] in keys:
                     continue
+                if it["key"] == "core" and _core_off():
+                    # one game's own panel: the core item updates this panel and its deployer,
+                    # not PlayOnline services it does not run
+                    it["name"] = "OpenLobby admin panel"
                 keys.add(it["key"])
                 modules.add(it.get("module") or it["key"])
                 items.append(it)
