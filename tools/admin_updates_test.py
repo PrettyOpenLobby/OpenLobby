@@ -300,6 +300,35 @@ chk("a deployer that does not answer: the panel's own check and the games' repor
 chk("  and the stable channel", out["channel"], "stable")
 del os.environ["POL_DEPLOYER_URL"]
 
+print("the host's ops runner")
+OPS = {"at": 1.0, "stale": False, "history": [],
+       "actions": {"update-kart": {}, "auto-on-kart": {}, "auto-off-kart": {}, "update-derby": {}, "update-ghost": {}},
+       "updates": {
+           "kart": {"action": "update-kart", "timer": {"enabled": True, "active": True, "next": 1792806468.7,
+                                                       "last": 1792806288.7, "on": "auto-on-kart", "off": "auto-off-kart"},
+                    "running": None,
+                    "last": {"ok": False, "result": "kart-sync.service failed (exit status 1, exit-code).",
+                             "by": "owner", "at": 1792806000.0, "took": 3.5, "log": ["a  b", 7, "c" * 400]}},
+           "derby": {"action": "update-derby", "timer": {"enabled": True, "active": True, "on": "auto-on-derby",
+                                                         "off": "auto-off-derby"}},
+           "ghost": {"action": "update-ghost"},
+           "../x": {"action": "update-kart"},
+           "nope": {"action": "update-nope"}}}
+it = items(U.overview(ops=OPS))
+k = it["kart"].get("ops") or {}
+chk("a game with a report keeps it, and gets the runner's controls",
+    (it["kart"]["update"], k.get("action"), k.get("auto"), k.get("next"), k.get("on")),
+    ("available", "update-kart", True, 1792806468.7, "auto-on-kart"))
+chk("  its last update as the runner said, the log kept as lines", (k["last"]["ok"], k["last"]["result"], k["last"]["log"]),
+    (False, "kart-sync.service failed (exit status 1, exit-code).", ["a  b", "c" * 300]))
+d = it["derby"].get("ops") or {}
+chk("a timer whose actions the runner does not offer: no setting", (d.get("action"), d.get("auto"), d.get("on")),
+    ("update-derby", None, None))
+chk("a game this panel does not show, a bad key, an action not offered: left out",
+    ("ghost" in it, "../x" in it, "nope" in it), (False, False, False))
+chk("a stale runner: no controls", "ops" in items(U.overview(ops=dict(OPS, stale=True)))["kart"], False)
+chk("no runner: no controls", "ops" in items(U.overview())["kart"], False)
+
 print("cleaning what comes in")
 good = {"running": {"commit": "ABCDEF1", "built_at": None}, "latest": {"commit": "abcdef2", "date": None},
         "behind": 60, "update": "available", "why": " a  b ", "how": "x" * 400,

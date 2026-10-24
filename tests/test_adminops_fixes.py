@@ -75,6 +75,24 @@ print("a fix already running blocks another")
 write_status(running={"action": "dns", "by": "x", "at": NOW})
 chk("refused while running", adminops.ops_request(data, "dns", "owner", NOW + 10)[0], False)
 
+print("a game's update runs beside the fixes, one at a time per game")
+acts = {"dns": {"name": "Restart DNS", "warning": "w"},
+        "update-kart": {"name": "Update Kart Club now", "warning": "w"},
+        "update-derby": {"name": "Update Derby Night now", "warning": "w"}}
+write_status(actions=acts, updates={"kart": {"action": "update-kart", "running": {"by": "owner", "at": NOW}},
+                                    "derby": {"action": "update-derby", "running": None}})
+ok, msg = adminops.ops_request(data, "update-kart", "owner", NOW + 10)
+chk("the same game's update again: refused", (ok, msg), (False, "That update is still running. Wait for it to finish."))
+ok, msg = adminops.ops_request(data, "update-derby", "owner", NOW + 10)
+chk("another game's: filed, saying it can take minutes", (ok, "a few minutes" in msg), (True, True))
+chk("  and a fix still can be", adminops.ops_request(data, "dns", "owner", NOW + 10)[0], True)
+for p in requests():
+    os.remove(p)
+write_status(actions=acts, updates="nonsense")
+chk("an updates field that is not an object is ignored", adminops.ops_request(data, "update-kart", "owner", NOW + 10)[0], True)
+for p in requests():
+    os.remove(p)
+
 print("a stale runner turns the buttons off")
 write_status()
 chk("stale", adminops.ops_status(data, NOW + adminops.OPS_STALE + 1)["stale"], True)

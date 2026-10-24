@@ -14,7 +14,10 @@ when running.commit equals latest.commit and the update is "current", a failure 
 activity log once, and a game that stays away (POL_ADMIN_UPDATE_LOST shortened) "has not come
 back". Then the deployer-run updater (path A): the panel offers it only once the owner approved
 it and a deployer is set up, and what the stand-in deployer receives is the stored, approved
-record, never what the browser sent. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
+record, never what the browser sent. Before both, a game the host's ops runner updates (its
+status's "updates"): the item it gets, Update now and the timer setting filed for the runner by
+the owner only, a second Update refused while one runs, and the request and how it ended in the
+activity log. Throwaway PostgreSQL (tools/pgtest.py); the panel runs as a
 subprocess.
 """
 import json
@@ -298,6 +301,97 @@ def path_b(owner, upd, see, game):
         (True, "Kart Club has not come back after updating; check its server"))
 
 
+def write_ops(tmp, at=None, **kart):
+    """The host's ops runner status: it can update kart (and a game this panel does not show)."""
+    at = time.time() if at is None else at
+    u = {"name": "Kart Club", "unit": "kart-sync.service", "action": "update-kart",
+         "timer": {"unit": "kart-sync.timer", "state": "enabled", "enabled": True, "active": True,
+                   "next": at + 130, "last": at - 50, "on": "auto-on-kart", "off": "auto-off-kart"},
+         "service": {"state": "inactive", "result": "success", "status": 0, "started": at - 50,
+                     "finished": at - 47},
+         "running": None, "last": None}
+    hist = kart.pop("history", [])
+    u.update(kart)
+    st = {"at": at, "checks": [], "running": None, "history": hist, "logs": [],
+          "actions": {a: {"name": a, "warning": "w"} for a in
+                      ("update-kart", "auto-on-kart", "auto-off-kart", "update-ghost")},
+          "updates": {"kart": u, "ghost": {"name": "Ghost", "action": "update-ghost", "timer": None}}}
+    os.makedirs(os.path.join(tmp, "ops"), exist_ok=True)
+    with open(os.path.join(tmp, "ops", "status.json"), "w") as f:
+        json.dump(st, f)
+
+
+def ops_requests(tmp):
+    d = os.path.join(tmp, "ops", "requests")
+    out = []
+    for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        with open(os.path.join(d, n)) as f:
+            out.append(json.load(f))
+        os.remove(os.path.join(d, n))
+    return [(r["action"], r["by"]) for r in out]
+
+
+def path_ops(owner, upd, see, tmp):
+    print("the host's ops runner updates the game")
+    chk("no runner: no ops controls", "ops" in (item(owner) or {}), False)
+    write_ops(tmp)
+    it = item(owner)
+    o = (it or {}).get("ops") or {}
+    chk("a game that reports no version still gets an item, unknown, saying so",
+        (it and it["update"], it and it["why"]), ("unknown", "Kart Club does not report which version it runs."))
+    chk("  with its Update action and its timer: automatic, next check in two minutes",
+        (o.get("action"), o.get("auto"), 100 < (o.get("next") or 0) - time.time() < 140, o.get("on"), o.get("off")),
+        ("update-kart", True, True, "auto-on-kart", "auto-off-kart"))
+    chk("a game the runner lists that this panel does not show: not in the list", item(owner, "ghost"), None)
+    n = audit_top()
+    chk("a moderator without game.kart.update: 403", see.call("api/updates/ops", {"key": "kart", "what": "update"})[0], 403)
+    chk("  and with it too: the owner only", upd.call("api/updates/ops", {"key": "kart", "what": "update"})[0], 403)
+    for body in ({"key": "kart", "what": "reboot"}, {"key": "../kart", "what": "update"}, {"what": "update"}):
+        chk("refused before the runner is asked: %r" % (body,), owner.call("api/updates/ops", body)[0], 400)
+    chk("  nothing filed", ops_requests(tmp), [])
+    code, r = owner.call("api/updates/ops", {"key": "kart", "what": "update"})
+    chk("Update now: filed for the runner", (code, ops_requests(tmp)), (200, [("update-kart", OWNER)]))
+    chk("  in the activity log", audit_since(n), [(OWNER, "asked Kart Club to update now", True)])
+    asked = time.time()
+    write_ops(tmp, running={"by": OWNER, "at": asked})
+    chk("running: the list says who asked", item(owner)["ops"]["running"]["by"], OWNER)
+    code, r = owner.call("api/updates/ops", {"key": "kart", "what": "update"})
+    chk("  a second Update while it runs is refused", (code, r.get("error")),
+        (409, "That update is still running. Wait for it to finish."))
+    last = {"action": "update-kart", "ok": True, "by": OWNER, "at": asked + 1, "took": 40,
+            "result": "kart-sync.service finished (exit status 0).",
+            "log": ["2026-10-23T21:44:48-0400 host kart-sync[1]: kart-sync: 1a2b -> 9f8e"]}
+    write_ops(tmp, last=last, history=[last])
+    o = item(owner)["ops"]
+    chk("done: its result and the journal lines", (o["running"], o["last"]["ok"], o["last"]["result"], o["last"]["log"]),
+        (None, True, "kart-sync.service finished (exit status 0).", last["log"]))
+    chk("  the refused one logged, then how the first ended, once, under who asked", audit_since(n)[1:],
+        [(OWNER, "asked Kart Club to update now", False),
+         (OWNER, "Kart Club: update now done: kart-sync.service finished (exit status 0).", True)])
+    item(owner)
+    chk("  (not again)", len(audit_since(n)), 3)
+    n = audit_top()
+    code, r = owner.call("api/updates/ops", {"key": "kart", "what": "auto-off"})
+    chk("When I press Update: the timer off", (code, ops_requests(tmp)), (200, [("auto-off-kart", OWNER)]))
+    off = {"action": "auto-off-kart", "ok": True, "by": OWNER, "at": time.time() + 1,
+           "result": "Kart Club now updates only when someone presses Update.", "log": []}
+    write_ops(tmp, timer=dict(enabled=False, active=False, next=None, last=None, on="auto-on-kart",
+                              off="auto-off-kart"), history=[last, off])
+    o = item(owner)["ops"]
+    chk("  the list says so", (o["auto"], o["next"]), (False, None))
+    chk("  both in the activity log", audit_since(n),
+        [(OWNER, "set Kart Club to update only when Update is pressed", True),
+         (OWNER, "Kart Club: updates only when Update is pressed done: "
+                 "Kart Club now updates only when someone presses Update.", True)])
+    n = audit_top()
+    write_ops(tmp, at=time.time() - 600)
+    chk("a runner that stopped: no ops controls", "ops" in (item(owner) or {}), False)
+    code, r = owner.call("api/updates/ops", {"key": "kart", "what": "auto-on"})
+    chk("  and Automatic is refused, and logged", (code, audit_since(n)),
+        (409, [(OWNER, "turned automatic updates on for Kart Club", False)]))
+    os.remove(os.path.join(tmp, "ops", "status.json"))
+
+
 def path_a(owner, anon, dep):
     print("the deployer runs an approved updater")
     game = Game()
@@ -357,6 +451,7 @@ def main():
         chk("Kart Club added", code, 200)
         chk("moderators sign in", (upd.login("mod_upd", "pass for mod_upd"), see.login("mod_see", "pass for mod_see")),
             (200, 200))
+        path_ops(owner, upd, see, tmp)
         path_b(owner, upd, see, game)
         path_a(owner, anon, dep)
     finally:

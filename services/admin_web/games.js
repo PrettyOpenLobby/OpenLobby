@@ -681,6 +681,10 @@ function updItem(it) {
     // the game is applying its own update: its message, live (applyFollow)
     tail = `<div class="upd-live" data-upd-live="${esc(it.key)}"><span class="spin" aria-hidden="true"></span>`
       + `<span>${esc(applyLine(it.key, it.name, it.message))}</span></div>`;
+  } else if (it.ops && !updByDeployer(it.key) && it.via !== "game") {
+    // the server's ops runner updates it: its Update button and when it updates (opsBox)
+    tail = (it.update === "unknown" && it.why && it.state !== "failed" ? `<div class="upd-why">${esc(it.why)}</div>` : "")
+      + opsBox(it);
   } else if (it.update === "available") {
     const btn = (attr, how) => `<div class="upd-act"><button class="act sm" ${attr}="${esc(it.key)}">Update</button>`
       + `${how ? `<span class="muted">${how}</span>` : ""}</div>`;
@@ -709,6 +713,97 @@ function updItem(it) {
     + `<span class="pill ${cls}">${esc(word)}</span>${it.channel === "dev" ? '<span class="pill dev">dev build</span>' : ""}`
     + `${behind ? `<span class="muted">${esc(behind)}</span>` : ""}</div>`
     + `${vers ? `<div class="upd-vers">${vers}</div>` : ""}${tail}${news}</div>`;
+}
+
+// ---- a game the server's ops runner updates (adminupdates.py, ops_merge) ----
+// Its Update button runs the game's own deploy job on the server now; the setting beside it
+// turns that job's timer on (it deploys by itself within minutes of a push) or off. The
+// runner picks a request up within a few seconds, so the list is asked again every 5 s
+// while something it was asked to do has not shown up yet.
+const OPS_ASKED = {};   // key -> { what, at, auto } asked from this page, until the runner shows it
+const OPS_WAS = {};     // key -> true while its update ran at the last look
+
+function inMin(sec) {
+  const m = Math.round((sec * 1000 - Date.now()) / 60000);
+  return m <= 0 ? "in under a minute" : `in ${m} min`;
+}
+
+function opsSettled(it) {
+  // has the runner shown what this page asked of it?
+  const a = OPS_ASKED[it.key], o = it.ops;
+  if (!a) return true;
+  if (Date.now() - a.at > 60000) return true;
+  if (a.what === "update") return !!o.running || !!(o.last && o.last.at * 1000 >= a.at - 5000);
+  return o.auto === a.auto;
+}
+
+function opsBox(it) {
+  const o = it.ops, name = it.name || it.key;
+  const busy = o.running || (OPS_ASKED[it.key] && OPS_ASKED[it.key].what === "update");
+  let html = "";
+  if (busy) {
+    const r = o.running || {};
+    const who = r.by ? ` Asked by ${r.by}${r.at ? ", " + ago(r.at * 1000) : ""}.` : "";
+    html += `<div class="upd-live"><span class="spin" aria-hidden="true"></span>`
+      + `<span>${esc(`${name} is updating.${who} The result shows here when it ends.`)}</span></div>`;
+  } else if (it.update !== "current" || o.auto) {
+    const label = it.update === "available" ? "Update" : "Update now";
+    const how = o.auto && it.update !== "available" ? "Runs its update now instead of at the next check."
+      : "Runs its update on the server now.";
+    html += `<div class="upd-act"><button class="act sm" data-upd-ops="${esc(it.key)}">${label}</button>`
+      + `<span class="muted">${esc(how)}</span></div>`;
+  }
+  if (o.on && o.off) {
+    const checking = o.service && o.service.state === "activating";
+    const state = o.auto ? (checking ? "Automatic, checking now" : o.next ? `Automatic, next check ${inMin(o.next)}` : "Automatic")
+      : "When you press Update";
+    const asked = OPS_ASKED[it.key] && OPS_ASKED[it.key].what !== "update";
+    html += `<div class="upd-auto"><span>Updates:</span>`
+      + `<div class="seg" role="group" aria-label="When ${esc(name)} updates">`
+      + `<button data-upd-auto="${esc(it.key)}" data-on="1" class="${o.auto ? "on" : ""}" aria-pressed="${o.auto}"${asked ? " disabled" : ""}>Automatic (deploys within minutes of a push)</button>`
+      + `<button data-upd-auto="${esc(it.key)}" data-on="0" class="${o.auto ? "" : "on"}" aria-pressed="${!o.auto}"${asked ? " disabled" : ""}>When I press Update</button></div>`
+      + `<span class="muted">${esc(asked ? "Changing..." : state)}</span></div>`;
+  }
+  if (o.last && !busy) {
+    const l = o.last;
+    html += `<div class="upd-why${l.ok ? "" : " bad"}">${esc(`Last update from the panel${l.by ? " (" + l.by + ")" : ""}`
+      + `${l.at ? " " + ago(l.at * 1000) : ""}: ${l.ok ? "finished" : "failed"}. ${l.result || ""}`)}</div>`
+      + (l.log && l.log.length ? `<details class="upd-log"><summary>Show the log</summary><pre>${esc(l.log.join("\n"))}</pre></details>` : "");
+  }
+  return html;
+}
+
+// after each look: say how a finished update ended, and keep looking while one runs
+function opsFollow(items) {
+  let again = false;
+  for (const it of items) {
+    if (!it.ops) continue;
+    const o = it.ops;
+    if (OPS_WAS[it.key] && !o.running && o.last) {
+      toast(`${it.name}: update ${o.last.ok ? "finished" : "failed"}${o.last.result ? ". " + o.last.result : ""}`, !o.last.ok);
+    }
+    OPS_WAS[it.key] = !!o.running;
+    if (opsSettled(it)) delete OPS_ASKED[it.key];
+    if (o.running || OPS_ASKED[it.key]) again = true;
+  }
+  return again;
+}
+
+async function opsAsk(key, what) {
+  const it = ((UPD || {}).items || []).find((x) => x.key === key) || { name: key, ops: {} };
+  const name = it.name || key;
+  if (what === "update" && !confirm(`Update ${name} now?\n\nIts update runs on the server. When there is a new version `
+    + `it goes live and ${name} restarts, and everyone playing it is disconnected.`)) return;
+  if (what === "auto-on" && !confirm(`Update ${name} automatically?\n\nPushes to main go live within minutes and restart the game.`)) return;
+  try {
+    const r = await api("/api/updates/ops", { method: "POST", headers: { "Content-Type": "application/json" },
+                                              body: JSON.stringify({ key, what }) });
+    toast(r.message || "Asked.");
+  } catch (e) { toast(e.message, true); return; }
+  OPS_ASKED[key] = { what, at: Date.now(), auto: what === "auto-on" };
+  if (UPD) renderUpdates();
+  clearTimeout(UPD_TIMER);
+  UPD_TIMER = setTimeout(() => loadUpdates(false), 3000);
 }
 
 // ---- a game that applies its own update (path B): the Update button, then its status every 5 s ----
@@ -832,10 +927,13 @@ async function loadUpdates(refresh) {
   clearTimeout(UPD_TIMER);
   try { UPD = await api("/api/updates" + (refresh ? "?refresh=1" : "")); }
   catch (e) { toast(e.message, true); return; }
+  const opsBusy = opsFollow(UPD.items || []);
   if (CUR_TAB === "deploy" || CUR_TAB === "modules") renderUpdates();
-  // while a check runs, ask again every 3 s
+  // while a check runs, ask again every 3 s; while the ops runner works on a game, every 5 s
   if (UPD.checking && ["deploy", "modules", "overview"].includes(CUR_TAB))
     UPD_TIMER = setTimeout(() => loadUpdates(false), 3000);
+  else if (opsBusy && ["deploy", "modules"].includes(CUR_TAB))
+    UPD_TIMER = setTimeout(() => loadUpdates(false), 5000);
   return UPD;
 }
 
@@ -876,6 +974,13 @@ document.addEventListener("click", async (e) => {
   }
   const ap = t.closest("[data-upd-apply]");
   if (ap) return applyStart(ap.dataset.updApply);
+  const op = t.closest("[data-upd-ops]");
+  if (op) return opsAsk(op.dataset.updOps, "update");
+  const au = t.closest("[data-upd-auto]");
+  if (au) {
+    if (au.classList.contains("on") || au.disabled) return;
+    return opsAsk(au.dataset.updAuto, au.dataset.on === "1" ? "auto-on" : "auto-off");
+  }
   const ru = t.closest("[data-upd-run]");
   if (ru) return updaterStart(ru.dataset.updRun);
   const go = t.closest("[data-upd-go]");

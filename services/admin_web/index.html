@@ -828,6 +828,12 @@
     .upd-live.bad .spin { display: none; }
     @keyframes updspin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .upd-live .spin { animation: none; } }
+    .upd-auto { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; font-size: 13px; }
+    .upd-auto .seg { flex-wrap: wrap; }
+    .upd-auto .muted { font-size: 12.5px; }
+    .upd-log pre { max-height: 280px; overflow: auto; margin: 6px 0 0; padding: 8px 10px; font-size: 11.5px;
+      white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--line);
+      border-radius: 6px; }
     /* Settings > Modules: a paired game's updater, under its row */
     tr.has-upd td { border-bottom: 0; }
     .ga-upd-box { border-left: 3px solid var(--warn); background: var(--panel2); border-radius: 0 8px 8px 0;

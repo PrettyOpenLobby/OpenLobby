@@ -2503,7 +2503,7 @@ class Handler(BaseHTTPRequestHandler):
         # update notices (adminupdates.py) and a pairing code's state: owner only, as above
         if path == "/api/updates":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            out = adminupdates.overview(q.get("refresh", [""])[0] == "1")
+            out = adminupdates.overview(q.get("refresh", [""])[0] == "1", ops=adminops.ops_status(_DATA))
             self._audit_update_events()
             return self._send(200, out)
         if path == "/api/pair/code":
@@ -2707,6 +2707,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._update_apply()
         if path == "/api/updates/run":
             return self._update_run()
+        if path == "/api/updates/ops":
+            return self._update_ops()
         if path == "/api/deploy/action":
             body = self._json_body()
             act, game = body.get("action"), body.get("game")
@@ -2824,8 +2826,34 @@ class Handler(BaseHTTPRequestHandler):
     # -- updating a paired game (docs/installs.md, "Updates") ----------------- #
     def _audit_update_events(self):
         """The failures games reported since the last look (adminupdates.take_events)."""
-        for actor, what, key in adminupdates.take_events():
-            _audit(actor, "game", what, target=key, ok=False, addr=self._addr())
+        for ev in adminupdates.take_events():
+            actor, what, key = ev[:3]
+            _audit(actor, "game", what, target=key, ok=ev[3] if len(ev) > 3 else False, addr=self._addr())
+
+    def _update_ops(self):
+        """{"key", "what": "update" | "auto-on" | "auto-off"}: the host's ops runner runs the
+        game's own deploy job now, or turns that job's timer on or off (adminupdates, "a game
+        the host's ops runner updates"). The owner only, and game.<key>.update besides. Only
+        the key and the word come from the browser; the runner offers the action or refuses."""
+        body = self._json_body()
+        key, what = str(body.get("key") or ""), body.get("what")
+        if what not in adminupdates.OPS_KINDS or not adminupdates._KEY.match(key):
+            return self._send(400, {"error": "Which game, and what?"})
+        if not (self._is_owner() and self._can("game.%s.update" % key)):
+            return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
+        user, role, _p = self._caller()
+        title = adminupdates.ops_title(key, adminops.ops_status(_DATA))
+        action = "%s-%s" % (what, key)
+        now = time.time()
+        ok, msg = adminops.ops_request(_DATA, action, user, now)
+        said = {"update": "asked %s to update now",
+                "auto-on": "turned automatic updates on for %s",
+                "auto-off": "set %s to update only when Update is pressed"}[what] % title
+        _audit(user, role, said, target=key[:32], detail=None if ok else {"error": msg[:300]},
+               ok=ok, addr=self._addr())
+        if ok:
+            adminupdates.ops_asked(key, action, title, user, now)
+        return self._send(200 if ok else 409, {"ok": ok, "message": msg} if ok else {"error": msg})
 
     def _update_apply(self):
         """{"key"}: the game updates itself (path B): POST /openlobby/update on its admin port.

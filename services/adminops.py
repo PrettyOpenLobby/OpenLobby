@@ -146,7 +146,9 @@ def disk(data_dir):
 #   {"at": <unix time>, "checks": [{"id", "name", "state": ok|warn|bad|info,
 #    "detail", "fix": <action id or null>, "restarted": {...} or null}],
 #    "actions": {<id>: {"name", "warning"}}, "running": null or {...},
-#    "history": [...]}
+#    "updates": {<game key>: {"action", "timer": {"enabled", "active", "next",
+#    "last", "on", "off"} or null, "running", "last"}}, "history": [...]}
+# ("updates" is optional: the games the runner can update, adminupdates.py)
 # and carries out the fixes; this side only reads that file and drops
 # ops/requests/<time>-<id>.json naming one of the actions it lists. The panel
 # never restarts anything itself. With no runner, the server checks are hidden.
@@ -182,6 +184,13 @@ def ops_request(data_dir, action, by, now=None):
         return False, "That is not a fix the server knows."
     if st.get("running"):
         return False, "Another fix is still running. Wait for it to finish."
+    # a game's update (status "updates", one per game the runner can update): it runs beside
+    # the other fixes, one at a time per game
+    update = next((u for u in (st.get("updates") or {}).values()
+                   if isinstance(u, dict) and u.get("action") == action), None) \
+        if isinstance(st.get("updates"), dict) else None
+    if update is not None and update.get("running"):
+        return False, "That update is still running. Wait for it to finish."
     now = time.time() if now is None else now
     req = os.path.join(data_dir, "ops", "requests")
     os.makedirs(req, exist_ok=True)
@@ -190,6 +199,9 @@ def ops_request(data_dir, action, by, now=None):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"action": action, "by": str(by)[:64], "at": now}, f)
     os.replace(tmp, os.path.join(req, name))
+    if update is not None:
+        return True, ("%s: asked. It can take a few minutes; the result shows here when it ends."
+                      % actions[action].get("name", action))
     return True, "%s requested. It usually takes under a minute." % actions[action].get("name", action)
 
 

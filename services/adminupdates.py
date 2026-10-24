@@ -226,9 +226,10 @@ def game_reports():
     return out
 
 
-def overview(refresh=False):
+def overview(refresh=False, ops=None):
     """{"checked_at", "checking", "items"} for the panel's Updates view; refresh asks the
-    deployer, or GitHub for the panel's own check, again (at most once a minute)."""
+    deployer, or GitHub for the panel's own check, again (at most once a minute). `ops` is the
+    host's ops runner status (adminops.ops_status), for the games it can update (ops_merge)."""
     items, keys, modules = [], set(), set()
     checked_at, checking, from_deployer = None, False, False
     channel = "stable"
@@ -275,12 +276,131 @@ def overview(refresh=False):
             if key in approved:
                 it["via"] = "updater"
         _observe(key, it)
+    ops_merge(items, ops)
     for it in items:
         it.pop("module", None)
         if it["key"] in _applying:
             it["applying"] = True
     return {"checked_at": checked_at or updatecheck.iso(), "checking": checking, "items": items,
             "channel": channel}
+
+
+# ------------------------------------------- a game the host's ops runner updates
+# The deployment's ops runner (adminops.py) may list, in its status, games it can update by
+# running their own deploy job ("updates": {key: {"action", "timer", "running", "last"}}). Such
+# a game's item gets "ops": its Update action, whether it updates by itself (the job's timer)
+# and when it checks next, the update running now and the last one's result and log. A game
+# the runner lists that reports no version of its own still gets an item, as unknown. The
+# panel files the runner's actions (adminops.ops_request); ops_asked() remembers who asked, and
+# the runner's history says how it ended, for the activity log.
+
+_ops_pending = {}        # key -> [{"action", "title", "actor", "at"}] filed from this panel
+OPS_KINDS = ("update", "auto-on", "auto-off")
+OPS_GIVE_UP = 7200.0     # a request with no outcome this long is logged as never reported
+
+
+def _num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+
+def _ops_view(u, actions):
+    act = u.get("action")
+    if not (isinstance(act, str) and act in actions):
+        return None
+    view = {"action": act, "auto": None, "next": None, "checked": None, "on": None, "off": None,
+            "running": None, "last": None, "service": None}
+    t = u.get("timer")
+    if isinstance(t, dict) and t.get("on") in actions and t.get("off") in actions:
+        view.update(auto=t.get("enabled") is True and t.get("active") is True, next=_num(t.get("next")),
+                    checked=_num(t.get("last")), on=t["on"], off=t["off"])
+    run = u.get("running")
+    if isinstance(run, dict):
+        view["running"] = {"by": _text(run.get("by"), 64), "at": _num(run.get("at"))}
+    last = u.get("last")
+    if isinstance(last, dict):
+        view["last"] = {"ok": last.get("ok") is True, "result": _text(last.get("result"), 300),
+                        "by": _text(last.get("by"), 64), "at": _num(last.get("at")),
+                        "took": _num(last.get("took")),
+                        "log": [str(x)[:300] for x in (last.get("log") or [])[:60] if isinstance(x, str)]
+                        if isinstance(last.get("log"), list) else []}
+    svc = u.get("service")
+    if isinstance(svc, dict):
+        view["service"] = {"state": _text(svc.get("state"), 20), "result": _text(svc.get("result"), 30),
+                           "finished": _num(svc.get("finished"))}
+    return view
+
+
+def _shown_titles():
+    """{key: title} of the games this panel shows, or None when there are no modules here."""
+    try:
+        import adminmodules
+        return {k: m.title for k, m in adminmodules.enabled().items()}
+    except Exception:                          # noqa: BLE001 -- no modules: take the runner's names
+        return None
+
+
+def ops_merge(items, ops):
+    """Put the ops runner's update controls on the games it lists (see above)."""
+    ups = ops.get("updates") if isinstance(ops, dict) and not ops.get("stale") else None
+    if not isinstance(ups, dict) or not ups:
+        return
+    actions = ops.get("actions") if isinstance(ops.get("actions"), dict) else {}
+    shown = _shown_titles()
+    by_key = {it["key"]: it for it in items}
+    for key in sorted(ups):
+        u = ups[key]
+        if not isinstance(key, str) or not _KEY.match(key) or not isinstance(u, dict):
+            continue
+        if shown is not None and key not in shown:
+            continue                           # a game this panel does not show
+        view = _ops_view(u, actions)
+        if view is None:
+            continue
+        it = by_key.get(key)
+        if it is None:
+            title = (shown or {}).get(key) or _text(u.get("name"), 80) or key
+            it = updatecheck.unknown(updatecheck.item(key, title),
+                                     "%s does not report which version it runs." % title)
+            items.append(it)
+            by_key[key] = it
+        it["ops"] = view
+    _ops_outcomes(ops)
+
+
+def ops_title(key, ops):
+    """The name to say for a game the runner updates."""
+    shown = _shown_titles() or {}
+    u = ((ops or {}).get("updates") or {}).get(key) if isinstance(ops, dict) else None
+    return shown.get(key) or (_text(u.get("name"), 80) if isinstance(u, dict) else None) or key
+
+
+def ops_asked(key, action, title, actor, at):
+    """Note a request the panel filed, so its outcome reaches the activity log."""
+    with _lock:
+        _ops_pending.setdefault(key, []).append({"action": action, "title": title, "actor": actor, "at": at})
+
+
+def _ops_outcomes(ops):
+    """Each request filed from here that the runner's history now shows ended, once."""
+    hist = [h for h in (ops.get("history") or []) if isinstance(h, dict)]
+    with _lock:
+        for key, asks in list(_ops_pending.items()):
+            for ask in list(asks):
+                done = next((h for h in reversed(hist) if h.get("action") == ask["action"]
+                             and (_num(h.get("at")) or 0) >= ask["at"] - 5), None)
+                if done is None and time.time() - ask["at"] > OPS_GIVE_UP:
+                    done = {"ok": False, "result": "the server's ops runner never reported how it ended"}
+                if done is None:
+                    continue
+                asks.remove(ask)
+                kind = ask["action"][:ask["action"].rindex("-" + key)]
+                said = {"update": "update now", "auto-on": "automatic updates on",
+                        "auto-off": "updates only when Update is pressed"}.get(kind, kind)
+                _events.append((ask["actor"], "%s: %s %s: %s" % (
+                    ask["title"], said, "done" if done.get("ok") is True else "failed",
+                    _text(done.get("result"), 300) or "no result given"), key, done.get("ok") is True))
+            if not asks:
+                _ops_pending.pop(key, None)
 
 
 # ------------------------------------------------ a game that applies its own update
@@ -320,7 +440,8 @@ def _observe(key, it, actor=None):
 
 
 def take_events():
-    """[(actor, what, key)] seen since the last call, for admin.py to audit."""
+    """[(actor, what, key)] or [(actor, what, key, ok)] seen since the last call, for admin.py
+    to audit (the three-part ones are failures)."""
     with _lock:
         out = list(_events)
         del _events[:]
