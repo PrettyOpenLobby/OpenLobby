@@ -3183,7 +3183,7 @@ class FakeFeed:
                     files = feed.packages.get((parts[5], parts[6]))
                     if files is None:
                         return self.send(404, {"message": "not found"})
-                    return self.send(200, [{"name": n, "size": len(b),
+                    return self.send(200, [{"name": n, "Size": len(b),
                                             "sha256": hashlib.sha256(b).hexdigest()}
                                            for n, b in sorted(files.items())])
                 if parts[:2] == ["api", "packages"] and len(parts) == 7:

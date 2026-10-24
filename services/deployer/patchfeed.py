@@ -112,10 +112,11 @@ class Feed:
                 ok = {}
                 for f in files if isinstance(files, list) else []:
                     name = str(f.get("name") or "") if isinstance(f, dict) else ""
-                    size, sha = f.get("size") if isinstance(f, dict) else None, \
-                        str(f.get("sha256") or "").lower() if isinstance(f, dict) else ""
+                    # Forgejo and Gitea spell it "Size"
+                    size = f.get("Size", f.get("size")) if isinstance(f, dict) else None
+                    sha = str(f.get("sha256") or "").lower() if isinstance(f, dict) else ""
                     if (name == FULL or UPDATE.match(name)) and isinstance(size, int) \
-                            and size > 0 and SHA256.match(sha):
+                            and not isinstance(size, bool) and size > 0 and SHA256.match(sha):
                         ok[name] = {"size": size, "sha256": sha}
                 if ok:
                     versions[v] = ok
