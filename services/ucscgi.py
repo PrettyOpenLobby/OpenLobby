@@ -3621,9 +3621,47 @@ _SUITES = {
 }
 
 
+def _is_tls_hello(head):
+    """True when the first bytes on the band port open an SSL/TLS handshake.
+
+    Two shapes reach us. The PS2 sends an SSL 3.0 record, `16 03 ..`. The Xbox
+    360 Viewer sends the SSLv2-compatible ClientHello instead: a two-byte length
+    with the top bit set, then CLIENT-HELLO (01) and version 3.0 --
+    `80 28 01 03 00` (captured 2026-10-24). Matching `16 03` alone sent the 360's
+    wallpaper download to the plain portal passthrough, which answered with
+    nothing; sslterm (sslspoof) already handles the SSLv2 form. An HTTP request
+    starts with an ASCII method, so neither shape can collide with one.
+    """
+    if len(head) >= 2 and head[0] == 0x16 and head[1] == 0x03:
+        return True
+    return (len(head) >= 4 and head[0] & 0x80 and head[2] == 0x01
+            and head[3] == 0x03)
+
+
+def _describe_sslv2_hello(b):
+    """describe_hello for the SSLv2-compatible form (see _is_tls_hello)."""
+    rec_len = ((b[0] & 0x7f) << 8) | b[1]
+    cli_ver = f"{b[3]}.{b[4]}"
+    cs_len = int.from_bytes(b[5:7], "big")
+    sid_len = int.from_bytes(b[7:9], "big")
+    chal_len = int.from_bytes(b[9:11], "big")
+    # SSLv2 cipher specs are 3 bytes; 00 xx yy is the SSLv3 suite xx yy.
+    specs = [int.from_bytes(b[11 + j:14 + j], "big") for j in range(0, cs_len, 3)]
+    names = ", ".join(_SUITES.get(s, f"0x{s:06x}") for s in specs)
+    have = len(b)
+    return (f"ClientHello (SSLv2 format): client_ver={cli_ver} "
+            f"record_len={rec_len} session_id={sid_len}B challenge={chal_len}B "
+            f"ciphers={len(specs)} [{names}] "
+            f"| peeked {have}B of {rec_len + 2}B record"
+            + ("  <-- TRUNCATED, the rest had not arrived yet"
+               if have < rec_len + 2 else ""))
+
+
 def describe_hello(b):
     """Parse enough of a ClientHello to say what was actually offered."""
     try:
+        if len(b) >= 11 and b[0] & 0x80 and b[2] == 0x01:
+            return _describe_sslv2_hello(b)
         if len(b) < 11 or b[0] != 0x16:
             return f"not a handshake record (first byte 0x{b[0]:02x})"
         rec_ver = f"{b[1]}.{b[2]}"
@@ -3725,8 +3763,9 @@ def _passthrough(conn, upstream_host, upstream_ip, port, pace=False):
     they are in dns.redirect_only, so owning the port outright would silently
     break portal browsing.
 
-    Splitting on the first byte avoids that: a TLS ClientHello starts 0x16 0x03,
-    an HTTP request starts with an ASCII method. TLS is ours; everything else is
+    Splitting on the first byte avoids that: a TLS ClientHello starts 0x16 0x03
+    (or 0x80 for the 360's SSLv2-format hello, see _is_tls_hello), an HTTP
+    request starts with an ASCII method. TLS is ours; everything else is
     handed straight through to the real portal box, byte for byte.
     """
     try:
@@ -3870,8 +3909,8 @@ def serve(port, plain=False):
 
     def worker(conn, addr):
         try:
-            head = conn.recv(3, socket.MSG_PEEK)
-            if len(head) >= 2 and head[0] == 0x16 and head[1] == 0x03:
+            head = conn.recv(4, socket.MSG_PEEK)
+            if _is_tls_hello(head):
                 if ssl3_host:
                     try:
                         ip = socket.gethostbyname(ssl3_host)
