@@ -15,7 +15,14 @@ revoked code is refused and frees its install. Then a panel that mints a registr
 on a stand-in Forgejo (POL_DEV_ISSUER_FORGEJO_*): the token made with basic auth and read:package
 only, the access code carries it, a second redeem makes no second token, a failed mint binds
 nothing and says so, revoke deletes the token, and a site admin's sign-in acts for the reader
-user (Sudo). Last, the limit: five tries a minute from one address, then 429. Throwaway
+user (Sudo). Then kinds (POL_DEV_ISSUER_KINDS, made-up kart and derby): each kind with its own
+base code and its own stand-in Forgejo and reader user, derby's tokens with two scopes; a code is
+made for a kind (none given with two kinds is refused), one install holds a code of each kind but
+not two of one; a kind taken out of the settings lists its codes as not configured, answers 503
+to redeem, and still revokes, saying its token was left; a scope outside the allowlist, a second
+kind on the first one's Forgejo user and a malformed KINDS entry each refuse with a sentence. The
+migration's default kind '' and its key check. Last, the limit: five tries a minute from one
+address, then 429. Throwaway
 PostgreSQL (tools/pgtest.py); the panels run as subprocesses.
 """
 import base64
@@ -80,10 +87,12 @@ def audit_top():
 
 
 class Forgejo:
-    """The two token endpoints of Forgejo's API, for the user READER: POST makes a token (basic
-    auth only, as Forgejo wants), DELETE removes one. self.fail makes the next POST a 500."""
+    """The two token endpoints of Forgejo's API, for one reader user (READER unless told): POST
+    makes a token (basic auth with the user's password only, as Forgejo wants), DELETE removes
+    one. self.fail makes the next POST a 500."""
 
-    def __init__(self):
+    def __init__(self, user=READER, password=READER_PW, prefix="kart-token"):
+        self.user, self.password, self.prefix = user, password, prefix
         self.tokens = {}
         self.calls = []
         self.fail = False
@@ -107,19 +116,19 @@ class Forgejo:
                 if not auth.startswith("Basic "):
                     return None
                 name, _, pw = base64.b64decode(auth[6:]).decode().partition(":")
-                if (name, pw) == (READER, READER_PW):
-                    return READER
-                if (name, pw) == ("siteadmin", "admin password 1") and self.headers.get("Sudo") == READER:
-                    return READER
+                if (name, pw) == (fj.user, fj.password):
+                    return fj.user
+                if (name, pw) == ("siteadmin", "admin password 1") and self.headers.get("Sudo") == fj.user:
+                    return fj.user
                 return None
 
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"{}")
                 fj.calls.append(("POST", self.path, body, self.headers.get("Sudo")))
-                if self.path != "/api/v1/users/%s/tokens" % READER:
+                if self.path != "/api/v1/users/%s/tokens" % fj.user:
                     return self.send(404, {"message": "not found"})
-                if self.who() != READER:
+                if self.who() != fj.user:
                     return self.send(401, {"message": "basic auth required"})
                 if fj.fail:
                     fj.fail = False
@@ -127,14 +136,14 @@ class Forgejo:
                 if any(t["name"] == body.get("name") for t in fj.tokens.values()):
                     return self.send(422, {"message": "access token name has been used already"})
                 fj.n += 1
-                tok = {"id": fj.n, "name": body.get("name"), "sha1": "kart-token-%04d" % fj.n,
+                tok = {"id": fj.n, "name": body.get("name"), "sha1": "%s-%04d" % (fj.prefix, fj.n),
                        "scopes": body.get("scopes")}
                 fj.tokens[str(fj.n)] = tok
                 return self.send(201, tok)
 
             def do_DELETE(self):
                 fj.calls.append(("DELETE", self.path, None, self.headers.get("Sudo")))
-                if self.who() != READER:
+                if self.who() != fj.user:
                     return self.send(401, {"message": "basic auth required"})
                 ref = self.path.rsplit("/", 1)[-1]
                 hit = [k for k, t in fj.tokens.items() if k == ref or t["name"] == ref]
@@ -210,8 +219,12 @@ def shared(tmp, base_env):
             (code, len(codes), all(devchannel.short_code(c) and len(c) == 14 and c.count("-") == 2 for c in codes),
              r.get("note")), (200, 4, True, "Kart Club testers"))
         chk("  in the activity log", audit_since(n)[:1], [(OWNER, "made 4 dev access codes for Kart Club testers", True)])
-        rows = owner.call("api/devcodes")[1]["codes"]
+        listed = owner.call("api/devcodes")[1]
+        rows = listed["codes"]
         chk("  listed, unused", sorted(x["state"] for x in rows), ["unused"] * 4)
+        chk("  of the one unnamed kind, which issues", ([(k["key"], k["issuing"]) for k in listed["kinds"]],
+                                                         {(x["kind"], x["kind_ok"]) for x in rows}),
+            ([("", True)], {("", True)}))
         c1, c2, c3, c4 = codes
 
         print("redeeming")
@@ -325,6 +338,169 @@ def minting(tmp, base_env, fj, auth):
         stop(proc)
 
 
+KART_BASE = devchannel.make_code("kart.example.org/dev", None, "https://code.example.org/kart")
+DERBY_BASE = devchannel.make_code("derby.example.org/dev", None, "https://code.example.org/derby",
+                                  "derby.example.org/patches")
+DERBY_READER, DERBY_PW = "derbydev", "derby reader password 2"
+
+
+def kinds_env(base_env, kart, derby, **more):
+    env = dict(base_env, POL_DEV_ISSUER_KINDS="kart:Kart Club, derby:Derby Night",
+               POL_DEV_ISSUER_KART_CODE=KART_BASE, POL_DEV_ISSUER_DERBY_CODE=DERBY_BASE,
+               POL_DEV_ISSUER_KART_FORGEJO_URL=kart.url, POL_DEV_ISSUER_KART_FORGEJO_USER=kart.user,
+               POL_DEV_ISSUER_KART_FORGEJO_AUTH="%s:%s" % (kart.user, kart.password),
+               POL_DEV_ISSUER_DERBY_FORGEJO_URL=derby.url, POL_DEV_ISSUER_DERBY_FORGEJO_USER=derby.user,
+               POL_DEV_ISSUER_DERBY_FORGEJO_AUTH="%s:%s" % (derby.user, derby.password),
+               POL_DEV_ISSUER_DERBY_SCOPES="read:repository, read:package")
+    env.update(more)
+    return env
+
+
+def kinds(tmp, base_env, kart, derby):
+    print("a panel with two kinds of code, each with its own Forgejo reader")
+    for f in (kart, derby):
+        f.tokens.clear()
+        del f.calls[:]
+        f.n = 0
+    proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=kinds_env(base_env, kart, derby))
+    try:
+        owner, anon = Client(url), Client(url)
+        owner.login(OWNER, OWNER_PW)
+        code, r = owner.call("api/devcodes")
+        ks = {k["key"]: k for k in r.get("kinds") or []}
+        chk("its page: both kinds, in order, both minting with their own scopes",
+            (code, r.get("issuing"), [k["key"] for k in r.get("kinds") or []],
+             [(ks[k]["label"], ks[k]["issuing"], ks[k]["minting"], ks[k]["scopes"]) for k in ("kart", "derby")]),
+            (200, True, ["kart", "derby"],
+             [("Kart Club", True, True, ["read:package"]),
+              ("Derby Night", True, True, ["read:package", "read:repository"])]))
+        chk("  each kind says, in a sentence, that its codes get their own token",
+            [("Kart Club codes get a registry token of their own" in ks["kart"]["why"], kart.user in ks["kart"]["why"]),
+             ("Derby Night codes get a registry token of their own" in ks["derby"]["why"],
+              derby.user in ks["derby"]["why"])], [(True, True), (True, True)])
+        code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "x"})
+        chk("make with no kind: 400, pick one", (code, r.get("error")), (400, "Pick which kind of code to make."))
+        code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "x", "kind": "golf"})
+        chk("make of a kind it does not have: 400", (code, bool(r.get("error"))), (400, True))
+        n = audit_top()
+        code, r = owner.call("api/devcodes", {"action": "make", "count": 2, "note": "Kart testers", "kind": "kart"})
+        k1, k2 = r.get("codes") or [None, None]
+        chk("make 2 Kart Club codes", (code, r.get("kind"), r.get("kind_label")), (200, "kart", "Kart Club"))
+        chk("  in the activity log with the kind", audit_since(n)[:1],
+            [(OWNER, "made 2 Kart Club dev access codes for Kart testers", True)])
+        d1, d2 = owner.call("api/devcodes", {"action": "make", "count": 2, "note": "Derby testers",
+                                             "kind": "derby"})[1]["codes"]
+        rows = {x["code"]: x for x in owner.call("api/devcodes")[1]["codes"]}
+        chk("  listed with their kinds", [(rows[c]["kind"], rows[c]["kind_label"], rows[c]["kind_ok"]) for c in (k1, d1)],
+            [("kart", "Kart Club", True), ("derby", "Derby Night", True)])
+
+        code, r = redeem(anon, k1, INSTALL_A)
+        info = devchannel.parse_code(r.get("access_code") or "x" * 9) if code == 200 else {}
+        chk("redeem a Kart Club code: the kart base code with a token from the kart reader",
+            (code, info.get("registry"), info.get("token"), info.get("feed")),
+            (200, "kart.example.org/dev", kart.user + ":kart-token-0001", None))
+        chk("  minted on the kart Forgejo, read:package, named after the kind and code",
+            [(c[1], c[2]) for c in kart.calls if c[0] == "POST"],
+            [("/api/v1/users/%s/tokens" % kart.user,
+              {"name": "openlobby-dev-kart-" + devchannel.short_code(k1), "scopes": ["read:package"]})])
+        code, r = redeem(anon, d1, INSTALL_A)
+        info = devchannel.parse_code(r.get("access_code") or "x" * 9) if code == 200 else {}
+        chk("the same install redeems a Derby Night code too: the derby base code, its patch feed, its token",
+            (code, info.get("registry"), info.get("feed"), info.get("token")),
+            (200, "derby.example.org/dev", "derby.example.org/patches", derby.user + ":derby-token-0001"))
+        chk("  minted on the derby Forgejo with both scopes, nothing more on the kart one",
+            ([(c[2]["name"], c[2]["scopes"]) for c in derby.calls if c[0] == "POST"],
+             len([c for c in kart.calls if c[0] == "POST"])),
+            ([("openlobby-dev-derby-" + devchannel.short_code(d1), ["read:package", "read:repository"])], 1))
+        code, r = redeem(anon, k2, INSTALL_A)
+        chk("a second Kart Club code for that install: 409, it holds one of that kind",
+            (code, "of this kind" in r.get("error", "")), (409, True))
+        code, r = redeem(anon, k2, INSTALL_B)
+        chk("  another install takes it", code, 200)
+        code, r = owner.call("api/devcodes", {"action": "revoke", "code": k1})
+        chk("revoke the first Kart Club code: its token deleted on the kart Forgejo only",
+            (code, r.get("token_deleted"), sorted(kart.tokens), sorted(derby.tokens)), (200, True, ["2"], ["1"]))
+        code, r = redeem(anon, k2.replace("-", ""), INSTALL_A)
+        chk("  the install still cannot take a Kart Club code bound elsewhere", code, 409)
+    finally:
+        stop(proc)
+
+    print("the derby kind removed from the settings")
+    env = kinds_env(base_env, kart, derby, POL_DEV_ISSUER_KINDS="kart:Kart Club")
+    proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=env)
+    try:
+        owner, anon = Client(url), Client(url)
+        owner.login(OWNER, OWNER_PW)
+        code, r = owner.call("api/devcodes")
+        rows = {x["code"]: x for x in r["codes"]}
+        chk("its page: one kind; the derby codes listed as a kind not configured",
+            ([k["key"] for k in r["kinds"]], rows[d1]["kind_ok"], rows[d2]["kind_ok"], rows[k2]["kind_ok"]),
+            (["kart"], False, False, True))
+        code, r = redeem(anon, d2, INSTALL_C)
+        chk("redeem an unused derby code: 503 with a sentence", (code, r.get("error")),
+            (503, "This panel does not hand out that kind of dev code at the moment. Try again later, or "
+                  "ask the people who gave you the code."))
+        code, r = redeem(anon, d1, INSTALL_A)
+        chk("  and the used one, even from its own install: 503", code, 503)
+        code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "x", "kind": "derby"})
+        chk("making derby codes: 400", code, 400)
+        n = audit_top()
+        code, r = owner.call("api/devcodes", {"action": "revoke", "code": d1})
+        chk("revoke the used derby code: 200, revoked, and it says the token was not deleted",
+            (code, r.get("token_deleted"), "was not deleted" in (r.get("warning") or ""),
+             "openlobby-dev-derby-" + devchannel.short_code(d1) in (r.get("warning") or ""), sorted(derby.tokens)),
+            (200, False, True, True, ["1"]))
+        chk("  in the activity log", audit_since(n)[0][1:], ("revoked the dev access code for Derby testers", True))
+        rows = {x["code"]: x for x in owner.call("api/devcodes")[1]["codes"]}
+        chk("  listed revoked, with its token left", (rows[d1]["state"], rows[d1]["token_left"]), ("revoked", True))
+        chk("  redeeming it now: 403", redeem(anon, d1, INSTALL_A)[0], 403)
+        code, r = owner.call("api/devcodes", {"action": "revoke", "code": d2})
+        chk("revoke the unused derby code: 200, no warning", (code, r.get("warning")), (200, None))
+    finally:
+        stop(proc)
+
+    print("kinds that cannot be used")
+    env = kinds_env(base_env, kart, derby,
+                    POL_DEV_ISSUER_KINDS="kart:Kart Club,derby:Derby Night,polo:Polo Cup,Golf,9x:Nine",
+                    POL_DEV_ISSUER_DERBY_SCOPES="read:package,write:package",
+                    POL_DEV_ISSUER_POLO_CODE=KART_BASE,
+                    POL_DEV_ISSUER_POLO_FORGEJO_URL=kart.url, POL_DEV_ISSUER_POLO_FORGEJO_USER=kart.user,
+                    POL_DEV_ISSUER_POLO_FORGEJO_AUTH="%s:%s" % (kart.user, kart.password))
+    proc, url = start_panel(tmp, SERVICES, free_port(), env_extra=env)
+    try:
+        owner, anon = Client(url), Client(url)
+        owner.login(OWNER, OWNER_PW)
+        code, r = owner.call("api/devcodes")
+        ks = {k["key"]: k for k in r.get("kinds") or []}
+        chk("a scope outside read:package and read:repository: the kind issues nothing, and says so",
+            (ks["derby"]["issuing"], "POL_DEV_ISSUER_DERBY_SCOPES may name only read:package and read:repository"
+             in ks["derby"]["why"], "write:package" in ks["derby"]["why"]), (False, True, True))
+        chk("two kinds sharing one Forgejo user: the second refused, and says why",
+            (ks["kart"]["issuing"], ks["polo"]["issuing"], "same Forgejo user as Kart Club" in ks["polo"]["why"]),
+            (True, False, True))
+        chk("entries that are not key:Label: a sentence each", (sorted(ks), len(r.get("problems") or []),
+                                                                all("POL_DEV_ISSUER_KINDS" in p for p in r["problems"])),
+            (["derby", "kart", "polo"], 2, True))
+        code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "later", "kind": "derby"})
+        chk("  a derby code can be made for later", code, 200)
+        chk("  but not redeemed (503), while a kart one still works",
+            (redeem(anon, r["codes"][0], INSTALL_C)[0], redeem(anon, k2, INSTALL_B)[0]), (503, 200))
+        sql("DELETE FROM dev_codes")
+    finally:
+        stop(proc)
+
+    print("migration 0022")
+    sql("INSERT INTO dev_codes (code, note, created_at) VALUES ('ABCDEFGHJKMN', 'old', 0)")
+    chk("a code made without a kind is of the unnamed kind",
+        sql("SELECT kind FROM dev_codes WHERE code = 'ABCDEFGHJKMN'"), [{"kind": ""}])
+    try:
+        sql("INSERT INTO dev_codes (code, kind, note, created_at) VALUES ('ABCDEFGHJKMP', 'Kart', 'x', 0)")
+        chk("a kind key that does not fit is refused by the table", "inserted", "refused")
+    except Exception:          # noqa: BLE001
+        chk("a kind key that does not fit is refused by the table", "refused", "refused")
+    sql("DELETE FROM dev_codes")
+
+
 def limited(tmp, base_env):
     print("five tries a minute from one address")
     env = dict(base_env, POL_DEV_ISSUER_CODE=BASE)
@@ -351,6 +527,7 @@ def main():
         shared(tmp, base_env)
         minting(tmp, base_env, fj, "%s:%s" % (READER, READER_PW))
         minting(tmp, base_env, fj, "siteadmin:admin password 1")
+        kinds(tmp, base_env, Forgejo(), Forgejo(DERBY_READER, DERBY_PW, "derby-token"))
         limited(tmp, base_env)
     finally:
         fj.stop()

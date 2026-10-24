@@ -562,35 +562,50 @@ const DC_WORD = { unused: ["live", "Unused"], used: ["env", "In use"], revoked: 
 
 function renderDevCodes() {
   const d = DEVCODES || {}, box = $("#devCodesPanel");
-  const codes = d.codes || [];
-  box.hidden = !d.issuing && !codes.length;
+  const codes = d.codes || [], kinds = d.kinds || [];
+  box.hidden = !d.issuing && !codes.length && !(d.problems || []).length;
   if (box.hidden) return;
-  $("#dcWhy").textContent = d.why || "";
+  // One sentence per kind (what its codes redeem to), then any setting that could not be read.
+  const named = kinds.length > 1 || kinds.some((k) => k.key);
+  $("#dcWhy").innerHTML = kinds.map((k) => `<p${k.key && !k.issuing ? ' class="dc-problem"' : ""}>${esc(k.why || "")}</p>`).join("")
+    + (d.problems || []).map((p) => `<p class="dc-problem">${esc(p)}</p>`).join("");
+  const sel = $("#dcKind"), was = sel.value;
+  const ready = kinds.filter((k) => k.issuing);
+  sel.innerHTML = ready.map((k) => `<option value="${esc(k.key)}">${esc(k.label || k.key)}</option>`).join("");
+  if (ready.some((k) => k.key === was)) sel.value = was;
+  $("#dcKindBox").hidden = ready.length < 2;
   $("#dcMake").disabled = !d.issuing;
+  const kindCol = named || codes.some((c) => !c.kind_ok);
+  box.querySelectorAll(".dc-kindcol").forEach((el) => { el.hidden = !kindCol; });
   $("#dcBody").innerHTML = codes.map((c) => {
     const [cls, word] = DC_WORD[c.state] || DC_WORD.unused;
     const used = c.redeemed_at ? `${ago(c.redeemed_at * 1000)}<div class="muted mono">${esc(c.install || "")}</div>` : '<span class="muted">-</span>';
     const act = c.state !== "revoked" || c.token_left
       ? `<button class="${c.token_left ? "ghost" : "danger"} sm" data-dc-revoke="${esc(c.code)}">${c.token_left ? "Delete its token again" : "Revoke"}</button>` : "";
+    const kind = c.kind_ok ? esc(c.kind_label || c.kind || "")
+      : `${esc(c.kind_label || c.kind || "Unnamed")}<div class="muted">kind not configured</div>`;
     return `<tr><td class="strong" data-label="Code"><code class="mono dc-code">${esc(c.code)}</code></td>`
+      + (kindCol ? `<td data-label="Kind">${kind}</td>` : "")
       + `<td data-label="For">${esc(c.note || "")}<div class="muted">${esc([c.made_by, c.created_at ? ago(c.created_at * 1000) : ""].filter(Boolean).join(", "))}</div></td>`
       + `<td data-label="State"><span class="pill ${cls}">${esc(word)}</span>${c.token ? ' <span class="muted">own token</span>' : ""}</td>`
       + `<td data-label="Redeemed">${used}</td>`
       + `<td data-label="">${act}</td></tr>`;
-  }).join("") || `<tr><td colspan="5" class="muted">No codes yet.</td></tr>`;
+  }).join("") || `<tr><td colspan="${kindCol ? 6 : 5}" class="muted">No codes yet.</td></tr>`;
 }
 
 async function dcMake() {
   const count = parseInt($("#dcCount").value, 10), note = $("#dcNote").value.trim();
   const res = $("#dcResult");
   res.hidden = true;
+  const body = { action: "make", count, note };
+  if ($("#dcKind").value) body.kind = $("#dcKind").value;      // '' is the unnamed kind
   try {
     const r = await api("/api/devcodes", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "make", count, note }) });
+      body: JSON.stringify(body) });
     $("#dcNote").value = "";
     $("#dcNew").hidden = false;
     $("#dcNewList").textContent = r.codes.join("\n");
-    $("#dcNewHead").textContent = `${r.codes.length} new code${r.codes.length === 1 ? "" : "s"} for ${r.note}`;
+    $("#dcNewHead").textContent = `${r.codes.length} new ${r.kind_label ? r.kind_label + " " : ""}code${r.codes.length === 1 ? "" : "s"} for ${r.note}`;
     loadDevCodes();
   } catch (e) { res.hidden = false; res.textContent = e.message; }
 }
@@ -603,9 +618,10 @@ async function dcRevoke(code) {
       : "Nobody can redeem it any more."));
   if (!sure) return;
   try {
-    await api("/api/devcodes", { method: "POST", headers: { "Content-Type": "application/json" },
+    const r = await api("/api/devcodes", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "revoke", code }) });
-    toast(`${code} revoked`);
+    if (r.warning) toast(r.warning, true);
+    else toast(`${code} revoked`);
   } catch (e) { toast(e.message, true); }
   loadDevCodes();
 }

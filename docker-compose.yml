@@ -390,11 +390,15 @@ services:
       POL_DEPLOYER_URL: "${POL_DEPLOYER_URL:-http://deployer:8099}"
       POL_DEPLOYER_TOKEN: "${POL_DEPLOYER_TOKEN:-}"
       # This panel as an issuer of single-use dev codes (docs/deployer.md, "Dev access
-      # codes"); unset on almost every install.
+      # codes"); unset on almost every install. These are the settings of one unnamed
+      # kind of code. With POL_DEV_ISSUER_KINDS, add each kind's POL_DEV_ISSUER_<KEY>_*
+      # settings here the same way (Compose passes only the names it is given).
+      POL_DEV_ISSUER_KINDS: "${POL_DEV_ISSUER_KINDS:-}"
       POL_DEV_ISSUER_CODE: "${POL_DEV_ISSUER_CODE:-}"
       POL_DEV_ISSUER_FORGEJO_URL: "${POL_DEV_ISSUER_FORGEJO_URL:-}"
       POL_DEV_ISSUER_FORGEJO_USER: "${POL_DEV_ISSUER_FORGEJO_USER:-}"
       POL_DEV_ISSUER_FORGEJO_AUTH: "${POL_DEV_ISSUER_FORGEJO_AUTH:-}"
+      POL_DEV_ISSUER_SCOPES: "${POL_DEV_ISSUER_SCOPES:-}"
     ports:
       - "127.0.0.1:8090:8090"
     # The Overview's service checks dial the published ports on the host as

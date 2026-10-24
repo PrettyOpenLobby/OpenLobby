@@ -870,6 +870,9 @@
     .dc-new { margin: 8px 0 10px; font-size: 15px; letter-spacing: .06em; white-space: pre-wrap;
               background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
     .dc-code { font-size: 13px; white-space: nowrap; }
+    .dc-why p { margin-top: 6px; }
+    .dc-why .dc-problem { color: var(--bad); }
+    .dc-kind select { width: 100%; }
     .chan-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 4px 0 10px; }
     .chan-top .seg button { padding: 6px 16px; font-size: 13px; }
     .chan-warn { color: var(--bad); }
@@ -2157,14 +2160,17 @@
           <tbody id="addedBody"></tbody></table></div>
       </div>
       <!-- Single-use dev access codes, this panel as their issuer (admindevcodes.py): shown once
-           POL_DEV_ISSUER_CODE is set, or while codes exist. -->
+           a kind of code is set up (POL_DEV_ISSUER_CODE, or POL_DEV_ISSUER_KINDS), or while
+           codes exist. The kind picker and column show only with more than one kind. -->
       <div class="panel" id="devCodesPanel" hidden>
         <h2>Dev access codes</h2>
         <p class="hint">Short codes that unlock the dev channel for one server each. The first server to
           enter one keeps it; any other server is refused, so a code that was passed on after use unlocks
           nothing. Revoke one to lock that server out.</p>
-        <p class="hint" id="dcWhy"></p>
+        <div class="hint dc-why" id="dcWhy"></div>
         <div class="row dc-form">
+          <div class="dc-kind" id="dcKindBox" style="flex:1 1 160px" hidden><label for="dcKind">Kind</label>
+            <select id="dcKind"></select></div>
           <div style="flex:0 1 110px"><label for="dcCount">How many</label>
             <input type="text" id="dcCount" value="1" inputmode="numeric" maxlength="3"></div>
           <div style="flex:2 1 240px"><label for="dcNote">For</label>
@@ -2180,8 +2186,8 @@
             <button class="ghost sm" id="dcNewClose">Close</button>
           </div>
         </div>
-        <div class="tablewrap"><table class="cards"><thead><tr><th>Code</th><th>For</th><th>State</th>
-          <th>Redeemed</th><th></th></tr></thead><tbody id="dcBody"></tbody></table></div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Code</th><th class="dc-kindcol">Kind</th>
+          <th>For</th><th>State</th><th>Redeemed</th><th></th></tr></thead><tbody id="dcBody"></tbody></table></div>
       </div>
       <!-- Update notices when there is no deployer (the Install games tab is hidden then). -->
       <div class="panel upd-panel" id="updModules" hidden></div>

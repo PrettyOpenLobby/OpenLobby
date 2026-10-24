@@ -926,42 +926,117 @@ and uses the `olx1.` (or `olx2.`) code it answers with
 sentence saying so. `GET /api/channel` says `"short_codes": true` when it
 is set.
 
-The issuer is any OpenLobby admin panel with `POL_DEV_ISSUER_CODE` set:
-the access code its short codes redeem to. Its owner makes 1 to 100 codes
-at a time with a note in Settings, Modules, "Dev access codes", lists them
-(unused, in use, revoked, with when and which install redeemed them) and
-revokes them; each of those is in the activity log. The table is
-`dev_codes` (polcore migration 0021): `code` (the key), `note`, `made_by`,
-`created_at`, `redeemed_at`, `install_id`, `token_ref`, `token` and
-`revoked_at`, with one live code per install.
+The issuer is any OpenLobby admin panel set up to hand out codes. Its
+owner makes 1 to 100 codes at a time with a note in Settings, Modules,
+"Dev access codes", lists them (unused, in use, revoked, with when and
+which install redeemed them) and revokes them; each of those is in the
+activity log.
 
-`/api/dev-code/redeem` needs no panel login and gets the same limit as
-`/api/pair` (`POL_ADMIN_PAIR_TRIES` a minute from one address, then 429).
-It locks the code's row, then answers
+#### Kinds of code
 
-- 200 with the access code, and binds the code to the install, for an
-  unused code. The same install asking again gets the same access code, so
-  a reinstalled panel is not locked out;
-- 404 for a code it does not know, 403 for a revoked code, 409 for a code
-  another install redeemed, or when this install already holds another
-  live code;
-- 404 when the panel issues no codes (`POL_DEV_ISSUER_CODE` unset).
+One panel can hand out codes for several things, such as its own dev
+builds and a paired game's. Each thing is a kind, and every code is made
+for one kind:
 
-By default every short code redeems to `POL_DEV_ISSUER_CODE` itself, which
-suits public packages that need no token: the short code then only
+    POL_DEV_ISSUER_KINDS=kart:Kart Club,derby:Derby Night
+
+A key is a lower-case letter then up to 11 letters or digits; the label
+is what the owner's page shows. Each kind has its own settings, named
+with its key in capitals:
+
+- `POL_DEV_ISSUER_KART_CODE`: the access code (`olx1.` or `olx2.`) that
+  kind's codes redeem to. Its registry, source and patch feed are what
+  every redeemed code of the kind carries. Unset, or not a code the panel
+  can read: the kind hands out nothing, and its codes are refused with 503.
+- `POL_DEV_ISSUER_KART_FORGEJO_URL`, `_FORGEJO_USER` and `_FORGEJO_AUTH`:
+  a token of its own per code (below).
+- `POL_DEV_ISSUER_KART_SCOPES`: the scopes of those tokens, a comma list
+  of `read:package` and `read:repository` (`read:package` when unset). A
+  kind whose updater reads a repository branch as well as images needs
+  `read:repository,read:package`. Any other scope stops the kind, and the
+  owner's page says why.
+
+Without `POL_DEV_ISSUER_KINDS` the panel has one unnamed kind (key `''`),
+set by the same settings without the key: `POL_DEV_ISSUER_CODE`,
+`POL_DEV_ISSUER_FORGEJO_URL` and so on. That is how a panel from before
+kinds works, unchanged. Codes made then are of the unnamed kind, so once a
+panel names its kinds they list as "kind not configured".
+
+The owner picks the kind when making codes (a choice shows only when more
+than one kind is ready), and the list shows each code's kind. A server
+holds at most one live code of each kind, so it can hold a Kart Club code
+and a Derby Night code at once, but not two Kart Club codes.
+
+When a kind is taken out of the settings, its codes stay in the list as
+"kind not configured" and redeeming one answers 503. Revoking one still
+works, but the panel no longer has the Forgejo settings to delete its
+token, so the answer says the token is left and names it, for deleting by
+hand (or put the settings back and press Revoke again).
+
+#### A token per code
+
+By default every short code of a kind redeems to the kind's code itself,
+which suits public packages that need no token: the short code then only
 records who has dev, and revoking one stops that server from redeeming it
-again but not from using the access code it already has. With
-`POL_DEV_ISSUER_FORGEJO_URL`, `POL_DEV_ISSUER_FORGEJO_USER` and
-`POL_DEV_ISSUER_FORGEJO_AUTH` set, the issuer instead makes a token of its
-own for each code on Forgejo, named `openlobby-dev-<code>`, for that user
-(one that may only read the dev packages), with the `read:package` scope,
-and answers with the base code's registry, source and patch feed and that
-token. Revoking the code deletes the token, so the server's next pull fails
-with "The access code no longer works" while every other server keeps
-working. Forgejo makes tokens only for a password sign-in, so
-`POL_DEV_ISSUER_FORGEJO_AUTH` is `name:password`: that user's own, or a
-site admin's, who then acts for the user (the `Sudo` header). The owner's
-page says which of the two ways the panel works.
+again but not from using the access code it already has. With the kind's
+`_FORGEJO_URL`, `_FORGEJO_USER` and `_FORGEJO_AUTH` set, the issuer
+instead makes a token of its own for each code on Forgejo, for that user,
+with the kind's scopes, named `openlobby-dev-<kind>-<code>`
+(`openlobby-dev-<code>` for the unnamed kind), and answers with the kind's
+registry, source and patch feed and that token. Revoking the code deletes
+the token, so the server's next pull fails with "The access code no longer
+works" while every other server keeps working.
+
+Forgejo makes tokens only for a password sign-in, so `_FORGEJO_AUTH` is
+`name:password`: that user's own, or a site admin's, who then acts for the
+user (the `Sudo` header). The user must be one that can only read what the
+kind's codes open, and each kind needs a user of its own: a Forgejo token
+cannot be limited to one organization, so a token of a user shared by two
+kinds would read both. A second kind on the same Forgejo user is refused
+with a sentence on the owner's page. The page says, for each kind, whether
+its codes get their own token or all share the kind's code.
+
+The table is `dev_codes` (polcore migrations 0021 and 0022): `code` (the
+key), `kind`, `note`, `made_by`, `created_at`, `redeemed_at`,
+`install_id`, `token_ref`, `token` and `revoked_at`, with one live code per
+install and kind.
+
+#### Redeeming a code (for setup programs)
+
+A deployer redeems codes itself, but any program can, for example a game's
+setup program that takes a short code from its user. The request needs no
+panel login:
+
+    POST <issuer>/api/dev-code/redeem
+    Content-Type: application/json
+
+    {"code": "ABCD-EFGH-JKMN", "install_id": "ol-0123456789abcdef0123456789abcdef"}
+
+`code` is the short code as the user typed it: 12 characters of A to Z
+and 2 to 9 without O, I or L, in any case, with or without dashes or
+spaces. `install_id` names the server the code is for: 16 to 64 of A to Z,
+a to z, 0 to 9, `_` and `-`. Make it once at random, keep it, and send the
+same one every time; a deployer's is `ol-` and 32 hex digits. The code is
+bound to the first install id that redeems it.
+
+Every answer is JSON. A refusal carries `error`, a sentence to show the
+user as it is; no sentence repeats the code.
+
+| Status | When | Body |
+| --- | --- | --- |
+| 200 | the code is now bound to this install | `{"ok": true, "access_code": "olx1...."}` |
+| 200 | this install redeemed it before | `{"ok": true, "access_code": "olx1....", "again": true}`, the same access code as the first time |
+| 400 | the body is not JSON with a `code` that fits and an `install_id` that fits | `{"error": "..."}` |
+| 403 | the code was revoked | `{"error": "That dev code was revoked. Ask for a new one."}` |
+| 404 | the code is not known, or the panel hands out no codes at all | `{"error": "..."}` |
+| 409 | another install redeemed the code, or this install already holds another live code of the same kind | `{"error": "..."}` |
+| 429 | too many tries from this address (`POL_ADMIN_PAIR_TRIES` a minute, 5 by default) | `{"error": "Too many tries from this address. Try again in N seconds."}`, and a `Retry-After` header in seconds |
+| 502 | the code is fine, but the issuer could not make its token on Forgejo | `{"error": "..."}`; try again later, nothing was bound |
+| 503 | the code's kind is not set up on the panel now, or the panel has no admin credential and is not on loopback | `{"error": "..."}` |
+
+`access_code` is an `olx1.` or `olx2.` code, as described in "Access codes"
+above: use it as if the user had typed it. Treat it as a secret
+(with a token per code it holds one), and do not log it.
 
 ### Switching
 
@@ -1227,9 +1302,9 @@ written from the folder they are in (`mirrors/`, `clients/`,
 | `POL_DEV_ISSUER` | empty | The panel that redeems short dev codes for this install, its base URL ("Dev access codes"). Empty: only full access codes are taken. |
 
 The issuer's own settings are the admin service's, not the deployer's:
-`POL_DEV_ISSUER_CODE`, `POL_DEV_ISSUER_FORGEJO_URL`,
-`POL_DEV_ISSUER_FORGEJO_USER` and `POL_DEV_ISSUER_FORGEJO_AUTH` ("Dev access
-codes" above).
+`POL_DEV_ISSUER_KINDS`, and for each kind `POL_DEV_ISSUER_<KEY>_CODE`,
+`_FORGEJO_URL`, `_FORGEJO_USER`, `_FORGEJO_AUTH` and `_SCOPES` (without
+the key for a panel with one unnamed kind; "Dev access codes" above).
 
 ## The image
 

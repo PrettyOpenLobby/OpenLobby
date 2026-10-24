@@ -2964,16 +2964,17 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(status, out)
 
     def _dev_codes(self):
-        """Settings > Modules, "Dev access codes" (owner): {"action": "make", "count", "note"}
-        or {"action": "revoke", "code"}. Audited here; the codes themselves are not secrets
+        """Settings > Modules, "Dev access codes" (owner): {"action": "make", "count", "note",
+        "kind"} (kind may be left out while the panel has one) or {"action": "revoke", "code"}. Audited here; the codes themselves are not secrets
         once made, but the row names only the note and how many."""
         body = self._json_body()
         act = body.get("action")
         user, role, _p = self._caller()
         if act == "make":
-            status, out = admindevcodes.make(body.get("count"), body.get("note"), user)
+            status, out = admindevcodes.make(body.get("count"), body.get("note"), user, body.get("kind"))
             n = len(out.get("codes") or [])
-            what = ("made %d dev access code%s for %s" % (n, "" if n == 1 else "s", out.get("note"))
+            what = ("made %d %sdev access code%s for %s" % (n, "%s " % out["kind_label"] if out.get("kind_label")
+                                                             else "", "" if n == 1 else "s", out.get("note"))
                     if status == 200 else "could not make dev access codes")
             detail = {"codes": out.get("codes")} if status == 200 else {"error": out.get("error")}
             target = None
@@ -2981,7 +2982,8 @@ class Handler(BaseHTTPRequestHandler):
             status, out = admindevcodes.revoke(body.get("code"), user)
             what = "revoked the dev access code for %s" % (out.get("note") or out.get("code") or "?")
             detail = {"error": out["error"]} if out.get("error") else (
-                {"token": "deleted"} if out.get("token_deleted") else None)
+                {"token": "deleted"} if out.get("token_deleted") else (
+                    {"token": "left", "warning": out["warning"]} if out.get("warning") else None))
             target = out.get("code") or str(body.get("code") or "")[:20]
         else:
             return self._send(400, {"error": "Unknown action."})
