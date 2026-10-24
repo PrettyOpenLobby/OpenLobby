@@ -2,7 +2,7 @@
 """The band port must send the Xbox 360's SSLv2-format ClientHello to sslterm.
 
 The 360 Viewer's wallpaper download opens 51305 with an SSLv2-compatible hello
-(`80 28 01 03 00 ...`, captured from the operator's 360 on 2026-10-24) where the
+(`80 28 01 03 00 ...`, captured from a real 360 on 2026-10-24) where the
 PS2 sends an SSL 3.0 record (`16 03 00 ...`). The old sniffer took only `16 03`,
 so the 360 went to the plain portal passthrough and its download closed at
 once. Here the real serve() front door runs against a fake terminator and a
