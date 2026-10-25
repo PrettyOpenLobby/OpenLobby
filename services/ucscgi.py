@@ -247,7 +247,7 @@ TITLE_MAILADDR = "Mail Account Address"
 TITLE_MAILPW = "Mail Account Password"
 TITLE_MEMBERINFO = "Member Information"
 TITLE_MEMBERCHG = "Change Member Information"
-TITLE_DISCORD = "Link Discord"
+TITLE_DISCORD = "Discord and Fluxer"
 
 try:
     # The Discord link store (discordlink.py). Optional like `accounts`: absent,
@@ -2142,29 +2142,38 @@ def page_memberchange(tok, ret_url, sess):
         "Choose what to change.", scroll=False))
 
 
-def page_discord(tok, ret_url, sess, link, error=None):
-    """kinou_id=90 -- link this account to Discord (ours; polbridge.py).
+def page_discord(tok, ret_url, sess, link, error=None, flink=None):
+    """kinou_id=90 -- link this account to Discord and/or Fluxer (ours; polbridge.py).
 
-    The code comes from `/playonline link` in Discord. Entering it HERE, behind
-    the member's own password, is the whole proof of ownership -- the bot is
-    never given a password (a firm design rule, 2026-09-13).
+    The code comes from `/playonline link` in Discord, or from sending `link` to
+    the PlayOnline bot on Fluxer. Entering it HERE, behind the member's own
+    password, is the whole proof of ownership -- the bot is never given a
+    password (a firm design rule, 2026-09-13). The code itself says which
+    platform it links (discordlink.redeem).
     """
     who = (link["discord_name"] or "a Discord account") if link else None
+    fwho = (flink["fluxer_name"] or "a Fluxer account") if flink else None
     fields = (_line(TOP, "Linked to Discord as %s." % who if who
                     else "Not linked to Discord.")
-              + _field(56, "Link code", "code", "(from Discord)",
+              + _line(TOP + LINE, "Linked to Fluxer as %s." % fwho if fwho
+                      else "Not linked to Fluxer.")
+              + _field(80, "Link code", "code", "(Discord or Fluxer)",
                        required=False, maxlength=9)
-              + _bottom(("hint", "In Discord, type /playonline link for a code."),
+              + _bottom(("hint", "Discord: type /playonline link for a code."),
+                        ("hint", "Fluxer: send link to the PlayOnline bot."),
                         ("note", error)))
     ret_q = urllib.parse.quote(ret_url, safe="")
     buttons = [("Link", SUBMIT)]
     if link:
-        buttons.append(("Unlink",
+        buttons.append(("Discord off",
                         f"?kinou_id={KINOU_DISCORD}&step=4&t={tok}&ret_url={ret_q}"))
+    if flink:
+        buttons.append(("Fluxer off",
+                        f"?kinou_id={KINOU_DISCORD}&step=5&t={tok}&ret_url={ret_q}"))
     buttons.append(("Exit", _ret_ok(ret_url)))
     return _page("PlayOnline", _chrome(
         "", TITLE_DISCORD, _form(fields, 3, tok, kinou=KINOU_DISCORD), buttons,
-        "Get PlayOnline messages in Discord.", scroll=False),
+        "PlayOnline messages in Discord or Fluxer.", scroll=False),
         extra_head=_formaction(
             f"/pml-cgi-bin/?kinou_id={KINOU_DISCORD}&step=3&t={tok}"))
 
@@ -2173,7 +2182,7 @@ def page_discord_done(ret_url, text, hint):
     inner = (_line(TOP, text, indent=0) + _bottom(("hint", hint), indent=0))
     return _page("PlayOnline", _chrome(
         "", TITLE_DISCORD, inner, [("Exit", _ret_ok(ret_url))],
-        "Discord link updated.", scroll=False))
+        "Link updated.", scroll=False))
 
 
 def page_mailaddr(tok, ret_url, sess, current, error=None):
@@ -3103,21 +3112,37 @@ class Handler(BaseHTTPRequestHandler):
                 ldb = discordlink.connect()
                 try:
                     link = discordlink.link_by_member(ldb, mid)
+                    flink = discordlink.fluxer_by_member(ldb, mid)
+                    if step == 5:
+                        discordlink.unlink_fluxer_member(ldb, mid)
+                        log(f"kinou=90 Fluxer unlinked for {sess['polid']}")
+                        _UCS_SESSION.pop(tok, None)
+                        return page_discord_done(
+                            ret_url, "Fluxer has been unlinked.",
+                            "You will not get PlayOnline DMs on Fluxer any more.")
                     if step == 4:
                         discordlink.unlink_member(ldb, mid)
                         log(f"kinou=90 Discord unlinked for {sess['polid']}")
                         _UCS_SESSION.pop(tok, None)
                         return page_discord_done(
                             ret_url, "Discord has been unlinked.",
-                            "You will not get PlayOnline DMs any more.")
+                            "You will not get PlayOnline DMs on Discord any more.")
                     if step < 3:
-                        return page_discord(tok, ret_url, sess, link)
+                        return page_discord(tok, ret_url, sess, link, flink=flink)
                     got = discordlink.redeem(ldb, q.get("code") or "", mid)
                     if got is None:
                         log(f"kinou=90 code refused for {sess['polid']}")
                         return page_discord(
-                            tok, ret_url, sess, link,
+                            tok, ret_url, sess, link, flink=flink,
                             error="That code is not valid, or it has expired.")
+                    if got.get("platform") == "fluxer":
+                        log(f"kinou=90 {sess['polid']} linked to Fluxer "
+                            f"{got['fluxer_id']} ({got['fluxer_name']!r})")
+                        _UCS_SESSION.pop(tok, None)
+                        return page_discord_done(
+                            ret_url, "Linked to Fluxer as %s."
+                            % (got["fluxer_name"] or "your account"),
+                            "New PlayOnline messages will arrive as Fluxer DMs.")
                     log(f"kinou=90 {sess['polid']} linked to Discord "
                         f"{got['discord_id']} ({got['discord_name']!r})")
                     _UCS_SESSION.pop(tok, None)

@@ -107,6 +107,7 @@ function renderGamesSide() {
 
 // ---- every game ----
 function renderGameGrid() {
+  GAME_SHOWN = null;
   const total = GAMES.reduce((n, g) => n + (g.live && typeof g.live.online === "number" ? g.live.online : 0), 0);
   const card = (g) => {
     const st = gameState(g), live = g.live || {};
@@ -158,6 +159,7 @@ function renderGame(key, toolId) {
   const g = GAMES.find((x) => x.key === key);
   if (!g) return renderGameGrid();
   const head = gameHeader(g) + gameTabs(g, toolId);
+  GAME_SHOWN = toolId ? null : key;
   if (toolId === "logs") return renderGameLogs(g, head);
   if (toolId) {
     const t = g.tools.find((x) => x.id === toolId);
@@ -235,7 +237,7 @@ function renderGame(key, toolId) {
   // the status redraw keeps the action forms as they are, with what was typed and picked
   const kept = $("#gamesMain .gx-acts");
   $("#gamesMain").innerHTML = head + `<div class="gx-stats">${statHtml}</div>`
-    + `<div class="gx-layout">${gameUpdateBox(g)}${playersHtml}${actHtml}${roomsHtml}${svcHtml}${about}</div>`;
+    + `<div class="gx-layout">${gameUpdateBox(g)}${playersHtml}${actHtml}${roomsHtml}${svcHtml}${gamePatchBox(g)}${about}</div>`;
   const fresh = $("#gamesMain .gx-acts");
   if (kept && fresh && kept.dataset.sig === fresh.dataset.sig) fresh.replaceWith(kept);
   else mountGamePickers(g);
@@ -1121,7 +1123,14 @@ function renderUpdates() {
   box.innerHTML = `<h2>Updates <span class="h2sub">${esc(when)}</span>`
     + `${r.channel === "dev" ? ' <span class="pill dev">dev channel</span>' : ""}</h2>`
     + `<div class="toolbar"><button class="ghost sm" data-upd-check${r.checking ? " disabled" : ""}>Check now</button></div>`
-    + `<div class="upd-list">${items.map(updItem).join("") || '<p class="hint">Nothing reports its version yet.</p>'}</div>`;
+    + `<div class="upd-list">${items.map(updItem).join("") || '<p class="hint">Nothing reports its version yet.</p>'}</div>`
+    // no deployer: say how to get it, since Install games (and the dev access code box) is hidden
+    + (box.id === "updModules" ? `<p class="hint">Installing games from here, the Update buttons and the `
+      + `developers' builds (with an access code) need the deployer, which this install does not run. `
+      + `To add it, open OpenLobby Setup and pick Add the deployer; it asks for an access code if you `
+      + `have one. Installed with the setup script instead: run it again from the OpenLobby folder with `
+      + `<span class="mono">-Deployer</span> (<span class="mono">--deployer</span>). Then reload this page: `
+      + `Settings gets an Install games tab.</p>` : "");
   // an update a game applies itself, started here or before a reload: follow it
   for (const it of items) if ((it.state === "updating" || it.applying) && !APPLY[it.key]) applyFollow(it.key, it.name);
 }
@@ -1578,6 +1587,80 @@ function provHtml(p) {
       .sort((x, y) => (provKey(y.version) < provKey(x.version) ? -1 : provKey(y.version) > provKey(x.version) ? 1 : 0))
       .map(row).join("") + `</tbody></table>`;
 }
+
+// ---- a game's patches, on its page (adminpatches.py, GET /api/games/patches) ----
+// One row per bundle the patch service hands out for the game: the version it serves as
+// newest, what the versions here are, and the retail ones known to exist that are not;
+// a row opens to the whole timeline (provHtml). A game with no bundles shows nothing.
+const GAME_PATCHES = {};          // key -> {at, loading, data | error}
+const GAME_PATCH_OPEN = new Set();  // "<key>:<REGION-PRODUCT>" rows that are open
+let GAME_SHOWN = null;            // the game whose Overview is on screen (renderGame)
+async function loadGamePatches(key) {
+  const c = GAME_PATCHES[key];
+  if (c && c.loading) return;
+  GAME_PATCHES[key] = Object.assign({}, c, { at: Date.now(), loading: true });
+  let got;
+  try { got = { data: await api("/api/games/patches?key=" + encodeURIComponent(key)) }; }
+  catch (e) { got = { error: e.message }; }
+  GAME_PATCHES[key] = Object.assign({ at: Date.now(), loading: false }, got);
+  if (GAME_SHOWN === key && $("#gamesMain .gx-layout")) renderGame(key);
+}
+function gamePatchBox(g) {
+  const c = GAME_PATCHES[g.key];
+  if (!c || Date.now() - c.at > 60000) loadGamePatches(g.key);
+  if (!c || (!c.data && !c.error)) return "";
+  if (c.error) return `<section class="panel gx-wide"><h3>Patches</h3><p class="muted">${esc(c.error)}</p></section>`;
+  const bs = c.data.bundles || [];
+  if (!bs.length) return "";
+  const many = new Set(bs.map((b) => b.product)).size > 1;
+  const word = (o) => (PROV_WORD[o] || [o, "env"]);
+  const rows = bs.map((b) => {
+    const id = `${b.region}-${b.product}`, open = GAME_PATCH_OPEN.has(g.key + ":" + id);
+    if (b.error) return `<tr><td colspan="4"><b>${esc(id)}</b> <span class="patch-why">${esc(b.error)}</span></td></tr>`;
+    const n = {};
+    (b.versions || []).forEach((r) => { n[r.origin] = (n[r.origin] || 0) + 1; });
+    const here = Object.entries(n).map(([o, k]) => `${k} ${word(o)[0].toLowerCase()}`).join(", ");
+    const top = (b.versions || []).find((r) => r.version === b.latest);
+    const where = many ? b.title : (String(b.title || "").match(/\(([^)]*)\)\s*$/) || [, b.title])[1];
+    const lost = (b.missing || []).length;
+    return `<tr class="gp-row" data-gp="${esc(g.key + ":" + id)}" tabindex="0" aria-expanded="${open}">`
+      + `<td><span class="gp-caret" aria-hidden="true">${open ? "▾" : "▸"}</span> <b>${esc(where)}</b> <span class="muted mono">${esc(id)}</span></td>`
+      + `<td>${b.latest ? `<span class="mono">${esc(b.latest)}</span> ${top ? `<span class="pill ${word(top.origin)[1]}">${esc(word(top.origin)[0])}</span>` : ""}` : '<span class="muted">nothing</span>'}</td>`
+      + `<td>${(b.versions || []).length} <span class="muted">(${esc(here || "none")})</span></td>`
+      + `<td>${lost ? `<span class="pill off">${lost} not here</span>` : `<span class="muted">none known</span>`}`
+      + `${b.final_list ? "" : ' <span class="muted">· full list unknown</span>'}</td></tr>`
+      + `<tr data-gpbody="${esc(g.key + ":" + id)}"${open ? "" : " hidden"}><td colspan="4">${open ? provHtml(b) : ""}</td></tr>`;
+  }).join("");
+  const from = c.data.source === "deployer" ? "the deployer" : "the patch versions service";
+  return `<section class="panel gx-wide gx-patches"><h3>Patches <span class="muted">${bs.length} bundle${bs.length === 1 ? "" : "s"}</span></h3>`
+    + `<p class="muted">What the patch service hands out for ${esc(g.title)}, by region. "Serving" is the version it`
+    + ` gives as newest. Open a row for every version: retail (Square Enix's), ours, or unknown, and the retail`
+    + ` versions known to exist that are not here. Read from ${from}${c.data.at ? ", " + esc(c.data.at) : ""}.</p>`
+    + `<div class="tablewrap"><table class="cards"><thead><tr><th>Bundle</th><th>Serving</th><th>Versions here</th><th>Retail not here</th></tr></thead>`
+    + `<tbody>${rows}</tbody></table></div></section>`;
+}
+function toggleGamePatch(row) {
+  const id = row.dataset.gp, c = GAME_PATCHES[id.split(":")[0]];
+  const body = document.querySelector(`[data-gpbody="${CSS.escape(id)}"]`);
+  if (!body || !c || !c.data) return;
+  const open = body.hidden;
+  if (open) GAME_PATCH_OPEN.add(id); else GAME_PATCH_OPEN.delete(id);
+  if (open && !body.firstElementChild.innerHTML) {
+    const b = c.data.bundles.find((x) => `${x.region}-${x.product}` === id.slice(id.indexOf(":") + 1));
+    body.firstElementChild.innerHTML = b ? provHtml(b) : "";
+  }
+  body.hidden = !open;
+  row.setAttribute("aria-expanded", String(open));
+  row.querySelector(".gp-caret").textContent = open ? "▾" : "▸";
+}
+document.addEventListener("click", (e) => {
+  const row = e.target.closest("tr[data-gp]");
+  if (row) toggleGamePatch(row);
+});
+document.addEventListener("keydown", (e) => {
+  const row = e.target.closest && e.target.closest("tr[data-gp]");
+  if (row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleGamePatch(row); }
+});
 
 document.addEventListener("click", async (e) => {
   const a = e.target.closest("[data-prov]");

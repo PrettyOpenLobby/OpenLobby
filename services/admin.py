@@ -1407,6 +1407,8 @@ _GET_PERMS = {
     "/api/games": "any", "/api/modules": "any",
     # the player picker: checked per game (adminmodules.can_see)
     "/api/games/players": "any",
+    # a game's patch versions (adminpatches.py): checked per game (game.<key>)
+    "/api/games/patches": "any",
     # a game updating itself: checked per game (game.<key>.update)
     "/api/updates/state": "any",
     # People (adminpeople.py): the PlayOnline parts still need accounts_view
@@ -2556,6 +2558,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._modules()
         if path == "/api/games/players":
             return self._game_players()
+        if path == "/api/games/patches":
+            key = self._query().get("key", "")
+            m = adminmodules.enabled().get(key)
+            if m is None or not self._can("game." + key):
+                return self._send(404, {"error": "No such game."})
+            import adminpatches
+            return self._send(*adminpatches.for_game(m, self._caller()[0]))
         if path == "/api/updates/state":
             # a game updating itself: the owner, or a moderator with game.<key>.update
             key = self._query().get("key", "")

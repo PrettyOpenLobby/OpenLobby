@@ -194,6 +194,11 @@ elif opt("--reach", "-Reach"):
         lines = [l for l in f.read().splitlines() if not l.startswith("POL_ADVERTISE=")]
     with open(env_path, "w", encoding="utf-8") as f:
         f.write("\n".join(["POL_ADVERTISE=%s" % (address or "198.51.100.5")] + lines) + "\n")
+if ("--deployer" in a or "-Deployer" in a) and not os.environ.get("STUB_DEPLOYER_LEFT_OFF"):
+    with open(env_path, "a", encoding="utf-8") as f:
+        f.write("POL_DEPLOYER_TOKEN=stub-token\n")
+elif "--deployer" in a or "-Deployer" in a:
+    print("The deployer (installing games from the admin panel) is left off: this Docker is not Docker Desktop.")
 print("== Starting the stack")
 if os.environ.get("STUB_SCRIPT_FAIL"):
     print("setup.sh: docker compose up failed; see the output above")
@@ -716,6 +721,46 @@ class SetupAppTest(unittest.TestCase):
         self.assertNotIn(code, script)
         self.assertEqual(self.get("channel_code"), code)
 
+    def test_add_deployer_from_the_menu(self):
+        # an install from before Setup offered the deployer: the menu says so and adds it
+        self.install()
+        self.assertNotIn("Deployer", self.calls("script")[0])
+        with mock.patch.object(self.mod.getpass, "getpass", lambda prompt: ""):
+            out = self.main("--dir", self.folder, "--panel-url", self.panel, "--panel-wait", "5",
+                            answers=["8", "", "0"])
+        self.assertIn("Pick 8, Add the deployer", out)
+        script = self.calls("script")[-1]
+        self.assertIn("-Deployer", script)
+        self.assertNotIn("-Channel", script)
+        self.assertNotIn("-Reach", script)          # the settings in .env stay as they are
+        self.assertIn("The deployer is on.", out)
+        out = self.main("--dir", self.folder, "--panel-url", self.panel, answers=["0"])
+        self.assertNotIn("Add the deployer", out)
+
+    def test_add_deployer_with_an_access_code(self):
+        self.install()
+        code = "kart-dev-third-81Kd"
+        with mock.patch.object(self.mod.getpass, "getpass", lambda prompt: code):
+            out = self.main("--dir", self.folder, "--panel-url", self.panel, "--panel-wait", "5",
+                            answers=["8", "", "0"])
+        script = self.calls("script")[-1]
+        self.assertIn("-Channel dev -CodeFile ", script)
+        self.assertIn("-Deployer", script)
+        self.assertNotIn(code, script)
+        self.assertEqual(self.get("channel_code"), code)
+        handed = script.split("-CodeFile ", 1)[1].split(" ")[0]
+        self.assertFalse(os.path.exists(handed), "the temporary code file is removed")
+        self.assertIn("with your access code already in", out)
+        self.assertEqual(self.mod.CHANNEL, {})
+
+    def test_add_deployer_left_off_says_so(self):
+        self.install()
+        with mock.patch.dict(os.environ, {"STUB_DEPLOYER_LEFT_OFF": "1"}):
+            out = self.main("--yes", "--dir", self.folder, "--panel-url", self.panel, "--panel-wait", "5",
+                            "--add-deployer", expect=1)
+        self.assertIn("The deployer was left off; the setup log says why", out)
+        self.assertNotIn("The deployer is on.", out)
+
     def test_dev_channel_refusals(self):
         out = self.main("--yes", "--dir", self.folder, "--channel", "dev", "--registry",
                         "registry.example.org/kart", expect=2)
@@ -743,6 +788,8 @@ class SetupAppTest(unittest.TestCase):
             self.assertRegex(sh, r"(?m)^\s+(?:[-\w]+\|)*%s(?:\|[-\w]+)*\)" % re.escape(flag), flag)
         self.system = "windows"
         cmd = self.mod.script_command(inst, settings, "host", client=True, dry_run=True)
+        # Dev turns the deployer on, which an install from before it was offered lacks
+        self.assertIn("-Deployer", cmd)
         flags = [a for a in cmd[cmd.index("-File") + 2:] if a.startswith("-")] + ["-Address", "-NoPs2", "-NoClient"]
         for flag in flags:
             self.assertRegex(ps1, r"\]\$%s\b" % flag[1:], flag)

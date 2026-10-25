@@ -75,18 +75,19 @@ def format_code(code):
     return f"{code[:4]}-{code[4:]}" if len(code) == CODE_LEN else code
 
 
-def new_code(conn, discord_id, discord_name=None, avatar=None, now=None):
-    """A fresh code for this Discord user. Any older code of theirs is void.
-    `avatar` is the user's current avatar hash, carried onto the link they redeem
-    so the picture is there at once."""
+def new_code(conn, discord_id, discord_name=None, avatar=None, now=None, platform="discord"):
+    """A fresh code for this Discord user (or, platform="fluxer", this Fluxer user).
+    Any older code of theirs is void. `avatar` is the user's current avatar hash,
+    carried onto the link they redeem so the picture is there at once."""
     now = time.time() if now is None else now
-    conn.execute("DELETE FROM discord_code WHERE discord_id = %s OR created_at < %s",
-                 (str(discord_id), now - CODE_TTL))
+    conn.execute("DELETE FROM discord_code WHERE (discord_id = %s AND platform = %s)"
+                 " OR created_at < %s", (str(discord_id), platform, now - CODE_TTL))
     while True:
         code = "".join(secrets.choice(ALPHABET) for _ in range(CODE_LEN))
         try:
-            conn.execute("INSERT INTO discord_code (code, discord_id, discord_name, avatar, created_at)"
-                         " VALUES (%s,%s,%s,%s,%s)", (code, str(discord_id), discord_name, avatar, now))
+            conn.execute("INSERT INTO discord_code (code, discord_id, discord_name, avatar, created_at,"
+                         " platform) VALUES (%s,%s,%s,%s,%s,%s)",
+                         (code, str(discord_id), discord_name, avatar, now, platform))
             break
         except accounts.db.IntegrityError:
             continue
@@ -95,11 +96,13 @@ def new_code(conn, discord_id, discord_name=None, avatar=None, now=None):
 
 
 def redeem(conn, code, member_id, now=None):
-    """Spend a code on a member. Returns the new link row, or None.
+    """Spend a code on a member. Returns the new link row, or None; its
+    "platform" says which one ("discord" or "fluxer").
 
     Single use, and only inside CODE_TTL. A member has at most one Discord
     account and a Discord account at most one member, so whatever either side
-    was linked to before is replaced.
+    was linked to before is replaced; the same for Fluxer, and a Fluxer link
+    leaves the member's Discord one alone.
     """
     now = time.time() if now is None else now
     code = normalise_code(code)
@@ -112,6 +115,14 @@ def redeem(conn, code, member_id, now=None):
     if now - float(row["created_at"]) > CODE_TTL:
         conn.commit()
         return None
+    if (row["platform"] or "discord") == "fluxer":
+        conn.execute("DELETE FROM fluxer_link WHERE member_id = %s OR fluxer_id = %s",
+                     (int(member_id), row["discord_id"]))
+        conn.execute("INSERT INTO fluxer_link (fluxer_id, member_id, fluxer_name, linked_at)"
+                     " VALUES (%s,%s,%s,%s)",
+                     (row["discord_id"], int(member_id), row["discord_name"], now))
+        conn.commit()
+        return dict(fluxer_by_member(conn, member_id), platform="fluxer")
     conn.execute("DELETE FROM discord_link WHERE member_id = %s OR discord_id = %s",
                  (int(member_id), row["discord_id"]))
     avatar = row["avatar"]
@@ -122,7 +133,65 @@ def redeem(conn, code, member_id, now=None):
     if avatar:
         _store_avatar(conn, row["discord_id"], avatar, now)
     conn.commit()
-    return link_by_member(conn, member_id)
+    return dict(link_by_member(conn, member_id), platform="discord")
+
+
+# --------------------------------------------------------------------------- #
+# Fluxer links (beside Discord: a member may have both)
+# --------------------------------------------------------------------------- #
+
+def fluxer_by_member(conn, member_id):
+    return conn.execute("SELECT * FROM fluxer_link WHERE member_id = %s",
+                        (int(member_id),)).fetchone()
+
+
+def fluxer_by_id(conn, fluxer_id):
+    return conn.execute("SELECT * FROM fluxer_link WHERE fluxer_id = %s",
+                        (str(fluxer_id),)).fetchone()
+
+
+def unlink_fluxer_member(conn, member_id):
+    n = conn.execute("DELETE FROM fluxer_link WHERE member_id = %s", (int(member_id),)).rowcount
+    conn.commit()
+    return n > 0
+
+
+def unlink_fluxer(conn, fluxer_id):
+    n = conn.execute("DELETE FROM fluxer_link WHERE fluxer_id = %s", (str(fluxer_id),)).rowcount
+    conn.execute("DELETE FROM discord_code WHERE discord_id = %s AND platform = 'fluxer'",
+                 (str(fluxer_id),))
+    conn.commit()
+    return n > 0
+
+
+def set_fluxer_notify(conn, fluxer_id, on):
+    n = conn.execute("UPDATE fluxer_link SET notify = %s WHERE fluxer_id = %s",
+                     (1 if on else 0, str(fluxer_id))).rowcount
+    conn.commit()
+    return n > 0
+
+
+def set_fluxer_dm(conn, fluxer_id, channel_id):
+    conn.execute("UPDATE fluxer_link SET dm_channel = %s WHERE fluxer_id = %s",
+                 (str(channel_id) if channel_id else None, str(fluxer_id)))
+    conn.commit()
+
+
+def note_fluxer_dm(conn, message_id, reply_id, now=None):
+    """Remember that Fluxer message `message_id` (a DM the bridge sent) is answered
+    through discord_reply row `reply_id`: replying to it on Fluxer is its Reply."""
+    now = time.time() if now is None else now
+    conn.execute("DELETE FROM fluxer_dm WHERE created_at < %s", (now - REPLY_TTL,))
+    conn.execute("INSERT INTO fluxer_dm (message_id, reply_id, created_at) VALUES (%s,%s,%s)"
+                 " ON CONFLICT (message_id) DO NOTHING", (str(message_id), str(reply_id), now))
+    conn.commit()
+
+
+def reply_for_fluxer_dm(conn, message_id):
+    """The discord_reply id a reply to Fluxer message `message_id` answers, or None."""
+    row = conn.execute("SELECT reply_id FROM fluxer_dm WHERE message_id = %s",
+                       (str(message_id),)).fetchone()
+    return row["reply_id"] if row else None
 
 
 def link_by_discord(conn, discord_id):

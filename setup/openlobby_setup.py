@@ -122,6 +122,8 @@ def channel_argv(windows):
             out += [names[1], CHANNEL["registry"]]
         if CHANNEL.get("code_file"):
             out += [names[2], CHANNEL["code_file"]]
+        # the deployer switches the channel; an install from before it was offered has none yet
+        out.append("-Deployer" if windows else "--deployer")
     return out
 
 
@@ -159,13 +161,18 @@ def prepare_channel(args):
     if not code:
         say("No access code was given.")
         return False
+    keep_code(code)
+    return True
+
+
+def keep_code(code):
+    """The access code into a private temporary file for the script (CHANNEL["code_file"])."""
     d = tempfile.mkdtemp(prefix="openlobby-channel-")
     path = os.path.join(d, "code")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(code + "\n")
     CHANNEL["code_file"] = path
-    return True
 
 
 def forget_channel_code():
@@ -695,7 +702,7 @@ def extract(z, dest):
 
 # --- the setup script ---------------------------------------------------------------------
 
-def script_command(inst, settings=None, admin_user="", client=None, dry_run=False):
+def script_command(inst, settings=None, admin_user="", client=None, dry_run=False, deployer=False):
     """The command that runs the checkout's own setup script without questions.
     settings None keeps the address settings in .env as they are."""
     if osname() == "windows":
@@ -714,6 +721,8 @@ def script_command(inst, settings=None, admin_user="", client=None, dry_run=Fals
             cmd += ["-AdminUser", admin_user]
         cmd.append("-InstallClient" if client else "-NoClient")
         cmd += channel_argv(True)
+        if deployer and "-Deployer" not in cmd:
+            cmd.append("-Deployer")
         if dry_run:
             cmd.append("-DryRun")
         return cmd
@@ -730,6 +739,8 @@ def script_command(inst, settings=None, admin_user="", client=None, dry_run=Fals
     if admin_user:
         cmd += ["--admin-user", admin_user]
     cmd += channel_argv(False)
+    if deployer and "--deployer" not in cmd:
+        cmd.append("--deployer")
     if dry_run:
         cmd.append("--dry-run")
     return cmd
@@ -1382,16 +1393,22 @@ def install(inst, settings, admin_user, client, args):
 
 # --- later runs ---------------------------------------------------------------------------
 
-def update(inst, args):
-    heading("Update")
+def get_new(inst, args):
+    """The newest OpenLobby into the checkout. False (and says why) when it could not."""
     step("Getting the new OpenLobby")
     if os.path.isdir(os.path.join(inst.checkout, ".git")) and tool("git"):
         code, out = run("git", "-C", inst.checkout, "pull", "--ff-only", timeout=600)
         if code != 0:
             say("git pull did not work (changes made in the folder by hand?). Nothing was changed:")
             say(tail(out, 8))
-            return 1
-    elif not unpack_zip(inst, args.zip_url):
+            return False
+        return True
+    return bool(unpack_zip(inst, args.zip_url))
+
+
+def update(inst, args):
+    heading("Update")
+    if not get_new(inst, args):
         return 1
     code, log = run_script(inst, script_command(inst, client=False), "update")
     ok = finish(inst, code, log, panel_url(inst, args.panel_url), args.panel_wait)
@@ -1409,6 +1426,55 @@ def change_settings(inst, args):
     inst.save_state(reach=settings["reach"], address=settings["address"], ps2=settings["ps2"])
     code, log = run_script(inst, script_command(inst, settings, client=False), "change settings")
     return 0 if finish(inst, code, log, panel_url(inst, args.panel_url), args.panel_wait) else 1
+
+
+def has_deployer(inst):
+    return bool(inst.env().get("POL_DEPLOYER_TOKEN"))
+
+
+def add_deployer(inst, args):
+    """Turn the deployer on for an install made without it (Setup offered it on Windows
+    only later), and with an access code put it on the developers' builds as well."""
+    heading("Add the deployer")
+    if has_deployer(inst):
+        say("The deployer is already set up here: Settings > Install games on the admin panel.")
+        return 0
+    say("The deployer lets the admin panel install, turn on and update games and OpenLobby")
+    say("itself, and switch servers to the developers' builds with an access code. It runs")
+    say("as one more container with control of Docker; it opens no port and needs a token.")
+    say("This also updates OpenLobby. Your games, settings and the panel's password stay.")
+    if not ask_yes("Add the deployer and restart OpenLobby?"):
+        return 0
+    # the setup script that can add it on Docker Desktop is newer than many such installs
+    if not get_new(inst, args):
+        return 1
+    CHANNEL.clear()
+    if not Answers.yes:
+        try:
+            code = getpass.getpass("Developers' access code, if you were given one "
+                                   "(not shown; Enter for none): ").strip()
+        except EOFError:
+            code = ""
+        if code:
+            CHANNEL["channel"] = "dev"
+            keep_code(code)
+    try:
+        rc, log = run_script(inst, script_command(inst, client=False, deployer=True), "add the deployer")
+        ok = finish(inst, rc, log, panel_url(inst, args.panel_url), args.panel_wait)
+    finally:
+        dev = CHANNEL.get("channel") == "dev"
+        forget_channel_code()
+        CHANNEL.clear()
+    if not ok:
+        return 1
+    if not has_deployer(inst):
+        say()
+        say("The deployer was left off; the setup log says why: %s" % log)
+        return 1
+    say()
+    say("The deployer is on. Reload the admin panel: Settings now has an Install games tab%s."
+        % (", with your access code already in" if dev else ""))
+    return 0
 
 
 def shared_kept(inst):
@@ -1606,6 +1672,12 @@ def menu(inst, args):
                  ("Check that consoles can reach this server", check_consoles),
                  ("Start over", start_over), ("Uninstall", uninstall)]
         say()
+        if not has_deployer(inst):
+            # last, so the numbers above stay what they always were
+            items.append(("Add the deployer", add_deployer))
+            say("This install cannot install games or take a developers' access code from the admin")
+            say("panel yet. Pick %d, Add the deployer, to set that up; your games and settings stay."
+                % len(items))
         for i, (title, _) in enumerate(items, 1):
             say("  %d. %s" % (i, title))
         say("  0. Quit")
@@ -1644,6 +1716,8 @@ def parse_args(argv=None):
     do.add_argument("--change-settings", action="store_true", help="ask the address questions again")
     do.add_argument("--stop", action="store_true", help="stop OpenLobby")
     do.add_argument("--start", action="store_true", help="start OpenLobby again")
+    do.add_argument("--add-deployer", action="store_true",
+                    help="turn the deployer on for an install made without it")
     do.add_argument("--check", action="store_true",
                     help="check that consoles can reach this server (DNS, and on Windows the firewall)")
     do.add_argument("--uninstall", action="store_true",
@@ -1691,7 +1765,8 @@ def main(argv=None):
         if not inst.installed():
             for line in other_installs_note(inst):
                 say(line)
-            if args.update or args.change_settings or args.stop or args.start or args.uninstall or args.check:
+            if (args.update or args.change_settings or args.stop or args.start or args.uninstall
+                    or args.check or args.add_deployer):
                 say("OpenLobby is not set up in %s." % inst.folder)
                 return 1
             return first_run(inst, args)
@@ -1701,7 +1776,7 @@ def main(argv=None):
             return run_attached(inst, script_command(inst, client=False, dry_run=True))
         for flag, action in ((args.update, update), (args.change_settings, change_settings),
                              (args.stop, stop), (args.start, start), (args.uninstall, uninstall),
-                             (args.check, check_consoles)):
+                             (args.check, check_consoles), (args.add_deployer, add_deployer)):
             if flag:
                 return action(inst, args)
         return menu(inst, args)

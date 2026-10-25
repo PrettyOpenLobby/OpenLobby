@@ -498,6 +498,215 @@ def scan_once(now=None, min_age=None):
         ldb.close()
 
 
+# --------------------------------------------------------------------------- #
+# Fluxer: friend-list messages as DMs, link codes and replies, all in DMs.
+# Fluxer has no slash commands, buttons or forms (operator, 2026-10-24): a
+# member sends the bot a word ("link"), and answers a message by replying to
+# the DM it came in. Its own "already sent" names ("fluxer:<file>") keep it
+# apart from the Discord pass, so a member linked on both gets both.
+# --------------------------------------------------------------------------- #
+
+FLUXER_HELP = ("I'm the PlayOnline bot. Send me one of these:\n"
+               "**link**: a code to link your PlayOnline account\n"
+               "**unlink**: unlink it\n"
+               "**status**: what is linked\n"
+               "**notify on** / **notify off**: your friend-list messages as DMs\n"
+               "To answer a PlayOnline message I sent you, reply to it.")
+
+FLUXER_PORTAL_HINT = PORTAL_HINT.replace(
+    "Choose **Discord**", "Choose **Discord** (the same page links Fluxer)")
+
+
+def fluxer_dm_payload(sender, subject, body, to_handle, when):
+    """dm_payload without the Reply button Fluxer cannot show: a reply to the DM is the reply."""
+    payload = dm_payload(sender, subject, body, to_handle, when, "")
+    payload.pop("components", None)
+    emb = payload["embeds"][0]
+    emb["footer"]["text"] = ("%s. Reply to this message to answer."
+                             % emb["footer"]["text"])[:2048]
+    return payload
+
+
+def fluxer_dm_channel(ldb, flink):
+    """The Fluxer DM channel for a linked user, opened once and remembered."""
+    if flink["dm_channel"]:
+        return flink["dm_channel"]
+    st, data = api("POST", "/users/@me/channels", {"recipient_id": flink["fluxer_id"]})
+    if st in (200, 201) and data.get("id"):
+        discordlink.set_fluxer_dm(ldb, flink["fluxer_id"], data["id"])
+        return str(data["id"])
+    log("cannot open a Fluxer DM with %s (%s %s)" % (flink["fluxer_id"], st, str(data)[:120]))
+    return None
+
+
+def scan_fluxer_once(now=None, min_age=None):
+    """scan_once for Fluxer: every new person-to-person message for a member linked on
+    Fluxer, as a Fluxer DM. Its first pass takes stock, as scan_once's did."""
+    if not ARGS.fluxer_token:
+        return 0
+    rs = R()
+    now = time.time() if now is None else now
+    min_age = MIN_AGE if min_age is None else min_age
+    try:
+        stored = {n: at for n, _size, at in rs._res_list_info(scope="mail", suffix=".bin")}
+    except Exception as exc:
+        log("cannot list the message store (%r)" % (exc,))
+        return 0
+    names = sorted(stored)
+    ldb = discordlink.connect()
+    was = use_platform(True)
+    try:
+        if discordlink.get_meta(ldb, "fluxer-baselined") is None:
+            discordlink.mark_notified(ldb, ["fluxer:" + n for n in names], now)
+            discordlink.set_meta(ldb, "fluxer-baselined", int(now))
+            log("Fluxer first run: %d stored message(s) taken as already seen" % len(names))
+            return 0
+        sent, adb = 0, None
+        try:
+            for name in names:
+                key = "fluxer:" + name
+                if discordlink.is_notified(ldb, key):
+                    continue
+                if min_age > 0 and now - stored[name] < min_age:
+                    continue
+                path = rs._mail_path_of(name)
+                meta = rs._mail_meta(path) if path else None
+                if not meta or int(meta.get("kind") or 0) != rs.MAIL_KIND_MESSAGE:
+                    discordlink.mark_notified(ldb, key, now)
+                    continue
+                if adb is None:
+                    adb = rs.accounts.connect()
+                row = rs._mail_recipient_row(adb, meta["recipient_guid"])
+                flink = discordlink.fluxer_by_member(ldb, row["member_id"]) if row else None
+                if flink is None or not flink["notify"]:
+                    discordlink.mark_notified(ldb, key, now)
+                    continue
+                subject, body = read_message(rs._res_read(name))
+                subject = subject or meta.get("subject") or ""
+                rid = discordlink.new_reply(ldb, row["member_id"], row["id"],
+                                            meta["sender_guid"], meta.get("sender"), subject, now)
+                ch = fluxer_dm_channel(ldb, flink)
+                if ch is None:
+                    _fail(ldb, key, now)
+                    continue
+                st, data = api("POST", "/channels/%s/messages" % ch,
+                               fluxer_dm_payload(meta.get("sender") or "?", subject, body,
+                                                 row["handle_name"], meta.get("when")))
+                if st in (200, 201):
+                    if data.get("id"):
+                        discordlink.note_fluxer_dm(ldb, data["id"], rid, now)
+                    discordlink.mark_notified(ldb, key, now)
+                    sent += 1
+                    log("Fluxer DM'd member %s: %r from %r" % (row["member_id"], subject,
+                                                                meta.get("sender")))
+                elif st == 404:
+                    discordlink.set_fluxer_dm(ldb, flink["fluxer_id"], None)
+                    _fail(ldb, key, now)
+                else:
+                    log("Fluxer DM to %s failed (%s %s)" % (flink["fluxer_id"], st, str(data)[:160]))
+                    _fail(ldb, key, now)
+        finally:
+            if adb is not None:
+                adb.close()
+        return sent
+    finally:
+        use_platform(was)
+        ldb.close()
+
+
+def fluxer_answer(d, now=None):
+    """What the bot says back to one Fluxer message (a MESSAGE_CREATE), or None.
+    Only DMs from people: a server channel or another bot gets nothing."""
+    author = d.get("author") or {}
+    if d.get("guild_id") or author.get("bot") or not author.get("id"):
+        return None
+    uid = str(author["id"])
+    name = str(author.get("global_name") or author.get("username") or "")[:80]
+    text = (d.get("content") or "").strip()
+    ref = (d.get("message_reference") or {}).get("message_id")
+    ldb = discordlink.connect()
+    try:
+        rid = discordlink.reply_for_fluxer_dm(ldb, ref) if ref else None
+        if rid:
+            flink = discordlink.fluxer_by_id(ldb, uid)
+            ctx = discordlink.get_reply(ldb, rid, now)
+            if ctx is None or flink is None or int(flink["member_id"]) != int(ctx["member_id"]):
+                return "That message can no longer be answered from here."
+            body = clean(text, BODY_MAX)
+            if not body:
+                return "A reply needs some text."
+            subj = ctx["subject"] or ""
+            subject = clean(subj if subj.lower().startswith("re:")
+                            else ("Re: " + subj if subj else "Re:"), SUBJECT_MAX)
+            said = send_reply(ldb, ctx, subject, body, now)
+            if len(text) > BODY_MAX and said.startswith("Sent"):
+                said += " (cut to %d characters, the most a message holds)" % BODY_MAX
+            return said
+        words = text.lower().split()
+        cmd = words[0].lstrip("!/") if words else ""
+        if cmd == "link":
+            code = discordlink.new_code(ldb, uid, name, platform="fluxer", now=now)
+            return ("Your link code is **%s**. It works once, for %d minutes.\n\n%s"
+                    % (code, discordlink.CODE_TTL // 60, FLUXER_PORTAL_HINT))
+        if cmd == "unlink":
+            return ("Unlinked. You will not get PlayOnline messages here any more."
+                    if discordlink.unlink_fluxer(ldb, uid) else "This Fluxer account is not linked.")
+        if cmd == "status":
+            flink = discordlink.fluxer_by_id(ldb, uid)
+            if flink is None:
+                return "Not linked. Send **link** for a code."
+            return ("Linked to a PlayOnline account. Friend-list messages as DMs: %s."
+                    % ("on" if flink["notify"] else "off"))
+        if cmd == "notify" and len(words) > 1 and words[1] in ("on", "off"):
+            if not discordlink.set_fluxer_notify(ldb, uid, words[1] == "on"):
+                return "Not linked. Send **link** for a code first."
+            return "Friend-list messages as DMs: %s." % words[1]
+        return FLUXER_HELP
+    finally:
+        ldb.close()
+
+
+def on_fluxer_message(d):
+    """Answer one Fluxer DM, as a reply to it. Never raises."""
+    try:
+        text = fluxer_answer(d)
+        if not text:
+            return
+        was = use_platform(True)
+        try:
+            st, data = api("POST", "/channels/%s/messages" % d["channel_id"],
+                           {"content": text[:2000], "allowed_mentions": {"parse": []},
+                            "message_reference": {"message_id": d.get("id")}})
+        finally:
+            use_platform(was)
+        if st not in (200, 201):
+            log("Fluxer answer in %s failed (%s %s)" % (d.get("channel_id"), st, str(data)[:120]))
+    except Exception as e:                       # noqa: BLE001 -- never die
+        log("Fluxer message error (%r)" % e)
+
+
+class _FluxerTap:
+    """The Gateway socket with the bridge listening in: each MESSAGE_CREATE is
+    answered on a thread of its own, so a slow reply never holds up a heartbeat."""
+
+    def __init__(self, ws):
+        self.ws = ws
+
+    def recv(self, timeout=None):
+        raw = self.ws.recv(timeout=timeout)
+        try:
+            msg = json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+        if msg.get("op") == 0 and msg.get("t") == "MESSAGE_CREATE" and isinstance(msg.get("d"), dict):
+            threading.Thread(target=on_fluxer_message, args=(msg["d"],),
+                             name="polbridge-fluxer-dm", daemon=True).start()
+        return raw
+
+    def __getattr__(self, name):
+        return getattr(self.ws, name)
+
+
 _FAILS = {}
 
 
@@ -517,6 +726,10 @@ def watch():
             scan_once()
         except Exception as e:                   # noqa: BLE001 -- never die
             log("watcher error (%r) -- still running" % e)
+        try:
+            scan_fluxer_once()
+        except Exception as e:                   # noqa: BLE001 -- never die
+            log("Fluxer watcher error (%r) -- still running" % e)
         time.sleep(max(1.0, float(ARGS.poll)))
 
 
@@ -1423,39 +1636,46 @@ def on_reply_submit(data, rid, now=None):
     subject, body = clean(vals.get("subject"), SUBJECT_MAX), clean(vals.get("body"), BODY_MAX)
     if not subject or not body:
         return _say("A reply needs a subject and a message.")
-    rs = R()
     ldb = discordlink.connect()
     try:
         ctx = _owned_reply(ldb, rid, uid)
         if ctx is None:
             return _say("This message can no longer be answered from here.")
-        if discordlink.sent_since(ldb, ctx["member_id"], 3600, now) >= REPLY_PER_HOUR:
-            return _say("That is a lot of replies in an hour -- try again a little later.")
-        adb = rs.accounts.connect()
-        try:
-            me = adb.execute("SELECT * FROM handle WHERE id = %s",
-                             (int(ctx["handle_id"]),)).fetchone()
-            peer = rs._mail_recipient_row(adb, int(ctx["peer_guid"]))
-        finally:
-            adb.close()
-        if me is None or int(me["member_id"]) != int(ctx["member_id"]):
-            return _say("That handle is no longer yours, so the reply was not sent.")
-        if peer is None:
-            return _say("%s is not on this server any more, so the reply was not sent."
-                        % (ctx["peer_name"] or "That player"))
-        path = rs._mail_mint(me["handle_name"], rs.accounts.handle_guid(int(me["id"])),
-                             int(ctx["peer_guid"]), subject, body)
-        if not path:
-            return _say("The server could not post that reply. Nothing was sent.")
-        discordlink.note_sent(ldb, ctx["member_id"], now)
-        # our own reply is never DM'd back to anyone as "new": it is addressed
-        # to the PEER, and if they are linked they SHOULD get it -- so only the
-        # sender's side is ours to settle, and there is nothing to settle.
-        log("reply from member %s (%s) to %r: %r" % (ctx["member_id"], me["handle_name"],
-                                                     peer["handle_name"], subject))
-        return _say("Sent to **%s**." % md(peer["handle_name"]))
+        return _say(send_reply(ldb, ctx, subject, body, now))
     finally:
         ldb.close()
+
+
+def send_reply(ldb, ctx, subject, body, now=None):
+    """Post a member's reply into PlayOnline mail, from the handle the message
+    was addressed to, to the player who sent it. Returns what to tell them.
+    Shared by Discord's Reply form and a reply to a Fluxer DM."""
+    rs = R()
+    if discordlink.sent_since(ldb, ctx["member_id"], 3600, now) >= REPLY_PER_HOUR:
+        return "That is a lot of replies in an hour -- try again a little later."
+    adb = rs.accounts.connect()
+    try:
+        me = adb.execute("SELECT * FROM handle WHERE id = %s",
+                         (int(ctx["handle_id"]),)).fetchone()
+        peer = rs._mail_recipient_row(adb, int(ctx["peer_guid"]))
+    finally:
+        adb.close()
+    if me is None or int(me["member_id"]) != int(ctx["member_id"]):
+        return "That handle is no longer yours, so the reply was not sent."
+    if peer is None:
+        return ("%s is not on this server any more, so the reply was not sent."
+                % (ctx["peer_name"] or "That player"))
+    path = rs._mail_mint(me["handle_name"], rs.accounts.handle_guid(int(me["id"])),
+                         int(ctx["peer_guid"]), subject, body)
+    if not path:
+        return "The server could not post that reply. Nothing was sent."
+    discordlink.note_sent(ldb, ctx["member_id"], now)
+    # our own reply is never DM'd back to anyone as "new": it is addressed
+    # to the PEER, and if they are linked they SHOULD get it -- so only the
+    # sender's side is ours to settle, and there is nothing to settle.
+    log("reply from member %s (%s) to %r: %r" % (ctx["member_id"], me["handle_name"],
+                                                 peer["handle_name"], subject))
+    return "Sent to **%s**." % md(peer["handle_name"])
 
 
 def interaction(data):
@@ -1604,8 +1824,10 @@ def start_presence():
         return polgateway.count_text("", n=pol_online(), one="player on PlayOnline",
                                      many="players on PlayOnline")
     if ARGS.fluxer_token and hasattr(polboards, "FluxerPresence"):
-        polboards.FluxerPresence("bridge-fluxer", ARGS.fluxer_token, status_fn=text,
-                                 url=polboards.FLUXER_GATEWAY).start()
+        # the same session hears the DMs (link codes, notify, replies to messages)
+        polboards.FluxerPresence(
+            "bridge-fluxer", ARGS.fluxer_token, status_fn=text, url=polboards.FLUXER_GATEWAY,
+            connect_fn=lambda url, **kw: _FluxerTap(polgateway.WebSocket.connect(url, **kw))).start()
     if not ARGS.token:
         return None
     return polgateway.Presence("bridge", ARGS.token, status_fn=text).start()

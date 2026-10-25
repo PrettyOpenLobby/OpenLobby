@@ -1052,6 +1052,10 @@
       align-items: center; gap: 8px; }
     .gx-layout h3 button { margin-left: auto; }
     .gx-wide { grid-column: 1 / -1; }
+    .gx-patches tr.gp-row { cursor: pointer; }
+    .gx-patches tr.gp-row:hover td { background: var(--panel2); }
+    .gx-patches tr[data-gpbody] > td { background: var(--bg); }
+    .gx-patches .gp-caret { display: inline-block; width: 12px; color: var(--muted); }
     .gx-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
       padding: 8px 0; border-bottom: 1px solid var(--line); }
     .gx-row:last-child { border-bottom: 0; }

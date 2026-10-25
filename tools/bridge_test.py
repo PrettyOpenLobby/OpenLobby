@@ -678,6 +678,71 @@ else:
     check("with nothing bound, the scanner sits idle",
           B.scan_announce() == 0 and len(net.calls) == k4)
 
+print("Fluxer: link codes, friend-list DMs and replies, beside Discord")
+B.ARGS.fluxer_token = "FTKN"
+
+
+def fdm(uid, content, ref=None, guild=None, bot=False):
+    d = {"id": "FM%d" % len(net.calls), "channel_id": "FDM", "content": content,
+         "author": {"id": uid, "username": "f%s" % uid, "bot": bot}}
+    if ref:
+        d["message_reference"] = {"message_id": ref}
+    if guild:
+        d["guild_id"] = guild
+    return B.fluxer_answer(d)
+
+
+check("a server channel and another bot get no answer",
+      fdm("F7", "link", guild="G1") is None and fdm("F8", "link", bot=True) is None)
+check("anything else gets the help", "Send me one of these" in fdm("F7", "hello"))
+said = fdm("F7", "link")
+fcode = re.search(r"\*\*([A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})\*\*", said)
+check("link: a code, and where to redeem it", fcode is not None and "Fluxer" in said, said)
+L.unlink_member(ldb, AM)
+dcode = L.new_code(ldb, "111", "alice.d")
+L.redeem(ldb, dcode, AM)
+got = L.redeem(ldb, fcode.group(1) if fcode else "", AM)
+check("the portal redeems a Fluxer code into a Fluxer link",
+      got is not None and got["platform"] == "fluxer" and got["fluxer_id"] == "F7", got)
+check("...and the member's Discord link is still there beside it",
+      dict(L.link_by_member(ldb, AM) or {}).get("discord_id") == "111")
+check("status and notify answer for the linked account",
+      "Linked" in fdm("F7", "status") and "off" in fdm("F7", "notify off")
+      and not L.fluxer_by_id(ldb, "F7")["notify"] and "on" in fdm("F7", "notify on"))
+check("the Fluxer watcher's FIRST pass only takes stock",
+      B.scan_fluxer_once(min_age=0) == 0)
+B.scan_once(min_age=0)
+k5 = len(net.calls)
+R._mail_mint(HB["handle_name"], A.handle_guid(HB["id"]), A.handle_guid(HA["id"]),
+             "Both ways", "Are you on Fluxer yet?")
+nd, nf = B.scan_once(min_age=0), B.scan_fluxer_once(min_age=0)
+fl = [c for c in net.calls[k5:] if c[1].startswith(B.FLUXER_API) and c[1].endswith("/messages")]
+check("a message to a member linked on both goes to both", (nd, nf, len(fl)) == (1, 1, 1),
+      net.calls[k5:])
+femb = fl[0][2]["embeds"][0] if fl else {}
+check("...on Fluxer with no button, the footer saying to reply",
+      "components" not in (fl[0][2] if fl else {}) and femb.get("title") == "Both ways"
+      and "Reply to this message" in femb.get("footer", {}).get("text", ""), fl and fl[0][2])
+check("the next Fluxer pass sends nothing again", B.scan_fluxer_once(min_age=0) == 0)
+fmid = "M%d" % (net.calls.index(fl[0]) + 1) if fl else ""
+check("a reply from another Fluxer account is refused",
+      "can no longer be answered" in fdm("F9", "hi", ref=fmid))
+before_r = stored_names()
+said = fdm("F7", "Not yet, soon!", ref=fmid)
+mailed = new_names(before_r)
+check("replying to the DM sends it to the sender as PlayOnline mail",
+      said.startswith("Sent to **Bobby**") and len(mailed) == 1, (said, mailed))
+check("...subject 'Re:' and the text as typed",
+      B.read_message(R._res_read(mailed[0]))[0:2] == ("Re: Both ways", "Not yet, soon!")
+      if mailed else False)
+check("unlink: Fluxer only, Discord stays",
+      "Unlinked" in fdm("F7", "unlink") and L.fluxer_by_member(ldb, AM) is None
+      and L.link_by_member(ldb, AM) is not None)
+page = U.page_discord("t1", "toviewer:", {"polid": alice["polid"]}, L.link_by_member(ldb, AM),
+                      flink={"fluxer_name": "fF7"})
+check("the portal page shows both links and a Fluxer off button",
+      "Linked to Discord as" in page and "Linked to Fluxer as fF7." in page and "step=5" in page)
+
 ldb.close()
 print("\n%s" % ("ALL OK" if not FAILS else "%d FAILED: %s" % (len(FAILS), FAILS)))
 sys.exit(1 if FAILS else 0)

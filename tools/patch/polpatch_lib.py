@@ -247,7 +247,7 @@ def provenance(bundle_dir, known=None):
                if v not in held and _ORIGIN.get(s, "retail") == "retail"]
     discs = [row(v, s, "disc") for v, s in listed.items() if v not in held and s == "disc"]
     return {"region": info["region"], "product": info["product"], "title": info["title"],
-            "versions": rows, "missing": sorted(missing, key=lambda r: version_key(r["version"])),
+            "latest": info["latest"], "versions": rows, "missing": sorted(missing, key=lambda r: version_key(r["version"])),
             "discs": discs, "final_list": bool(entry.get("final_list")),
             "mirrored": mirrored, "note": entry.get("note")}
 
