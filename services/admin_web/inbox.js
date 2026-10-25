@@ -1,12 +1,11 @@
 // inbox.js -- Inbox > All: GM calls, player reports, bug reports and every game's help desk in
 // one list, newest first (admininbox.py). The hash is #inbox, or #inbox/person/<id> for one
-// person's cases. Each case opens in its own view: a help request right here (helpdesk.js),
-// the others in their own tab, where their actions are.
+// person's cases. A help request opens right here (helpdesk.js); a click on any other case
+// goes straight to its own tab with that case open, where its actions are.
 "use strict";
 
 const IB = { source: "all", state: "waiting", game: "", offset: 0, limit: 50, cur: null, rows: [], seq: 0, last: null };
 const IB_SRC_TAB = { gm: "gmcalls", report: "reports", issue: "issues", help: "gamehelp" };
-const IB_SRC_VIEW = { gm: "GM calls", report: "Player reports", issue: "Bug reports" };
 
 function ibPersonOfHash() {
   const m = /^person\/(\d+)$/.exec(parseHash().path || "");
@@ -25,13 +24,21 @@ async function loadInbox() {
   catch (e) { if (seq === IB.seq) $("#ibList").innerHTML = `<li class="empty">${esc(e.message)}</li>`; return; }
   if (seq !== IB.seq) return;
   IB.last = r;
+  if (!person && !IB.game) ibPaintCounts(r.waiting);
+  else loadInboxCounts();
   IB.rows = r.threads || [];
   ibRenderBar(r);
   ibRenderList(r);
   const cur = IB.cur && IB.rows.find((t) => ibKey(t) === IB.cur);
   if (cur) ibOpen(cur, true);
-  else { IB.cur = null; delete $("#ibPane").dataset.game; $("#ibPane").innerHTML = `<p class="muted">${IB.rows.length ? "Pick a case." : ""}</p>`; }
-  $("#ibPane").classList.toggle("idle", !cur);
+  else { IB.cur = null; delete $("#ibPane").dataset.game; $("#ibPane").innerHTML = ""; }
+  ibPaneShown(!!cur);
+}
+
+// Nothing open: no empty reading pane, the list takes the whole width.
+function ibPaneShown(on) {
+  $("#ibPane").classList.toggle("idle", !on);
+  $("#tab-inbox .ib-split").classList.toggle("solo", !on);
 }
 
 const ibKey = (t) => `${t.source}|${t.game}|${t.id}`;
@@ -74,7 +81,7 @@ function ibWho(t, can_link) {
 function ibMeta(t, can_link) {
   const when = t.at ? ago(t.at * 1000) : "";
   const who = ibWho(t, can_link);
-  if (t.source === "gm") return `${esc(t.game_title)}. From ${who}${when ? ", " + esc(when) : ""}. Only staff who answer GM calls see it.`;
+  if (t.source === "gm") return `${esc(t.game_title)}. From ${who}${when ? ", " + esc(when) : ""}`;
   if (t.source === "report") return `${esc(t.source_title)}, ${esc(t.game_title)}. ${t.about ? "About " + esc(t.about) + ", from " : ""}${who}${when ? ", " + esc(when) : ""}`;
   if (t.source === "issue") return `${esc(t.source_title)}, ${esc(t.game_title)}. ${who}${t.about ? ", " + esc(t.about) : ""}${when ? ", " + esc(when) : ""}`;
   return `${esc(t.source_title)}, ${esc(t.game_title)}${t.about ? " (" + esc(t.about) + ")" : ""}. ${who}${when ? ", " + esc(when) : ""}`;
@@ -82,16 +89,17 @@ function ibMeta(t, can_link) {
 
 const ibTitle = (t) => t.source === "gm" ? "GM call (confidential)" : (t.subject || "(no subject)");
 const ibState = (t) => t.state === "open" ? "waiting" : t.state;
+const IB_STATE_WORD = { waiting: "Waiting", answered: "Answered", closed: "Closed" };
 
 function ibRows(rows, can_link) {
   return rows.map((t) => `<li class="ib-row${ibKey(t) === IB.cur ? " on" : ""}" data-ib="${esc(ibKey(t))}" tabindex="0">`
-    + `<div class="ib-top"><b>${esc(ibTitle(t))}</b><span class="ib-st ${ibState(t)}">${esc(ibState(t))}</span></div>`
+    + `<div class="ib-top"><b>${esc(ibTitle(t))}</b><span class="ib-st ${ibState(t)}">${esc(IB_STATE_WORD[ibState(t)] || ibState(t))}</span></div>`
     + `<div class="ib-meta">${ibMeta(t, can_link)}</div></li>`).join("");
 }
 
 function ibRenderList(r) {
-  const empty = { waiting: "Nobody is waiting on us.", open: "Nothing open.", answered: "Nothing answered and still open.",
-                  closed: "Nothing closed.", all: "Nothing here yet." }[IB.state];
+  const empty = { waiting: "Nobody is waiting on us.", open: "Nothing open.",
+                  closed: "Nothing closed.", all: "Nothing here yet." }[IB.state] || "Nothing here.";
   const none = !(r.sources || []).length ? "You can't read any of the Inbox's sources." : empty;
   $("#ibList").innerHTML = ibRows(IB.rows, r.can_link) || `<li class="empty">${esc(none)}</li>`;
   const from = r.total ? r.offset + 1 : 0, to = r.offset + IB.rows.length;
@@ -101,37 +109,21 @@ function ibRenderList(r) {
       + `<button class="ghost sm" data-page="1"${to < r.total ? "" : " disabled"}>Older</button>` : "";
 }
 
-// ---- the reading pane ----
+// ---- the reading pane: help requests. Every other case opens in its own tab. ----
 async function ibOpen(t, quiet) {
+  if (t.source !== "help") return ibGoTo(t);
   IB.cur = ibKey(t);
-  $("#ibPane").classList.remove("idle");
+  ibPaneShown(true);
   document.querySelectorAll("#ibList li[data-ib]").forEach((li) => li.classList.toggle("on", li.dataset.ib === IB.cur));
   const pane = $("#ibPane");
   const can_link = IB.last && IB.last.can_link;
   const who = ibWho(t, can_link);
   const others = `<span class="ib-others"></span>`;
-  if (t.source === "help") {
-    const head = (th) => `<p class="muted">Game help in ${esc(th.game_title)}, from ${who}`
-      + `${th.who.online === true ? " (online now)" : ""}.${th.closed ? " Closed." : ""} ${others}</p>`;
-    const got = await renderHelpThread(pane, t.game, t.id, quiet, loadInbox, head);
-    if (got) ibOthers(t);
-    if (!quiet && got && window.matchMedia("(max-width: 760px)").matches) pane.scrollIntoView({ block: "start" });
-    return;
-  }
-  delete pane.dataset.game;
-  const view = IB_SRC_VIEW[t.source];
-  const about = t.source === "gm"
-    ? "Its request and chat open in the GM call view, with Knock, Invite and Close. Like every GM call, it is seen only by staff who answer GM calls, the player who made it and players invited into it."
-    : t.source === "report" ? "Its message, any earlier answers and Answer by mail open in Player reports."
-    : "Its description and the logs it came with open in Bug reports.";
-  pane.innerHTML = `<h3>${esc(ibTitle(t))}</h3>`
-    + `<p class="muted">${esc(t.source_title)}, ${esc(t.game_title)}, from ${who}${t.at ? ", " + esc(ago(t.at * 1000)) : ""}. `
-    + `Now ${esc(ibState(t))}. ${others}</p>`
-    + (t.about && t.source === "report" ? `<p>About ${esc(t.about)}.</p>` : "")
-    + `<p class="muted">${esc(about)}</p>`
-    + `<div class="ib-acts"><button class="act" data-ib-go="${esc(IB.cur)}">Open in ${esc(view)}</button></div>`;
-  ibOthers(t);
-  if (!quiet && window.matchMedia("(max-width: 760px)").matches) pane.scrollIntoView({ block: "start" });
+  const head = (th) => `<p class="muted">Game help in ${esc(th.game_title)}, from ${who}`
+    + `${th.who.online === true ? " (online now)" : ""}.${th.closed ? " Closed." : ""} ${others}</p>`;
+  const got = await renderHelpThread(pane, t.game, t.id, quiet, loadInbox, head);
+  if (got) ibOthers(t);
+  if (!quiet && got && window.matchMedia("(max-width: 760px)").matches) pane.scrollIntoView({ block: "start" });
 }
 
 // "Their other open cases": the same person's open cases from every source.
@@ -158,6 +150,26 @@ function ibGoTo(t) {
   location.hash = "#" + tab;
 }
 
+// ---- the badges: what is waiting on us in each source, the Inbox filter's own numbers ----
+// GM calls' badge is the desk's too (gmBadge, every 4 s while it is open): "open" there is
+// the same thing, a caller nobody has answered yet.
+function ibPaintCounts(w) {
+  w = w || {};
+  for (const [src, sel] of [["gm", "#gmBadge"], ["report", "#reportsBadge"], ["issue", "#issuesBadge"], ["help", "#helpBadge"]]) {
+    const b = $(sel), n = w[src] || 0;
+    if (!b) continue;
+    b.textContent = n; b.hidden = !n;
+    b.title = n ? `${n} waiting on us` : "";
+  }
+}
+let IB_COUNT_SEQ = 0;
+async function loadInboxCounts() {
+  const seq = ++IB_COUNT_SEQ;
+  let r;
+  try { r = await api("/api/inbox?state=waiting&limit=1"); } catch (e) { return; }
+  if (seq === IB_COUNT_SEQ) ibPaintCounts(r.waiting);
+}
+
 // ---- events ----
 $("#tab-inbox").addEventListener("click", (e) => {
   const lb = e.target.closest("[data-ib-link]");
@@ -172,8 +184,6 @@ $("#tab-inbox").addEventListener("click", (e) => {
   const pg = e.target.closest("#ibPager button[data-page]");
   if (pg) { IB.offset = Math.max(0, IB.offset + (+pg.dataset.page) * IB.limit); return loadInbox(); }
   if (e.target.closest("#ibWhoX")) { location.hash = "#inbox"; return; }
-  const go = e.target.closest("[data-ib-go]");
-  if (go) { const t = IB.rows.find((x) => ibKey(x) === go.dataset.ibGo); return t && ibGoTo(t); }
   const li = e.target.closest("#ibList li[data-ib]");
   if (li) { const t = IB.rows.find((x) => ibKey(x) === li.dataset.ib); if (t) ibOpen(t); }
 });

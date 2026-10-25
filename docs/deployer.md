@@ -460,6 +460,36 @@ In this process the deployer only reads a `.polpatch`'s ZIP directory and
 its `polpatch.json`, with the toolkit's size limits, for the upload answer
 and the folder browser.
 
+## Known problems
+
+Some failures a game is known to log can be fixed from the panel. A game's
+catalog entry lists them under `diagnose`:
+
+```json
+"diagnose": [{"id": "db-password", "services": ["connect", "search", "world", "map"],
+              "match": "Access denied for user '", "say": "...", "fix": "lsb-db-password",
+              "fix_label": "Give the database the .env password", "fix_about": "..."}]
+```
+
+When the panel asks for the games (`GET /api/games`), the deployer reads the
+last 80 lines of the named services' logs of every enabled game (at most once
+a minute) and lists each problem whose `match` is in them under the game's
+`problems`. Install games shows the sentence (`say`) with a button
+(`fix_label`), which asks first (`fix_about`) and then starts the action
+`fix` with the problem's id. The fix itself is code in the deployer (`FIXES`):
+the catalog names one, it never supplies a command.
+
+There is one so far. `lsb-db-password` is for Final Fantasy XI's servers
+failing with "Access denied for user 'xiadmin'". MariaDB sets its users'
+passwords from `.env` only the first time the database starts, so changing
+`LSB_DB_PASSWORD` later leaves the two apart. The fix signs in to the
+database as root with `LSB_DB_ROOT_PASSWORD`, sets the user's password to
+`LSB_DB_PASSWORD`, and recreates the services that failed. Both passwords
+go to the database on standard input, never on a command line, and the job
+log blanks them. When root is refused as well (its password was changed
+after the database was created too), the job says so and changes nothing:
+put both back in `.env` to what they were at the first start and restart.
+
 ## Jobs and logs
 
 One action runs at a time. Each is a job with an id, kept with its output
@@ -566,6 +596,73 @@ game's: whoever can change the scripts in that folder, or the release the
 game's update fetches, can run code as root through it. Approve an updater
 only for a game whose source you trust as you trust OpenLobby's, and revoke
 it when you stop trusting it.
+
+## A deployer for paired games only
+
+A game's own setup program may start a panel of its own beside the game,
+with no PlayOnline core (`POL_ADMIN_CORE=none`) and no OpenLobby checkout.
+For the Update button of such a panel, run the deployer with
+`POL_DEPLOY_MODE=updaters`. It then needs no `POL_DEPLOY_ROOT`, catalog or
+`stack.py`, and does only what the section above describes: it runs the
+updaters the owner approved, and switches their channels.
+
+It answers `GET /api/health` (with `"mode": "updaters"`), `GET /api/games`
+(no games, `"mode": "updaters"`), `GET /api/updates` (nothing of its own),
+`GET /api/channel` (no keys of its own, `"mode": "updaters"`), the jobs and
+their logs, `POST /api/updater`, and `POST /api/channel` with only
+`{"issuer"}`. Everything else answers 409 with a sentence saying it only
+runs the updaters of paired games. Unlocking (`{"unlock"}`) is refused too:
+nothing of its own has dev builds, and a paired game's switch to Dev carries
+its own code.
+
+The panel sees the mode and names its Settings tab Updates instead of
+Install games, with no install list and no row for OpenLobby itself. Each
+paired game with an approved updater has its Update button there, and in
+Update channel the access code box is open without Unlock or Forget: the
+owner types the code, then picks Dev on the game's row.
+
+The service, in the game's own compose file, on the same network as its
+panel:
+
+    services:
+      deployer:
+        image: ghcr.io/prettyopenlobby/openlobby-deployer:latest
+        restart: unless-stopped
+        environment:
+          POL_DEPLOY_MODE: updaters
+          POL_DEPLOYER_TOKEN: "${POL_DEPLOYER_TOKEN}"
+          # where short dev codes are redeemed; empty for the default
+          POL_DEV_ISSUER: "${POL_DEV_ISSUER:-}"
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+          - deployer:/deployer
+        healthcheck:
+          test: ["CMD", "python", "/app/deployer.py", "--healthcheck"]
+          interval: 30s
+          timeout: 10s
+          retries: 3
+    volumes:
+      deployer:
+
+and on the panel's service:
+
+        environment:
+          POL_DEPLOYER_URL: http://deployer:8099
+          POL_DEPLOYER_TOKEN: "${POL_DEPLOYER_TOKEN}"
+
+`POL_DEPLOYER_TOKEN` is one random value of at least 16 characters (the
+setup scripts make 43), the same in both. The deployer publishes no port;
+the panel reaches it on the compose network. The game's folder is not
+mounted into the deployer: each updater runs in a container of its own that
+mounts the folder from the approved record, at the path the Docker daemon
+sees it (step 2 above), so a game installed under `C:\Users\you\Kart Club`
+on Docker Desktop works without any path setting. Leave `hostname` unset:
+the deployer finds its own image through its container's hostname, which
+Docker makes the container id.
+
+The image is published from OpenLobby's main branch as `latest` and
+`sha-<commit>`, and from each release tag as `X.Y.Z` and `X.Y`; a setup
+program that wants a known version names one of those instead of `latest`.
 
 ## HTTP API
 
@@ -1442,7 +1539,8 @@ written from the folder they are in (`mirrors/`, `clients/`,
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `POL_DEPLOYER_TOKEN` | (none) | Required. The bearer token; the admin service gets the same value. |
-| `POL_DEPLOY_ROOT` | (none) | Required. Absolute path of the directory holding the checkouts, as the Docker daemon sees it (on Docker Desktop for Windows, `/run/desktop/mnt/host/<drive>/...`). |
+| `POL_DEPLOY_MODE` | `full` | `updaters`: no checkout, only the updaters of paired games ("A deployer for paired games only"); `POL_DEPLOY_ROOT` is then not needed. |
+| `POL_DEPLOY_ROOT` | (none) | Required, except with `POL_DEPLOY_MODE=updaters`. Absolute path of the directory holding the checkouts, as the Docker daemon sees it (on Docker Desktop for Windows, `/run/desktop/mnt/host/<drive>/...`). |
 | `POL_DEPLOY_CORE` | `POL_DEPLOY_ROOT/openlobby` | The OpenLobby checkout, when it has another name, written the same way. |
 | `POL_DEPLOY_GHCR` | empty | `1`: actions use the published images. |
 | `POL_DEPLOY_CLIENTS` | empty | Absolute path of a folder of client installs to browse for imports, as the daemon sees it, mounted read-only. Empty: uploads only. |

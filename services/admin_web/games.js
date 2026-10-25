@@ -39,11 +39,11 @@ async function loadGames(refresh) {
     if (CUR_TAB !== "games" || document.hidden) return;
     const [key, tool] = (GAME_TOOL || "").split("/");
     if (tool) return;
-    if (gamesBusy()) return;
+    if (gamesBusy() || gamesSelecting()) return;
     await fetchGames(false);
-    if (gamesBusy()) return;
     renderGamesSide();
-    if (key) renderGame(key); else renderGameGrid();
+    if (gamesBusy() || gamesSelecting()) return;
+    keepGamesView(() => { if (key) renderGame(key); else renderGameGrid(); });
   }, 10000);
 }
 
@@ -52,14 +52,21 @@ function opsCheck(key) {
   return GAMES_OPS ? (GAMES_OPS.checks || []).find((c) => c.id === key) || null : null;
 }
 
+// One set of health words for the pill, the stat tile and the card.
+const HEALTH = { ok: ["good", "OK"], warn: ["warn", "Check"], bad: ["bad", "Trouble"],
+                 down: ["bad", "Down"], unknown: ["off", "Unknown"] };
+const health = (state) => HEALTH[state] || HEALTH.unknown;
+const opsHealth = (ops) => health(ops.state === "ok" || ops.state === "warn" || ops.state === "bad" ? ops.state : "unknown");
+
 function gameState(g) {
   const live = g.live, ops = opsCheck(g.key);
-  if (ops && ops.state === "bad") return { cls: "bad", word: "Trouble", why: ops.detail };
-  if (live && live.up === false) return { cls: "bad", word: "Down", why: live.error || "" };
-  if (live && live.error) return { cls: "warn", word: "Status unreadable", why: live.error };
-  if (ops && ops.state === "warn") return { cls: "warn", word: "Check", why: ops.detail };
-  if (!live && !ops) return { cls: "off", word: "No status", why: "This game reports no live status." };
-  return { cls: "good", word: "Running", why: "" };
+  const st = (h, why) => ({ cls: HEALTH[h][0], word: HEALTH[h][1], why: why || "" });
+  if (ops && ops.state === "bad") return st("bad", ops.detail);
+  if (live && live.up === false) return st("down", live.error);
+  if (live && live.error) return st("warn", "Its status could not be read: " + live.error);
+  if (ops && ops.state === "warn") return st("warn", ops.detail);
+  if (!live && !ops) return st("unknown", "This game reports no live status.");
+  return st("ok", "");
 }
 
 const num = (v) => (v === null || v === undefined ? "\u2013" : String(v));
@@ -67,36 +74,73 @@ const factText = (f) => f.kind === "time" && typeof f.value === "number"
   ? new Date(f.value * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
   : String(f.value ?? "");
 
-function serviceCount(g) {
-  const ops = opsCheck(g.key);
-  if (!ops) return null;
-  return ops.state === "ok" ? "up" : ops.state;
-}
-
 // ---- the sidebar's list of games (under Games) ----
 // The PlayOnline Viewer first (it is the platform, not a title), then the games by where
-// they run, each group alphabetical. The group is read from the module's platform.
-const GAME_GROUPS = [["viewer", ""], ["pol", "PlayOnline"], ["ps2", "PlayStation 2"], ["other", "Other"]];
+// they run, each group alphabetical by the name shown, then the platform's own modules
+// (kind "platform", such as the patch versions) last. The group is read from the module's platform.
+const GAME_GROUPS = [["viewer", ""], ["pol", "PlayOnline"], ["ps2", "PlayStation 2"], ["other", "Other"],
+                     ["platform", "Platform"]];
 function gameGroup(g) {
   const p = String(g.platform || "").toLowerCase();
-  if (g.key === "viewer" || p === "playonline platform") return "viewer";
+  if (g.key === "viewer") return "viewer";
+  if (g.kind === "platform") return "platform";
+  if (p === "playonline platform") return "viewer";
   if (p.startsWith("playonline")) return "pol";
   if (p.startsWith("ps2") || p.includes("playstation 2")) return "ps2";
   return "other";
 }
-function groupedGames() {
-  const name = (g) => String(g.short || g.title || g.key).toLowerCase();
+const isGame = (g) => g.kind !== "platform";
+// `shown` is the name the list shows: the sidebar shows the short name, the grid the title
+function groupedGames(shown) {
+  const name = (g) => String(shown(g) || g.key).toLowerCase();
   const groups = GAME_GROUPS.map(([id, label]) => [label, GAMES.filter((g) => gameGroup(g) === id)
     .sort((a, b) => name(a).localeCompare(name(b)))]).filter(([, gs]) => gs.length);
   // without the PlayOnline core one heading over every game says nothing
   return coreOff() && groups.length === 1 ? [["", groups[0][1]]] : groups;
+}
+const sideName = (g) => g.short || g.title;
+
+// ---- keeping what the reader was doing across a status redraw ----
+// The 10 s poll rebuilds #gamesMain. While text in it is selected the redraw waits; scroll
+// positions of its scrolling boxes, open <details> and the focused element come back after it.
+function gamesSelecting() {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || sel.isCollapsed || !String(sel).trim()) return false;
+  const main = $("#gamesMain");
+  return !!main && (main.contains(sel.anchorNode) || main.contains(sel.focusNode));
+}
+function keepGamesView(draw) {
+  const main = $("#gamesMain");
+  const boxes = (sel) => [...main.querySelectorAll(sel)];
+  const keyOf = (el, i) => el.dataset.keep || el.id || String(i);
+  const scrolls = {}, opens = new Set();
+  boxes(".gx-scroll, .tablewrap").forEach((el, i) => { scrolls[keyOf(el, i)] = [el.scrollTop, el.scrollLeft]; });
+  boxes("details[open]").forEach((el, i) => opens.add(keyOf(el, i)));
+  const f = document.activeElement && main.contains(document.activeElement) ? document.activeElement : null;
+  const fsel = f && f.id ? "#" + CSS.escape(f.id) : f && f.dataset.game !== undefined ? `[data-game="${CSS.escape(f.dataset.game)}"]` : "";
+  const top = window.scrollY;
+  draw();
+  boxes(".gx-scroll, .tablewrap").forEach((el, i) => {
+    const s = scrolls[keyOf(el, i)];
+    if (s) { el.scrollTop = s[0]; el.scrollLeft = s[1]; }
+  });
+  boxes("details").forEach((el, i) => { if (opens.has(keyOf(el, i))) el.open = true; });
+  if (fsel) { const n = main.querySelector(fsel); if (n) n.focus({ preventScroll: true }); }
+  if (window.scrollY !== top) window.scrollTo(0, top);
+  labelTables(main);
+}
+// a phone shows card tables with each cell labelled by its column (app.js labelCells);
+// tables drawn after the page loaded are labelled here
+function labelTables(root) {
+  if (typeof labelCells !== "function" || !root) return;
+  root.querySelectorAll("table.cards > tbody").forEach((tb) => labelCells(tb));
 }
 
 function renderGamesSide() {
   const cur = CUR_TAB === "pml" ? "viewer" : CUR_TAB === "games" ? (GAME_TOOL || "").split("/")[0] : null;
   $("#gamesList").innerHTML =
     `<button class="gx-item${cur === "" ? " on" : ""}" data-game="">All games</button>`
-    + groupedGames().map(([label, gs]) => (label ? `<div class="gx-group">${esc(label)}</div>` : "") + gs.map((g) => {
+    + groupedGames(sideName).map(([label, gs]) => (label ? `<div class="gx-group">${esc(label)}</div>` : "") + gs.map((g) => {
       const st = gameState(g);
       const on = g.live && typeof g.live.online === "number" ? g.live.online : "";
       return `<button class="gx-item${cur === g.key ? " on" : ""}" data-game="${esc(g.key)}">`
@@ -108,31 +152,35 @@ function renderGamesSide() {
 // ---- every game ----
 function renderGameGrid() {
   GAME_SHOWN = null;
-  const total = GAMES.reduce((n, g) => n + (g.live && typeof g.live.online === "number" ? g.live.online : 0), 0);
-  const card = (g) => {
+  const games = GAMES.filter(isGame);
+  const total = games.reduce((n, g) => n + (g.live && typeof g.live.online === "number" ? g.live.online : 0), 0);
+  const card = (g, group) => {
     const st = gameState(g), live = g.live || {};
-    const rooms = Array.isArray(live.rooms) ? live.rooms.length : null;
-    const svc = serviceCount(g);
+    const ops = opsCheck(g.key);
+    // only the numbers the game reports: no dashes for what it cannot tell
+    const nums = [
+      typeof live.online === "number" ? [live.online, "online"] : null,
+      Array.isArray(live.rooms) ? [live.rooms.length, live.rooms_label || "rooms"] : null,
+      ops ? [opsHealth(ops)[1], "services"] : null,
+    ].filter(Boolean);
     const line = live.summary || st.why || g.about || "";
-    const chips = g.tools.map((t) => `<span class="pill">${esc(t.label)}</span>`).join("");
     return `<button class="panel gx-card" data-game="${esc(g.key)}">`
       + `<span class="gx-head"><span class="dot ${st.cls}" aria-hidden="true"></span>`
-      + `<span class="gx-name">${esc(g.title)}<small>${esc(g.platform || "")}</small></span>`
+      + `<span class="gx-name">${esc(g.title)}<small>${esc(g.platform || group || "")}</small></span>`
       + `<span class="pill ${st.cls}">${esc(st.word)}</span></span>`
-      + `<span class="gx-nums"><span><b>${num(live.online)}</b>online</span>`
-      + `<span><b>${num(rooms)}</b>${esc(live.rooms_label || "rooms")}</span>`
-      + (svc === null ? "" : `<span><b>${esc(svc === "up" ? "OK" : svc)}</b>services</span>`) + `</span>`
-      + `<span class="gx-line">${esc(line)}</span>`
-      + (chips ? `<span class="gx-chips">${chips}</span>` : "")
+      + (nums.length ? `<span class="gx-nums">${nums.map(([v, k]) => `<span><b>${esc(v)}</b>${esc(k)}</span>`).join("")}</span>` : "")
+      + (line ? `<span class="gx-line">${esc(line)}</span>` : "")
       + `</button>`;
   };
-  const cards = groupedGames().map(([label, gs]) => (label ? `<h3 class="gx-grouphead">${esc(label)}</h3>` : "")
-    + `<div class="gx-grid">${gs.map(card).join("")}</div>`).join("");
+  // one grid across the width, in the sidebar's order (by where they run, then by title)
+  const cards = groupedGames((g) => g.title).map(([label, gs]) => gs.map((g) => card(g, label)).join("")).join("");
   $("#gamesMain").innerHTML =
-    `<div class="gx-top"><h2 class="gx-title">Games</h2>`
-    + `<span class="muted">${GAMES.length} on this server, ${total} players online</span></div>`
-    + (cards ? cards
-      : `<div class="panel muted">No games are set up on this server yet. See docs/admin-modules.md.</div>`);
+    `<div class="gx-top"><span class="muted">${games.length} game${games.length === 1 ? "" : "s"} on this server, `
+    + `${total} player${total === 1 ? "" : "s"} online</span></div>`
+    + (cards ? `<div class="gx-grid">${cards}</div>`
+      : `<div class="panel muted">No games are set up on this server yet.${isOwner()
+        ? ' Add one in <a href="#modules">Settings, Modules</a>.' : ""}</div>`);
+  labelTables($("#gamesMain"));
 }
 
 // ---- one game ----
@@ -144,15 +192,39 @@ function gameTabs(g, active) {
     tabs.push(`<a href="${esc(href)}" class="${active === t.id ? "on" : ""}">${esc(t.label)}</a>`);
   }
   if (canGameLogs(g)) tabs.push(`<a href="#games/${esc(g.key)}/logs" class="${active === "logs" ? "on" : ""}">Logs</a>`);
-  return `<nav class="gx-tabs" aria-label="${esc(g.title)}">${tabs.join("")}</nav>`;
+  // a bar with only Overview on it is no choice at all
+  return tabs.length > 1 ? `<nav class="gx-tabs" aria-label="${esc(g.title)}">${tabs.join("")}</nav>` : "";
+}
+
+// the game's own update, as a pill beside its name when there is nothing to do about it
+function gameUpdatePill(g) {
+  const u = (g.live || {}).update;
+  if (!u || u.apply !== true || !can(`game.${g.key}.update`)) return "";
+  if (u.update === "current" && u.state !== "failed" && u.state !== "updating" && !APPLY[g.key])
+    return ` <span class="pill good" title="This game says it runs its newest version.">Up to date</span>`;
+  return "";
 }
 
 function gameHeader(g) {
-  const st = gameState(g);
+  const st = gameState(g), live = g.live || {};
+  const age = live.at ? "Status " + ago(live.at * 1000) : "";
+  const sub = [g.platform, g.about].filter(Boolean).join(". ");
   return `<div class="gx-crumb"><a href="#games">Games</a> / ${esc(g.title)}</div>`
     + `<div class="gx-top"><h2 class="gx-title">${esc(g.title)}`
-    + ` <span class="pill ${st.cls}"><span class="dot ${st.cls}" aria-hidden="true"></span>${esc(st.word)}</span></h2>`
-    + `<span class="muted">${esc([g.platform, g.about].filter(Boolean).join(". "))}</span></div>`;
+    + ` <span class="pill ${st.cls}"${st.why ? ` title="${esc(st.why)}"` : ""}><span class="dot ${st.cls}" aria-hidden="true"></span>${esc(st.word)}</span>`
+    + `${gameUpdatePill(g)}</h2>`
+    + `<span class="muted">${esc(sub)}${sub && age ? " · " : ""}${esc(age)}</span></div>`
+    + (st.why && st.cls !== "good" ? `<div class="gx-why ${st.cls}">${esc(st.why)}</div>` : "");
+}
+
+// the verb on an action's button: the card already says what it is
+const ACT_VERB = { kick: "Kick", announce: "Send", message: "Send", ban: "Ban", unban: "Lift ban", mute: "Mute",
+                   unmute: "Unmute", warn: "Warn", restart: "Restart", gift: "Give", give: "Give" };
+function actionVerb(a) {
+  if (ACT_VERB[a.kind]) return ACT_VERB[a.kind];
+  // "Kick a player", "Give the item": the first word is the verb
+  const w = String(a.label || "").split(/\s+/);
+  return w.length > 1 && /^(a|an|the|all|every|this|one|someone|their|his|her|my)$/i.test(w[1]) ? w[0] : "Run";
 }
 
 function renderGame(key, toolId) {
@@ -171,46 +243,57 @@ function renderGame(key, toolId) {
       + ` data-src="${esc(src)}" src="${esc(src)}"></iframe>`;
     return;
   }
-  const live = g.live || { players: [], rooms: [], facts: [] };
-  const st = gameState(g);
-  const players = live.players || [], rooms = live.rooms || [], facts = live.facts || [];
-  const stats = [
-    ["Online now", num(live.online), players.length && players.length < (live.online || 0) ? `${players.length} listed` : ""],
-    [cap(live.rooms_label || "rooms"), num(rooms.length || (g.live ? 0 : null)), ""],
-  ];
+  const live = g.live || {};
+  const players = live.players || [], facts = live.facts || [];
+  const rooms = Array.isArray(live.rooms) ? live.rooms : null;
+  const counted = typeof live.online === "number";
   const ops = opsCheck(g.key);
-  if (ops) stats.push(["Services", ops.state === "ok" ? "OK" : cap(ops.state),
-    ops.restarted ? "last start " + ago(ops.restarted.at * 1000) : ""]);
+  // the numbers the game reports, its facts beside them; nothing for what it does not report
+  const stats = [];
+  if (counted) stats.push(["Online now", String(live.online), players.length && players.length < live.online ? `${players.length} listed` : ""]);
+  if (rooms) stats.push([cap(live.rooms_label || "rooms"), String(rooms.length), ""]);
+  if (ops) stats.push(["Services", opsHealth(ops)[1], ops.restarted ? "last start " + ago(ops.restarted.at * 1000) : ""]);
   if (live.summary) stats.push(["Now", live.summary, ""]);
+  facts.forEach((f) => stats.push([f.label, factText(f), ""]));
   const statHtml = stats.map(([k, v, s]) => `<div class="panel gx-stat"><div class="k">${esc(k)}</div>`
-    + `<div class="v${String(v).length > 12 ? " long" : ""}">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
+    + `<div class="v${String(v).length > 12 ? " long" : ""}">${esc(v)}</div>${s ? `<div class="s">${esc(s)}</div>` : ""}</div>`).join("");
 
+  // the boxes that sit side by side; an odd one out takes the whole row
+  const halves = [];
   const playerRows = players.map((p) => `<tr><td class="strong">${esc(p.name)}</td><td>${esc(p.where)}</td>`
     + `<td class="muted">${esc(p.detail)}</td></tr>`).join("");
-  const playersHtml = `<section class="panel gx-wide"><h3>Who is playing <span class="muted">${esc(num(live.online))}</span></h3>`
-    + (playerRows ? `<div class="tablewrap"><table class="cards"><thead><tr><th>Player</th><th>Where</th><th>Detail</th></tr></thead><tbody>${playerRows}</tbody></table></div>`
-      : `<p class="muted">${live.online ? "This game reports a count, not names." : "Nobody right now."}</p>`)
-    + `</section>`;
-
-  const roomsHtml = `<section class="panel"><h3>${esc(cap(live.rooms_label || "rooms"))}</h3>`
-    + (rooms.length ? `<div class="gx-scroll">` + rooms.map((r) => `<div class="gx-row"><div><div class="strong">${esc(r.name)}</div>`
-      + `<div class="muted">${esc(r.detail)}</div></div>${r.state ? `<span class="pill">${esc(r.state)}</span>` : ""}</div>`).join("") + `</div>`
-      : `<p class="muted">None right now.</p>`)
-    + (facts.length ? `<dl class="gx-facts">${facts.map((f) => `<dt>${esc(f.label)}</dt><dd>${esc(factText(f))}</dd>`).join("")}</dl>` : "")
-    + `</section>`;
+  // only with names, or a count of nobody: a count alone is already in the tile above
+  if (playerRows || (counted && live.online === 0)) {
+    halves.push(`<section class="panel"><h3>Who is playing <span class="muted">${esc(num(live.online))}</span></h3>`
+      + (playerRows ? `<div class="tablewrap gx-scroll" data-keep="players"><table class="cards"><thead><tr><th>Player</th><th>Where</th><th>Detail</th></tr></thead><tbody>${playerRows}</tbody></table></div>`
+        : `<p class="muted">Nobody right now.</p>`)
+      + `</section>`);
+  }
+  if (rooms) {
+    halves.push(`<section class="panel"><h3>${esc(cap(live.rooms_label || "rooms"))} <span class="muted">${rooms.length}</span></h3>`
+      + (rooms.length ? `<div class="gx-scroll" data-keep="rooms">` + rooms.map((r) => `<div class="gx-row"><div><div class="strong">${esc(r.name)}</div>`
+        + `<div class="muted">${esc(r.detail)}</div></div>${r.state ? `<span class="pill">${esc(r.state)}</span>` : ""}</div>`).join("") + `</div>`
+        : `<p class="muted">None open right now.</p>`)
+      + `</section>`);
+  }
 
   const svcs = g.services || [];
   const fix = GAMES_OPS && GAMES_OPS.can_fix && GAMES_OPS.actions && GAMES_OPS.actions[g.key];
-  const svcHtml = svcs.length ? `<section class="panel"><h3>Services${fix
-      ? ` <button class="sm ghost" data-fix="${esc(g.key)}">Restart ${esc(g.short || g.title)}</button>` : ""}</h3>`
-    + (ops ? `<p class="gx-ops ${esc(ops.state)}"><span class="dot ${ops.state === "ok" ? "good" : esc(ops.state)}" aria-hidden="true"></span>${esc(ops.detail)}`
-      + (ops.restarted ? ` <span class="muted">Last start ${esc(ago(ops.restarted.at * 1000))}: ${esc(ops.restarted.reason || "")}</span>` : "") + `</p>`
-      : `<p class="muted">${!can("health") ? "Server checks need the service status permission."
-        : GAMES_OPS ? "The server checker has no check for this game yet. It picks up new games when it is updated."
-        : "The server checker is not reporting."}</p>`)
-    + svcs.map((s) => `<div class="gx-row"><div><div class="mono">${esc(s.containers.join(", "))}</div>`
-      + `<div class="muted">${esc(Object.entries(s.ports || {}).map(([p, w]) => w + " :" + p).join(", "))}</div></div></div>`).join("")
-    + `</section>` : "";
+  if (svcs.length) {
+    // what each service is, by name; the containers and ports are in the tooltip
+    const tech = (s) => s.containers.join(", ") + Object.keys(s.ports || {}).map((p) => " :" + p).join("");
+    halves.push(`<section class="panel"><h3>Services${fix
+        ? ` <button class="sm ghost" data-fix="${esc(g.key)}">Restart ${esc(g.short || g.title)}</button>` : ""}</h3>`
+      + (ops ? `<p class="gx-ops ${esc(ops.state)}"><span class="dot ${opsHealth(ops)[0]}" aria-hidden="true"></span>${esc(ops.detail)}`
+        + (ops.restarted ? ` <span class="muted">Last start ${esc(ago(ops.restarted.at * 1000))}: ${esc(ops.restarted.reason || "")}</span>` : "") + `</p>`
+        : `<p class="muted">${!can("health") ? "Server checks need the service status permission."
+          : GAMES_OPS ? "The server checker has no check for this game yet. It picks up new games when it is updated."
+          : "The server checker is not reporting."}</p>`)
+      + svcs.map((s) => `<div class="gx-row"><div><div class="strong"${isOwner() ? ` title="${esc(tech(s))}"` : ""}>${esc(s.name || g.title)}</div>`
+        + `<div class="muted">${esc([...new Set(Object.values(s.ports || {}))].join(", "))}</div></div></div>`).join("")
+      + `</section>`);
+  }
+  if (halves.length % 2) halves[halves.length - 1] = halves[halves.length - 1].replace('<section class="panel"', '<section class="panel gx-wide"');
 
   // a field of type "player" is a search box with a pick-list when the game can search its
   // players (picker.js); without that it stays a plain text box
@@ -222,25 +305,19 @@ function renderGame(key, toolId) {
     + g.actions.map((a) => `<form class="gx-act" data-action="${esc(a.id)}">`
       + `<div class="strong">${esc(a.label)}</div>${a.about ? `<div class="muted">${esc(a.about)}</div>` : ""}`
       + (a.fields || []).map(field).join("")
-      + `<button type="submit" class="${a.danger ? "danger" : "act"}">${esc(a.label)}</button></form>`).join("")
+      + `<button type="submit" class="${a.danger ? "danger" : "act"} sm">${esc(actionVerb(a))}</button></form>`).join("")
     + `</div></section>` : "";
-
-  const age = live.at ? ago(live.at * 1000) : "";
-  const about = `<section class="panel gx-wide"><h3>About this module</h3><dl class="gx-facts">`
-    + `<dt>Live status</dt><dd>${g.live ? esc((live.source || "read") + (age ? ", " + age : "")) : "none: this game reports no live status yet"}</dd>`
-    + (live.error ? `<dt>Last problem</dt><dd>${esc(live.error)}</dd>` : "")
-    + `<dt>Tools</dt><dd>${g.tools.length ? esc(g.tools.map((t) => t.label).join(", ")) : "none"}${g.tools.some((t) => !t.panel) && !g.has_tools ? " (the game's tool port is not set up)" : ""}</dd>`
-    + `<dt>Actions</dt><dd>${g.actions.length ? esc(g.actions.map((a) => a.label).join(", ")) : "none"}</dd>`
-    + `<dt>Why it shows</dt><dd>${esc(st.why || "running normally")}</dd>`
-    + `</dl></section>`;
 
   // the status redraw keeps the action forms as they are, with what was typed and picked
   const kept = $("#gamesMain .gx-acts");
-  $("#gamesMain").innerHTML = head + `<div class="gx-stats">${statHtml}</div>`
-    + `<div class="gx-layout">${gameUpdateBox(g)}${playersHtml}${actHtml}${roomsHtml}${svcHtml}${gamePatchBox(g)}${about}</div>`;
+  const body = gameUpdateBox(g) + halves.join("") + actHtml + gamePatchBox(g);
+  $("#gamesMain").innerHTML = head + (statHtml ? `<div class="gx-stats">${statHtml}</div>` : "")
+    + `<div class="gx-layout">${body || (statHtml ? "" : `<p class="muted gx-wide">Nothing more to show for ${esc(g.title)} yet: `
+      + `it reports no players or rooms, and has no actions or pages here.</p>`)}</div>`;
   const fresh = $("#gamesMain .gx-acts");
   if (kept && fresh && kept.dataset.sig === fresh.dataset.sig) fresh.replaceWith(kept);
   else mountGamePickers(g);
+  labelTables($("#gamesMain"));
 }
 
 function mountGamePickers(g) {
@@ -250,6 +327,7 @@ function mountGamePickers(g) {
       search: (q, limit) => api(`/api/games/players?game=${encodeURIComponent(g.key)}`
         + `&q=${encodeURIComponent(q)}&limit=${limit}`).then((r) => r.players || []),
     });
+    pk.el.dataset.pkFor = slot.dataset.pk;
     slot.replaceWith(pk.el);
   });
 }
@@ -287,7 +365,7 @@ function drawLogs() {
   if (!$("#lgPre")) return;
   $("#lgFresh").disabled = LOGS.busy || !LOGS.available;
   $("#lgWhen").textContent = LOGS.busy ? "Asking the server..."
-    : !LOGS.available ? "The server checker (pol-ops) is not reading logs on this server."
+    : !LOGS.available ? "The server checker is not reading logs on this server."
     : d ? `Read ${ago(d.at * 1000)}${d.by ? " for " + d.by : ""}${LOGS.addresses ? "" : ". Players' addresses are hidden."}` : "";
   const ctrs = (d && d.containers) || [];
   $("#lgCtrs").innerHTML = ctrs.length > 1 ? ctrs.map((c, i) => `<button class="cal-chip${i === LOGS.shown ? "" : " off-lite"}" data-lgctr="${i}">`
@@ -297,8 +375,11 @@ function drawLogs() {
   const f = LOGS.filter.toLowerCase();
   const lines = (c.lines || []).filter((l) => !f || l.toLowerCase().includes(f));
   const pre = $("#lgPre");
+  // follow the end only when the reader is already there (or it is the first text)
+  const stick = !pre.dataset.drawn || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
   pre.textContent = c.missing ? `${c.name} is not on this server.` : lines.join("\n") || (f ? "No line has that." : "Nothing logged.");
-  pre.scrollTop = pre.scrollHeight;
+  pre.dataset.drawn = "1";
+  if (stick) pre.scrollTop = pre.scrollHeight;
 }
 
 async function fetchLogs() {
@@ -379,8 +460,15 @@ function wireGames() {
     const g = GAMES.find((x) => x.key === key);
     const a = g && g.actions.find((x) => x.id === form.dataset.action);
     if (!a) return;
-    if (a.danger && !confirm(a.label + "?")) return;
     const params = Object.fromEntries(new FormData(form).entries());
+    if (a.danger) {
+      // name who it is for: the picked player's name, as the box shows it
+      const who = (a.fields || []).filter((f) => f.type === "player").map((f) => {
+        const box = form.querySelector(`[data-pk-for="${CSS.escape(f.id)}"] .pk-q`) || form.querySelector(".pk .pk-q");
+        return (box && box.value.trim()) || params[f.id] || "";
+      }).filter(Boolean);
+      if (!confirm(who.length ? `${actionVerb(a)} ${who.join(", ")}?` : `${a.label}?`)) return;
+    }
     const btn = form.querySelector("button[type=submit]");
     btn.disabled = true;
     try {
@@ -413,34 +501,39 @@ function renderOverviewGames() {
 }
 
 // ---- Settings > Modules (owner): every module the panel found ----
-const ORIGIN = { "built-in": "OpenLobby", file: "this server's modules folder",
-                 game: "the game itself", legacy: "POL_ADMIN_GAMES_EXTRA" };
+// where a module came from, in words; the setting behind it is in the cell's tooltip
+const ORIGIN = { "built-in": ["OpenLobby", ""], file: ["This server's modules folder", "POL_ADMIN_MODULES_DIR"],
+                 game: ["The game itself", ""], legacy: ["An older setting", "POL_ADMIN_GAMES_EXTRA"] };
 
-const PORT_FROM = { env: "the environment", stored: "this panel" };
+const PORT_FROM = { env: "This server's settings", stored: "This panel" };
 let ADDED = [];
 
 async function loadModules() {
-  // no deployer: the update notices live here, since the Install games tab is hidden
   if (!DEPLOY) await probeDeploy();
-  if (!(DEPLOY && DEPLOY.available)) loadUpdates(false);
-  else $("#updModules").hidden = true;
   let r;
   try { r = await api("/api/modules?fresh=1"); } catch (e) { toast(e.message, true); return; }
   const live = Object.fromEntries((r.modules || []).map((m) => [m.key, m.live]));
+  // a cell with nothing to say is marked, so a phone's card leaves it out
+  const nil = (html) => `<td class="muted nil">${html}</td>`;
   $("#modulesBody").innerHTML = (r.found || []).map((m) => {
     const st = live[m.key];
-    const liveText = !m.live ? "none"
-      : !m.shown ? "not read (not shown)"
-      : !st ? "nothing yet"
-      : st.error ? "problem: " + st.error
-      : (st.source || "read") + (typeof st.online === "number" ? ", " + st.online + " online" : "");
-    const tools = m.tools ? m.tools + (m.has_tools ? "" : " (port not set up)") : "none";
+    const liveText = !m.live ? ""
+      : !m.shown ? "Not read while hidden"
+      : !st ? "Nothing yet"
+      : st.error ? "Problem: " + st.error
+      : "Reading" + (typeof st.online === "number" ? ", " + st.online + " online" : "");
+    const tools = m.tools ? `${m.tools} page${m.tools === 1 ? "" : "s"}${m.has_tools ? "" : " (not connected yet)"}` : "";
+    const acts = m.actions ? `${m.actions} action${m.actions === 1 ? "" : "s"}` : "";
+    const [from, fromTip] = ORIGIN[m.origin] || [m.origin, ""];
     return `<tr><td class="strong">${m.shown ? `<a href="#games/${esc(m.key)}">${esc(m.title)}</a>` : esc(m.title)}</td>`
-      + `<td class="mono">${esc(m.key)}</td><td>${esc(ORIGIN[m.origin] || m.origin)}</td>`
-      + `<td>${esc(PORT_FROM[m.port] || "-")}</td>`
-      + `<td>${m.shown ? "yes" : "no"}</td><td>${esc(tools)}${m.actions ? `, ${m.actions} action${m.actions === 1 ? "" : "s"}` : ""}</td>`
-      + `<td class="${st && st.error ? "bad" : "muted"}">${esc(liveText)}</td></tr>`;
+      + `<td class="mono">${esc(m.key)}</td><td${fromTip ? ` title="${esc(fromTip)}"` : ""}>${esc(from)}</td>`
+      + (PORT_FROM[m.port] ? `<td>${esc(PORT_FROM[m.port])}</td>` : nil("-"))
+      + (m.shown ? `<td class="nil">Yes</td>` : "<td>No</td>")
+      + ([tools, acts].some(Boolean) ? `<td>${esc([tools, acts].filter(Boolean).join(", "))}</td>` : nil("None"))
+      + (liveText ? `<td class="${st && st.error ? "bad" : "muted"}">${esc(liveText)}</td>` : nil("None"))
+      + `</tr>`;
   }).join("") || `<tr><td colspan="7" class="muted">No modules found.</td></tr>`;
+  labelTables($("#tab-modules"));
   const probs = r.problems || [];
   $("#modulesProblems").hidden = !probs.length;
   $("#modulesProblemList").innerHTML = probs.map((p) => `<li>${esc(p)}</li>`).join("");
@@ -477,77 +570,17 @@ function updaterRow(g) {
 }
 
 // ---- a paired game's update channel (docs/installs.md, "Update channels"), owner only ----
-// The switch runs the approved updater with --channel <name> as a deployer job; the panel stores
-// the channel only once that job ended ok. A dev access code typed here goes to the deployer,
-// which hands it to the updater in its environment; the field is cleared as soon as it is sent.
-const GA_SW = {};          // key -> {job, want, state, summary}: a switch started from this page
-let GA_CHAN_FORM = null;   // {key, want}: the switch form that is open
+// Which channel it follows, here beside its updater. It is switched in one place, the Update
+// channel list under Install games, where the one access code box is too.
 const chanWord = (c) => c.charAt(0).toUpperCase() + c.slice(1);
 
 function gaChanBox(g, u) {
-  const key = g.key, on = u.channel || "stable", sw = GA_SW[key];
-  const busy = sw && !JOB_DONE.has(sw.state);
-  const segs = u.channels.map((c) => `<button type="button" data-ga-chan="${esc(key)}" data-to="${esc(c)}"`
-    + `${c === on ? ' class="on" aria-pressed="true"' : ' aria-pressed="false"'}${busy ? " disabled" : ""}>${esc(chanWord(c))}</button>`).join("");
-  const when = u.channel_at ? `Switched by ${u.channel_by || "the owner"}, ${ago(u.channel_at * 1000)}`
-    : "It has not been switched from this panel.";
-  let live = "";
-  if (busy) {
-    live = `<div class="upd-live"><span class="spin" aria-hidden="true"></span>`
-      + `<span>Switching ${esc(g.title)} to ${esc(chanWord(sw.want))}: its updater is running.</span>`
-      + ` <button class="ghost sm" data-ga-chanlog="${esc(sw.job)}">Follow the log</button></div>`;
-  } else if (sw && sw.state !== "ok") {
-    live = `<div class="upd-why bad">Switch to ${esc(chanWord(sw.want))} failed: ${esc(String(sw.summary || "").replace(/^Update failed:\s*/i, "") || "the updater stopped with an error")}.`
-      + ` ${esc(g.title)} stays on ${esc(chanWord(on))}. <button class="ghost sm" data-ga-chanlog="${esc(sw.job)}">Show the log</button></div>`;
-  }
-  const f = GA_CHAN_FORM && GA_CHAN_FORM.key === key ? GA_CHAN_FORM.want : null;
-  const form = f ? `<div class="ga-box ga-chan-form"><h3>Switch ${esc(g.title)} to ${esc(chanWord(f))}</h3>`
-    + `<p class="hint" style="margin-top:0">The deployer runs the approved updater with <code class="mono">--channel ${esc(f)}</code>. `
-    + `${esc(g.title)}'s own setup program switches its images and looks after its database, and refuses a switch it cannot `
-    + `do safely. Everyone playing it may be disconnected.</p>`
-    + `<div class="row"><div style="flex:1 1 260px"><label for="gaChanCode">Access code, if the developers gave you one</label>`
-    + `<input type="password" id="gaChanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH-JKMN or olx1..."></div></div>`
-    + `<div class="hint">It goes to the deployer and the updater only; it is not stored here and never shown again.</div>`
-    + `<div class="ga-result bad" id="gaChanResult" role="alert" hidden></div>`
-    + `<div class="toolbar" style="margin-top:12px"><button class="act sm" data-ga-chango="${esc(key)}">Switch to ${esc(chanWord(f))}</button>`
-    + `<button class="ghost sm" data-ga-chancancel>Cancel</button></div></div>` : "";
+  const on = u.channel || "stable";
+  const when = u.channel_at ? `Switched by ${u.channel_by || "the owner"}, ${ago(u.channel_at * 1000)}` : "";
   return `<div class="ga-chan"><span class="ga-chan-lab">Update channel</span>`
-    + `<div class="seg" role="group" aria-label="Update channel of ${esc(g.title)}">${segs}</div>`
-    + `<span class="muted">${esc(when)}</span></div>${live}${form}`;
-}
-
-async function gaChanSwitch(key, want, code) {
-  const g = ADDED.find((x) => x.key === key) || { title: key };
-  const res = $("#gaChanResult");
-  try {
-    const r = await api("/api/updates/channel", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(code ? { key, channel: want, code } : { key, channel: want }) });
-    GA_CHAN_FORM = null;
-    GA_SW[key] = { job: r.job, want, state: "running" };
-    toast(`Switching ${g.title} to ${chanWord(want)}: started`);
-    renderAdded();
-    gaChanFollow(key);
-  } catch (e) {
-    if (res) { res.hidden = false; res.textContent = e.message; } else toast(e.message, true);
-  }
-}
-
-function gaChanFollow(key) {
-  const sw = GA_SW[key];
-  if (!sw || JOB_DONE.has(sw.state)) return;
-  setTimeout(async () => {
-    let j = null;
-    try { j = await api("/api/deploy/job?id=" + encodeURIComponent(sw.job)); } catch (e) { /* restarting: ask again */ }
-    if (j && JOB_DONE.has(j.state)) {
-      sw.state = j.state; sw.summary = j.summary || "";
-      if (j.state === "ok") toast(`${(ADDED.find((x) => x.key === key) || { title: key }).title} is on ${chanWord(sw.want)}`);
-      // the panel stores the channel once it has seen the job end: give it a moment
-      setTimeout(() => { if (CUR_TAB === "modules") loadModules(); }, 1200);
-      if (CUR_TAB === "modules") renderAdded();
-      return;
-    }
-    gaChanFollow(key);
-  }, 2000);
+    + `<span class="pill ${on === "dev" ? "dev" : "env"}">${esc(chanWord(on))}</span>`
+    + (when ? `<span class="muted">${esc(when)}</span>` : "")
+    + `<button type="button" class="ghost sm" data-ga-chantab="${esc(g.key)}">Switch it under Install games</button></div>`;
 }
 
 // ---- Settings > Modules, "Dev access codes": this panel as the issuer (admindevcodes.py) ----
@@ -576,7 +609,7 @@ function renderDevCodes() {
   sel.innerHTML = ready.map((k) => `<option value="${esc(k.key)}">${esc(k.label || k.key)}</option>`).join("");
   if (ready.some((k) => k.key === was)) sel.value = was;
   $("#dcKindBox").hidden = ready.length < 2;
-  $("#dcMake").disabled = !d.issuing;
+  dcReady();
   const kindCol = named || codes.some((c) => !c.kind_ok);
   box.querySelectorAll(".dc-kindcol").forEach((el) => { el.hidden = !kindCol; });
   $("#dcBody").innerHTML = codes.map((c) => {
@@ -605,6 +638,7 @@ async function dcMake() {
     const r = await api("/api/devcodes", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body) });
     $("#dcNote").value = "";
+    dcReady();
     $("#dcNew").hidden = false;
     $("#dcNewList").textContent = r.codes.join("\n");
     $("#dcNewHead").textContent = `${r.codes.length} new ${r.kind_label ? r.kind_label + " " : ""}code${r.codes.length === 1 ? "" : "s"} for ${r.note}`;
@@ -628,52 +662,24 @@ async function dcRevoke(code) {
   loadDevCodes();
 }
 
+// "For" says who the codes are for; Make codes waits for it
+const dcReady = () => { $("#dcMake").disabled = !(DEVCODES || {}).issuing || !$("#dcNote").value.trim(); };
+document.addEventListener("input", (e) => { if (e.target.id === "dcNote") dcReady(); });
+
 document.addEventListener("click", (e) => {
   const t = e.target;
-  const ch = t.closest("[data-ga-chan]");
-  if (ch && !ch.disabled) {
-    const key = ch.dataset.gaChan, want = ch.dataset.to;
-    const g = ADDED.find((x) => x.key === key);
-    const on = ((g || {}).updater || {}).channel || "stable";
-    if (want === on) { GA_CHAN_FORM = null; renderAdded(); return; }
-    if (want === "stable") {
-      if (!confirm(`Switch ${g.title} back to Stable?\n\nThe deployer runs its updater with --channel stable. `
-        + `${g.title}'s setup program decides what that means for its data; what changed on another channel may be lost.`)) return;
-      return gaChanSwitch(key, want, "");
-    }
-    GA_CHAN_FORM = { key, want };
-    renderAdded();
-    const inp = $("#gaChanCode");
-    if (inp) inp.focus();
+  const ct = t.closest("[data-ga-chantab]");
+  if (ct) {
+    location.hash = "#deploy";
+    // the Update channel list is folded away lower down: open it and bring it into view
+    setTimeout(() => { const p = $("#chanPanel"); if (p && !p.hidden) { $("#chanFold").open = true; p.scrollIntoView({ block: "start" }); } }, 400);
     return;
   }
-  if (t.closest("[data-ga-chancancel]")) { GA_CHAN_FORM = null; renderAdded(); return; }
-  const go = t.closest("[data-ga-chango]");
-  if (go) {
-    const inp = $("#gaChanCode");
-    const code = inp ? inp.value.trim() : "";
-    if (inp) inp.value = "";
-    const was = go.textContent;
-    go.disabled = true;
-    go.textContent = "Starting...";
-    return gaChanSwitch(go.dataset.gaChango, GA_CHAN_FORM ? GA_CHAN_FORM.want : "", code).finally(() => {
-      go.disabled = false; go.textContent = was;
-    });
-  }
-  const lg = t.closest("[data-ga-chanlog]");
-  if (lg) { showTab("deploy"); followJob(lg.dataset.gaChanlog); return; }
   if (t.closest("#dcMake")) return dcMake();
   if (t.closest("#dcCopy")) return copyText($("#dcNewList").textContent, "the codes");
   if (t.closest("#dcNewClose")) { $("#dcNew").hidden = true; return; }
   const rv = t.closest("[data-dc-revoke]");
   if (rv) return dcRevoke(rv.dataset.dcRevoke);
-});
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && e.target.id === "gaChanCode") {
-    e.preventDefault();
-    const b = document.querySelector("[data-ga-chango]");
-    if (b) b.click();
-  }
 });
 
 async function gaUpdater(key, approve) {
@@ -698,14 +704,14 @@ function renderAdded() {
     const when = g.added_at ? ago(g.added_at * 1000) : "";
     return `<tr${g.updater ? ' class="has-upd"' : ""}><td class="strong">${esc(g.title)}<div class="muted mono">${esc(g.key)}</div></td>`
       + `<td><span class="mono">${esc(g.url)}</span>`
-      + `${g.env ? `<div class="patch-why">The environment also sets POL_ADMIN_GAME_${esc(g.key.toUpperCase())}_URL, and it wins.</div>` : ""}</td>`
+      + `${g.env ? `<div class="patch-why" title="POL_ADMIN_GAME_${esc(g.key.toUpperCase())}_URL">This server's settings also give it an address, and that one is used.</div>` : ""}</td>`
       + `<td>${esc(how)}<div class="muted">${esc([g.added_by, when].filter(Boolean).join(", "))}</div></td>`
       + `<td>${g.token_set ? "set" : '<span class="muted">none</span>'}</td>`
       + `<td><div class="deploy-acts"><button class="ghost sm" data-ga-edit="${esc(g.key)}">Change</button>`
       + `${g.paired ? `<button class="ghost sm" data-ga-unpair="${esc(g.key)}">Unpair</button>` : ""}`
       + `<button class="danger sm" data-ga-remove="${esc(g.key)}">Remove</button></div></td></tr>`
       + updaterRow(g);
-  }).join("") || `<tr><td colspan="5" class="muted">None yet. Games set up in the environment are listed below.</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">None yet. Games set up in this server's settings are listed under Game modules.</td></tr>`;
 }
 
 let GA_EDIT = null;   // the key being changed, or null for a new game
@@ -868,7 +874,8 @@ function updDate(iso) {
 
 // the deployer can update the core and the games it installed
 function updByDeployer(key) {
-  if (!(DEPLOY && DEPLOY.available)) return false;
+  // a deployer for paired games only (POL_DEPLOY_MODE=updaters) installs and updates nothing itself
+  if (!(DEPLOY && DEPLOY.available) || DEPLOY.mode === "updaters") return false;
   return key === "core" || (DEPLOY.games || []).some((g) => g.key === key && g.installed);
 }
 
@@ -909,17 +916,33 @@ function updItem(it) {
     tail = `<div class="upd-why bad">Update failed: ${esc(line || "the updater stopped with an error")}`
       + ` <button class="ghost sm" data-upd-log="${esc(lastRun.job)}">Show the log</button></div>` + tail;
   }
-  const ch = it.changes || [];
-  const li = (c) => `<li><span class="s">${esc(c.subject)}</span><span class="d">${esc(updDate(c.date))}</span></li>`;
-  const news = ch.length ? `<details${ch.length <= 3 ? " open" : ""}><summary>What's new (${ch.length})</summary>`
-    + `<ul class="upd-changes">${ch.slice(0, 10).map(li).join("")}</ul>`
-    + (ch.length > 10 ? `<button class="ghost sm" data-upd-all="${esc(it.key)}" style="margin-top:6px">Show all ${ch.length}</button>` : "")
-    + `</details>` : "";
   return `<div class="upd-item" data-upd="${esc(it.key)}"><div class="upd-head"><span class="nm">${esc(it.name || it.key)}</span>`
     + `<span class="pill ${cls}">${esc(word)}</span>${it.channel === "dev" ? '<span class="pill dev">dev build</span>' : ""}`
     + `${behind ? `<span class="muted">${esc(behind)}</span>` : ""}</div>`
-    + `${vers ? `<div class="upd-vers">${vers}</div>` : ""}${tail}${news}</div>`;
+    + `${vers ? `<div class="upd-vers">${vers}</div>` : ""}${tail}${updNews(it)}</div>`;
 }
+
+// What's new, Show all and the logs stay as the reader left them across the refreshes
+const UPD_OPEN = new Set();    // "news:<key>", "log:<key>" opened; "shut:<key>" a short list closed
+const UPD_ALL = new Set();     // keys whose whole list was asked for
+function updNews(it) {
+  const ch = it.changes || [];
+  if (!ch.length) return "";
+  const li = (c) => `<li><span class="s">${esc(c.subject)}</span><span class="d">${esc(updDate(c.date))}</span></li>`;
+  const open = UPD_OPEN.has("news:" + it.key) || (ch.length <= 3 && !UPD_OPEN.has("shut:" + it.key));
+  const all = UPD_ALL.has(it.key);
+  return `<details data-updopen="news:${esc(it.key)}"${open ? " open" : ""}><summary>What's new (${ch.length})</summary>`
+    + `<ul class="upd-changes">${(all ? ch : ch.slice(0, 10)).map(li).join("")}</ul>`
+    + (ch.length > 10 && !all ? `<button class="ghost sm" data-upd-all="${esc(it.key)}" style="margin-top:6px">Show all ${ch.length}</button>` : "")
+    + `</details>`;
+}
+document.addEventListener("toggle", (e) => {
+  const d = e.target;
+  if (!(d instanceof HTMLElement) || !d.dataset || !d.dataset.updopen) return;
+  const k = d.dataset.updopen, key = k.slice(k.indexOf(":") + 1);
+  if (d.open) { UPD_OPEN.add(k); if (k.startsWith("news:")) UPD_OPEN.delete("shut:" + key); }
+  else { UPD_OPEN.delete(k); if (k.startsWith("news:")) UPD_OPEN.add("shut:" + key); }
+}, true);
 
 // ---- a game the server's ops runner updates (adminupdates.py, ops_merge) ----
 // Its Update button runs the game's own deploy job on the server now; the setting beside it
@@ -974,7 +997,8 @@ function opsBox(it) {
     const l = o.last;
     html += `<div class="upd-why${l.ok ? "" : " bad"}">${esc(`Last update from the panel${l.by ? " (" + l.by + ")" : ""}`
       + `${l.at ? " " + ago(l.at * 1000) : ""}: ${l.ok ? "finished" : "failed"}. ${l.result || ""}`)}</div>`
-      + (l.log && l.log.length ? `<details class="upd-log"><summary>Show the log</summary><pre>${esc(l.log.join("\n"))}</pre></details>` : "");
+      + (l.log && l.log.length ? `<details class="upd-log" data-updopen="log:${esc(it.key)}"${UPD_OPEN.has("log:" + it.key) ? " open" : ""}>`
+        + `<summary>Show the log</summary><pre>${esc(l.log.join("\n"))}</pre></details>` : "");
   }
   return html;
 }
@@ -1061,7 +1085,7 @@ async function applyStart(key) {
   const it = ((UPD || {}).items || []).find((x) => x.key === key);
   const g = GAMES.find((x) => x.key === key);
   const name = (it && it.name) || (g && g.title) || key;
-  if (!confirm(`Everyone playing ${name} is disconnected while it updates.`)) return;
+  if (!confirm(`Update ${name} now?\n\nEveryone playing ${name} is disconnected while it updates.`)) return;
   let r;
   try {
     r = await api("/api/updates/apply", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -1070,7 +1094,7 @@ async function applyStart(key) {
   toast(r.msg || `${name} is updating`);
   APPLY[key] = { name, message: "" };
   applyFollow(key, name);
-  if (UPD && (CUR_TAB === "deploy" || CUR_TAB === "modules")) renderUpdates();
+  if (UPD && CUR_TAB === "deploy") renderUpdates();
   if (CUR_TAB === "games") renderGame(key);
 }
 
@@ -1086,8 +1110,6 @@ async function updaterStart(key) {
     UPD_RUN[key] = { job: r.job, state: "running" };
     await probeDeploy(); renderDeploy();
     followJob(r.job);
-    const panel = $("#deployJobPanel");
-    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1105,34 +1127,41 @@ function gameUpdateBox(g) {
     const n = typeof u.behind === "number" ? `${u.behind} change${u.behind === 1 ? "" : "s"} behind. ` : "";
     body = `<div class="upd-act"><button class="act sm" data-upd-apply="${esc(g.key)}">Update</button>`
       + `<span class="muted">${esc(n)}The game updates itself.</span></div>`;
+  } else if (u.state === "failed") {
+    body = "";
   } else {
-    body = `<p class="muted">${u.update === "current" ? "Up to date." : esc(u.why || "It cannot tell whether it is up to date.")}</p>`;
+    // up to date (a pill beside the name says so) or it cannot tell: nothing to do here
+    return "";
   }
   if (u.state === "failed" && !running) body = `<div class="upd-why bad">Update failed: ${esc(u.why || "")}</div>` + body;
   return `<section class="panel gx-wide gx-upd"><h3>Update</h3>${body}</section>`;
 }
 
-function renderUpdates() {
-  const box = DEPLOY && DEPLOY.available ? $("#updDeploy") : $("#updModules");
-  const other = box.id === "updDeploy" ? $("#updModules") : $("#updDeploy");
-  other.hidden = true;
+// The Updates list is always on this tab (Settings > Install games, called Updates without a
+// deployer). With a deployer, what it updates (the core, the games it installed) is shown on
+// that game's row under "Games this server can run", with its Update button; the list has the rest.
+function updWhen() {
   const r = UPD || {};
-  const items = r.items || [];
-  box.hidden = false;
-  const when = r.checking ? "checking now..." : (r.checked_at ? "checked " + ago(Date.parse(r.checked_at)) : "");
-  box.innerHTML = `<h2>Updates <span class="h2sub">${esc(when)}</span>`
+  return r.checking ? "checking now..." : (r.checked_at ? "checked " + ago(Date.parse(r.checked_at)) : "");
+}
+function renderUpdates() {
+  const box = $("#updDeploy");
+  const r = UPD || {};
+  const all = r.items || [];
+  const items = all.filter((it) => !updByDeployer(it.key));
+  const folded = all.length - items.length;
+  const check = `<button class="ghost sm" data-upd-check${r.checking ? " disabled" : ""}>Check for updates</button>`;
+  // with every item on a deployer row, the check sits on that list instead
+  box.hidden = !items.length && folded > 0;
+  const dc = $("#deployCheck");
+  if (dc) dc.innerHTML = folded ? `${check}<span class="muted">${esc(updWhen())}</span>` : "";
+  box.innerHTML = `<h2>${folded ? "Other updates" : "Updates"} <span class="h2sub">${esc(updWhen())}</span>`
     + `${r.channel === "dev" ? ' <span class="pill dev">dev channel</span>' : ""}</h2>`
-    + `<div class="toolbar"><button class="ghost sm" data-upd-check${r.checking ? " disabled" : ""}>Check now</button></div>`
-    + `<div class="upd-list">${items.map(updItem).join("") || '<p class="hint">Nothing reports its version yet.</p>'}</div>`
-    // no deployer: say how to get it, since Install games (and the dev access code box) is hidden
-    + (box.id === "updModules" ? `<p class="hint">Installing games from here, the Update buttons and the `
-      + `developers' builds (with an access code) need the deployer, which this install does not run. `
-      + `To add it, open OpenLobby Setup and pick Add the deployer; it asks for an access code if you `
-      + `have one. Installed with the setup script instead: run it again from the OpenLobby folder with `
-      + `<span class="mono">-Deployer</span> (<span class="mono">--deployer</span>). Then reload this page: `
-      + `Settings gets an Install games tab.</p>` : "");
+    + (folded ? "" : `<div class="toolbar">${check}</div>`)
+    + `<div class="upd-list">${items.map(updItem).join("") || '<p class="hint">Nothing reports its version yet.</p>'}</div>`;
+  if (DEPLOY && DEPLOY.available) renderDeployRows();
   // an update a game applies itself, started here or before a reload: follow it
-  for (const it of items) if ((it.state === "updating" || it.applying) && !APPLY[it.key]) applyFollow(it.key, it.name);
+  for (const it of all) if ((it.state === "updating" || it.applying) && !APPLY[it.key]) applyFollow(it.key, it.name);
 }
 
 async function loadUpdates(refresh) {
@@ -1141,11 +1170,11 @@ async function loadUpdates(refresh) {
   try { UPD = await api("/api/updates" + (refresh ? "?refresh=1" : "")); }
   catch (e) { toast(e.message, true); return; }
   const opsBusy = opsFollow(UPD.items || []);
-  if (CUR_TAB === "deploy" || CUR_TAB === "modules") renderUpdates();
+  if (CUR_TAB === "deploy") renderUpdates();
   // while a check runs, ask again every 3 s; while the ops runner works on a game, every 5 s
-  if (UPD.checking && ["deploy", "modules", "overview"].includes(CUR_TAB))
+  if (UPD.checking && ["deploy", "overview"].includes(CUR_TAB))
     UPD_TIMER = setTimeout(() => loadUpdates(false), 3000);
-  else if (opsBusy && ["deploy", "modules"].includes(CUR_TAB))
+  else if (opsBusy && CUR_TAB === "deploy")
     UPD_TIMER = setTimeout(() => loadUpdates(false), 5000);
   return UPD;
 }
@@ -1160,10 +1189,9 @@ async function loadUpdateNotice() {
   ul.querySelectorAll(".upd-note").forEach((li) => li.remove());
   if (!avail.length || CUR_TAB !== "overview") return;
   if (!DEPLOY) await probeDeploy();
-  const go = DEPLOY && DEPLOY.available ? "deploy" : "modules";
   ul.querySelectorAll("li.empty").forEach((li) => li.remove());
-  ul.insertAdjacentHTML("afterbegin", `<li class="upd-note" data-go="${go}"><span class="t1"><b>Updates available:</b> `
-    + `${esc(avail.map((it) => it.name || it.key).join(", "))}</span><span class="t2">${go === "deploy" ? "Install games" : "Settings, Modules"}</span></li>`);
+  ul.insertAdjacentHTML("afterbegin", `<li class="upd-note" data-go="deploy"><span class="t1"><b>Updates available:</b> `
+    + `${esc(avail.map((it) => it.name || it.key).join(", "))}</span><span class="t2">Settings, ${DEPLOY && DEPLOY.available ? "Install games" : "Updates"}</span></li>`);
 }
 
 document.addEventListener("click", async (e) => {
@@ -1180,9 +1208,9 @@ document.addEventListener("click", async (e) => {
   if (all) {
     const it = ((UPD || {}).items || []).find((x) => x.key === all.dataset.updAll);
     if (!it) return;
-    const li = (c) => `<li><span class="s">${esc(c.subject)}</span><span class="d">${esc(updDate(c.date))}</span></li>`;
-    all.previousElementSibling.innerHTML = (it.changes || []).map(li).join("");
-    all.remove();
+    UPD_ALL.add(it.key);
+    UPD_OPEN.add("news:" + it.key);
+    all.closest("details").outerHTML = updNews(it);
     return;
   }
   const ap = t.closest("[data-upd-apply]");
@@ -1199,13 +1227,8 @@ document.addEventListener("click", async (e) => {
   const go = t.closest("[data-upd-go]");
   if (!go) return;
   const key = go.dataset.updGo;
-  const it = ((UPD || {}).items || []).find((x) => x.key === key) || { name: key };
-  const name = it.name || key;
-  const sure = key === "core"
-    ? confirm(`Update ${name}?\n\nThe deployer fetches the new version and restarts the core services, this panel among them. `
-      + "The panel goes away for a minute or two and comes back by itself; reload the page if it does not.")
-    : confirm(`Update ${name}?\n\nThe deployer fetches the new version and restarts ${name}. Everyone playing it is disconnected.`);
-  if (!sure) return;
+  const name = deployName(key);
+  if (!confirmDeploy("update", key)) return;
   try {
     const r = await api("/api/deploy/action", { method: "POST", headers: { "Content-Type": "application/json" },
                                                 body: JSON.stringify({ action: "update", game: key }) });
@@ -1226,61 +1249,143 @@ const JOB_WORD = { queued: "Waiting", running: "Running", ok: "Done", failed: "F
 async function probeDeploy() {
   if (!isOwner()) return;
   try { DEPLOY = await api("/api/deploy"); } catch (e) { DEPLOY = null; }
-  $("#deployTab").hidden = !(DEPLOY && DEPLOY.available);
+  // the tab is always there for the owner: it holds the Updates list either way
+  const tab = $("#deployTab");
+  tab.hidden = false;
+  tab.textContent = DEPLOY && DEPLOY.available && DEPLOY.mode !== "updaters" ? "Install games" : "Updates";
 }
 
 function deployState(g) {
   if (!g.installed) return ["off", "Not installed", ["install"]];
-  if (!g.enabled) return ["off", "Installed, off", ["enable", "update", "check"]];
-  if (g.running === false) return ["bad", "On, not running", ["restart", "update", "disable", "check"]];
-  return ["good", g.running ? "Running" : "On", ["restart", "update", "disable", "check"]];
+  if (!g.enabled) return ["off", "Installed, off", ["update", "enable", "check"]];
+  if (g.running === false) return ["bad", "On, not running", ["update", "restart", "disable", "check"]];
+  return ["good", g.running ? "Running" : "On", ["update", "restart", "disable", "check"]];
 }
 const ACT_WORD = { install: "Install", enable: "Turn on", disable: "Turn off", update: "Update",
                    restart: "Restart", check: "Check", updater: "Update" };
 
+// a game's name as the deployer lists it, else the panel's own title for it
+function deployName(key) {
+  if (key === "core") return "OpenLobby";
+  const d = ((DEPLOY || {}).games || []).find((g) => g.key === key);
+  const m = (GAMES || []).find((g) => g.key === key);
+  const u = ((UPD || {}).items || []).find((x) => x.key === key);
+  return (d && d.name) || (m && m.title) || (u && u.name) || key;
+}
+
+function confirmDeploy(act, key) {
+  const name = deployName(key);
+  if (act === "update") {
+    return confirm(key === "core"
+      ? `Update ${name}?\n\nThe deployer fetches the new version and restarts the core services, this panel among them. `
+        + "The panel goes away for a minute or two and comes back by itself; reload the page if it does not."
+      : `Update ${name}?\n\nThe deployer fetches the new version and restarts ${name}. Everyone playing it is disconnected.`);
+  }
+  const what = { install: `Install ${name}?\n\nThe deployer fetches it and sets it up. It stays off until you turn it on.`,
+                 enable: `Turn ${name} on?\n\nIts services start and players can reach it.`,
+                 disable: `Turn ${name} off?\n\nIts services stop and everyone playing it is disconnected.`,
+                 restart: `Restart ${name}?\n\nEveryone playing it is disconnected for a moment.` }[act];
+  return confirm(what || `${ACT_WORD[act] || act} ${name}?\n\nThis changes what runs on the server.`);
+}
+
 function renderDeploy() {
   const d = DEPLOY || {};
   $("#deployOff").hidden = !!d.available;
-  $("#deployPanel").hidden = !d.available;
+  $("#deployPanel").hidden = !d.available || d.mode === "updaters";
   $("#deployJobsPanel").hidden = !d.available;
   if (!d.available) {
-    $("#deployWhy").textContent = "No deployer is answering (" + (d.why || "not set up") + "). It is an "
-      + "opt-in service: see docs/deployer.md to run it, then set POL_DEPLOYER_URL and POL_DEPLOYER_TOKEN "
-      + "for the admin service.";
+    // without a deployer this tab is the Updates list, and how to add the deployer
+    const notSetUp = !d.why || d.why === "not set up";
+    $("#deployWhy").innerHTML = notSetUp
+      ? `Installing games from here, the Update buttons and the developers' builds (with an access code) `
+        + `need the deployer, which this install does not run. To add it, open OpenLobby Setup and pick `
+        + `Add the deployer; it asks for an access code if you have one. Installed with the setup script `
+        + `instead: run it again from the OpenLobby folder with its <span title="-Deployer on Windows, --deployer elsewhere">deployer option</span>. `
+        + `Then reload this page: this tab then installs games too.`
+      : `The deployer is set up but not answering (${esc(d.why)}). Installing games and their Update buttons `
+        + `come back once it answers.`;
     return;
   }
   // the deployer found that Docker sees the checkouts elsewhere: it runs no compose command
-  const problem = (d.options || {}).problem || "";
+  const problem = d.mode === "updaters" ? "" : (d.options || {}).problem || "";
   $("#deployProblem").hidden = !problem;
   $("#deployProblem").textContent = problem;
+  renderDeployRows();
+  $("#deployJobs").innerHTML = (d.jobs || []).map((j) =>
+    `<li data-job="${esc(j.id)}"><span class="t1">${j.action === "channel" ? (j.key ? `Update channel: ${esc(deployName(j.key))} to ${j.to === "dev" ? "Dev" : "Stable"}` : "Update channel")
+      : `${esc(ACT_WORD[j.action] || j.action)} ${esc(j.title || deployName(j.game))}`}: `
+    + `${esc(JOB_WORD[j.state] || j.state)}${j.summary ? " - " + esc(j.summary) : ""}</span>`
+    + `<span class="t2">${esc(jobWhen(j))}</span></li>`).join("")
+    || '<li class="empty">No jobs yet.</li>';
+  if (CHAN) renderChannel();
+}
+
+// What a game still needs, short: files that share instructions are one line (their folder
+// once, then the names), each with its Import button; the instructions and the game's notes
+// fold away under "How to get them" and "Notes".
+function deployNeeds(g, busy) {
+  const groups = [];
+  for (const m of g.missing || []) {
+    const item = m.import && m.item ? m.item : "";
+    const k = [m.hint || "", m.required === false, item].join("\u0001");
+    let gr = groups.find((x) => x.k === k);
+    if (!gr) groups.push(gr = { k, hint: m.hint || "", optional: m.required === false, item, paths: [] });
+    gr.paths.push(m.path);
+  }
+  const shown = new Set();
+  const lines = groups.map((gr) => {
+    const parts = gr.paths.map((p) => String(p).split("/"));
+    let dir = parts.length > 1 ? parts[0].slice(0, -1) : [];
+    for (const p of parts.slice(1)) {
+      let i = 0;
+      while (i < dir.length && i < p.length - 1 && dir[i] === p[i]) i++;
+      dir = dir.slice(0, i);
+    }
+    const label = parts.length > 1 && dir.length
+      ? `<span class="mono">${esc(dir[dir.length - 1])}/</span> ${esc(parts.map((p) => p.slice(dir.length).join("/")).join(", "))}`
+      : `<span class="mono">${esc(parts[0].slice(-2).join("/"))}</span>`;
+    const btn = gr.item && !shown.has(gr.item)
+      ? (shown.add(gr.item), ` <button class="ghost sm" data-import="${esc(g.key)}" data-item="${esc(gr.item)}"`
+        + `${busy ? " disabled" : ""}>Import from a client...</button>`) : "";
+    return `<div class="dn-need" title="${esc(gr.paths.join("\n"))}">${label}`
+      + `${gr.optional ? ' <span class="muted">(optional)</span>' : ""}${btn}`
+      + (gr.hint ? `<details class="dn-more"><summary>How to get ${gr.paths.length > 1 ? "them" : "it"}</summary>`
+        + `<div class="muted">${esc(gr.hint)}</div></details>` : "") + `</div>`;
+  }).join("");
+  return lines
+    + (g.installed && g.enabled && (g.admin_env || []).length
+      ? `<div class="muted" title="${esc((g.admin_env || []).join(", "))}">Its admin page needs its address and token in this server's settings.</div>` : "")
+    + (g.notes ? `<details class="dn-more"><summary>Notes</summary><div class="muted">${esc(g.notes)}</div></details>` : "");
+}
+
+// one row per thing the deployer runs, with its update state and its one Update button
+function renderDeployRows() {
+  const d = DEPLOY || {};
+  if (!d.available) return;
   const busy = (d.jobs || []).some((j) => !JOB_DONE.has(j.state));
+  const upd = Object.fromEntries(((UPD || {}).items || []).map((it) => [it.key, it]));
   const rows = [{ key: "core", name: "OpenLobby (this server)", installed: true, enabled: true,
                   running: (d.core || {}).running, missing: [], admin_env: [], core: true }]
     .concat(d.games || []);
   $("#deployBody").innerHTML = rows.map((g) => {
     const [cls, word, acts] = g.core ? ["good", "Running", ["update", "restart", "check"]] : deployState(g);
-    const needs = (g.missing || []).map((m) => `<div><span class="mono">${esc(m.path)}</span>`
-      + (m.required === false ? ' <span class="muted">(optional)</span>' : "")
-      + `${m.hint ? ` <span class="muted">${esc(m.hint)}</span>` : ""}</div>`).join("")
-      + (g.installed && g.enabled && (g.admin_env || []).length
-        ? `<div class="muted">For its admin page set ${(g.admin_env || []).map((e) => `<span class="mono">${esc(e)}</span>`).join(" and ")}.</div>` : "")
-      + (g.notes ? `<div class="muted">${esc(g.notes)}</div>` : "")
-      + [...new Set((g.missing || []).filter((m) => m.import && m.item).map((m) => m.item))]
-        .map((it) => `<div><button class="ghost sm" data-import="${esc(g.key)}" data-item="${esc(it)}"`
-          + `${busy ? " disabled" : ""}>Import ${esc(it)} from a client...</button></div>`).join("");
-    return `<tr><td class="strong">${esc(g.name || g.key)}<div class="muted mono">${esc(g.key)}</div></td>`
-      + `<td><span class="pill ${cls === "good" ? "live" : cls === "bad" ? "off" : "env"}">${esc(word)}</span></td>`
-      + `<td>${needs || '<span class="muted">-</span>'}</td>`
-      + `<td><div class="deploy-acts">${acts.map((a) => `<button class="${a === "disable" ? "danger" : "ghost"} sm" `
-        + `data-deploy="${esc(a)}" data-game="${esc(g.key)}"${busy ? " disabled" : ""}>${esc(ACT_WORD[a])}</button>`).join("")}</div></td></tr>`;
+    const it = g.installed ? upd[g.key] : null;
+    const avail = it && it.update === "available";
+    const needs = deployNeeds(g, busy);
+    // its update: the state beside its running state, What's new under its name
+    const behind = avail && typeof it.behind === "number" ? `${it.behind} change${it.behind === 1 ? "" : "s"} behind` : "";
+    const updPill = !it ? "" : avail ? ` <span class="pill live">Update available</span>`
+      : it.update === "current" ? ` <span class="pill env">Up to date</span>` : "";
+    const failed = it && it.state === "failed" ? `<div class="patch-why">Update failed: ${esc(it.why || "")}</div>` : "";
+    const buttons = acts.map((a) =>
+      `<button class="${a === "disable" ? "danger" : a === "update" && avail ? "act" : "ghost"} sm" `
+      + `data-deploy="${esc(a)}" data-game="${esc(g.key)}"${busy ? " disabled" : ""}>${esc(ACT_WORD[a])}</button>`).join("");
+    return `<tr><td class="strong">${esc(g.name || g.key)}<div class="muted">${esc(behind)}</div>${it ? updNews(it) : ""}</td>`
+      + `<td><span class="pill ${cls === "good" ? "live" : cls === "bad" ? "off" : "env"}">${esc(word)}</span>${updPill}${failed}</td>`
+      + (needs ? `<td>${needs}</td>` : `<td class="nil"><span class="muted">-</span></td>`)
+      + `<td><div class="deploy-acts">${buttons}</div></td></tr>`;
   }).join("");
-  $("#deployJobs").innerHTML = (d.jobs || []).map((j) =>
-    `<li data-job="${esc(j.id)}"><span class="t1">${j.action === "channel" ? (j.key ? `Update channel: ${esc(j.key)} to ${j.to === "dev" ? "Dev" : "Stable"}` : "Update channel")
-      : `${esc(ACT_WORD[j.action] || j.action)} ${esc(j.title || j.game)}`}: `
-    + `${esc(JOB_WORD[j.state] || j.state)}${j.summary ? " - " + esc(j.summary) : ""}</span>`
-    + `<span class="t2">${esc(jobWhen(j))}</span></li>`).join("")
-    || '<li class="empty">No jobs yet.</li>';
-  if (CHAN) renderChannel();
+  labelTables($("#tab-deploy"));
 }
 
 // ---- Install games > Update channel (owner): an access code unlocks the dev builds, then each ----
@@ -1330,6 +1435,7 @@ function renderChannel() {
   if (c.available === false || old) {
     $("#chanPill").className = "pill env";
     $("#chanPill").textContent = "Stable";
+    if (!$("#chanFold").dataset.set) { $("#chanFold").open = false; $("#chanFold").dataset.set = "1"; }
     $("#chanHint").textContent = old ? "This deployer switches everything at once; update the core to switch each server on its own."
       : (c.why || "The deployer did not say what it follows.");
     ["#chanBar", "#chanWarn", "#chanForm", "#chanGaps", "#chanSource", "#chanAdv"].forEach((s) => { $(s).hidden = true; });
@@ -1338,6 +1444,9 @@ function renderChannel() {
   }
   const rows = chanRows(c);
   const onDev = rows.filter((r) => r.on === "dev");
+  // folded away unless something here is in use; opened once, it stays as the reader left it
+  const fold = $("#chanFold");
+  if (!fold.dataset.set) { fold.open = !!c.unlocked || onDev.length > 0 || c.mode === "updaters"; fold.dataset.set = "1"; }
   $("#chanPill").className = "pill " + (onDev.length ? "dev" : "env");
   $("#chanPill").textContent = onDev.length ? `Dev: ${onDev.length}` : (c.unlocked ? "Unlocked" : "Stable");
   $("#chanBar").hidden = false;
@@ -1354,6 +1463,14 @@ function renderChannel() {
       + "anything left on Stable keeps the published images."
     : "Everything follows the published releases. With an access code from the developers you can let each server "
       + "follow their preview builds on its own.";
+  if (c.mode === "updaters") {
+    // a deployer for paired games only: nothing to unlock here; the code goes with a game's switch
+    ["#chanUnlock", "#chanNewCode", "#chanLock", "#chanGo", "#chanCancel"].forEach((s) => { $(s).hidden = true; });
+    $("#chanForm").hidden = false;
+    $("#chanFormHead").textContent = "Access code from the developers";
+    $("#chanHint").textContent = "To put a game on its developers' builds, type the access code below, then pick "
+      + "Dev on the game's row. The code goes along with that switch.";
+  }
   // a code that no longer works is said on each row on Dev; here only what .channel itself says
   const warn = c.problem || "";
   $("#chanWarn").hidden = !warn;
@@ -1385,7 +1502,7 @@ function renderChannel() {
     }).join("");
     const notes = (r.problem ? `<span class="chan-note bad">${esc(r.problem)}</span>` : "")
       + (r.note ? `<span class="chan-note warn">${esc(r.note)}</span>` : "")
-      + (r.other ? `<span class="chan-note">On its ${esc(r.other)} channel (Settings, Modules).</span>` : "");
+      + (r.other ? `<span class="chan-note">On its ${esc(r.other)} channel.</span>` : "");
     return `<tr><td class="strong" data-label="Server"><div>${esc(r.name)}${r.sub ? `<div class="muted">${esc(r.sub)}</div>` : ""}${notes}</div></td>`
       + `<td data-label="Dev build"><div>${build || '<span class="muted">-</span>'}</div></td>`
       + `<td data-label="Follows"><div><div class="seg" role="group" aria-label="${esc(r.name)} follows">${seg}</div>`
@@ -1404,7 +1521,7 @@ function renderChannel() {
 }
 
 const ISSUER_FROM = {
-  env: "Set by POL_DEV_ISSUER in this server's environment, so it cannot be changed here.",
+  env: "Set in this server's settings, so it cannot be changed here.",
   state: "Set here.",
   default: "The project's own issuer, the default."
 };
@@ -1446,8 +1563,10 @@ async function chanUnlock(code) {
 function chanConfirm(r, to) {
   const word = to === "dev" ? "Dev" : "Stable";
   let text = `Switch ${r.name} to ${word}?\n\n`;
-  if (r.kind === "paired") text += `The deployer runs its approved updater with --channel ${to}; its own setup program `
-    + "switches its images and looks after its data. Everyone playing it may be disconnected.";
+  if (r.kind === "paired") text += `The deployer runs its approved updater to switch it; its own setup program `
+    + "switches its images and looks after its data. Everyone playing it may be disconnected."
+    + (to === "dev" ? ($("#chanCode").value.trim() ? "\n\nThe access code typed above goes with it."
+      : "\n\nNo access code goes with it. If its developers gave you one, type it in the access code box first.") : "");
   else if (!r.enabled) text += "It is not turned on, so nothing is restarted now; it follows this once it is.";
   else text += `The deployer pulls its ${to === "dev" ? "dev builds" : "published images"} and restarts only its services `
     + `(${r.services.join(", ")}). Everyone playing it may be disconnected.`;
@@ -1466,8 +1585,11 @@ document.addEventListener("click", async (e) => {
     if (!chanConfirm(r, to)) return;
     try {
       if (r.kind === "paired") {
+        // the access code box is the one place a code is typed; a switch to Dev takes it along
+        const code = to === "dev" ? $("#chanCode").value.trim() : "";
+        $("#chanCode").value = "";
         const j = await api("/api/updates/channel", { method: "POST", headers: { "Content-Type": "application/json" },
-                                                      body: JSON.stringify({ key: r.key, channel: to }) });
+                                                      body: JSON.stringify(code ? { key: r.key, channel: to, code } : { key: r.key, channel: to }) });
         toast(`Switching ${r.name} to ${to === "dev" ? "Dev" : "Stable"}: started`);
         await probeDeploy(); renderDeploy(); followJob(j.job);
       } else {
@@ -1503,14 +1625,24 @@ document.addEventListener("click", async (e) => {
     btn.disabled = true;
     $("#chanResult").hidden = true;
     btn.textContent = "Checking the code...";
-    await chanUnlock(code);
-    btn.textContent = "Unlock";
+    if (!(await chanUnlock(code)) && FEED && !FEED.feed) {
+      // a code that only opens patches from the developers: try it there before saying no
+      try {
+        await api("/api/deploy/patches/feed", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ enabled: true, code }) });
+        chanForm(false);
+        toast("Patches from the developers are on");
+        loadFeed();
+      } catch (x) { /* the channel's answer stays shown */ }
+    }
+    btn.textContent = "Use this code";
     btn.disabled = false;
   }
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "chanCode") {
     e.preventDefault();
+    if (CHAN && CHAN.mode === "updaters") return;    // the code waits for a game's switch
     $("#chanGo").click();
   }
 });
@@ -1530,7 +1662,8 @@ const PATCH_WORD = { patch_import: "Import bundle", patch_build: "Build bundle",
 Object.assign(ACT_WORD, PATCH_WORD);
 
 async function loadPatches(recheck) {
-  if (!DEPLOY || !DEPLOY.available) { $("#patchPanel").hidden = true; return; }
+  // a deployer for paired games only (POL_DEPLOY_MODE=updaters) serves no patches
+  if (!DEPLOY || !DEPLOY.available || DEPLOY.mode === "updaters") { $("#patchPanel").hidden = true; return; }
   let r;
   try { r = await api("/api/deploy/patches" + (recheck ? "?recheck=1" : "")); }
   catch (e) {
@@ -1559,8 +1692,8 @@ async function loadPatches(recheck) {
       + `<td><div class="deploy-acts">${older.length ? `<select data-rollto="${esc(key)}"><option value="">Roll back to...</option>`
         + older.slice().reverse().map((v) => `<option>${esc(v)}</option>`).join("") + `</select>` : ""}`
       + `<button class="danger sm" data-patchrm="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div></td></tr>`
-      + `<tr class="prov-row" data-provrow="${esc(key)}" hidden><td colspan="6"></td></tr>`;
-  }).join("") || '<tr><td colspan="6" class="muted">No bundles in the mirrors folder yet.</td></tr>';
+      + `<tr class="prov-row" data-provrow="${esc(key)}" hidden><td colspan="6" data-label=""></td></tr>`;
+  }).join("") || '<tr><td colspan="6" class="muted">No patch bundles on this server yet.</td></tr>';
   PROV = null;
 }
 
@@ -1568,8 +1701,15 @@ async function loadPatches(recheck) {
 let PROV = null;
 const PROV_WORD = { retail: ["Retail", "live"], ours: ["Ours", "wait"], "our-label": ["Retail files, our number", "env"],
                     unknown: ["Unknown", "off"], disc: ["Disc version", "env"], missing: ["Not here", "off"] };
-// newest first: the date, then the suffix, shorter first (a same-day _9 before _10)
+// newest first. A retail version (20250916_1) by its date, then its suffix, shorter first (a
+// same-day _9 before _10); anything else (a disc's 1.30, our own numbers) by its numbers.
+const PROV_RETAIL = /^\d{8}_\w{1,2}$/;
 const provKey = (v) => [v.slice(0, 8), String(v.length - 9).padStart(2, "0"), v.slice(9)].join("|");
+function provNewer(x, y) {
+  const a = String(x.version || ""), b = String(y.version || "");
+  if (PROV_RETAIL.test(a) && PROV_RETAIL.test(b)) return provKey(b) < provKey(a) ? -1 : provKey(b) > provKey(a) ? 1 : 0;
+  return b.localeCompare(a, undefined, { numeric: true });
+}
 
 function provHtml(p) {
   if (p.error) return `<div class="patch-why">${esc(p.error)}</div>`;
@@ -1584,7 +1724,7 @@ function provHtml(p) {
     + `${p.note ? " " + esc(p.note) : ""}</div>`
     + `<table class="cards"><thead><tr><th>Version</th><th>What it is</th><th>Known from</th></tr></thead><tbody>`
     + [].concat(held, lost.map((r) => Object.assign({}, r, { origin: "missing" })), p.discs || [])
-      .sort((x, y) => (provKey(y.version) < provKey(x.version) ? -1 : provKey(y.version) > provKey(x.version) ? 1 : 0))
+      .sort(provNewer)
       .map(row).join("") + `</tbody></table>`;
 }
 
@@ -1603,7 +1743,7 @@ async function loadGamePatches(key) {
   try { got = { data: await api("/api/games/patches?key=" + encodeURIComponent(key)) }; }
   catch (e) { got = { error: e.message }; }
   GAME_PATCHES[key] = Object.assign({ at: Date.now(), loading: false }, got);
-  if (GAME_SHOWN === key && $("#gamesMain .gx-layout")) renderGame(key);
+  if (GAME_SHOWN === key && $("#gamesMain .gx-layout") && !gamesBusy() && !gamesSelecting()) keepGamesView(() => renderGame(key));
 }
 function gamePatchBox(g) {
   const c = GAME_PATCHES[g.key];
@@ -1616,7 +1756,7 @@ function gamePatchBox(g) {
   const word = (o) => (PROV_WORD[o] || [o, "env"]);
   const rows = bs.map((b) => {
     const id = `${b.region}-${b.product}`, open = GAME_PATCH_OPEN.has(g.key + ":" + id);
-    if (b.error) return `<tr><td colspan="4"><b>${esc(id)}</b> <span class="patch-why">${esc(b.error)}</span></td></tr>`;
+    if (b.error) return `<tr><td colspan="4" data-label=""><b>${esc(id)}</b> <span class="patch-why">${esc(b.error)}</span></td></tr>`;
     const n = {};
     (b.versions || []).forEach((r) => { n[r.origin] = (n[r.origin] || 0) + 1; });
     const here = Object.entries(n).map(([o, k]) => `${k} ${word(o)[0].toLowerCase()}`).join(", ");
@@ -1628,14 +1768,19 @@ function gamePatchBox(g) {
       + `<td>${b.latest ? `<span class="mono">${esc(b.latest)}</span> ${top ? `<span class="pill ${word(top.origin)[1]}">${esc(word(top.origin)[0])}</span>` : ""}` : '<span class="muted">nothing</span>'}</td>`
       + `<td>${(b.versions || []).length} <span class="muted">(${esc(here || "none")})</span></td>`
       + `<td>${lost ? `<span class="pill off">${lost} not here</span>` : `<span class="muted">none known</span>`}`
-      + `${b.final_list ? "" : ' <span class="muted">· full list unknown</span>'}</td></tr>`
-      + `<tr data-gpbody="${esc(g.key + ":" + id)}"${open ? "" : " hidden"}><td colspan="4">${open ? provHtml(b) : ""}</td></tr>`;
+      + `${b.final_list || bs.every((x) => !x.final_list) ? "" : ' <span class="muted">*</span>'}</td></tr>`
+      + `<tr data-gpbody="${esc(g.key + ":" + id)}"${open ? "" : " hidden"}><td colspan="4" data-label="">${open ? provHtml(b) : ""}</td></tr>`;
   }).join("");
-  const from = c.data.source === "deployer" ? "the deployer" : "the patch versions service";
+  const at = Date.parse(c.data.at || "");
+  const when = isNaN(at) ? (c.data.at || "") : ago(at);
+  // Square Enix's full list is unknown for some: said once, for all of them or the starred ones
+  const open = bs.filter((b) => !b.error && !b.final_list).length;
+  const unknown = !open ? "" : open === bs.filter((b) => !b.error).length
+    ? "Square Enix's full list of versions is not known for these, so the missing count may be short."
+    : "* Square Enix's full list of versions is not known for this one, so its missing count may be short.";
   return `<section class="panel gx-wide gx-patches"><h3>Patches <span class="muted">${bs.length} bundle${bs.length === 1 ? "" : "s"}</span></h3>`
-    + `<p class="muted">What the patch service hands out for ${esc(g.title)}, by region. "Serving" is the version it`
-    + ` gives as newest. Open a row for every version: retail (Square Enix's), ours, or unknown, and the retail`
-    + ` versions known to exist that are not here. Read from ${from}${c.data.at ? ", " + esc(c.data.at) : ""}.</p>`
+    + `<p class="muted gx-note" title="What the patch service hands out for ${esc(g.title)}. Open a row for every version.">`
+    + `${when ? "Updated " + esc(when) + ". " : ""}Open a row for every version.${unknown ? " " + esc(unknown) : ""}</p>`
     + `<div class="tablewrap"><table class="cards"><thead><tr><th>Bundle</th><th>Serving</th><th>Versions here</th><th>Retail not here</th></tr></thead>`
     + `<tbody>${rows}</tbody></table></div></section>`;
 }
@@ -1648,6 +1793,7 @@ function toggleGamePatch(row) {
   if (open && !body.firstElementChild.innerHTML) {
     const b = c.data.bundles.find((x) => `${x.region}-${x.product}` === id.slice(id.indexOf(":") + 1));
     body.firstElementChild.innerHTML = b ? provHtml(b) : "";
+    labelTables(body);
   }
   body.hidden = !open;
   row.setAttribute("aria-expanded", String(open));
@@ -1673,6 +1819,7 @@ document.addEventListener("click", async (e) => {
     if (!PROV) PROV = await api("/api/deploy/patches/provenance");
     const p = (PROV.bundles || []).find((x) => `${x.region}-${x.product}` === a.dataset.prov);
     tr.firstElementChild.innerHTML = p ? provHtml(p) : '<span class="muted">Nothing on record for this bundle.</span>';
+    labelTables(tr);
   } catch (x) { tr.firstElementChild.innerHTML = `<span class="patch-why">${esc(x.message)}</span>`; }
   tr.hidden = false;
 });
@@ -1684,7 +1831,7 @@ const FEED_STATE = { new: ["Not here", "env"], behind: ["Behind", "wait"], curre
 
 async function loadFeed(refresh) {
   const panel = $("#feedPanel");
-  if (!DEPLOY || !DEPLOY.available) { panel.hidden = true; return; }
+  if (!DEPLOY || !DEPLOY.available || DEPLOY.mode === "updaters") { panel.hidden = true; return; }
   let r;
   try { r = await api("/api/deploy/patches/feed" + (refresh ? "?refresh=1" : "")); }
   catch (e) {
@@ -1695,14 +1842,12 @@ async function loadFeed(refresh) {
     return;
   }
   FEED = r;
-  panel.hidden = false;
+  // only for a server whose access code includes patches (typed once, in the access code box)
+  panel.hidden = !r.feed && !r.can_enable;
   $("#feedPill").textContent = r.feed ? "On" : "Off";
   $("#feedPill").className = "pill " + (r.feed ? "live" : "env");
   $("#feedOff").hidden = !!r.feed;
   $("#feedOnBlock").hidden = !r.feed;
-  // a kept code (or the dev channel's, when it opens the patches) needs nothing typed
-  $("#feedCode").hidden = !!r.can_enable;
-  $("#feedHint").hidden = !!r.feed || !r.from_channel;
   if (!r.feed) return;
   const busy = ((DEPLOY || {}).jobs || []).some((j) => !JOB_DONE.has(j.state));
   $("#feedRefresh").disabled = busy;
@@ -1736,12 +1881,11 @@ document.addEventListener("click", (e) => {
   if (e.target.closest("#feedRefresh")) return loadFeed(true);
   if (e.target.closest("#feedOn") || e.target.closest("#feedOffBtn")) {
     const on = !!e.target.closest("#feedOn");
+    // on: the deployer uses the access code it keeps (entered in the access code box)
     const body = { enabled: on };
-    if (on && !$("#feedCode").hidden) body.code = $("#feedCode").value.trim();
     return (async () => {
       try {
         await api("/api/deploy/patches/feed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        $("#feedCode").value = "";
         toast(on ? "Patches from the developers are on" : "Patches from the developers are off");
       } catch (x) { toast(x.message, true); }
       loadFeed();
@@ -1759,9 +1903,10 @@ document.addEventListener("click", (e) => {
   if (rm) {
     const b = (PATCHES.bundles || []).find((x) => `${x.region}-${x.product}` === rm.dataset.patchrm);
     const name = b.title || rm.dataset.patchrm;
-    const typed = prompt(`Remove ${name} from the patch service? Its files go to the deployer's trash folder, `
-      + `and clients can no longer update it. Type ${rm.dataset.patchrm} to confirm.`);
-    return patchAct({ action: "patch_remove", region: b.region, product: b.product }, typed === rm.dataset.patchrm ? true : (typed !== null && toast("Not removed: that did not match.", true), false));
+    // Remove and Roll back both take files out: the same dialog, naming the bundle
+    return uiAsk({ title: `Remove ${name}?`, danger: true, ok: "Remove",
+      text: `${name} leaves the patch service and clients can no longer update it. Its files go to the deployer's trash folder.` })
+      .then((sure) => patchAct({ action: "patch_remove", region: b.region, product: b.product }, !!sure));
   }
 });
 document.addEventListener("change", (e) => {
@@ -1770,11 +1915,12 @@ document.addEventListener("change", (e) => {
   const b = (PATCHES.bundles || []).find((x) => `${x.region}-${x.product}` === sel.dataset.rollto);
   const to = sel.value;
   sel.value = "";
+  const name = b.title || sel.dataset.rollto;
   const gone = (b.versions || []).slice((b.versions || []).indexOf(to) + 1);
-  patchAct({ action: "patch_rollback", region: b.region, product: b.product, to },
-    confirm(`Roll ${b.title || sel.dataset.rollto} back to ${to}?\n\nThis takes out ${gone.length === 1 ? "version" : "versions"} `
-      + `${gone.join(", ")}. Clients on ${gone.length === 1 ? "it" : "them"} are told to update to ${to}. `
-      + `The files go to the deployer's trash folder.`));
+  uiAsk({ title: `Roll ${name} back to ${to}?`, danger: true, ok: "Roll back",
+    text: `This takes out ${gone.length === 1 ? "version" : "versions"} ${gone.join(", ")}. Clients on `
+      + `${gone.length === 1 ? "it" : "them"} are told to update to ${to}. The files go to the deployer's trash folder.` })
+    .then((sure) => patchAct({ action: "patch_rollback", region: b.region, product: b.product, to }, !!sure));
 });
 
 async function loadDeploy() {
@@ -1782,18 +1928,29 @@ async function loadDeploy() {
   renderDeploy();
   loadPatches();
   loadFeed();
+  loadUpdates(false);
   if (!DEPLOY || !DEPLOY.available) { renderChannel(); return; }
   loadChannel();
-  loadUpdates(false);
+  // a job's log shows while it runs (or when it is picked under Recent jobs), not the last one's every visit
   const live = (DEPLOY.jobs || []).find((j) => !JOB_DONE.has(j.state));
   if (live && live.id !== DEPLOY_JOB) followJob(live.id);
-  else if (!live && !DEPLOY_JOB && (DEPLOY.jobs || [])[0]) showJob(DEPLOY.jobs[0].id);
+}
+
+// the log goes under the panel whose button started the job
+function placeJob(j) {
+  const act = String(j.action || "");
+  const after = act === "patch_fetch" ? "#feedPanel" : act.startsWith("patch_") ? "#patchPanel"
+    : act === "channel" ? "#chanPanel" : act === "updater" && !updByDeployer(j.game) ? "#updDeploy" : "#deployPanel";
+  const anchor = $(after), panel = $("#deployJobPanel");
+  const at = anchor && !anchor.hidden ? anchor : $("#deployPanel");
+  if (at && at.nextElementSibling !== panel) at.after(panel);
 }
 
 async function showJob(id) {
   let j;
   try { j = await api("/api/deploy/job?id=" + encodeURIComponent(id)); } catch (e) { return; }
   DEPLOY_JOB = id;
+  placeJob(j);
   $("#deployJobPanel").hidden = false;
   $("#deployJobTitle").textContent = `${ACT_WORD[j.action] || j.action} ${j.title || j.game}`;
   $("#deployJobState").textContent = JOB_WORD[j.state] || j.state;
@@ -1804,7 +1961,9 @@ async function showJob(id) {
     $("#deployJobSummary").insertAdjacentHTML("beforeend", ` <span>${esc(jg.name || jg.key)} is on: turn it on again to use the new data.</span>`
       + ` <button class="act sm" data-deploy="enable" data-game="${esc(jg.key)}">Turn on again</button>`);
   }
-  $("#deployLog").textContent = j.log || "";
+  const pre = $("#deployLog");
+  pre.textContent = j.log || "";
+  pre.scrollTop = pre.scrollHeight;
   DEPLOY_OFFSET = j.log_size || (j.log || "").length;
   return j;
 }
@@ -1820,8 +1979,9 @@ async function followJob(id) {
     catch (e) { return; }                   // the deployer or the panel restarting: keep trying
     if (r.text) {
       const pre = $("#deployLog");
+      const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
       pre.textContent += r.text;
-      pre.scrollTop = pre.scrollHeight;
+      if (stick) pre.scrollTop = pre.scrollHeight;
     }
     // the deployer says where the text it sent started; the next read follows on from it
     DEPLOY_OFFSET = typeof r.next === "number" ? r.next
@@ -1831,7 +1991,7 @@ async function followJob(id) {
       const done = await showJob(id);
       await probeDeploy();
       renderDeploy();
-      if (j.action === "channel") { loadChannel(); loadUpdates(false); }
+      if (j.action === "channel") { loadChannel(); loadUpdates(false); loadFeed(); }
       if (j.action === "updater") {
         if (done) UPD_RUN[done.game || j.game] = { job: id, state: done.state, summary: done.summary || "" };
         loadUpdates(false);
@@ -2050,8 +2210,8 @@ document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-deploy]");
   if (b) {
     const act = b.dataset.deploy, game = b.dataset.game;
-    const what = `${ACT_WORD[act]} ${game === "core" ? "OpenLobby" : game}`;
-    if (act !== "check" && !confirm(`${what}?\n\nThis changes what runs on the server.`)) return;
+    const what = `${ACT_WORD[act]} ${deployName(game)}`;
+    if (act !== "check" && !confirmDeploy(act, game)) return;
     try {
       const r = await api("/api/deploy/action", { method: "POST", headers: { "Content-Type": "application/json" },
                                                     body: JSON.stringify({ action: act, game }) });
@@ -2063,4 +2223,5 @@ document.addEventListener("click", async (e) => {
   }
   const li = e.target.closest("#deployJobs [data-job]");
   if (li) followJob(li.dataset.job);
+  if (e.target.closest("#deployJobClose")) $("#deployJobPanel").hidden = true;
 });

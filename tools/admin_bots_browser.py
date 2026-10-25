@@ -162,12 +162,17 @@ def main():
             ["tm", "tm_auction", "tm_live", "tm_news"])
         chk("  the stored channel is filled in",
             b.js("%s.querySelector('.fluxChan[data-key=\"tm\"]').value" % tm), CHAN)
+        chk("bots with nothing on Fluxer are one line, not cards",
+            ("Janhourou" in (b.js("document.querySelector('#botsRest').innerText") or ""),
+             b.js("!!document.querySelector('#botsList [data-bot=\"jan\"]')")), (True, False))
+        b.click_el('[data-flux-add="bridge"]')
+        b.pump(0.5)
+        chk("  a name in it brings up that bot's card, its Settings open",
+            b.js("document.querySelector('[data-bot=\"bridge\"] .bc-edit').open"), True)
         br = "document.querySelector('[data-bot=\"bridge\"]')"
         keys = b.js("[...%s.querySelectorAll('.fluxChan')].map(e=>e.dataset.key)" % br) or []
         chk("the bridge's Fluxer side has its news channel and a ping role per game",
             (keys[:1], "role:tetra" in keys), (["announce"], True))
-        b.click_el('[data-bot="bridge"] .bc-edit > summary')
-        b.pump(0.5)
         chk("  its ping roles sit in a grid, several to a row",
             b.js("(g=>getComputedStyle(g).gridTemplateColumns.split(' ').length)"
                  "(document.querySelector('[data-bot=\"bridge\"] .bc-roles'))") >= 2, True)

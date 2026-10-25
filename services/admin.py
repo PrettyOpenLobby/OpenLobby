@@ -188,6 +188,21 @@ CLIENT_TREE = os.path.join("wh000.pol.com", "pml")
 _M32 = 1 << 32
 
 
+def _rename_admin_cred(conn, username):
+    """Change the operator username and keep the stored password. Raises ValueError if
+    rejected or when no credential is stored. Does NOT commit."""
+    username = (username or "").strip()
+    if not username:
+        raise ValueError("Username must not be empty.")
+    if len(username) > 64:
+        raise ValueError("Username must be at most 64 characters.")
+    n = conn.execute("UPDATE admin_cred SET username = %s, updated_at = %s WHERE id = 1",
+                     (username, accounts._now())).rowcount
+    if not n:
+        raise ValueError("No password is set yet: set one first.")
+    return username
+
+
 def _decode_text(buf):
     """Reverse the pml text cipher. Returns None if the buffer is not encrypted."""
     n = len(buf)
@@ -256,6 +271,33 @@ def _load_pml_text(fs_path):
 #: the same table, and it was missing Janhourou (3), which therefore showed as a
 #: bare code in the panel while the registration pages named it.
 CONTENT_NAMES = dict(contentlist.CONTENT_TITLES)
+
+
+def _panel_title(cid):
+    """A content id's title as the rest of the panel names that game: the title of
+    the module that owns it ("Final Fantasy XI", "Dirge of Cerberus") rather than
+    SE's own spelling ("FINAL FANTASY XI"), which stays for the client and the
+    registration pages. A second id of a module keeps its suffix ("... Test Server")."""
+    base = contentlist.content_title(cid)
+    try:
+        mods = list(adminmodules.load().values())
+    except Exception:
+        return base
+    for m in mods:
+        ids = list(getattr(m, "content_ids", None) or [])
+        if cid not in ids:
+            continue
+        if cid == ids[0]:
+            return m.title
+        first = contentlist.content_title(ids[0])
+        if base.upper().startswith(first.upper()):
+            return m.title + base[len(first):]
+        return base
+    return base
+
+
+def _panel_content_names():
+    return {c: _panel_title(c) for c in CONTENT_NAMES}
 
 _MIME = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -1371,7 +1413,7 @@ def _content_label(codes_csv):
         if not c:
             continue
         try:
-            out.append(contentlist.content_title(int(c)))
+            out.append(_panel_title(int(c)))
         except ValueError:
             out.append(c)
     return ", ".join(out)
@@ -1524,9 +1566,16 @@ _AUDIT_ACTIONS = {
     "/api/mods": "moderator", "/api/me/password": "changed their own password",
     "/api/maintenance": "posted or cleared a maintenance warning",
     "/api/alerts": "changed alert settings",
-    "/api/bots": "Discord bot",
+    "/api/bots": "changed a bot",
     "/api/push/subscribe": "turned on GM call alerts",
     "/api/push/unsubscribe": "turned off GM call alerts",
+}
+#: The Bots tab's actions as the Activity log words them (Discord and Fluxer alike).
+_BOT_ACTION_WORDS = {
+    "save": "saved Discord settings", "refresh": "checked Discord", "endpoint": "set the Discord endpoint",
+    "clear": "removed the Discord token", "delete": "removed everything stored",
+    "fluxer-save": "saved Fluxer settings", "fluxer-check": "checked Fluxer",
+    "fluxer-clear": "removed the Fluxer token and channels",
 }
 #: Never written to the audit log, whatever the endpoint.
 _AUDIT_SECRET = {"password", "current", "pw", "token", "confirm",
@@ -1878,12 +1927,24 @@ class Handler(BaseHTTPRequestHandler):
         return lambda x: x.get("role") == "mod" and x.get("uid") == uid
 
     def _sessions_revoke(self):
-        """Sign out one browser ({"id": ...}) or every other one ({"others": true})."""
+        """Sign out one browser ({"id": ...}), every other browser of the caller's own login
+        ({"others": true}: for the owner, the owner's browsers, never the moderators'), or,
+        the owner only, every moderator's browser ({"mods": true})."""
         body = self._json_body()
-        cur = (self._session() or {}).get("sid")
+        me = self._session() or {}
+        cur = me.get("sid")
         mine = self._own_session_pred()
+        owner = self._is_owner()
+        if body.get("mods"):
+            if not owner:
+                return self._send(403, {"error": "You don't have permission to do that."})
+            n = _sessions_drop_where(lambda x: x.get("role") == "mod")
+            return self._send(200, {"ok": True, "revoked": n})
         if body.get("others"):
-            n = _sessions_drop_where(mine, keep_sid=cur)
+            if owner:
+                n = _sessions_drop_where(lambda x: x.get("role") != "mod", keep_sid=cur)
+            else:
+                n = _sessions_drop_where(mine, keep_sid=cur)
             return self._send(200, {"ok": True, "revoked": n})
         want = str(body.get("id") or "")
         if len(want) < 8:
@@ -1979,7 +2040,12 @@ class Handler(BaseHTTPRequestHandler):
                                              "username."})
         db = _db()
         try:
-            username = accounts.set_admin_cred(db, username, password)
+            # A blank new password keeps the stored one: renaming the login alone. The first
+            # set (nothing stored yet) still needs a password.
+            if not password and accounts.get_admin_cred(db) is not None:
+                username = _rename_admin_cred(db, username)
+            else:
+                username = accounts.set_admin_cred(db, username, password)
             db.commit()
         except ValueError as exc:
             return self._send(400, {"error": str(exc)})
@@ -2027,6 +2093,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             db.close()
         self._send(200, {"mods": rows, "perm_labels": adminusers.perm_labels(),
+                         "perm_short": adminusers.PERM_SHORT,
                          "owner_ready": _auth_required()})
 
     def _mods_change(self):
@@ -2127,11 +2194,13 @@ class Handler(BaseHTTPRequestHandler):
         actor = (q.get("actor") or [""])[0].strip() or None
         try:
             limit = int((q.get("limit") or ["200"])[0])
+            before = float((q.get("before") or ["0"])[0] or 0) or None
+            before_id = int((q.get("before_id") or ["0"])[0] or 0) or None
         except ValueError:
-            limit = 200
+            return self._send(400, {"error": "limit, before and before_id must be numbers"})
         db = adminusers.connect()
         try:
-            rows = [dict(r) for r in adminusers.audit_list(db, limit, actor)]
+            rows = [dict(r) for r in adminusers.audit_list(db, limit, actor, before, before_id)]
             actors = adminusers.audit_actors(db)
         finally:
             db.close()
@@ -2150,7 +2219,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/news/publish" and body.get("dry_run"):
             action = "previewed a news publish"
         if path == "/api/bots":
-            action = "Discord bot %s: %s" % (body.get("bot") or "?", body.get("action") or "save")
+            action = "bot %s: %s" % (body.get("bot") or "?",
+                                     _BOT_ACTION_WORDS.get(body.get("action") or "save",
+                                                           body.get("action") or "save"))
         resp = getattr(self, "_resp", None)
         resp = resp if isinstance(resp, dict) else {}
         target = next((body.get(k) for k in _AUDIT_TARGETS if body.get(k)), None) \
@@ -2321,7 +2392,7 @@ class Handler(BaseHTTPRequestHandler):
                         " AND status='active'", (h["id"],))}
                     for c in sorted(linked):
                         titles.append({"handle": h["handle_name"], "content": c,
-                                       "label": contentlist.content_title(c)})
+                                       "label": _panel_title(c)})
                 try:
                     for t in accounts.list_client_tokens(db, m["id"]):
                         devices.append({"label": _client_label(t["client_sig"]),
@@ -2339,7 +2410,7 @@ class Handler(BaseHTTPRequestHandler):
                 " ORDER BY s.created_at DESC", (pol, now)).fetchall()
             codes = [dict(r) for r in db.execute(
                 "SELECT code, contents, redeemed_at FROM regcode WHERE redeemed_by=%s"
-                " ORDER BY redeemed_at", (pol,))]
+                " ORDER BY redeemed_at DESC", (pol,))]
         finally:
             db.close()
         for c in codes:
@@ -2359,7 +2430,7 @@ class Handler(BaseHTTPRequestHandler):
                          "ext_mail": bool(m["ext_mail"]) if "ext_mail" in m.keys() else False}
                         for m in members],
             "handles": handles,
-            "owned": [{"content": c, "label": contentlist.content_title(c),
+            "owned": [{"content": c, "label": _panel_title(c),
                        "linked": c in linked_codes} for c in owned],
             "characters": titles, "devices": devices,
             "online": [{"since": r["created_at"],
@@ -2380,7 +2451,7 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     fl = rec.get("fields") or {}
                     if str(fl.get("suspect") or "").lower() in names:
-                        got.append({"received_at": rec.get("received_at"),
+                        got.append({"id": name[:-5], "received_at": rec.get("received_at"),
                                     "application": fl.get("application"),
                                     "explanation": fl.get("explanation")})
             except OSError:
@@ -2431,7 +2502,8 @@ class Handler(BaseHTTPRequestHandler):
                 "devices": [{"username": r["username"], "role": r["role"],
                              "ua": r["ua"], "created_at": r["created_at"],
                              "last_ok": r["last_ok"], "last_error": r["last_error"]}
-                            for r in adminusers.push_list(mdb)],
+                            for r in sorted(adminusers.push_list(mdb),
+                                            key=lambda r: -(r["created_at"] or 0))],
                 "recent": [dict(r) for r in adminusers.alerted_recent(mdb, 8)],
             }
         finally:
@@ -2687,7 +2759,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/account-footprint":
             return self._account_footprint()
         if path == "/api/content-names":
-            return self._send(200, CONTENT_NAMES)
+            return self._send(200, _panel_content_names())
         if path == "/api/page":
             return self._live_page()
         if path == "/api/reports":

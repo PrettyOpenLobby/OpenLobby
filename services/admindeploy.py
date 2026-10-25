@@ -27,7 +27,7 @@ import devchannel  # noqa: E402
 
 TIMEOUT = 8.0
 CHANNEL_TIMEOUT = 45.0      # a switch to Dev waits for the deployer to ask the registry
-ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import")
+ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import", "fix")
 _KEY = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _JOB = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 UPLOAD_TIMEOUT = 1800.0     # the deployer answers an upload once it is extracted and listed
@@ -86,7 +86,9 @@ def overview():
         return 200, {"available": False, "why": games.get("error") or "HTTP %d" % st}
     _st, jobs = _call("GET", "/api/jobs?limit=20")
     return 200, {"available": True, "games": games.get("games") or [], "core": games.get("core") or {},
-                 "options": games.get("options") or {}, "jobs": (jobs or {}).get("jobs") or []}
+                 "options": games.get("options") or {}, "jobs": (jobs or {}).get("jobs") or [],
+                 # "updaters": a deployer that only runs paired games' updaters (POL_DEPLOY_MODE)
+                 "mode": "updaters" if games.get("mode") == "updaters" else "full"}
 
 
 def updates(refresh=False):
@@ -102,7 +104,7 @@ OLD_DEPLOYER = "This deployer has no update channels yet; update the core first,
 #: what the panel passes on of the deployer's channel answer and of each image row: never
 #: the registry's address, which the page does not show (it says "dev builds")
 CHANNEL_KEYS = ("channel", "unlocked", "dev", "since", "code_stored", "code_ok", "code_why", "ghcr",
-                "problem", "install_id", "short_codes")
+                "problem", "install_id", "short_codes", "mode")
 CHANNEL_ROW = ("key", "name", "stable", "dev_name", "applies", "on", "what", "license", "note",
                "enabled", "has_source")
 #: what the panel passes on of each thing with a dev build (the core, a game)
@@ -261,6 +263,11 @@ def action(act, game, item=None, source=None):
     if not isinstance(game, str) or not _KEY.match(game):
         return 400, {"error": "Unknown game."}
     body = {"action": act, "game": game}
+    if act == "fix":
+        # the known problem to fix (GET /api/games, a game's "problems"), sent as "item"
+        if not isinstance(item, str) or not _KEY.match(item):
+            return 400, {"error": "Unknown problem."}
+        body["fix"] = item
     if act == "import":
         src = _source(source)
         if not isinstance(item, str) or not _KEY.match(item):

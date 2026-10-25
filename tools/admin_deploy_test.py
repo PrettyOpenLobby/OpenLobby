@@ -432,7 +432,7 @@ def main():
         chk("...and the registry's address is nowhere in the answer, though the deployer sent it",
             ("registry.example.org" in json.dumps(ch), sorted(ch), sorted(ch["images"][0]), sorted(ch["keys"][0])),
             (False, ["available", "channel", "code_ok", "code_stored", "code_why", "dev", "ghcr", "images",
-                     "install_id", "issuer", "keys", "paired", "problem", "short_codes", "since", "unlocked"],
+                     "install_id", "issuer", "keys", "mode", "paired", "problem", "short_codes", "since", "unlocked"],
              ["applies", "dev_name", "enabled", "has_source", "key", "license", "name", "note", "on", "stable", "what"],
              ["applies", "back", "builds_on_core", "enabled", "images", "key", "name", "note", "on", "problem",
               "services", "since", "would"]))

@@ -7,8 +7,12 @@ const $ = (s) => document.querySelector(s);
 // Escape anything that reaches innerHTML.
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// API_BUSY: requests in flight, so Refresh can say "Refreshed" once they are back.
+let API_BUSY = 0;
 const api = async (path, opts) => {
-  const r = await fetch(path, opts);
+  API_BUSY++;
+  let r;
+  try { r = await fetch(path, opts); } finally { API_BUSY--; }
   const t = await r.text();
   let j; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
   // The session expired (or was revoked by a password change elsewhere). A
@@ -345,15 +349,18 @@ $("#secSave").onclick = async () => {
   const username = $("#secUser").value.trim();
   const password = $("#secNew").value, confirm = $("#secNew2").value;
   if (!username) return toast("Username is required", true);
-  if (password !== confirm) return toast("The two new passwords do not match", true);
-  if (password.length < 8) return toast("Password must be at least 8 characters", true);
+  // Both new-password boxes empty: keep the password, change only the username.
+  const keep = !password && !confirm && !!SESSION.credential_set;
+  if (!keep && password !== confirm) return toast("The two new passwords do not match", true);
+  if (!keep && password.length < 8) return toast("Password must be at least 8 characters", true);
   try {
     const r = await api("/api/credentials", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ current: $("#secCurrent").value, username, password })
     });
     $("#secCurrent").value = ""; $("#secNew").value = ""; $("#secNew2").value = "";
-    toast("Saved. Your other browsers were signed out.");
+    toast(keep ? "Username saved. Your other browsers were signed out."
+               : "Saved. Your other browsers were signed out.");
     loadSession();
   } catch (e) { toast(e.message, true); }
 };
@@ -420,8 +427,32 @@ $("#code").addEventListener("input", (e) => {
 });
 
 // ---- small shared helpers ----
-const fmtWhen = (iso) => String(iso || "").slice(0, 16).replace("T", " ");
-const isoMs = (iso) => Date.parse(iso || "") || 0;
+// Times from the server are UTC: an ISO string (with or without the Z), a
+// "YYYY-MM-DD HH:MM:SS" database stamp, or epoch seconds. A stamp without a
+// zone is UTC too; Date.parse would read it as local time.
+function whenMs(t) {
+  if (t === null || t === undefined || t === "") return 0;
+  if (typeof t === "number") return t < 1e12 ? t * 1000 : t;
+  let s = String(t).trim();
+  if (/^\d{4}-\d\d-\d\d[ T]\d\d:\d\d(:\d\d(\.\d+)?)?$/.test(s)) s = s.replace(" ", "T") + "Z";
+  return Date.parse(s) || 0;
+}
+// fmtWhen: the viewer's local time, short ("today 18:26", "Oct 24, 18:26",
+// "Oct 24, 2025"); utcTitle: the exact UTC time, for a title tooltip.
+function fmtWhen(t) {
+  const ms = whenMs(t);
+  if (!ms) return String(t || "");
+  const d = new Date(ms), now = new Date();
+  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === now.toDateString()) return "today " + hm;
+  if (d.getFullYear() !== now.getFullYear()) return d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + ", " + hm;
+}
+function utcTitle(t) {
+  const ms = whenMs(t);
+  return ms ? new Date(ms).toISOString().slice(0, 19).replace("T", " ") + " UTC" : "";
+}
+const isoMs = (iso) => whenMs(iso);
 function ago(ms) {
   if (!ms) return "";
   const s = Math.max(0, (Date.now() - ms) / 1000);
@@ -450,6 +481,10 @@ async function copyText(text, what) {
   }
   toast(ok ? `Copied ${what}` : "Copy failed. Select the text and copy it manually.", !ok);
 }
+
+// the small copy button beside a code or an ID (class "copy", title says what it copies)
+const COPY_ICON = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">`
+  + `<rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>`;
 
 function downloadCsv(name, header, rows) {
   const cell = (v) => {
@@ -523,14 +558,14 @@ function renderCodes() {
                              : "redeemed (account deleted)";
     return `<tr>` +
       `<td style="white-space:nowrap"><code class="mono">${esc(r.code)}</code>` +
-        `<button class="copy" data-copy="${esc(r.code)}" title="Copy">copy</button></td>` +
+        `<button class="copy" data-copy="${esc(r.code)}" title="Copy the code" aria-label="Copy the code">${COPY_ICON}</button></td>` +
       `<td>${esc(r.contents_label || r.contents || "")}</td>` +
       `<td class="muted">${esc(r.note || "")}</td>` +
-      `<td class="muted" style="white-space:nowrap" title="${esc(r.created_at || "")}">${esc(fmtWhen(r.created_at))}</td>` +
+      `<td class="muted" style="white-space:nowrap" title="${esc(utcTitle(r.created_at))}">${esc(fmtWhen(r.created_at))}</td>` +
       `<td class="muted">${esc(r.created_by || "")}</td>` +
       `<td class="muted" style="white-space:nowrap">${r.expires_at && !used
         ? esc(new Date(r.expires_at * 1000).toLocaleDateString()) : ""}</td>` +
-      `<td><span class="pill ${used ? "used" : "open"}" title="${esc(r.redeemed_at || "")}">${used ? by : "unused"}</span></td>` +
+      `<td><span class="pill ${used ? "used" : "open"}" title="${esc(r.redeemed_at ? "Redeemed " + fmtWhen(r.redeemed_at) + " (" + utcTitle(r.redeemed_at) + ")" : "")}">${used ? by : "unused"}</span></td>` +
       `<td style="text-align:right">${used || !can("codes_void") ? "" :
         `<button class="danger sm" data-void="${esc(r.code)}" title="Delete this unused code">Void</button>`}</td>` +
       `</tr>`;
@@ -555,7 +590,8 @@ $("#codesBody").onclick = async (e) => {
   const v = e.target.closest("[data-void]");
   if (!v) return;
   const code = v.dataset.void;
-  if (!confirm(`Void ${code}?\n\nIt is deleted and can no longer be redeemed.`)) return;
+  if (!await uiAsk({ title: `Void ${code}?`, text: "It is deleted and can no longer be redeemed.",
+                     ok: "Void the code", danger: true })) return;
   v.disabled = true;
   try {
     await api("/api/codes/void", {
@@ -578,7 +614,9 @@ $("#codeCopyShown").onclick = () => {
 $("#codeVoidShown").onclick = async () => {
   const rows = codesShown().filter((r) => !codeUsed(r));
   if (!rows.length) return toast("No unused codes shown", true);
-  if (!confirm(`Void ${rows.length} unused code${rows.length === 1 ? "" : "s"}? They can no longer be redeemed.`)) return;
+  if (!await uiAsk({ title: `Void ${rows.length} unused code${rows.length === 1 ? "" : "s"}?`,
+                     text: "The codes shown are deleted and can no longer be redeemed.",
+                     ok: `Void ${rows.length}`, danger: true })) return;
   let n = 0;
   for (const r of rows) {
     try { await post("/api/codes/void", { code: r.code }); n++; } catch (e) { toast(e.message, true); break; }
@@ -592,13 +630,6 @@ $("#codeCsv").onclick = () => downloadCsv("registration-codes.csv",
   codesShown().map((r) => [r.code, r.contents_label || r.contents, r.note, r.created_at,
                            r.created_by, r.expires_at ? new Date(r.expires_at * 1000).toISOString() : "",
                            r.redeemed_at, r.redeemed_by]));
-
-$("#randBtn").onclick = async () => {
-  try {
-    $("#code").value = (await api("/api/codes/random", { method: "POST" })).code;
-    $("#codeCount").value = "1";
-  } catch (e) { toast(e.message, true); }
-};
 
 $("#createBtn").onclick = async () => {
   const contents = [...document.querySelectorAll("#contentChips input:checked")].map((c) => +c.value);
@@ -637,7 +668,7 @@ $("#newCodesCopy").onclick = () => {
 
 // ---- accounts ----
 const ACCOUNT_STATES = [
-  [0x00, "No Code", "No administrative message is shown."],
+  [0x00, "None", "No administrative message is shown."],
   [0xDD, "Unexpected error", "Unable to log in due to an unexpected error."],
   [0xDE, "Missing payment information", "Your account will be closed at the end of this month due to missing payment information. Please log in from a Japanese copy of the PlayOnline Viewer for further details."],
   [0xDF, "Registration delayed", "Due to internet congestion, it will take longer than usual to complete registration for PlayOnline. Please wait for an e-mail confirming its completion."],
@@ -664,11 +695,13 @@ const ACCOUNT_STATES = [
   [0xFA, "Card expires this month", "The credit card registered for your payment method will expire at the end of the month."],
 ];
 const accountState = (code) => ACCOUNT_STATES.find((s) => s[0] === code);
+const stateHex = (code) => `0x${Number(code).toString(16).toUpperCase()}`;
 const stateLabel = (code) => {
   const state = accountState(code);
-  return state ? `${state[1]}${code ? ` (0x${code.toString(16).toUpperCase()})` : ""}`
-               : `Unknown (0x${Number(code).toString(16).toUpperCase()})`;
+  return state ? `${state[1]}${code ? ` (${stateHex(code)})` : ""}` : `Unknown (${stateHex(code)})`;
 };
+// the words alone, for a pill; the code goes in its tooltip
+const stateName = (code) => (accountState(code) || [0, "Unknown code"])[1];
 
 let ACCOUNTS = [], ACC_SHOWN = [];
 const accFilter = segControl("#accFilter", "accFilter", "all", () => renderAccounts());
@@ -700,7 +733,7 @@ function renderAccounts() {
     ? `${ACCOUNTS.length} account${ACCOUNTS.length === 1 ? "" : "s"}`
     : `${ACC_SHOWN.length} of ${ACCOUNTS.length}`;
   if (!ACC_SHOWN.length) {
-    body.innerHTML = `<tr><td colspan="8" class="muted">${ACCOUNTS.length
+    body.innerHTML = `<tr><td colspan="7" class="muted">${ACCOUNTS.length
       ? "No accounts match." : "No accounts yet."}</td></tr>`;
     return;
   }
@@ -711,31 +744,25 @@ function renderAccounts() {
     const owned = (r.contents || []).length;
     const missing = (r.unlinked || []).length;
     const play = !owned ? `<span class="muted">-</span>`
-      : missing ? `<span class="pill used">${owned - missing}/${owned}, ${missing} not linked</span>`
+      : missing ? `<span class="pill wait">${owned - missing}/${owned}, ${missing} not linked</span>`
                 : `<span class="pill open">all ${owned}</span>`;
     const clients = [...new Set(r.clients || [])];
-    const expired = !!(r.reject_code && r.reject_until && !r.effective_reject_code);
-    const refusal = r.effective_reject_code ? stateLabel(r.effective_reject_code) :
-      expired ? `Expired: ${stateLabel(r.reject_code)}` : "Allowed";
+    // Login status stays empty for the usual case: no refusal, no notice.
     const refusalTime = r.reject_until ? ` until ${new Date(r.reject_until).toLocaleString()}` : "";
-    const notice = r.info_code ? stateLabel(r.info_code) : "No Code";
-    const noticeDelivery = r.info_code ?
-      (r.info_repeat === "once" ? " · once" : " · every login") : "";
+    const state = (r.effective_reject_code ? `<div class="account-state"><span class="kind">Refused</span>` +
+        `<span class="pill used" title="${esc(stateLabel(r.effective_reject_code) + refusalTime)}">${esc(stateName(r.effective_reject_code))}</span></div>` : "") +
+      (r.info_code ? `<div class="account-state"><span class="kind">Notice</span>` +
+        `<span class="pill wait" title="${esc(stateLabel(r.info_code) + (r.info_repeat === "once" ? ", once" : ", every login"))}">${esc(stateName(r.info_code))}</span></div>` : "");
     return `<tr>` +
       `<td style="white-space:nowrap"><a class="acct-link mono" data-i="${i}" data-act="detail">${esc(r.polid)}</a>` +
-        `<button class="copy" data-i="${i}" data-act="copy" title="Copy">copy</button></td>` +
+        `<button class="copy" data-i="${i}" data-act="copy" title="Copy the PlayOnline ID" aria-label="Copy the PlayOnline ID">${COPY_ICON}</button></td>` +
       `<td>${esc(r.handle) || "-"}</td>` +
       `<td>${esc(r.contents_label) || "-"}</td>` +
       `<td>${play}</td>` +
       `<td class="clients">${clients.length ? esc(clients.join(", ")) : "never signed in"}</td>` +
-      `<td><div class="account-state"><span class="kind">Refusal</span>` +
-        `<span class="pill ${r.effective_reject_code ? "used" : "open"}" title="${esc(refusal + refusalTime)}">${esc(refusal)}</span></div>` +
-        `<div class="account-state"><span class="kind">Notice</span>` +
-        `<span class="pill open" title="${esc(notice + noticeDelivery)}">${esc(notice)}</span></div></td>` +
-      `<td class="muted" style="white-space:nowrap" title="${esc(r.created_at || "")}">${esc(fmtWhen(r.created_at))}</td>` +
-      `<td><div class="rowacts">` +
-        `<button class="ghost" data-i="${i}" data-act="detail">Open</button>` +
-      `</div></td>` + `</tr>`;
+      `<td>${state}</td>` +
+      `<td class="muted" style="white-space:nowrap" title="${esc(utcTitle(r.created_at))}">${esc(fmtWhen(r.created_at))}</td>` +
+      `</tr>`;
   }).join("");
 }
 
@@ -747,7 +774,6 @@ $("#accountsBody").onclick = (e) => {
   const act = b.dataset.act;
   if (act === "copy") copyText(r.polid, r.polid);
   if (act === "detail") openAccount(r.polid);
-  if (act === "grant") prefillGrant(r);
   if (act === "pw") askPassword(r.polid);
   if (act === "tok") askTokens(r.polid);
   if (act === "refusal") askState(r);
@@ -768,7 +794,8 @@ $("#accCsv").onclick = () => downloadCsv("accounts.csv",
     r.created_at]));
 
 async function kickAccount(polid) {
-  if (!confirm(`Kick all current sessions for ${polid}? The account can log in again unless a refusal is set.`)) return;
+  if (!await uiAsk({ title: `Kick ${polid}?`, ok: "Kick", danger: true,
+                     text: "Every current session is disconnected. They can sign in again unless a login refusal is set." })) return;
   try {
     const result = await api("/api/account-kick", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -785,7 +812,7 @@ const REFUSAL_CODES = [0, 0xDD, 0xE2, 0xE3, 0xE4, 0xE5,
 $("#stateCode").innerHTML = ACCOUNT_STATES.filter(([code]) =>
   REFUSAL_CODES.includes(code)
 ).map(([code, label]) =>
-  `<option value="${code}">${code ? `0x${code.toString(16).toUpperCase()} · ` : ""}${esc(label)}</option>`
+  `<option value="${code}">${esc(label)}${code ? ` (${stateHex(code)})` : ""}</option>`
 ).join("");
 
 function selectState(code) {
@@ -892,13 +919,13 @@ $("#stateGo").onclick = async () => {
 };
 
 // Information codes use the accepted 300 token. A notice can be queued while a
-// refusal is active; a one-time code becomes No Code after delivery.
+// refusal is active; a one-time code becomes None after delivery.
 let INFO_POLID = null;
 const INFO_CODES = [0, 0xDE, 0xDF, 0xE0, 0xE1, 0xE8,
   0xEA, 0xEC, 0xEE, 0xFA];
 $("#infoCode").innerHTML = INFO_CODES.map((code) => {
   const state = accountState(code);
-  return `<option value="${code}">${code ? `0x${code.toString(16).toUpperCase()} · ` : ""}${esc(state ? state[1] : "Undocumented code")}</option>`;
+  return `<option value="${code}">${esc(state ? state[1] : "Undocumented code")}${code ? ` (${stateHex(code)})` : ""}</option>`;
 }).join("");
 
 function selectInformation(code) {
@@ -947,29 +974,19 @@ $("#infoGo").onclick = async () => {
   finally { button.disabled = false; }
 };
 
-// "Content" on a row: aim the grant form at that account and tick what it
-// already owns, so the operator sees the current state before changing it.
-function prefillGrant(r) {
-  GRANT_PK.set(r.polid, r.handle ? `${r.handle} (${r.polid})` : r.polid);
-  const owned = new Set((r.contents || []).map(String));
-  grantChecks().forEach((c) => { c.checked = owned.has(c.value); });
-  const p = $("#grantPanel");
-  p.scrollIntoView({ behavior: "smooth", block: "center" });
-  flash(p);
-  toast(`Loaded ${r.polid}. Titles it owns are ticked.`);
-}
-
 // ---- outside mail ----
 // Per account and OFF by default: sign-up may be open, and an enabled account
 // can mail anyone on the internet from the server's outside domain
 // (POL_EXT_MAIL_DOMAIN). services/extmail.py has the rest.
 function outsideAddr(r) {
-  return r.ext_addr || "(no outside address - no mail name, or POL_EXT_MAIL_DOMAIN unset)";
+  return r.ext_addr || "";
 }
+const extMailWord = (on) => on ? "Turn off outside mail" : "Turn on outside mail";
+const extMailTitle = (r) => outsideAddr(r)
+  ? `Mail to and from the internet as ${outsideAddr(r)}`
+  : "Outside mail isn't set up on this server, or this account has no mail name yet";
 async function toggleExtMail(r, btn) {
   const on = !r.ext_mail;
-  if (on && !confirm(`Let ${r.polid} send and receive mail outside PlayOnline as ` +
-                     `${outsideAddr(r)}?`)) return;
   btn.disabled = true;
   try {
     const res = await api("/api/account-extmail", {
@@ -977,9 +994,8 @@ async function toggleExtMail(r, btn) {
       body: JSON.stringify({ polid: r.polid, enabled: on })
     });
     r.ext_mail = res.ext_mail;
-    btn.textContent = "Ext mail: " + (res.ext_mail ? "on" : "off");
-    btn.className = res.ext_mail ? "act" : "ghost";
-    toast(`Outside mail ${res.ext_mail ? "ON" : "off"} for ${res.polid}`);
+    btn.textContent = extMailWord(res.ext_mail);
+    toast(`Outside mail ${res.ext_mail ? "on" : "off"} for ${res.polid}`);
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; }
 }
@@ -1003,7 +1019,9 @@ async function loadIssues() {
     triFillSelect("#issTitle", ISSUES.map((r) => r.title));
     renderIssues();
     const cur = ISSUES.find((r) => r.id === ISSUE_SEL);
-    if (cur) showIssue(cur, true); else $("#issueDetail").style.display = "none";
+    const was = $("#issueDetail").style.display === "none";
+    if (cur) { showIssue(cur, !was); if (was) triScrollTo("#issueDetail"); }
+    else $("#issueDetail").style.display = "none";
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1017,7 +1035,7 @@ function renderIssues() {
   body.innerHTML = "";
   if (!rows.length) {
     body.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">` +
-      (ISSUES.length ? "No issue reports match." : "No issue reports filed.") + `</td></tr>`;
+      (ISSUES.length ? "No bug reports match." : "No bug reports filed.") + `</td></tr>`;
     return;
   }
   rows.forEach((r) => {
@@ -1027,18 +1045,18 @@ function renderIssues() {
     tr.style.cursor = "pointer";
     tr.className = (triClosed(r) ? "tri-closed" : "") + (r.id === ISSUE_SEL ? " tri-sel-row" : "");
     tr.innerHTML =
-      `<td style="color:var(--muted)">${esc((r.received_at || "").slice(0, 19).replace("T", " "))}</td>` +
+      `<td class="muted" style="white-space:nowrap" title="${esc(utcTitle(r.received_at))}">${esc(fmtWhen(r.received_at))}</td>` +
       `<td><b>${esc(r.handle) || "-"}</b><br>` +
         `<span style="color:var(--muted)">${esc(r.host) || ""}</span></td>` +
       `<td>${esc(r.title) || "-"}</td>` +
-      `<td>${esc(first) || "<i>(no description)</i>"}</td>` +
+      `<td><div class="clamp2">${esc(first) || "<i>(no description)</i>"}</div></td>` +
       // The honest-negative column. A bundle whose lines could not be tied to
       // this client is the case you must not read as "the server was quiet".
       `<td>${w.correlation_warning
-        ? `<span title="${esc(w.correlation_warning)}">WARNING: ${esc(w.correlated_lines || 0)}</span>`
-        : esc(w.correlated_lines ?? "-")}</td>` +
+        ? `<span class="muted" title="${esc(w.correlation_warning)}">none matched</span>`
+        : w.correlated_lines != null ? `${esc(w.correlated_lines)} line${w.correlated_lines === 1 ? "" : "s"}` : "-"}</td>` +
       `<td>${triChip(r)}</td>`;
-    tr.onclick = () => { ISSUE_SEL = r.id; renderIssues(); showIssue(r); };
+    tr.onclick = () => { ISSUE_SEL = r.id; renderIssues(); showIssue(r); triScrollTo("#issueDetail"); };
     body.appendChild(tr);
   });
 }
@@ -1124,7 +1142,9 @@ async function loadReports() {
     triFillSelect("#repTitle", REPORTS.map((r) => r.application));
     renderReports();
     const cur = REPORTS.find((r) => r.id === REPORT_SEL);
-    if (cur) showReport(cur); else $("#reportLogPanel").style.display = "none";
+    const was = $("#reportLogPanel").style.display === "none";
+    if (cur) { showReport(cur, !was); if (was) triScrollTo("#reportLogPanel"); }
+    else $("#reportLogPanel").style.display = "none";
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1146,13 +1166,13 @@ function renderReports() {
     tr.style.cursor = "pointer";
     tr.className = (triClosed(r) ? "tri-closed" : "") + (r.id === REPORT_SEL ? " tri-sel-row" : "");
     tr.innerHTML =
-      `<td style="color:var(--muted)">${esc((r.received_at || "").slice(0, 19).replace("T", " "))}</td>` +
+      `<td class="muted" style="white-space:nowrap" title="${esc(utcTitle(r.received_at))}">${esc(fmtWhen(r.received_at))}</td>` +
       `<td><b>${esc(r.suspect) || "-"}</b></td>` +
       `<td>${esc(r.application) || "-"}</td>` +
       `<td><code class="mono">${esc(r.from) || "-"}</code></td>` +
-      `<td>${esc(r.explanation) || "-"}</td>` +
+      `<td><div class="clamp2">${esc(r.explanation) || "-"}</div></td>` +
       `<td>${triChip(r)}</td>`;
-    tr.onclick = () => { REPORT_SEL = r.id; renderReports(); showReport(r); };
+    tr.onclick = () => { REPORT_SEL = r.id; renderReports(); showReport(r); triScrollTo("#reportLogPanel"); };
     body.appendChild(tr);
   });
 }
@@ -1160,7 +1180,8 @@ $("#repTitle").addEventListener("change", () => renderReports());
 $("#repSearch").addEventListener("input", () => renderReports());
 
 // The attached transcript is the client's own, so it is shown verbatim.
-function showReport(r) {
+// `keep`: a reload of the one already open, which keeps a half-written answer.
+function showReport(r, keep) {
   $("#reportLogWho").textContent = r.suspect || "(unnamed)";
   $("#reportExpl").textContent = r.explanation || "(no explanation)";
   $("#reportLogHint").hidden = !r.log;
@@ -1177,10 +1198,11 @@ function showReport(r) {
   };
   $("#repReplyTo").textContent = r.from || "(no address)";
   repPaintReplies(r);
-  $("#repReplyText").value = "";
-  const send = async (b, status) => {
+  if (!keep) { $("#repReplyText").value = ""; $("#repReplyClose").checked = false; }
+  const send = async (b) => {
     const text = $("#repReplyText").value.trim();
     if (!text) { toast("Write a message first", true); return; }
+    const status = !triClosed(r) && $("#repReplyClose").checked ? "resolved" : null;
     b.disabled = true;
     try {
       const out = await api("/api/report-reply", { method: "POST",
@@ -1190,16 +1212,17 @@ function showReport(r) {
       if (status) Object.assign(r, { status, status_by: SESSION.user || "you",
                                      status_at: Date.now() / 1000 });
       $("#repReplyText").value = "";
-      toast(`Mail sent to ${out.to}`);
+      $("#repReplyClose").checked = false;
+      toast(`Mail sent to ${out.to}` + (status ? ", report marked resolved" : ""));
       repPaintReplies(r);
       triPaint("rep", "reports", r, () => renderReports());
       renderReports();
+      loadInboxCounts();
     } catch (err) { toast(err.message, true); }
     b.disabled = false;
   };
-  $("#repReplySend").onclick = (e) => send(e.currentTarget, null);
-  $("#repReplyResolve").onclick = (e) => send(e.currentTarget, "resolved");
-  $("#repReplyResolve").hidden = triClosed(r);
+  $("#repReplySend").onclick = (e) => send(e.currentTarget);
+  $("#repReplyCloseWrap").hidden = triClosed(r);
   $("#reportLogPanel").style.display = "";
 }
 
@@ -1215,7 +1238,13 @@ function repPaintReplies(r) {
 // the player nothing; it is how the team sees what is still waiting.
 const TRI_LABEL = { open: "Open", resolved: "Resolved", wontfix: "Won't fix" };
 const triClosed = (r) => !!r.status && r.status !== "open";
-const triMatch = (r, f) => f === "all" || (f === "closed") === triClosed(r);
+// "waiting": open and nobody has answered it yet (a player report's mailed answers)
+const triMatch = (r, f) => f === "all" ||
+  (f === "waiting" ? !triClosed(r) && !(r.replies || []).length : (f === "closed") === triClosed(r));
+// The detail sits under the list: bring it into view when a row opens it.
+function triScrollTo(sel) {
+  requestAnimationFrame(() => { const el = $(sel); if (el && el.style.display !== "none") el.scrollIntoView({ block: "start", behavior: "smooth" }); });
+}
 const triChip = (r) =>
   `<span class="tri-st ${esc(r.status || "open")}">${TRI_LABEL[r.status] || "Open"}</span>`;
 function triCount(shown, all) {
@@ -1241,7 +1270,7 @@ function triPaint(pfx, kind, r, after) {
   const btn = (s, label, cls) => `<button class="${cls} sm" data-st="${s}">${label}</button>`;
   const acts = $(`#${pfx}StActs`);
   acts.innerHTML = st === "open"
-    ? btn("resolved", "Mark resolved", "act") + btn("wontfix", "Won't fix", "ghost")
+    ? btn("resolved", "Mark resolved", "act") + btn("wontfix", "Won't fix", "ghost") + btn("open", "Save note", "ghost")
     : btn("open", "Reopen", "ghost") + btn(st, "Save note", "ghost");
   acts.onclick = async (e) => {
     const b = e.target.closest("button[data-st]");
@@ -1258,6 +1287,7 @@ function triPaint(pfx, kind, r, after) {
             : `Marked ${TRI_LABEL[status].toLowerCase()}`);
       triPaint(pfx, kind, r, after);
       after();
+      loadInboxCounts();
     } catch (err) { toast(err.message, true); b.disabled = false; }
   };
 }
@@ -1606,18 +1636,43 @@ async function loadGmCalls() {
   gmFollowTicketRoom();
 }
 
+// The Inbox's words for where a case stands: "open" on the desk is a player waiting on us.
+const GM_ST_WORD = { open: "Waiting", answered: "Answered", closed: "Closed" };
+const gmStWord = (s) => GM_ST_WORD[s] || s;
+function gmFilterOk(r, f) {
+  if (f === "waiting") return r.status === "open";
+  if (f === "closed") return r.status === "closed";
+  if (f === "all") return true;
+  return r.status !== "closed";
+}
+// "17 min ago" lives in <span data-ago="unix seconds"> and is updated in place, so the
+// passing of time never rebuilds the list or the request (and never takes the caret).
+function gmAgoTick() {
+  document.querySelectorAll("#tab-gmcalls [data-ago]").forEach((el) => {
+    const s = gmAgo(+el.dataset.ago);
+    if (el.textContent !== s) el.textContent = s;
+  });
+}
+const gmAgoSpan = (t) => `<span data-ago="${+t || 0}">${esc(gmAgo(t))}</span>`;
+// Nothing picked: the list takes the whole width and the reading side is not drawn at all.
+function gmLayout() {
+  const r = GM_CALLS.find((x) => x.id === GM_SEL);
+  $("#tab-gmcalls .gm-grid").classList.toggle("solo", !r);
+}
 function gmRenderList() {
-  const shown = GM_CALLS.filter((r) => GM_FILTER === "all" || r.status !== "closed");
-  const sig = GM_FILTER + "|" + GM_SEL + "|" + shown.map((r) =>
-    [r.id, r.status, r.connected, gmAgo(gmIso(r.received_at))].join(",")).join(";");
-  if (sig === GM_LIST_SIG) return;
+  const shown = GM_CALLS.filter((r) => gmFilterOk(r, GM_FILTER));
+  const sig = GM_FILTER + "|" + GM_SEL + "|" + GM_CALLS.length + "|" + shown.map((r) =>
+    [r.id, r.status, r.connected, r.received_at].join(",")).join(";");
+  gmLayout();
+  if (sig === GM_LIST_SIG) return gmAgoTick();
   GM_LIST_SIG = sig;
-  document.querySelectorAll(".gm-filter button").forEach(
+  document.querySelectorAll("#gmFilter button").forEach(
     (b) => b.classList.toggle("on", b.dataset.f === GM_FILTER));
   if (!shown.length) {
-    $("#gmList").innerHTML = `<div class="gm-none">` + (GM_CALLS.length
-      ? "Nothing open. Every request has been closed."
-      : "No GM calls yet. They appear here the moment a player submits one.") + `</div>`;
+    $("#gmList").innerHTML = `<div class="gm-none">` + (!GM_CALLS.length
+      ? "No GM calls yet. They appear here the moment a player submits one."
+      : { waiting: "Nobody is waiting on us.", open: "Nothing open.", closed: "Nothing closed." }[GM_FILTER]
+        || "Nothing here.") + `</div>`;
     return;
   }
   $("#gmList").innerHTML = shown.map((r) =>
@@ -1625,9 +1680,9 @@ function gmRenderList() {
       `<div class="gm-item-top">` +
         `<span class="gm-item-who">${r.connected ? `<span class="gm-dot" title="On a GM Call now"></span>` : ""}` +
           `${esc(gmClean(r.handle) || r.caller || "") || "(no handle)"}</span>` +
-        `<span class="gm-item-when">${esc(gmAgo(gmIso(r.received_at)))}</span></div>` +
+        `<span class="gm-item-when">${gmAgoSpan(gmIso(r.received_at))}</span></div>` +
       `<div class="gm-item-subj">${esc(gmClean(r.subject)) || "(no subject)"}</div>` +
-      `<div><span class="gm-st ${esc(r.status)}">${esc(r.status)}</span></div>` +
+      `<div><span class="gm-st ${esc(r.status)}">${esc(gmStWord(r.status))}</span></div>` +
     `</div>`).join("");
 }
 
@@ -1645,7 +1700,7 @@ function gmFollowTicketRoom() {
   const t = GM_CALLS.find((x) => x.id === GM_SEL);
   gmSwitchRoom(t ? t.room : "");
 }
-document.querySelectorAll(".gm-filter button").forEach((b) => {
+document.querySelectorAll("#gmFilter button").forEach((b) => {
   b.onclick = () => {
     GM_FILTER = b.dataset.f;
     try { localStorage.setItem("gmFilter", GM_FILTER); } catch (e) {}
@@ -1655,10 +1710,17 @@ document.querySelectorAll(".gm-filter button").forEach((b) => {
 
 function gmRenderTicket() {
   const r = GM_CALLS.find((x) => x.id === GM_SEL);
-  const sig = r ? [r.id, r.status, r.connected, gmAgo(gmIso(r.received_at)),
-                   r.knocked_at ? gmAgo(r.knocked_at) : "",
+  // No relative times in here: they tick in place (gmAgoTick). With them in, the poll
+  // rebuilt the request once a minute and took the caret out of the box being typed in.
+  const sig = r ? [r.id, r.status, r.connected, r.received_at, r.knocked_at || "",
                    (r.invited || []).map((i) => i.handle).join("|")].join(",") : "";
-  if (sig === GM_TICKET_SIG) return;
+  gmLayout();
+  if (sig === GM_TICKET_SIG) return gmAgoTick();
+  // A change from the poll waits while someone is typing in the request's own boxes (the
+  // invite search, the resolution); a click of ours clears GM_TICKET_SIG and redraws at once.
+  const act = document.activeElement;
+  if (GM_TICKET_SIG && r && GM_TICKET_SIG.split(",")[0] === r.id && act
+      && act !== document.body && $("#gmTActions").contains(act)) return;
   GM_TICKET_SIG = sig;
   $("#gmEmpty").hidden = !!r;
   $("#gmTicket").hidden = !r;
@@ -1667,17 +1729,17 @@ function gmRenderTicket() {
   $("#gmTSubj").textContent = gmClean(r.subject) || "(no subject)";
   $("#gmTChips").innerHTML =
     (r.connected ? `<span class="gm-st live">On a GM Call now</span>` : "") +
-    `<span class="gm-st ${esc(r.status)}">${esc(r.status)}</span>` +
-    (r.knocked_at ? `<span class="gm-st live">Knocked ${esc(gmAgo(r.knocked_at))}</span>` : "");
+    `<span class="gm-st ${esc(r.status)}">${esc(gmStWord(r.status))}</span>` +
+    (r.knocked_at ? `<span class="gm-st live">Knocked ${gmAgoSpan(r.knocked_at)}</span>` : "");
   const t = gmIso(r.received_at);
   const meta = [
-    r.content_label || "",
-    r.request_no != null ? `request #${r.request_no}` : "",
-    t ? `${gmDay(t)} ${gmTime(t)} (${gmAgo(t)})` : "",
-    r.polid ? `POL ID ${r.polid}` : "",
+    esc(r.content_label || ""),
+    r.request_no != null ? `request #${esc(r.request_no)}` : "",
+    t ? `${esc(gmDay(t))} ${esc(gmTime(t))} (${gmAgoSpan(t)})` : "",
+    r.polid ? `POL ID ${esc(r.polid)}` : "",
   ].filter(Boolean);
   const reps = r.reports || [];
-  $("#gmTMeta").innerHTML = meta.map((m) => `<span>${esc(m)}</span>`).join("") +
+  $("#gmTMeta").innerHTML = meta.map((m) => `<span>${m}</span>`).join("") +
     (reps.length && can("reports") ? `<span><a href="#" id="gmToRep">${reps.length} report${reps.length === 1 ? "" : "s"} from this player</a></span>` : "");
   const toRep = $("#gmToRep");
   if (toRep) toRep.onclick = (e) => { e.preventDefault(); REPORT_SEL = reps[0]; location.hash = "#reports"; };
@@ -2098,7 +2160,6 @@ document.addEventListener("keydown", (e) => {
 function grantChecks() {
   return [...document.querySelectorAll("#grantChips input")];
 }
-$("#grantAllBtn").onclick = () => grantChecks().forEach((c) => { c.checked = true; });
 $("#grantNoneBtn").onclick = () => grantChecks().forEach((c) => { c.checked = false; });
 
 // The account to grant to: found by PlayOnline ID or handle (/api/accounts/find).
@@ -2135,17 +2196,23 @@ $("#revokeBtn").onclick = async () => {
   const codes = grantChecks().filter((c) => c.checked).map((c) => +c.value);
   if (!polid) return toast("Which account?", true);
   if (!codes.length) return toast("Pick at least one content to revoke", true);
-  const names = codes.map((c) => CONTENT[c] || c).join(", ");
-  if (!confirm(`Revoke ${names} from ${polid}?\n\nTheir characters are removed from the launcher. Granting again restores them.`)) return;
+  if (!await askRevoke(polid, codes)) return;
   try {
     const r = await api("/api/revoke", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ polid, content_codes: codes })
     });
     toast(`Revoked from ${r.polid}`);
+    grantChecks().forEach((c) => { c.checked = false; });
     loadAccounts();
   } catch (e) { toast(e.message, true); }
 };
+// the one question before content is taken away, from the form or the account window
+function askRevoke(polid, codes) {
+  const names = codes.map((c) => CONTENT[c] || c).join(", ");
+  return uiAsk({ title: `Revoke ${names} from ${polid}?`, ok: "Revoke", danger: true,
+                 text: "Its characters are removed from the launcher. Granting it again brings them back." });
+}
 
 // ---- PML preview ----
 // A page browser on the left, the page drawn with the Viewer's own font in the
@@ -2310,7 +2377,9 @@ function renderLayerSwitch(layers) {
 // ---- zoom ----
 function fitStage() {
   const boxEl = $("#pvStageBox"), sc = $("#pvStageScale");
-  let z = ZOOM === "fit" ? Math.max(0.5, (boxEl.clientWidth - 22) / 640) : +ZOOM;
+  // Fit: the whole page in view, as wide as the box allows and no taller than the window below the bar
+  const room = window.innerHeight - Math.max(0, boxEl.getBoundingClientRect().top + window.scrollY) - 34;
+  let z = ZOOM === "fit" ? Math.max(0.5, Math.min((boxEl.clientWidth - 22) / 640, room / 480)) : +ZOOM;
   if (ZOOM === "fit") z = Math.min(z, 2.5);
   sc.style.transform = `scale(${z})`;
   sc.style.width = 640 * z + "px";
@@ -3153,16 +3222,29 @@ function renderNewsList() {
     const flags = [];
     if (!(it.body || "").trim() && !(it.link || "").trim()) flags.push("no story");
     if (it.status) flags.push("status");
+    // the order players see them in: up and down on the row itself
+    const mv = `<span class="nw-mv"><button type="button" data-nwmove="-1" title="Move up" aria-label="Move up"${i === 0 ? " disabled" : ""}>&#9650;</button>`
+      + `<button type="button" data-nwmove="1" title="Move down" aria-label="Move down"${i === NEWS.length - 1 ? " disabled" : ""}>&#9660;</button></span>`;
     return `<div class="nw-item${i === NEWS_SEL ? " active" : ""}" data-i="${i}">` +
       `${newsBadge("ticker:" + (it.content || "playonline")) || "<span></span>"}` +
       `<div style="min-width:0"><div class="t">${esc(it.title || "(no headline)")}</div>` +
       `<div class="m">${esc(it.date || "no date")} · ${esc(cat)}</div></div>` +
-      `<div>${flags.map((f) => `<span class="flag">${esc(f)}</span>`).join(" ")}</div></div>`;
+      `<div>${flags.map((f) => `<span class="flag">${esc(f)}</span>`).join(" ")}${mv}</div></div>`;
   }).join("") + renderNewsAuto();
 }
 $("#newsList").onclick = (e) => {
   const row = e.target.closest(".nw-item");
   if (!row || row.classList.contains("nw-auto")) return;
+  const mv = e.target.closest("[data-nwmove]");
+  if (mv) {
+    if (mv.disabled) return;
+    readNewsForm();
+    NEWS_SEL = +row.dataset.i;
+    newsMove(+mv.dataset.nwmove)();
+    bindNewsForm();
+    renderNewsPreview();
+    return;
+  }
   readNewsForm();
   NEWS_SEL = +row.dataset.i;
   renderNewsList();
@@ -3191,6 +3273,7 @@ function bindNewsForm() {
   $("#nKind").value = it.kind || "info";
   $("#nContent").value = it.content || "playonline";
   $("#nBody").value = it.body || "";
+  growNewsBody();
   $("#nLink").value = it.link || "";
   $("#nStatus").checked = !!it.status;
   $("#nwMore").open = !!(it.link || it.status);
@@ -3219,6 +3302,16 @@ function readNewsForm() {
   it.status = $("#nStatus").checked;
 }
 
+// the story box grows with what is written, up to most of the window
+function growNewsBody() {
+  const t = $("#nBody");
+  if (!t || !t.offsetParent) return;
+  t.style.height = "auto";
+  const most = Math.round(window.innerHeight * 0.7);
+  t.style.height = Math.min(t.scrollHeight + 2, most) + "px";
+  t.style.overflowY = t.scrollHeight + 2 > most ? "auto" : "hidden";
+}
+$("#nBody").addEventListener("input", growNewsBody);
 ["nTitle", "nDate", "nBody", "nLink"].forEach((id) => $("#" + id).addEventListener("input", () => {
   readNewsForm(); newsMarkDirty(); renderNewsList(); renderNewsEffect();
   if (id === "nDate") showDateHint();
@@ -3295,8 +3388,6 @@ const newsMove = (d) => () => {
   NEWS_SEL = j;
   newsMarkDirty(); renderNewsList();
 };
-$("#nUpBtn").onclick = newsMove(-1);
-$("#nDownBtn").onclick = newsMove(1);
 window.addEventListener("pagehide", () => {
   if (!NEWS_DIRTY || !NEWS_DRAFT_KEY) return;
   clearTimeout(NEWS_DRAFT_TIMER);
@@ -3333,12 +3424,28 @@ $("#newsPublishBtn").onclick = async () => {
     $("#nwPubSummary").textContent = n
       ? `${n} file${n === 1 ? "" : "s"} will be updated on the server. Players see the change the next time the Viewer loads the news.`
       : "Nothing to publish: players already see these announcements.";
-    $("#nwPubList").innerHTML = [...r.written.map((p) => ["update", p]), ...r.pruned.map((p) => ["remove", p])]
-      .map(([w, p]) => `<div><span>${w}</span><span class="mono" style="font-size:11.5px">${esc(p)}</span></div>`).join("");
+    // each file by what players see it as; its path is in the tooltip
+    $("#nwPubList").innerHTML = [...r.written.map((p) => ["Update", p]), ...r.pruned.map((p) => ["Remove", p])]
+      .map(([w, p]) => `<div title="${esc(p)}"><span>${w}</span><span>${esc(newsFileWords(p))}</span></div>`).join("");
     $("#nwPubGo").disabled = !n;
     $("#nwPubModal").classList.add("show");
   } catch (e) { toast("Publish failed: " + e.message, true); }
 };
+// a published file, in words: "Login ticker, en-US"
+function newsFileWords(path) {
+  const parts = String(path).split("/"), file = parts[parts.length - 1] || path, loc = parts[parts.length - 2] || "";
+  const lang = /^[a-z]{2}-[A-Z]{2}$/.test(loc) ? ", " + loc : "";
+  if (file === "latestnews.pml") return "Login ticker" + lang;
+  if (/\/snews\//.test(path) && file === "index.pml") return "Login news page" + lang;
+  if (/\/pml\/info\/news0\.pml$/.test(path)) return "French and German copy";
+  const n = file.match(/^news(\d+)\.pml$/);
+  if (n && NEWS_META) {
+    const key = Object.keys(NEWS_META.content_ids || {}).find((k) => String(NEWS_META.content_ids[k]) === n[1]);
+    return `Information section, ${(NEWS_META.contents || {})[key] || "service " + n[1]}${lang}`;
+  }
+  if (/\/ntool\//.test(path)) return "Story page" + lang;
+  return file;
+}
 $("#nwPubCancel").onclick = () => $("#nwPubModal").classList.remove("show");
 $("#nwPubModal").onclick = (e) => { if (e.target === $("#nwPubModal")) $("#nwPubModal").classList.remove("show"); };
 $("#nwPubGo").onclick = async () => {
@@ -3354,6 +3461,7 @@ $("#nwPubGo").onclick = async () => {
 
 // The maintenance warning (maintnotice.py, core/broadcast.py).
 async function loadMaint() {
+  maintSubjectCut();
   try {
     const j = await api("/api/maintenance");
     renderMaintChoices(j);
@@ -3369,14 +3477,25 @@ async function loadMaint() {
       : `No notice up (${j.files.length} title pages can show one).`;
   } catch (e) { $("#maintStatus").textContent = ""; }
 }
-// The title folders a notice can go on, by the names people know them by.
-const MAINT_TITLE_NAMES = { ff11: "FFXI", tetra: "Tetra Master", jan: "JongHoLow",
-                            fmo: "Front Mission Online", dc: "Dirge of Cerberus", fe: "Fantasy Earth" };
+// The title folders a notice can go on, by the game's own title from its module (games.js
+// loads them); a folder named differently from its module's key is matched here.
+const MAINT_FOLDER_KEY = { ff11: "ffxi", tetra: "tm", dc: "doc" };
+let MAINT_GAME_TITLES = {};
+function maintTitleName(t) {
+  const key = MAINT_FOLDER_KEY[t] || t;
+  const g = (typeof GAMES !== "undefined" ? GAMES : []).find((x) => x.key === key);
+  return g ? g.title : MAINT_GAME_TITLES[key] || t;
+}
 function renderMaintChoices(j) {
   const keep = new Set(maintTitles());
-  $("#maintTitles").innerHTML = (j.titles || []).map((t) =>
-    `<label class="chip"><input type="checkbox" value="${esc(t)}"${keep.has(t) ? " checked" : ""}>` +
-    `${esc(MAINT_TITLE_NAMES[t] || t)}</label>`).join("") || `<span class="muted">No title pages found.</span>`;
+  const draw = () => {
+    $("#maintTitles").innerHTML = (j.titles || []).map((t) =>
+      `<label class="chip"><input type="checkbox" value="${esc(t)}"${keep.has(t) ? " checked" : ""}>` +
+      `${esc(maintTitleName(t))}</label>`).join("") || `<span class="muted">No title pages found.</span>`;
+  };
+  draw();
+  if (!GAMES_LOADED && canSeeGames()) fetchGames(false).then(() => { keep.clear(); maintTitles().forEach((t) => keep.add(t)); draw(); });
+  MAINT_GAME_TITLES = Object.assign({}, j.games || {});
   const games = Object.entries(j.games || {});
   $("#maintGamesWrap").hidden = !games.length;
   if ($("#maintGames").dataset.done !== "1" || $("#maintGames").children.length !== games.length) {
@@ -3385,6 +3504,16 @@ function renderMaintChoices(j) {
     $("#maintGames").dataset.done = "1";
   }
 }
+// the message to everyone online shows only the subject's first 15 characters: say so as it is typed
+function maintSubjectCut() {
+  const el = $("#maintSubjectCut");
+  if (!el) return;
+  const v = $("#maintSubject").value.trim();
+  el.textContent = coreOff() ? "" : v.length > 15
+    ? `The message to everyone online shows the first 15 characters: "${v.slice(0, 15)}".`
+    : "The message to everyone online shows up to 15 characters of it.";
+}
+$("#maintSubject").addEventListener("input", maintSubjectCut);
 const maintTitles = () => [...document.querySelectorAll("#maintTitles input:checked")].map((i) => i.value);
 const maintGames = () => [...document.querySelectorAll("#maintGames input:checked")].map((i) => i.value);
 $("#maintPostBtn").onclick = async () => {
@@ -3411,13 +3540,13 @@ $("#maintMsgBtn").onclick = async () => {
   if (!subject || !text) return toast("A message needs a subject and a text.", true);
   if (lite && !maintGames().length) return toast("Tick at least one game.", true);
   if (!confirm(lite ? `Announce "${subject}" in ${maintGames().length} game${maintGames().length === 1 ? "" : "s"} now?`
-                    : `Send "${subject}" to everyone online now? The subject is cut to 15 characters.`)) return;
+                    : `Send "${subject}" to everyone online now?`)) return;
   try {
     const r = await post("/api/maintenance", { action: "message", subject, text, games: maintGames() });
     if (lite) {
       const g = Object.entries(r.games || {}), failed = g.filter(([, v]) => !v.ok);
       if (!failed.length) toast(`Announced in ${g.length} game${g.length === 1 ? "" : "s"}.`);
-      else toast(`Announcing failed in ${failed.map(([k, v]) => k + " (" + v.msg + ")").join(", ")}`, true);
+      else toast(`Announcing failed in ${failed.map(([k, v]) => maintTitleName(k) + " (" + v.msg + ")").join(", ")}`, true);
       return;
     }
     const sent = `Sent ${r.messages} message${r.messages === 1 ? "" : "s"} to ${r.members} member${r.members === 1 ? "" : "s"} online`;
@@ -3425,7 +3554,7 @@ $("#maintMsgBtn").onclick = async () => {
     const failed = g.filter(([, v]) => !v.ok);
     if (!g.length) toast(sent);
     else if (!failed.length) toast(`${sent}, and announced in ${g.length} game${g.length === 1 ? "" : "s"}.`);
-    else toast(`${sent}, but announcing failed in ${failed.map(([k, v]) => k + " (" + v.msg + ")").join(", ")}`, true);
+    else toast(`${sent}, but announcing failed in ${failed.map(([k, v]) => maintTitleName(k) + " (" + v.msg + ")").join(", ")}`, true);
   } catch (e) { toast("Message failed: " + e.message, true); }
 };
 
@@ -3528,12 +3657,13 @@ async function loadOverview() {
          `${newAcc} new this week` + (notPlayable.length ? `, ${notPlayable.length} not playable` : ""),
          notPlayable.length ? "warn" : "") +
     card("codes", "Unused codes", codes ? unused : "?", `of ${C.length} total`) +
+    // in the Inbox's order: GM calls, player reports, bug reports
     card("gmcalls", "Open GM calls", calls ? openCalls.length : "?", duty,
          openCalls.length ? "warn" : "") +
-    card("issues", "Open bug reports", issues ? openI : "?",
-         (newI ? `${newI} new, ` : "") + `${I.length} in total`, newI ? "warn" : "") +
     card("reports", "Open player reports", reports ? openR : "?",
          (newR ? `${newR} new, ` : "") + `${R.length} in total`, newR ? "warn" : "") +
+    card("issues", "Open bug reports", issues ? openI : "?",
+         (newI ? `${newI} new, ` : "") + `${I.length} in total`, newI ? "warn" : "") +
     card("news", "Announcements", news && news.items ? news.items.length : "?",
          news && news.writable === false ? "publishing unavailable" : "published",
          news && news.writable === false ? "warn" : "");
@@ -3550,8 +3680,8 @@ async function loadOverview() {
   openCalls.slice(0, 4).forEach((r) => att.push(li("gmcalls",
     `GM call from <b>${esc(r.handle || "?")}</b>: ${esc(r.subject || "(no subject)")}`,
     esc(ago(isoMs(r.received_at))))));
-  if (newI) att.push(li("issues", `${newI} new bug report${newI === 1 ? "" : "s"}`, ""));
   if (newR) att.push(li("reports", `${newR} new player report${newR === 1 ? "" : "s"}`, ""));
+  if (newI) att.push(li("issues", `${newI} new bug report${newI === 1 ? "" : "s"}`, ""));
   notPlayable.slice(0, 4).forEach((r) => att.push(li("accounts",
     `<code class="mono">${esc(r.polid)}</code> has titles that cannot be played yet`,
     `${(r.unlinked || []).length} not linked`, ` data-q="${esc(r.polid)}"`)));
@@ -3648,20 +3778,20 @@ function markSeen(kind) {
   store.set("seen:" + kind, String(Date.now()));
   setBadge(kind === "issues" ? "#issuesBadge" : "#reportsBadge", 0);
 }
+// The Inbox's sub-tab badges count what is waiting on us, the same number as the Inbox's own
+// filter (loadInboxCounts in inbox.js); "new since you looked" stays in the Overview's list.
+const INBOX_COUNTED = new Set(["#reportsBadge", "#issuesBadge"]);
 function setBadge(sel, n) {
+  if (INBOX_COUNTED.has(sel)) return;
   const b = $(sel);
   if (!b) return;
   b.textContent = n; b.hidden = !n;
 }
 async function loadBadges() {
   if (!SESSION.authenticated && SESSION.auth_required !== false) return;
-  if (!can("reports")) return;
-  const [i, r] = await Promise.all([api("/api/issues").catch(() => null),
-                                    api("/api/reports").catch(() => null)]);
-  if (Array.isArray(i) && CUR_TAB !== "issues") setBadge("#issuesBadge", countNew("issues", i));
-  if (Array.isArray(r) && CUR_TAB !== "reports") setBadge("#reportsBadge", countNew("reports", r));
+  loadInboxCounts();
 }
-setInterval(loadBadges, 60000);
+setInterval(loadBadges, 30000);
 
 // ---- signed-in browsers ----
 function uaName(ua) {
@@ -3679,7 +3809,14 @@ async function loadSessions() {
   let rows;
   try { rows = await api("/api/sessions"); } catch (e) { return; }
   $("#sessCount").textContent = `${rows.length} signed in`;
-  $("#sessOthers").disabled = rows.filter((r) => !r.current).length === 0;
+  // the owner's "others" are the owner's own browsers; moderators have their own button
+  const meRole = isOwner() ? "owner" : "mod";
+  const mine = rows.filter((r) => !r.current && (r.role || "owner") === meRole);
+  const mods = isOwner() ? rows.filter((r) => r.role === "mod") : [];
+  $("#sessOthers").hidden = !mine.length;
+  $("#sessOthers").textContent = `Sign out my other browsers (${mine.length})`;
+  $("#sessMods").hidden = !mods.length;
+  $("#sessMods").textContent = `Sign out all moderators (${mods.length})`;
   if (!rows.length) {
     body.innerHTML = `<tr><td colspan="6" class="muted">No sessions.</td></tr>`;
     return;
@@ -3698,7 +3835,8 @@ async function loadSessions() {
 $("#sessBody").onclick = async (e) => {
   const b = e.target.closest("button[data-sid]");
   if (!b) return;
-  if (b.dataset.cur && !confirm("Sign out this browser?")) return;
+  if (b.dataset.cur && !(await uiAsk({ title: "Sign out this browser?", text: "You will need to sign in again here.",
+                                       ok: "Sign out" }))) return;
   b.disabled = true;
   try {
     const r = await api("/api/sessions/revoke", {
@@ -3710,20 +3848,33 @@ $("#sessBody").onclick = async (e) => {
     loadSessions();
   } catch (err) { b.disabled = false; toast(err.message, true); }
 };
-$("#sessOthers").onclick = async () => {
-  if (!confirm("Sign out every other browser?")) return;
+async function sessRevokeMany(body, ask) {
+  if (!(await uiAsk(ask))) return;
   try {
-    const r = await api("/api/sessions/revoke", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ others: true })
-    });
-    toast(`Signed out ${r.revoked} other session${r.revoked === 1 ? "" : "s"}`);
+    const r = await post("/api/sessions/revoke", body);
+    toast(`Signed out ${r.revoked} browser${r.revoked === 1 ? "" : "s"}`);
     loadSessions();
   } catch (e) { toast(e.message, true); }
-};
+}
+$("#sessOthers").onclick = () => sessRevokeMany({ others: true }, {
+  title: "Sign out your other browsers?", ok: "Sign out",
+  text: isOwner() ? "Every other browser signed in as the owner is signed out. Moderators stay signed in."
+                  : "Every other browser signed in as you is signed out." });
+$("#sessMods").onclick = () => sessRevokeMany({ mods: true }, {
+  title: "Sign out all moderators?", ok: "Sign out moderators", danger: true,
+  text: "Every moderator is signed out of every browser. They can sign in again with their passwords." });
 
 // ---- refresh + keyboard ----
-$("#refreshBtn").onclick = () => { loadTab(CUR_TAB, true); toast("Refreshed"); };
+$("#refreshBtn").onclick = async () => {
+  const b = $("#refreshBtn");
+  b.disabled = true;
+  loadTab(CUR_TAB, true);
+  // "Refreshed" once what the tab asked for is back (or after 15 s, whatever is still out)
+  await new Promise((ok) => setTimeout(ok, 50));
+  for (let i = 0; i < 150 && API_BUSY > 0; i++) await new Promise((ok) => setTimeout(ok, 100));
+  b.disabled = false;
+  toast("Refreshed");
+};
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const t = e.target;
@@ -3746,27 +3897,26 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---- moderators (owner) ----
-let MODS = [], MOD_LABELS = {}, MOD_EDIT = null;
+let MODS = [], MOD_LABELS = {}, MOD_SHORT = {}, MOD_EDIT = null;
 const post = (u, body) => api(u, { method: "POST", headers: { "Content-Type": "application/json" },
                                    body: JSON.stringify(body) });
 
 async function loadMods() {
   let r;
   try { r = await api("/api/mods"); } catch (e) { return; }
-  MODS = r.mods || []; MOD_LABELS = r.perm_labels || {};
+  MODS = r.mods || []; MOD_LABELS = r.perm_labels || {}; MOD_SHORT = r.perm_short || {};
   $("#modCount").textContent = `${MODS.length} moderator${MODS.length === 1 ? "" : "s"}`;
   $("#modAdd").disabled = !r.owner_ready;
   $("#modAdd").title = r.owner_ready ? "" : "Set an owner password first";
   const body = $("#modsBody");
   if (!MODS.length) {
     body.innerHTML = `<tr><td colspan="6" class="muted">No moderators. ` +
-      `${r.owner_ready ? "" : "Set an owner password above before adding moderators."}</td></tr>`;
+      `${r.owner_ready ? "" : `Set an owner password on the <a href="#security">Sign-in</a> tab before adding moderators.`}</td></tr>`;
     return;
   }
-  const short = { gm: "GM desk", codes: "Codes", reports: "Reports", accounts_view: "Look up accounts" };
   body.innerHTML = MODS.map((m, i) =>
     `<tr><td><b>${esc(m.username)}</b></td>` +
-    `<td>${m.perms.length ? permChips(m.perms, short) : `<span class="muted">nothing yet</span>`}</td>` +
+    `<td>${m.perms.length ? permChips(m.perms) : `<span class="muted">nothing yet</span>`}</td>` +
     `<td class="pol-only">${m.perms.includes("codes") ? `${m.codes_24h} / ${m.code_limit ?? "no limit"}` : `<span class="muted">-</span>`}</td>` +
     `<td>${m.disabled ? `<span class="pill used">disabled</span>` : `<span class="pill open">active</span>`}</td>` +
     `<td class="muted">${m.last_seen ? esc(ago(m.last_seen * 1000)) + ` (${m.sessions} signed in)` : "not signed in"}</td>` +
@@ -3775,7 +3925,7 @@ async function loadMods() {
       `<button class="ghost" data-mi="${i}" data-ma="password">New password</button>` +
       `<button class="ghost" data-mi="${i}" data-ma="toggle">${m.disabled ? "Enable" : "Disable"}</button>` +
       (m.sessions ? `<button class="ghost" data-mi="${i}" data-ma="signout">Sign out</button>` : "") +
-      `<button class="danger" data-mi="${i}" data-ma="delete">Delete</button>` +
+      `<button class="danger" data-mi="${i}" data-ma="delete">Remove</button>` +
     `</div></td></tr>`).join("");
 }
 
@@ -3793,8 +3943,10 @@ $("#modsBody").onclick = async (e) => {
   const m = MODS[+b.dataset.mi], act = b.dataset.ma;
   if (!m) return;
   if (act === "edit") return openModModal(m);
-  if (act === "delete" && !confirm(`Delete moderator ${m.username}? They are signed out at once.`)) return;
-  if (act === "password" && !confirm(`Give ${m.username} a new generated password? Their current one stops working and they are signed out.`)) return;
+  if (act === "delete" && !(await uiAsk({ title: `Remove moderator ${m.username}?`, ok: `Remove ${m.username}`, danger: true,
+                                          text: "Their login is deleted and they are signed out at once." }))) return;
+  if (act === "password" && !(await uiAsk({ title: `New password for ${m.username}?`, ok: "Make a new password",
+                                            text: "A new password is generated and shown once. Their current one stops working and they are signed out." }))) return;
   b.disabled = true;
   try {
     const body = act === "toggle" ? { action: "update", id: m.id, disabled: !m.disabled }
@@ -3802,7 +3954,7 @@ $("#modsBody").onclick = async (e) => {
     const r = await post("/api/mods", body);
     if (r.password) showModResult(pwLine(r.username, r.password));
     toast(act === "toggle" ? `${m.username} ${m.disabled ? "enabled" : "disabled"}`
-      : act === "delete" ? `Deleted ${m.username}` : act === "signout" ? `Signed out ${m.username}`
+      : act === "delete" ? `Removed ${m.username}` : act === "signout" ? `Signed out ${m.username}`
       : `New password for ${m.username}`);
     loadMods(); loadAudit(); loadSessions();
   } catch (err) { b.disabled = false; toast(err.message, true); }
@@ -3837,15 +3989,18 @@ function permGroups() {
   return { core, games: Object.values(games) };
 }
 
-function permChips(perms, short) {
-  const { games } = permGroups();
+// A moderator's permissions as short chips, in the edit dialog's order: the panel's own,
+// then per game "Kart Club: Help desk" for each tool, or "Kart Club: see" for the game alone.
+function permChips(perms) {
+  const { core, games } = permGroups();
   const mine = new Set(perms);
-  const core = perms.filter((p) => !p.startsWith("game."));
-  return core.map((p) => `<span class="permchip" title="${esc(MOD_LABELS[p] || "")}">${esc(short[p] || p)}</span>`).join("")
-    + games.filter((g) => mine.has(g.view) || g.items.some(([k]) => mine.has(k))).map((g) => {
-      const n = g.items.filter(([k]) => mine.has(k)).length;
-      return `<span class="permchip" title="${esc(g.items.filter(([k]) => mine.has(k)).map(([, l]) => l).join(", "))}">`
-        + `${esc(g.title)}${n ? " (" + n + ")" : ""}</span>`;
+  const chip = (label, title) => `<span class="permchip" title="${esc(title || "")}">${esc(label)}</span>`;
+  const shortOf = (k, label) => MOD_SHORT[k] || String(label || k).split(/[:(]/)[0].trim();
+  return core.filter(([k]) => mine.has(k)).map(([k, label]) => chip(shortOf(k, label), label)).join("")
+    + games.map((g) => {
+      const tools = g.items.filter(([k]) => mine.has(k));
+      if (tools.length) return tools.map(([k, l]) => chip(`${g.title}: ${l}`, MOD_LABELS[k])).join("");
+      return mine.has(g.view) ? chip(`${g.title}: see`, MOD_LABELS[g.view]) : "";
     }).join("");
 }
 
@@ -3909,7 +4064,8 @@ $("#modSave").onclick = async () => {
     : { action: "create", username: $("#modUser").value.trim(), perms,
         code_limit: lim === "" ? null : lim, password: $("#modPw").value, titles };
   if (!MOD_EDIT && !body.username) return toast("Enter a username", true);
-  if (!perms.length && !confirm("No permissions selected. Save anyway?")) return;
+  if (!perms.length && !(await uiAsk({ title: "No permissions ticked", ok: "Save anyway",
+                                      text: "This moderator could sign in but use nothing. Save anyway?" }))) return;
   const btn = $("#modSave");
   btn.disabled = true;
   try {
@@ -3925,43 +4081,87 @@ $("#modSave").onclick = async () => {
 };
 
 // ---- activity log (owner) ----
-let AUDIT = [];
-async function loadAudit() {
+// 200 at a time, newest first; Load older asks for the next 200 from the last row shown.
+let AUDIT = [], AUDIT_MORE = false;
+const AUDIT_PAGE = 200;
+async function loadAudit(more) {
   const actor = $("#auditActor").value;
+  const last = more === true && AUDIT[AUDIT.length - 1];
   let r;
-  try { r = await api("/api/audit?limit=300" + (actor ? "&actor=" + encodeURIComponent(actor) : "")); }
-  catch (e) { return; }
-  AUDIT = r.rows || [];
+  try {
+    r = await api(`/api/audit?limit=${AUDIT_PAGE}` + (actor ? "&actor=" + encodeURIComponent(actor) : "")
+      + (last ? `&before=${encodeURIComponent(last.at)}&before_id=${encodeURIComponent(last.id)}` : ""));
+  } catch (e) { if (more === true) toast(e.message, true); return; }
+  const got = r.rows || [];
+  AUDIT = last ? AUDIT.concat(got) : got;
+  AUDIT_MORE = got.length === AUDIT_PAGE;
   const sel = $("#auditActor"), keep = sel.value;
   sel.innerHTML = `<option value="">Everyone</option>` +
     (r.actors || []).map((a) => `<option>${esc(a)}</option>`).join("");
   sel.value = keep;
   renderAudit();
 }
-// Stored as JSON; read as "key: value" pairs.
+// Stored as JSON; read as "what: value" pairs in words.
+const AUDIT_KEYS = { perms: "permissions", code_limit: "code limit per day", titles: "titles", disabled: "disabled",
+  remember: "remember me", status: "status", note: "note", action: "action", bot: "bot", url: "address",
+  news_channels: "news channels", channels: "channels", count: "how many", kind: "kind", reason: "reason",
+  resolution: "resolution", knock: "knock", on_duty: "on duty", flags: "flags", queue: "queue", text: "text",
+  subject: "subject", game: "game", until: "until", items: "items" };
+function auditValue(k, v) {
+  if (v === true) return "yes";
+  if (v === false) return "no";
+  if (v === null || v === undefined || v === "") return "none";
+  if (Array.isArray(v)) return v.map((x) => k === "perms" ? (MOD_SHORT[x] || x) : x).join(", ") || "none";
+  if (typeof v === "object") return Object.entries(v).map(([a, b]) => `${a.replace(/_/g, " ")} ${auditValue(a, b)}`).join(", ");
+  return String(v);
+}
 function auditDetail(d) {
   if (!d) return "";
   let o;
   try { o = JSON.parse(d); } catch (e) { return d; }
   if (!o || typeof o !== "object") return String(o);
-  return Object.entries(o).map(([k, v]) =>
-    `${k.replace(/_/g, " ")}: ${Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : v}`)
-    .join(" · ");
+  return Object.entries(o).map(([k, v]) => `${AUDIT_KEYS[k] || k.replace(/_/g, " ")}: ${auditValue(k, v)}`).join(" · ");
+}
+// What was done, in words: older rows were logged under raw names ("moderator: create",
+// "account.kick", "Discord bot fe: fluxer-save").
+const AUDIT_MOD_WORDS = { create: "added a moderator", update: "changed a moderator", delete: "removed a moderator",
+  password: "gave a moderator a new password", signout: "signed out a moderator" };
+const AUDIT_BOT_WORDS = { save: "saved Discord settings", refresh: "checked Discord", endpoint: "set the Discord endpoint",
+  clear: "removed the Discord token", delete: "removed everything stored", "fluxer-save": "saved Fluxer settings",
+  "fluxer-check": "checked Fluxer", "fluxer-clear": "removed the Fluxer token and channels" };
+function auditAction(s) {
+  s = String(s || "");
+  let m = /^moderator: (\S+)$/.exec(s);
+  if (m) return AUDIT_MOD_WORDS[m[1]] || `moderator ${m[1]}`;
+  m = /^(?:Discord )?bot (\S+): (.+)$/.exec(s);
+  if (m) {
+    const b = BOTS && (BOTS.bots || []).find((x) => x.bot === m[1]);
+    return `${b ? b.title : m[1]} bot: ${AUDIT_BOT_WORDS[m[2]] || m[2]}`;
+  }
+  if (/^[a-z_]+(\.[a-z_]+)+$/.test(s)) return s.replace(/[._]/g, " ");
+  return s;
 }
 function renderAudit() {
   const q = $("#auditSearch").value.trim().toLowerCase();
   const rows = AUDIT.filter((a) => !q || [a.action, a.target, a.detail, a.actor]
     .some((v) => String(v || "").toLowerCase().includes(q)));
-  $("#auditCount").textContent = `${rows.length} shown`;
+  $("#auditCount").textContent = `${rows.length} shown` + (AUDIT_MORE ? ", older ones below" : "");
+  $("#auditMore").hidden = !AUDIT_MORE;
   $("#auditBody").innerHTML = rows.map((a) =>
     `<tr class="${a.ok ? "" : "audit-bad"}"><td class="muted" style="white-space:nowrap" title="${esc(new Date(a.at * 1000).toLocaleString())}">${esc(ago(a.at * 1000))}</td>` +
     `<td><b>${esc(a.actor)}</b>${a.role === "mod" ? ` <span class="muted">(mod)</span>` : ""}</td>` +
-    `<td>${esc(a.action)}${a.ok ? "" : " (refused)"}</td>` +
+    `<td title="${esc(a.action)}">${esc(auditAction(a.action))}${a.ok ? "" : " (refused)"}</td>` +
     `<td class="mono">${esc(a.target || "")}</td>` +
     `<td class="muted" style="font-size:12px; overflow-wrap:anywhere">${esc(auditDetail(a.detail))}</td></tr>`).join("")
     || `<tr><td colspan="5" class="muted">Nothing recorded yet.</td></tr>`;
 }
-$("#auditActor").onchange = loadAudit;
+$("#auditActor").onchange = () => loadAudit();
+$("#auditMore").onclick = async () => {
+  const btn = $("#auditMore");
+  btn.disabled = true;
+  await loadAudit(true);
+  btn.disabled = false;
+};
 $("#auditSearch").addEventListener("input", renderAudit);
 
 // ---- a moderator's own password ----
@@ -4015,6 +4215,18 @@ async function loadOnline() {
     || `<li class="empty">Nobody is signed in.</li>`;
 }
 
+// A port check's socket error, in words: the raw text goes in the tooltip.
+function plainSocketError(err) {
+  const e = String(err || "").toLowerCase();
+  if (!e) return "down";
+  if (/getaddrinfo|name or service|nodename|no address|name resolution|unknown host/.test(e)) return "can't find the host";
+  if (/refused|10061|errno 111/.test(e)) return "nothing is listening";
+  if (/timed out|timeout|10060/.test(e)) return "no answer (timed out)";
+  if (/unreachable|no route|10065|10051/.test(e)) return "can't reach it";
+  if (/reset|10054|broken pipe/.test(e)) return "the connection was dropped";
+  return "can't reach it";
+}
+
 function fmtBytes(n) {
   if (!n && n !== 0) return "";
   const u = ["B", "KB", "MB", "GB", "TB"];
@@ -4028,7 +4240,8 @@ async function loadHealth(fresh) {
   try { r = await api("/api/health" + (fresh ? "?fresh=1" : "")); } catch (e) { return; }
   const rows = (r.services || []).map((sv) =>
     `<li><span class="t1"><span class="dot ${sv.ok ? "ok" : "bad"}"></span>${esc(sv.name)}</span>` +
-    `<span class="t2">${sv.ok ? sv.ms + " ms" : esc(sv.error || "down")}</span></li>`);
+    (sv.ok ? `<span class="t2">${sv.ms} ms</span>`
+           : `<span class="t2" title="${esc(sv.error || "")}">${esc(plainSocketError(sv.error))}</span>`) + `</li>`);
   const b = r.backup;
   let bl;
   if (!b && coreOff()) bl = "";
@@ -4058,8 +4271,8 @@ let OPS_FAST = null;
 
 async function loadOps() {
   let r;
-  try { r = await api("/api/ops"); } catch (e) { return; }
   const panel = $("#opsPanel");
+  try { r = await api("/api/ops"); } catch (e) { panel.hidden = true; return; }
   if (!r.available) { panel.hidden = true; return; }
   panel.hidden = false;
   const checks = r.checks || [];
@@ -4120,7 +4333,7 @@ async function loadOps() {
 }
 
 async function runFix(action, a) {
-  if (!confirm(`${a.name || action}?\n\n${a.warning || ""}`)) return;
+  if (!await uiAsk({ title: `${a.name || action}?`, text: a.warning || "", ok: a.name || "Go" })) return;
   try {
     const res = await api("/api/ops/fix", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -4142,92 +4355,113 @@ async function openAccount(polid) {
   try { r = await api("/api/account-detail?polid=" + encodeURIComponent(polid)); }
   catch (e) { return toast(e.message, true); }
   ACCT = r;
-  const when = (iso) => iso ? `${esc(fmtWhen(iso))} (${esc(ago(isoMs(iso)))})` : "-";
+  const when = (iso) => iso ? `<span title="${esc(utcTitle(iso))}">${esc(fmtWhen(iso))} (${esc(ago(isoMs(iso)))})</span>` : "-";
   const kv = (k, v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
-  const sec = (title, inner) => `<div class="acct-sec"><h4>${title}</h4>${inner}</div>`;
-  const none = (t) => `<div class="none">${t}</div>`;
+  const sec = (title, inner, cls) => `<div class="acct-sec${cls ? " " + cls : ""}"><h4>${title}</h4>${inner}</div>`;
   const m = r.members[0] || {};
+  const manage = can("accounts_manage");
   $("#acctTitle").innerHTML = `<code class="mono">${esc(r.polid)}</code> ${esc(r.handles[0] || "")}`;
-  $("#acctSub").textContent = r.online.length ? "Signed in now" : "Not signed in";
+  $("#acctSub").textContent = r.online.length
+    ? `Signed in now, since ${ago(isoMs(r.online[0].since))}` + (r.online[0].addr ? ` from ${r.online[0].addr}` : "")
+      + (r.online.length > 1 ? ` (${r.online.length} sessions)` : "")
+    : "Not signed in";
   const status = r.status && r.status !== "active" ? `<span class="pill used">${esc(r.status)}</span>` : `<span class="pill open">active</span>`;
-  const refusal = r.effective_reject_code ? stateLabel(r.effective_reject_code) : "Allowed";
   const refusalTime = r.effective_reject_code && r.reject_until
     ? ` until ${new Date(r.reject_until).toLocaleString()}` : "";
-  const notice = r.info_code ? stateLabel(r.info_code) +
-    (r.info_repeat === "once" ? " · once" : " · every login") : "No Code";
+  const empty = [];          // the sections with nothing in them, said once at the bottom
   let html = `<div class="acct-grid">`;
   html += sec("Account",
-    kv("Status", status) + kv("Login refusal", esc(refusal + refusalTime)) +
-    kv("Login notice", esc(notice)) + kv("Created", when(r.created_at)) +
+    kv("Status", status) +
+    (r.effective_reject_code ? kv("Login refusal", `<span title="${esc(stateHex(r.effective_reject_code))}">${esc(stateName(r.effective_reject_code) + refusalTime)}</span>`) : "") +
+    (r.info_code ? kv("Login notice", `<span title="${esc(stateHex(r.info_code))}">${esc(stateName(r.info_code))}${r.info_repeat === "once" ? ", once" : ", every login"}</span>`) : "") +
+    kv("Created", when(r.created_at)) +
     kv("Login name", esc(m.login_name || "-")) +
     kv("Handles", esc(r.handles.join(", ") || "-")) +
     kv("Mail", esc(m.mail || "-") + (m.ext_mail ? " (outside mail on)" : "")) +
     kv("Messages / friends", `${r.mail_count ?? "-"} / ${r.friends ?? "-"}`));
-  html += sec("Signed in",
-    r.online.length ? r.online.map((o) => kv("Since " + esc(ago(isoMs(o.since))), esc(o.addr || ""))).join("")
-                    : none("Not signed in."));
-  html += sec("Titles",
-    r.owned.length ? r.owned.map((t) => kv(esc(t.label), t.linked ? `<span class="pill open">playable</span>`
-                                                              : `<span class="pill used">not linked</span>`)).join("")
-                   : none("No titles."));
-  html += sec("Devices",
-    r.devices.length ? r.devices.map((d) => kv(esc(d.known ? d.label : "Unknown device"),
-                                                "last seen " + esc(ago(isoMs(d.last_seen))))).join("")
-                     : none("No device has signed in to the lobby."));
-  html += sec("Registration codes",
-    r.codes.length ? r.codes.map((c) => kv(`<code class="mono">${esc(c.code)}</code>`,
-                                            esc(c.contents_label || "") + " · " + esc(fmtWhen(c.redeemed_at)))).join("")
-                   : none("None redeemed."));
-  if (r.gm_calls !== null) html += sec("GM calls",
-    r.gm_calls.length ? r.gm_calls.map((g) => kv(esc(g.subject || "(no subject)"), esc(ago(isoMs(g.received_at))))).join("")
-                      : none("None."));
-  if (r.reports !== null) html += sec("Reports about this player",
-    r.reports.length ? r.reports.map((x) => kv(esc(x.explanation || "(no text)").slice(0, 80), esc(ago(isoMs(x.received_at))))).join("")
-                     : none("None."));
-  if (r.activity !== null) html += sec("Panel activity",
-    r.activity.length ? r.activity.map((a) => kv(`${esc(a.actor)}: ${esc(a.action)}${a.ok ? "" : " (refused)"}`,
-                                                  esc(ago(a.at * 1000)))).join("")
-                      : none("No changes recorded."));
+  // Titles: with the manage permission, one switch per title that grants or
+  // revokes that title alone.
+  const owned = new Map(r.owned.map((t) => [String(t.content), t]));
+  if (manage) {
+    html += sec("Titles", Object.entries(CONTENT).map(([code, name]) => {
+      const t = owned.get(code);
+      const pill = !t ? "" : t.linked ? `<span class="pill open">playable</span>`
+                                     : `<span class="pill wait" title="Owned, but not linked to a handle yet">not linked</span>`;
+      return `<div class="kv acct-title"><label class="switch"><input type="checkbox" data-content="${esc(code)}"${t ? " checked" : ""}>`
+        + `<span>${esc(name)}</span></label>${pill}</div>`;
+    }).join(""));
+  } else if (r.owned.length) {
+    html += sec("Titles", r.owned.map((t) => kv(esc(t.label), t.linked ? `<span class="pill open">playable</span>`
+                                                               : `<span class="pill wait">not linked</span>`)).join(""));
+  } else empty.push("titles");
+  if (r.devices.length) html += sec("Devices", r.devices.map((d) => kv(esc(d.known ? d.label : "Unknown device"),
+    "last seen " + esc(ago(isoMs(d.last_seen))))).join(""));
+  else empty.push("devices");
+  if (r.codes.length) html += sec("Registration codes", r.codes.map((c) => kv(`<code class="mono">${esc(c.code)}</code>`,
+    esc(c.contents_label || "") + ` <span class="muted" title="${esc(utcTitle(c.redeemed_at))}">${esc(fmtWhen(c.redeemed_at))}</span>`)).join(""));
+  else empty.push("registration codes");
+  if (r.gm_calls !== null) {
+    if (r.gm_calls.length) html += sec("GM calls", r.gm_calls.map((g) => kv(
+      `<a class="acct-link" data-gm="${esc(g.id)}">${esc(g.subject || "(no subject)")}</a>`, esc(ago(isoMs(g.received_at))))).join(""));
+    else empty.push("GM calls");
+  }
+  if (r.reports !== null) {
+    if (r.reports.length) html += sec("Reports about this player", r.reports.map((x) => kv(
+      `<a class="acct-link" data-rep="${esc(x.id || "")}">${esc(String(x.explanation || "(no text)").slice(0, 80))}</a>`,
+      esc(ago(isoMs(x.received_at))))).join(""));
+    else empty.push("reports about this player");
+  }
+  if (r.activity !== null) {
+    if (r.activity.length) html += sec("Panel activity", r.activity.slice(0, 5).map((a) =>
+      kv(`${esc(a.actor)}: ${esc(a.action)}${a.ok ? "" : " (refused)"}`, esc(ago(a.at * 1000)))).join("")
+      + (tabAllowed("activity") ? `<div class="acct-more"><a class="acct-link" data-audit="${esc(r.polid)}">`
+        + `${r.activity.length > 5 ? "All of it" : "Open"} in the Activity log</a></div>` : ""));
+    else empty.push("panel activity");
+  }
   html += `<div class="acct-sec" id="acctGames"><h4>In the games</h4><div class="none">Asking the games...</div></div>`;
   html += `</div>`;
+  if (empty.length) html += `<div class="acct-empty">Nothing yet: ${esc(empty.join(", "))}.</div>`;
   $("#acctBody").innerHTML = html;
   loadAccountGames(r.polid);
-  $("#acctActions").innerHTML = (can("accounts_manage")
-    ? `<button class="ghost" data-a="grant">Content</button><button class="ghost" data-a="pw">Password</button>` +
-      `<button class="ghost" data-a="tok">Tokens</button>` +
-      `<button class="ghost" data-a="refusal">Refusal</button>` +
-      `<button class="ghost" data-a="notice">Notice</button>` +
-      (ACCT_ROW() ? `<button class="${ACCT_ROW().ext_mail ? "act" : "ghost"}" data-a="ext" ` +
-        `title="Mail to and from the internet as ${esc(outsideAddr(ACCT_ROW()))}">` +
-        `Ext mail: ${ACCT_ROW().ext_mail ? "on" : "off"}</button>` : "") +
-      `<button class="ghost" data-a="kick">Kick</button>` : "") +
-    (can("people") ? `<button class="ghost" data-a="person">Person page</button>` : "") +
+  // the everyday buttons, the rest under More, Delete last
+  const more = (manage ? `<button class="ghost" data-a="tok">Login tokens</button>`
+      + `<button class="ghost" data-a="notice">Login notice</button>`
+      + `<button class="ghost" data-a="ext" title="${esc(extMailTitle(ACCT_ROW() || {}))}">${extMailWord(!!m.ext_mail)}</button>` : "");
+  $("#acctActions").innerHTML =
+    (can("people") ? `<button class="ghost" data-a="person">Person page</button>` : "") + `<span class="grow"></span>` +
+    (manage ? `<button class="ghost" data-a="pw">Password</button><button class="ghost" data-a="refusal">Login refusal</button>`
+      + `<button class="ghost" data-a="kick">Kick</button>` : "") +
+    (more ? `<details class="more-menu"><summary class="ghost">More</summary><div class="more-pop">${more}</div></details>` : "") +
     (can("accounts_delete") ? `<button class="danger" data-a="del">Delete</button>` : "");
-  $("#acctActions").hidden = !$("#acctActions").innerHTML;
+  $("#acctActions").hidden = !$("#acctActions").querySelector("button");
   $("#acctModal").classList.add("show");
 }
 function closeAccount() { $("#acctModal").classList.remove("show"); ACCT = null; }
 $("#acctClose").onclick = closeAccount;
-$("#acctModal").onclick = (e) => { if (e.target === $("#acctModal")) closeAccount(); };
+$("#acctModal").onclick = (e) => {
+  if (e.target === $("#acctModal")) closeAccount();
+  // a click anywhere else folds the More menu
+  const menu = $("#acctActions .more-menu");
+  if (menu && menu.open && !e.target.closest(".more-menu")) menu.open = false;
+};
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("#acctModal").classList.contains("show")) closeAccount();
 });
 // The account's row in the Accounts list, for what only the list carries
-// (outside mail); null when the list has not been loaded.
+// (the outside address); null when the list has not been loaded.
 const ACCT_ROW = () => (ACCT && typeof ACCOUNTS !== "undefined"
   ? ACCOUNTS.find((x) => x.polid === ACCT.polid) || null : null);
 $("#acctActions").onclick = (e) => {
   const b = e.target.closest("button[data-a]");
   if (!b || !ACCT) return;
-  if (b.dataset.a === "ext") { if (ACCT_ROW()) toggleExtMail(ACCT_ROW(), b); return; }
+  if (b.dataset.a === "ext") {
+    const row = ACCT_ROW() || { polid: ACCT.polid, ext_mail: !!(ACCT.members[0] || {}).ext_mail };
+    toggleExtMail(row, b).then(() => { if (ACCT && ACCT.members[0]) ACCT.members[0].ext_mail = row.ext_mail; });
+    return;
+  }
   const account = ACCT, polid = account.polid, a = b.dataset.a;
   closeAccount();
   if (a === "person") location.hash = "#people/pol/" + encodeURIComponent(polid);
-  if (a === "grant") {
-    location.hash = "#accounts";
-    // The Accounts tab is (re)loading; aim the grant form once the row is there.
-    setTimeout(() => prefillGrant(ACCOUNTS.find((x) => x.polid === polid) || { polid, contents: [] }), 700);
-  }
   if (a === "pw") askPassword(polid);
   if (a === "tok") askTokens(polid);
   if (a === "refusal") askState(account);
@@ -4235,6 +4469,31 @@ $("#acctActions").onclick = (e) => {
   if (a === "kick") kickAccount(polid);
   if (a === "del") askDelete(polid);
 };
+// In the window: a title's switch grants or revokes that one title; a GM call,
+// a report or the activity opens where it lives.
+$("#acctBody").addEventListener("change", async (e) => {
+  const box = e.target.closest("input[data-content]");
+  if (!box || !ACCT) return;
+  const polid = ACCT.polid, code = +box.dataset.content, on = box.checked;
+  if (!on && !await askRevoke(polid, [code])) { box.checked = true; return; }
+  box.disabled = true;
+  try {
+    const res = await post(on ? "/api/grant" : "/api/revoke", { polid, content_codes: [code] });
+    const name = CONTENT[code] || code;
+    if (on) toast(res.linked ? `Granted ${name} to ${polid}` : `Granted ${name}, but the account has no handle yet, so it cannot play`, !res.linked);
+    else toast(`Revoked ${name} from ${polid}`);
+    if (ACCOUNTS.length) loadAccounts();
+    if (ACCT && ACCT.polid === polid) openAccount(polid);
+  } catch (err) { box.checked = !on; box.disabled = false; toast(err.message, true); }
+});
+$("#acctBody").addEventListener("click", (e) => {
+  const gm = e.target.closest("[data-gm]"), rep = e.target.closest("[data-rep]"), au = e.target.closest("[data-audit]");
+  if (!gm && !rep && !au) return;
+  closeAccount();
+  if (gm) { GM_SEL = gm.dataset.gm; GM_TICKET_SIG = ""; location.hash = "#gmcalls"; }
+  if (rep) { REPORT_SEL = rep.dataset.rep || null; location.hash = "#reports"; }
+  if (au) { $("#auditSearch").value = au.dataset.audit; location.hash = "#activity"; }
+});
 
 // ---- GM call alerts on this device (Web Push) ----
 // Browsers only allow push on a secure origin (https, or localhost).
@@ -4328,7 +4587,8 @@ $("#discordTest").onclick = async () => {
   catch (e) { toast(e.message, true); }
 };
 $("#discordClear").onclick = async () => {
-  if (!confirm("Remove the Discord webhook? GM calls will no longer be posted there.")) return;
+  if (!(await uiAsk({ title: "Remove the Discord webhook?", ok: "Remove webhook", danger: true,
+                      text: "New GM calls will no longer be posted to that Discord channel." }))) return;
   try { await post("/api/alerts", { clear_discord: true }); toast("Webhook removed"); loadAlerts(); }
   catch (e) { toast(e.message, true); }
 };
@@ -4349,12 +4609,13 @@ $("#checksSave").onclick = async () => {
 let BOTS = null;
 let BOTS_VIEW = store.get("botsView", "discord") === "fluxer" ? "fluxer" : "discord";
 const BOTS_OPEN = new Set();           // "<view>:<bot>" whose Settings are open, kept across a reload
+const BOTS_FLUX_SHOW = new Set();      // bots not on Fluxer whose card was asked for ("set up")
 function botState(b) {
   const a = b.applied || {};
-  if (b.has_token && !b.token_ok) return ["off", "Sealed under another POL_BOT_KEY"];
+  if (b.has_token && !b.token_ok) return ["off", "Token unreadable: saved under another key"];
   if (b.live) return ["live", "Running on this token"];
   if (b.has_token) return ["wait", a.at ? "Restarting onto the new values" : "Waiting for its service"];
-  if (a.source === "env") return ["env", "Running on .env"];
+  if (a.source === "env") return ["env", "Running on the server's settings"];
   return ["off", a.at ? "No token" : "Not running"];
 }
 const BOT_MARK = { ok: "✓", todo: "•", warn: "!", info: "i" };
@@ -4372,12 +4633,15 @@ function botChecklist(items, checked) {
     + (ok.length ? `<details class="bc-ok"><summary>${ok.length} check${ok.length === 1 ? "" : "s"} pass${ok.length === 1 ? "es" : ""}${when}</summary>${botItems(ok)}</details>` : "");
 }
 function fluxerState(f) {
-  if (f.has_token && !f.token_ok) return ["off", "Sealed under another POL_BOT_KEY"];
+  if (f.has_token && !f.token_ok) return ["off", "Token unreadable: saved under another key"];
   if (f.live) return ["live", "Running"];
   if (f.has_token) return ["wait", "Restarting onto the new values"];
-  if (f.source === "env") return ["env", "Running on .env"];
+  if (f.source === "env") return ["env", "Running on the server's settings"];
   return ["off", "Not set up"];
 }
+// Nothing of it on Fluxer at all: no token, no channels, nothing running from the server's settings.
+const fluxerUnset = (f) => !f || (!f.has_token && f.source !== "env" && !f.live
+  && !Object.values(f.channels || {}).some(Boolean) && !Object.values(f.running_channels || {}).some(Boolean));
 function botShell(b, view, state, sub, checklist, settings) {
   const [cls, label] = state, key = view + ":" + b.bot;
   const open = BOTS_OPEN.has(key);
@@ -4391,7 +4655,7 @@ function botShell(b, view, state, sub, checklist, settings) {
 function discordCard(b) {
   const state = botState(b);
   const who = b.username ? `${esc(b.username)} · app ${esc(b.app_id)}` : (b.app_id ? `app ${esc(b.app_id)}` : "Not set up here");
-  const where = b.port ? `port ${esc(b.port)}` : "through the Tetra Master board, /pol";
+  const where = b.port ? `port ${esc(b.port)}` : "reached through the Tetra Master board";
   const sub = `${who} · <code>/${esc(b.command)}</code> · ${where}`;
   const settings = `
     <label>Bot token ${b.has_token ? `<span class="muted">(saved, ends ${esc(b.token_hint || "?")})</span>` : ""}</label>
@@ -4410,28 +4674,28 @@ function discordCard(b) {
       ${b.invite ? `<a class="ghost sm btnlink" href="${esc(b.invite)}" target="_blank" rel="noopener">Invite</a>` : ""}
       <button class="ghost sm" data-act="endpoint" ${b.has_token && b.url ? "" : "disabled"}
         title="Point Discord's interactions at this board (it must already be running on this token)">Set endpoint</button>
-      <button class="ghost sm" data-act="refresh" ${b.has_token ? "" : "disabled"}>Check</button>
-      <button class="ghost sm" data-act="clear" ${b.has_token ? "" : "disabled"}>Forget token</button>
+      <button class="ghost sm" data-act="refresh" ${b.has_token ? "" : "disabled"}>Check now</button>
+      <button class="ghost sm" data-act="clear" ${b.has_token ? "" : "disabled"}>Remove token</button>
     </div>
-    <div class="hint">Left empty: <code>${esc(b.env_prefix)}_DISCORD_BOT_TOKEN</code> from <code>.env</code></div>`;
+    <div class="hint" title="${esc(b.env_prefix)}_DISCORD_BOT_TOKEN in .env">Left empty, the bot keeps the token from the server's own settings.</div>`;
   return botShell(b, "discord", state, sub, botChecklist(b.checklist, b.checked_at), settings);
 }
 function fluxerCard(b) {
   const f = b.fluxer;
-  if (!f) return botShell(b, "fluxer", ["off", "Not on Fluxer"], "This bot has no Fluxer side.", "", "");
+  if (!f) return "";
   const envHint = b.bot === "bridge"
-    ? `<code>POL_BRIDGE_FLUXER_BOT_TOKEN</code>, <code>POL_BRIDGE_FLUXER_ANNOUNCE</code>, <code>POL_BRIDGE_FLUXER_ANNOUNCE_ROLES</code>`
-    : `<code>${esc(b.env_prefix)}_FLUXER_BOT_TOKEN</code>, <code>_FLUXER_CHANNELS</code>`;
+    ? "POL_BRIDGE_FLUXER_BOT_TOKEN, POL_BRIDGE_FLUXER_ANNOUNCE, POL_BRIDGE_FLUXER_ANNOUNCE_ROLES in .env"
+    : `${b.env_prefix}_FLUXER_BOT_TOKEN, ${b.env_prefix}_FLUXER_CHANNELS in .env`;
   const roles = (f.roles || []).length ? `<label>Ping roles <span class="botfeed">(role id per game; empty = no ping)</span></label>
     <div class="bc-roles">${f.roles.map((r) => `<label><span>${esc(r.label)}</span>
     <input type="text" class="fluxChan" data-key="${esc(r.key)}" value="${esc(r.value || "")}"
-      spellcheck="false" inputmode="numeric" placeholder="${r.running ? `.env: ${esc(r.running)}` : "Role id"}"></label>`).join("")}</div>` : "";
+      spellcheck="false" inputmode="numeric" placeholder="${r.running ? `Server setting: ${esc(r.running)}` : "Role id"}"></label>`).join("")}</div>` : "";
   const chans = f.feeds.map((d) => {
     const run = (f.running_channels || {})[d.key];
     return `<label>Channels: ${esc(d.label)}${d.key === b.bot ? "" : `
       <span class="botfeed">(${d.shares_main ? "none = beside the board" : "none = off"})</span>`}</label>
     <input type="text" class="fluxChan" data-key="${esc(d.key)}" value="${esc((f.channels || {})[d.key] || "")}"
-      spellcheck="false" inputmode="numeric" placeholder="${run ? `Empty: its .env channels, ${esc(run)}` : "Channel ids, comma separated"}">`;
+      spellcheck="false" inputmode="numeric" placeholder="${run ? `Empty: the server's setting, ${esc(run)}` : "Channel ids, comma separated"}">`;
   }).join("");
   const settings = `
     <label>Bot token ${f.has_token ? `<span class="muted">(saved, ends ${esc(f.token_hint || "?")})</span>` : ""}</label>
@@ -4440,12 +4704,12 @@ function fluxerCard(b) {
     ${chans}${roles}
     <div class="rowacts">
       <button class="act sm" data-act="fluxer-save">Save</button>
-      <button class="ghost sm" data-act="fluxer-check" ${f.has_token ? "" : "disabled"}>Check</button>
-      <button class="ghost sm" data-act="fluxer-clear" ${f.has_token || Object.keys(f.channels || {}).length ? "" : "disabled"}>Forget</button>
+      <button class="ghost sm" data-act="fluxer-check" ${f.has_token ? "" : "disabled"}>Check now</button>
+      <button class="ghost sm" data-act="fluxer-clear" ${f.has_token || Object.keys(f.channels || {}).length ? "" : "disabled"}>Remove</button>
     </div>
-    <div class="hint">Left empty: ${envHint} from <code>.env</code></div>`;
+    <div class="hint" title="${esc(envHint)}">Left empty, the bot keeps what the server's own settings say.</div>`;
   const run = Object.values(f.running_channels || {}).filter(Boolean).length;
-  const sub = `${f.username ? esc(f.username) : (f.source === "env" ? "On its .env token" : "Not set up here")}`
+  const sub = `${f.username ? esc(f.username) : (f.source === "env" ? "On the server's token" : "Not set up here")}`
     + (run ? ` · ${run} feed${run === 1 ? "" : "s"} posting` : "");
   return botShell(b, "fluxer", fluxerState(f), sub, botChecklist(f.checklist, f.checked_at), settings);
 }
@@ -4463,8 +4727,28 @@ function renderBots() {
   document.querySelectorAll("#botsView button").forEach((x) => x.classList.toggle("on", x.dataset.view === BOTS_VIEW));
   document.querySelectorAll("#tab-bots [data-for]").forEach((x) => { x.hidden = x.dataset.for !== BOTS_VIEW; });
   botsCounts();
-  $("#botsList").innerHTML = BOTS.bots.map(BOTS_VIEW === "fluxer" ? fluxerCard : discordCard).join("");
+  if (BOTS_VIEW !== "fluxer") {
+    $("#botsList").innerHTML = BOTS.bots.map(discordCard).join("");
+    $("#botsRest").hidden = true;
+    return;
+  }
+  // Fluxer: a card for each bot that is on it (or that was asked for); the rest in one line
+  const on = (b) => !fluxerUnset(b.fluxer) || BOTS_FLUX_SHOW.has(b.bot);
+  const rest = BOTS.bots.filter((b) => b.fluxer && !on(b));
+  $("#botsList").innerHTML = BOTS.bots.filter((b) => b.fluxer && on(b)).map(fluxerCard).join("");
+  $("#botsRest").hidden = !rest.length;
+  $("#botsRest").innerHTML = rest.length ? `Not on Fluxer: ${rest.map((b) =>
+    `<button type="button" class="linkish" data-flux-add="${esc(b.bot)}" title="Set up ${esc(b.title)} on Fluxer">${esc(b.title)}</button>`).join(", ")}.` : "";
 }
+$("#botsRest").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-flux-add]");
+  if (!b) return;
+  BOTS_FLUX_SHOW.add(b.dataset.fluxAdd);
+  BOTS_OPEN.add("fluxer:" + b.dataset.fluxAdd);
+  renderBots();
+  const card = document.querySelector(`#botsList [data-bot="${CSS.escape(b.dataset.fluxAdd)}"]`);
+  if (card) card.scrollIntoView({ block: "nearest" });
+});
 async function loadBots() {
   let r;
   try { r = await api("/api/bots"); } catch (e) { $("#botsList").innerHTML = `<div class="panel muted">${esc(e.message)}</div>`; return; }
@@ -4500,17 +4784,32 @@ $("#botsList").addEventListener("click", async (e) => {
     body.channels = {};
     card.querySelectorAll(".fluxChan").forEach((el) => { body.channels[el.dataset.key] = el.value.trim(); });
   }
-  if (act === "clear" && !confirm(`Forget the ${bot} token? Its service goes back to its .env token.`)) return;
-  if (act === "fluxer-clear" && !confirm(`Forget the ${bot} Fluxer token and channels? The ${bot === "bridge" ? "bridge" : "board"} goes back to its .env values for Fluxer.`)) return;
+  const title = (BOTS.bots.find((x) => x.bot === bot) || {}).title || bot;
+  if (act === "clear" && !(await uiAsk({ title: `Remove the ${title} Discord token?`, ok: "Remove token", danger: true,
+      text: "Its service goes back to the token in the server's own settings, if there is one." }))) return;
+  if (act === "fluxer-clear" && !(await uiAsk({ title: `Remove ${title} from Fluxer?`, ok: "Remove", danger: true,
+      text: "Its Fluxer token and channels are removed here. It goes back to the server's own settings for Fluxer, if there are any." }))) return;
   btn.disabled = true;
   try {
     const r = await post("/api/bots", body);
     const d = r.discord, f = r.fluxer;
     toast(d ? `Saved: ${d.username || d.name} (app ${d.app_id})`
       : f ? `${r.detail || "Done"} Fluxer: ${f.username || f.user_id}` : (r.detail || "Done"));
-    loadBots();
+    botsRedrawOne(bot);
   } catch (err) { toast(err.message, true); btn.disabled = false; }
 });
+// After an action, only that bot's card is drawn again: what is typed in the others stays.
+async function botsRedrawOne(bot) {
+  let r;
+  try { r = await api("/api/bots"); } catch (e) { return; }
+  BOTS = r;
+  $("#botsNoKey").hidden = r.can_seal;
+  botsCounts();
+  const b = BOTS.bots.find((x) => x.bot === bot);
+  const card = document.querySelector(`#botsList [data-bot="${CSS.escape(bot)}"]`);
+  if (!b || !card) return renderBots();
+  card.outerHTML = (BOTS_VIEW === "fluxer" ? fluxerCard : discordCard)(b);
+}
 
 // ---- phone layout: label every card-table cell with its column ----
 // Watches the tbodies rather than asking every renderer to remember.
@@ -4572,16 +4871,16 @@ $("#themeBtn").onclick = () => {
   applyTheme(next);
 };
 
-// ---- the Inbox badge: GM calls waiting plus new reports and issues ----
+// ---- the Inbox badge: the sum of its sub-tabs', each what is waiting on us there ----
 function syncInboxBadge() {
-  const n = ["#gmBadge", "#reportsBadge", "#issuesBadge"].reduce((sum, id) => {
+  const n = ["#gmBadge", "#reportsBadge", "#issuesBadge", "#helpBadge"].reduce((sum, id) => {
     const el = $(id);
     return sum + (el && !el.hidden ? (parseInt(el.textContent, 10) || 0) : 0);
   }, 0);
   const b = $("#inboxBadge");
   b.textContent = n > 99 ? "99+" : String(n);
   b.hidden = !n;
-  b.classList.toggle("info", !!n && $("#gmBadge").hidden);
+  b.title = n ? `${n} waiting on us` : "";
 }
 
 // ---- boot ----

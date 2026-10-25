@@ -5,29 +5,47 @@
 // ---- Inbox > Game help ----
 // Each game's help desk needs that game's help permission; the owner sees them all.
 const canGameHelp = () => isOwner() || (SESSION.perms || []).some((p) => p.startsWith("game.") && p.endsWith(".help"));
-let GH = { open: true, rows: [], cur: null };
+// The filter is the Inbox's: Waiting on us, Open, Closed, All.
+// (helpdesk.js loads before app.js, so the remembered choice is read on first use)
+let GH = { filter: null, rows: [], cur: null };
+const GH_EMPTY = { waiting: "Nobody is waiting on us.", open: "Nothing open.", closed: "Nothing closed.", all: "No requests yet." };
+const ghOk = (t, f) => f === "all" || (f === "waiting" ? t.waiting && !t.closed : f === "closed" ? !!t.closed : !t.closed);
+
+// Nothing picked: the list takes the whole width, with no empty reading side.
+function ghLayout() { $("#tab-gamehelp .gh-split").classList.toggle("solo", !GH.cur); }
 
 async function loadGameHelp() {
-  $("#ghList").innerHTML = '<li class="empty">Loading...</li>';
+  if (GH.filter === null) GH.filter = store.get("ghFilter", "waiting");
+  if (!GH_EMPTY[GH.filter]) GH.filter = "waiting";
+  document.querySelectorAll("#ghFilter [data-f]").forEach((b) => b.classList.toggle("on", b.dataset.f === GH.filter));
+  if (!GH.rows.length) $("#ghList").innerHTML = '<li class="empty">Loading...</li>';
   let r;
-  try { r = await api("/api/help?open=" + (GH.open ? "1" : "0")); }
+  const open = GH.filter === "waiting" || GH.filter === "open";
+  try { r = await api("/api/help?open=" + (open ? "1" : "0")); }
   catch (e) { $("#ghList").innerHTML = `<li class="empty">${esc(e.message)}</li>`; return; }
-  GH.rows = r.threads || [];
+  const all = r.threads || [];
+  GH.rows = all.filter((t) => ghOk(t, GH.filter));
   $("#ghProblems").textContent = (r.problems || []).join("; ");
   $("#ghProblems").hidden = !(r.problems || []).length;
-  $("#ghNone").hidden = (r.games || []).length > 0;
-  const waiting = GH.rows.filter((t) => t.waiting && !t.closed).length;
+  // one message at a time: no help desk at all says only that
+  const none = !(r.games || []).length;
+  $("#ghNone").hidden = !none;
+  $("#tab-gamehelp .gh-split").hidden = none;
+  $("#tab-gamehelp .toolbar").hidden = none;
+  const waiting = all.filter((t) => t.waiting && !t.closed).length;
   $("#ghCount").textContent = waiting ? `${waiting} waiting for an answer` : "";
   $("#ghList").innerHTML = GH.rows.map((t) => `<li data-gh="${esc(t.game)}|${esc(t.id)}" class="${GH.cur && GH.cur.game === t.game && GH.cur.id === t.id ? "on" : ""}">`
     + `<span class="t1">${t.waiting && !t.closed ? '<span class="dot warn" aria-label="waiting"></span>' : ""}<b>${esc(t.subject)}</b>`
     + `<span class="muted"> ${esc(t.who || "?")}, ${esc(t.game_title)}${t.category ? ", " + esc(t.category) : ""}</span></span>`
-    + `<span class="t2">${t.closed ? "closed" : t.waiting ? "waiting" : "answered"}${t.at ? ", " + esc(ago(t.at * 1000)) : ""}</span></li>`).join("")
-    || `<li class="empty">${GH.open ? "No open requests." : "No requests."}</li>`;
+    + `<span class="t2">${t.closed ? "Closed" : t.waiting ? "Waiting" : "Answered"}${t.at ? ", " + esc(ago(t.at * 1000)) : ""}</span></li>`).join("")
+    || `<li class="empty">${GH_EMPTY[GH.filter]}</li>`;
+  ghLayout();
   if (GH.cur) showGameHelp(GH.cur.game, GH.cur.id, true);
 }
 
 async function showGameHelp(game, id, quiet) {
   GH.cur = { game, id };
+  ghLayout();
   document.querySelectorAll("#ghList li[data-gh]").forEach((li) => li.classList.toggle("on", li.dataset.gh === `${game}|${id}`));
   return renderHelpThread($("#ghThread"), game, id, quiet, loadGameHelp);
 }
@@ -73,6 +91,7 @@ async function gameHelpAct(box, action) {
   } catch (e) { return toast(e.message, true); }
   const after = HELP_AFTER.get(box);
   if (after) after();
+  loadInboxCounts();
 }
 
 document.addEventListener("click", async (e) => {
@@ -80,8 +99,8 @@ document.addEventListener("click", async (e) => {
   if (li) { const [g, ...rest] = li.dataset.gh.split("|"); return showGameHelp(g, rest.join("|")); }
   const f = e.target.closest("#ghFilter [data-f]");
   if (f) {
-    GH.open = f.dataset.f === "open";
-    document.querySelectorAll("#ghFilter [data-f]").forEach((b) => b.classList.toggle("on", b === f));
+    GH.filter = f.dataset.f;
+    store.set("ghFilter", GH.filter);
     return loadGameHelp();
   }
   const act = e.target.closest("[data-gh-act]");

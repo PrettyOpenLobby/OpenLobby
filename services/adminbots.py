@@ -42,6 +42,10 @@ from polcore import botcreds
 ACTIONS = ("save", "refresh", "endpoint", "clear", "delete", "fluxer-save", "fluxer-check",
            "fluxer-clear")
 _ID = re.compile(r"^\d{5,25}$")
+#: The answer to a token save while the server has no sealing key (POL_BOT_KEY): the page's
+#: note at the top of the Bots tab says how to set one.
+NO_KEY = ("Tokens cannot be stored yet: the server has no sealing key. See the note at the top "
+          "of the Bots page.")
 
 
 def _applied(name):
@@ -77,17 +81,16 @@ def checklist(name, r, port, command):
     info = _info(r)
     if name == "bridge":
         add("info", "Web address", "No page of its own: Discord reaches the bridge through the "
-            "Tetra Master board (port 8793) under /pol, so its address is https://<tm host>/pol.")
+            "Tetra Master board, so its address is the board's address followed by /pol.")
     elif port:
         add("ok" if url else "todo", "Web address",
             ("Board page on port %d of the server, published as %s." % (port, url)) if url else
-            "The board's page is on port %d of the server. Point a public https hostname at that "
-            "port and save it here: Discord only calls https." % port)
+            "Not set yet (the board's page is on port %d of the server)." % port)
     if not r.get("has_token"):
-        add("todo", "Bot token", "Paste the token from the developer portal (Bot, Reset Token).")
+        add("todo", "Bot token", "Not set yet.")
         return out
     if not info:
-        add("info", "Discord settings", "Not checked yet: press Check.")
+        add("info", "Discord settings", "Not checked yet: press Check now.")
         return out
     want = endpoint_of(url)
     have = info.get("endpoint") or ""
@@ -119,7 +122,7 @@ def checklist(name, r, port, command):
             % command)
     else:
         add("todo", "Slash command", "/%s is not registered yet: the bot's service registers it when "
-            "it starts on this token. Press Check again in a minute." % command)
+            "it starts on this token. Press Check now again in a minute." % command)
     if info.get("guilds") is not None:
         add("ok" if info["guilds"] else "todo", "Servers",
             ("In %d server%s." % (info["guilds"], "" if info["guilds"] == 1 else "s"))
@@ -191,7 +194,7 @@ def fluxer_checklist(name, r, applied=None):
     if r.get("fluxer_has_token"):
         info = _fluxer_info(r)
         if not info:
-            add("info", "Fluxer settings", "Not checked yet: press Check.")
+            add("info", "Fluxer settings", "Not checked yet: press Check now.")
         else:
             add("ok", "Bot", "Signs in as %s." % (info.get("username") or info.get("user_id") or "?"))
             if info.get("guilds") is not None:
@@ -199,9 +202,10 @@ def fluxer_checklist(name, r, applied=None):
                     ("In %s." % ", ".join(info["guilds"])) if info["guilds"] else
                     "Not in any server yet: add it to the server from its application page in Fluxer.")
     elif on_env:
-        add("ok", "Bot token", "Running on its .env token. Paste it here to check it from this page.")
+        add("ok", "Bot token", "Running on the token in the server's settings. Paste it here to "
+            "check it from this page.")
     else:
-        add("todo", "Bot token", "Paste the bot token from Fluxer (your application's Bot page).")
+        add("todo", "Bot token", "Not set yet.")
         return out
     seen = (info or {}).get("channels") or {}
     if name == "bridge":
@@ -221,7 +225,7 @@ def fluxer_checklist(name, r, applied=None):
                 add("info", "%s channels" % f["label"], "None of its own: it posts beside the board."
                     if f["shares_main"] else "None: this feed is off on Fluxer.")
             continue
-        where = " (from .env)" if f["key"] not in botcreds.fluxer_channels(r) else ""
+        where = " (from the server's settings)" if f["key"] not in botcreds.fluxer_channels(r) else ""
         if not info:
             add("info", "%s channels" % f["label"], ", ".join(ids) + where)
             continue
@@ -356,8 +360,8 @@ def _fluxer_change(name, act, body, actor, row, describe):
         if not row:
             return 200, {"ok": True, "detail": "Nothing stored."}
         botcreds.save(name, actor, fluxer_token="", fluxer_channels="", fluxer_info="")
-        return 200, {"ok": True, "detail": "Fluxer token and channels forgotten; %s goes back to "
-                                           "its .env values for Fluxer." % (what[0].lower() + what[1:])}
+        return 200, {"ok": True, "detail": "Fluxer token and channels removed; %s goes back to "
+                                           "the server's own settings for Fluxer." % (what[0].lower() + what[1:])}
     chans = botcreds.fluxer_channels(row)
     if act == "fluxer-save" and "channels" in body:
         # the page sends every feed's field, so what it sends is the whole set
@@ -369,12 +373,11 @@ def _fluxer_change(name, act, body, actor, row, describe):
     if token.lower().startswith("bot "):
         token = token[4:].strip()
     if token and not botcreds.can_seal():
-        return 400, {"error": "POL_BOT_KEY is not set in .env, so tokens cannot be stored. "
-                              "Add it (any long random string) to the admin and bot services."}
+        return 400, {"error": NO_KEY}
     use = token or (row or {}).get("fluxer_token") or ""
     if act == "fluxer-check" and not use:
         return 400, {"error": "No usable Fluxer token is stored for %s%s." % (
-            name, " (it was sealed under another POL_BOT_KEY)" if (row or {}).get("fluxer_has_token") else "")}
+            name, " (it was saved under a different sealing key)" if (row or {}).get("fluxer_has_token") else "")}
     if act == "fluxer-save" and not token and "channels" not in body:
         return 400, {"error": "Nothing to save: paste a Fluxer token or channel ids."}
     info = None
@@ -420,19 +423,20 @@ def change(body, actor, describe=None, set_endpoint=None, fluxer_describe=None):
 
     if act == "delete":
         botcreds.delete(name)
-        return 200, {"ok": True, "detail": "Forgotten. The %s service goes back to its .env "
-                                           "values when it next restarts." % name}
+        return 200, {"ok": True, "detail": "Removed. The %s service goes back to the server's own "
+                                           "settings when it next restarts." % name}
     if act == "clear":
         if not row:
             return 200, {"ok": True, "detail": "Nothing stored."}
         botcreds.save(name, actor, token="")
-        return 200, {"ok": True, "detail": "Token forgotten; the service restarts on its .env token."}
+        return 200, {"ok": True, "detail": "Token removed; the service restarts on the token in the "
+                                           "server's settings."}
 
     if act in ("refresh", "endpoint"):
         token = (row or {}).get("token") or ""
         if not token:
             return 400, {"error": "No usable token is stored for %s%s." % (
-                name, " (it was sealed under another POL_BOT_KEY)" if (row or {}).get("has_token") else "")}
+                name, " (it was saved under a different sealing key)" if (row or {}).get("has_token") else "")}
         if act == "refresh":
             info = describe(token)
             if info.get("error"):
@@ -471,8 +475,7 @@ def change(body, actor, describe=None, set_endpoint=None, fluxer_describe=None):
     info = None
     if token:
         if not botcreds.can_seal():
-            return 400, {"error": "POL_BOT_KEY is not set in .env, so tokens cannot be stored. "
-                                  "Add it (any long random string) to the admin and bot services."}
+            return 400, {"error": NO_KEY}
         info = describe(token)
         if info.get("error"):
             return 400, {"error": info["error"]}

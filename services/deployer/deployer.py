@@ -87,7 +87,7 @@ VERSION = "3.0"
 
 PATCH_ACTIONS = ("patch_import", "patch_build", "patch_remove", "patch_rollback", "patch_check",
                  "patch_fetch")
-ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import") + PATCH_ACTIONS
+ACTIONS = ("install", "enable", "disable", "update", "restart", "check", "import", "fix") + PATCH_ACTIONS
 CORE_ACTIONS = ("update", "restart", "check")
 
 KEEP_JOBS = 50
@@ -96,6 +96,8 @@ LOG_KEEP = 768 << 10       # what is left of it after a trim (the tail)
 TAIL = 64 << 10            # the log tail GET /api/jobs/<id> returns
 MAX_BODY = 4096
 GAMES_TTL = 5.0            # seconds GET /api/games reuses its last answer
+DIAGNOSE_TTL = 60.0        # seconds the known-problem scan of the games' logs is reused
+DIAGNOSE_TAIL = 80         # log lines per service it reads
 UPLOAD_MAX = 8 << 30       # default POL_DEPLOY_UPLOAD_MAX
 IMPORT_TIMEOUT = 6 * 3600  # an import tool is stopped after this long
 NOBODY = 65534             # the uid and gid an import runs as when the checkout is root's
@@ -160,6 +162,9 @@ class Config:
         self.stack = stack
         self.state = state
         self.ghcr = ghcr
+        # POL_DEPLOY_MODE=updaters: no OpenLobby checkout, only the updaters of paired games
+        # (docs/deployer.md, "A deployer for paired games only")
+        self.updaters_only = False
         self.python = sys.executable or "python3"
         self.clients = None          # realpath of POL_DEPLOY_CLIENTS; None: browsing is off
         self.clients_note = "POL_DEPLOY_CLIENTS is not set, so browsing is off"
@@ -202,6 +207,9 @@ def parse_args(argv):
                     "admin panel (docs/deployer.md).")
     ap.add_argument("--bind", default=env.get("POL_DEPLOYER_BIND") or "0.0.0.0:8099",
                     help="host:port to listen on (POL_DEPLOYER_BIND)")
+    ap.add_argument("--mode", default=env.get("POL_DEPLOY_MODE", ""),
+                    help="full (the default) or updaters: no OpenLobby checkout, only the updaters "
+                         "of games paired with the panel (POL_DEPLOY_MODE)")
     ap.add_argument("--root", default=env.get("POL_DEPLOY_ROOT", ""),
                     help="directory holding the openlobby checkout and the games beside it "
                          "(POL_DEPLOY_ROOT)")
@@ -264,27 +272,39 @@ def make_config(args):
         sys.exit(2)
     if len(token) < 16:
         say("warning: POL_DEPLOYER_TOKEN is shorter than 16 characters")
-    root = args.root.strip()
-    if not root or not os.path.isabs(root):
-        say("POL_DEPLOY_ROOT must be the absolute path of the directory that holds the "
-            "openlobby checkout (got %r)." % root)
+    mode = (args.mode or "").strip().lower() or "full"
+    if mode not in ("full", "updaters"):
+        say("POL_DEPLOY_MODE must be full or updaters (got %r)" % args.mode)
         sys.exit(2)
-    root = os.path.normpath(root)
-    core = os.path.normpath(args.core.strip() or os.path.join(root, "openlobby"))
-    stack = args.stack or os.path.join(core, "tools", "stack.py")
-    if not os.path.isfile(stack):
-        say("%s not found. POL_DEPLOY_ROOT (%s) must be mounted at the same path inside "
-            "the container and hold the openlobby checkout." % (stack, root))
-        sys.exit(2)
-    if not glob.glob(os.path.join(core, "games", "*.json")):
-        say("no game catalog in %s/games" % core)
-        sys.exit(2)
+    if mode == "updaters":
+        # no checkout: an empty folder in the state volume stands in for it, so there is no
+        # catalog, no .channel and no stack.py, and a job has a working folder
+        root = core = os.path.join(args.state, "no-checkout")
+        os.makedirs(core, exist_ok=True)
+        stack = ""
+    else:
+        root = args.root.strip()
+        if not root or not os.path.isabs(root):
+            say("POL_DEPLOY_ROOT must be the absolute path of the directory that holds the "
+                "openlobby checkout (got %r)." % root)
+            sys.exit(2)
+        root = os.path.normpath(root)
+        core = os.path.normpath(args.core.strip() or os.path.join(root, "openlobby"))
+        stack = args.stack or os.path.join(core, "tools", "stack.py")
+        if not os.path.isfile(stack):
+            say("%s not found. POL_DEPLOY_ROOT (%s) must be mounted at the same path inside "
+                "the container and hold the openlobby checkout." % (stack, root))
+            sys.exit(2)
+        if not glob.glob(os.path.join(core, "games", "*.json")):
+            say("no game catalog in %s/games" % core)
+            sys.exit(2)
     try:
         cfg = Config(token, args.bind, root, core, stack, args.state,
                      truthy(os.environ.get("POL_DEPLOY_GHCR")))
     except ValueError:
         say("POL_DEPLOYER_BIND must be host:port (got %r)" % args.bind)
         sys.exit(2)
+    cfg.updaters_only = mode == "updaters"
     if args.upload_max.strip():
         try:
             cfg.upload_max = parse_size(args.upload_max)
@@ -766,6 +786,11 @@ class JobLog:
     def line(self, text):
         self.write(text.rstrip("\n") + "\n")
 
+    def blank(self, *values):
+        """Blank these too from here on (a password a fix reads from .env)."""
+        found = {x.decode("utf-8") for x in self.secrets} | {v for v in values if v}
+        self.secrets = [x.encode("utf-8") for x in sorted(found, key=len, reverse=True)]
+
     def _trim(self):
         with open(self.path, "rb") as f:
             data = f.read()
@@ -907,6 +932,31 @@ class Runner:
         if rc != 0:
             raise JobFailed("docker compose %s failed (exit %d); the log has the details."
                             % (args[0], rc), rc)
+
+    def compose_input(self, args, data, timeout=120):
+        """docker compose `args` with `data` on its standard input -> (exit code, output). The
+        log shows the command and its output, never the data."""
+        self.paths_guard()
+        argv = [self.cfg.python, self.cfg.stack, "compose"] + (["--ghcr"] if self.cfg.ghcr else []) \
+            + ["--no-prebuild"] + list(args)
+        self.log.line("$ " + self.show(argv) + "   (its input is not shown)")
+        try:
+            p = subprocess.run(argv, cwd=self.cfg.core, env=self.child_env(False),
+                               input=data.encode("utf-8"), stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=timeout)
+        except FileNotFoundError:
+            raise JobFailed("%s is not installed in the deployer image" % os.path.basename(argv[0]))
+        except subprocess.TimeoutExpired:
+            raise JobFailed("%s did not finish within %d seconds" % (self.show(argv), timeout))
+        self.log.write(p.stdout)
+        self.last_rc = p.returncode
+        return p.returncode, p.stdout.decode("utf-8", "replace")
+
+    def game_env(self, key):
+        """The values a game's compose files are read with: the core's .env, then its own."""
+        vals = read_dotenv(os.path.join(self.cfg.core, ".env"))
+        vals.update(read_dotenv(os.path.join(self.cfg.root, self.catalog[key]["checkout"], ".env")))
+        return vals
 
     def up(self, extra=()):
         self.compose(["up", "-d"] + ([] if self.cfg.ghcr else ["--build"]) + list(extra))
@@ -1296,6 +1346,79 @@ def act_check(r, key):
     return evaluate(r.catalog, report, "Everything %s needs is in place." % what)
 
 
+# ------------------------------------------------ known problems and their fixes
+#
+# A catalog entry may list failures its services are known to log ("diagnose": [{"id",
+# "services", "match", "say", "fix", "fix_label", "fix_about"}], docs/deployer.md, "Known
+# problems"). diagnose() finds them in the services' recent logs and GET /api/games shows each
+# under the game's "problems"; POST /api/actions {"action": "fix", "game", "fix": <id>} runs
+# the fix named there. A fix is code here (FIXES), never a command from the catalog.
+
+def sql_quote(v):
+    """A MariaDB string literal's inside: backslashes and quotes escaped."""
+    return v.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def fix_lsb_db_password(r, key, d):
+    """LandSandBoat cannot sign in to its MariaDB: MariaDB takes LSB_DB_PASSWORD from .env only
+    when the database is first created, so a later change leaves the two apart. Set the database
+    user's password to the one in .env, signed in as root with LSB_DB_ROOT_PASSWORD, then
+    restart the services that failed. Both passwords go on standard input, never in an argument
+    or the log."""
+    vals = r.game_env(key)
+    user = vals.get("LSB_DB_USER") or "xiadmin"
+    pw, root = vals.get("LSB_DB_PASSWORD", ""), vals.get("LSB_DB_ROOT_PASSWORD", "")
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", user):
+        raise JobFailed("LSB_DB_USER (%r) is not a plain MariaDB user name; fix it in .env first." % user)
+    if not pw or not root:
+        raise JobFailed("The fix needs LSB_DB_PASSWORD and LSB_DB_ROOT_PASSWORD in %s's .env." % r.name(key))
+    r.log.blank(pw, root)
+    sql = "ALTER USER '%s'@'%%' IDENTIFIED BY '%s';\nFLUSH PRIVILEGES;\n" % (user, sql_quote(pw))
+    r.log.line("setting the password of the database user %s to LSB_DB_PASSWORD, as root" % user)
+    rc, out = r.compose_input(["exec", "-T", "db", "sh", "-c",
+                               'IFS= read -r P; MYSQL_PWD="$P" exec mariadb -uroot'],
+                              root + "\n" + sql)
+    if "Access denied for user 'root'" in out:
+        raise JobFailed(
+            "The database refused its root password too (LSB_DB_ROOT_PASSWORD), so that was changed "
+            "after the database was created as well. Put LSB_DB_PASSWORD and LSB_DB_ROOT_PASSWORD in "
+            "%s's .env back to what they were when it was first started (by default change-me and "
+            "change-me-root), then press Restart. Nothing was changed." % r.name(key), rc or 1)
+    if "Operation ALTER USER failed" in out:
+        raise JobFailed("The database has no user %s@'%%' to change; the log has the details." % user, rc or 1)
+    if rc != 0:
+        raise JobFailed("Changing the database password failed (exit %d); the log has the details." % rc, rc)
+    services = [s for s in d.get("services", []) if s in r.catalog[key].get("services", [])]
+    if services:
+        r.compose(["up", "-d", "--force-recreate"] + services, prebuild=False)
+    return "ok", ("The database now takes the password in .env, and %s %s restarted."
+                  % (", ".join(services) or "nothing", "is" if len(services) == 1 else "are")), []
+
+
+FIXES = {"lsb-db-password": fix_lsb_db_password}
+
+
+def diagnoses(entry):
+    """The catalog's "diagnose" rows that are well formed and have a fix here."""
+    out = []
+    for d in entry.get("diagnose") or []:
+        if (isinstance(d, dict) and isinstance(d.get("id"), str) and d.get("fix") in FIXES
+                and isinstance(d.get("match"), str) and d["match"]
+                and isinstance(d.get("services"), list) and d["services"]):
+            out.append(d)
+    return out
+
+
+def act_fix(r, key, job):
+    if key not in r.enabled():
+        raise JobFailed("%s is not enabled." % r.name(key))
+    d = next((x for x in diagnoses(r.catalog[key]) if x["id"] == job.get("fix")), None)
+    if d is None:
+        raise JobFailed("%s has no known problem %r with a fix." % (r.name(key), job.get("fix")))
+    r.log.line("fixing: %s" % d.get("say", d["id"]))
+    return FIXES[d["fix"]](r, key, d)
+
+
 def act_import(r, key, job):
     """Run the item's import tool on the folder the request named, as the
     checkout's owner with a bare environment, then check the game."""
@@ -1549,6 +1672,13 @@ ACT = {"install": act_install, "enable": act_enable, "disable": act_disable,
 # path the Docker daemon sees it at and made the working directory, with the Docker socket
 # (a game's update builds and restarts its containers): see docs/deployer.md, "Updaters of
 # paired games", for what approving one means.
+
+#: what a deployer started with POL_DEPLOY_MODE=updaters answers to everything else
+UPDATERS_ONLY = ("This deployer only runs the updaters of games paired with the panel "
+                 "(POL_DEPLOY_MODE=updaters); it installs and updates no OpenLobby games.")
+UPDATERS_ONLY_CHANNEL = ("This deployer has no dev builds of its own to unlock (POL_DEPLOY_MODE="
+                         "updaters). To put a paired game on Dev, type the access code, then pick "
+                         "Dev on that game's row: the code goes along with that switch.")
 
 FOLDER_CODE = ("import os, sys\n"
                "sys.exit(0 if os.path.isdir('/probe') else 3)\n")
@@ -2548,6 +2678,7 @@ class Deployer:
         self.code_state = None        # {"state", "why", "at"}: the access code's last check
         self.code_checking = False
         self.games_cache = (0.0, None)
+        self.diag_cache = (0.0, None)
         self.uploads = clientdata.Uploads(cfg.state)
         self.checks = patches.Checks(cfg.state)
         self.bundles = patches.BundleCache()
@@ -3037,6 +3168,8 @@ class Deployer:
             elif job["action"] == "import":
                 log.line("importing %s from %s" % (job["item"], json.dumps(job["source"])))
                 state, summary, missing = act_import(r, job["game"], job)
+            elif job["action"] == "fix":
+                state, summary, missing = act_fix(r, job["game"], job)
             else:
                 if job["action"] in COMPOSING:
                     r.paths_guard()        # before stack.py enable or git pull change anything
@@ -3071,6 +3204,44 @@ class Deployer:
                 self.current_game = None
                 self.current_upload = None
                 self.games_cache = (0.0, None)
+                self.diag_cache = (0.0, None)
+
+    def diagnose(self, catalog, keys):
+        """{key: [{"id", "say", "fix", "fix_label", "fix_about"}]}: the known problems
+        (diagnoses) whose text is in the recent logs of the services they name, for the
+        enabled games in `keys`; reused DIAGNOSE_TTL seconds. A log that cannot be read is no
+        problem found."""
+        t, cached = self.diag_cache
+        if cached is not None and time.time() - t < DIAGNOSE_TTL and set(cached["keys"]) == set(keys):
+            return cached["found"]
+        found = {}
+        for key in keys:
+            for d in diagnoses(catalog.get(key, {})):
+                services = [s for s in d["services"] if s in catalog[key].get("services", [])]
+                if not services:
+                    continue
+                text = self._stack_text(["compose"] + (["--ghcr"] if self.cfg.ghcr else [])
+                                        + ["--no-prebuild", "logs", "--no-color", "--tail",
+                                           str(DIAGNOSE_TAIL)] + services, 60)
+                if d["match"] in text:
+                    found.setdefault(key, []).append({
+                        "id": d["id"], "say": d.get("say", ""), "fix": d["fix"],
+                        "fix_label": d.get("fix_label") or "Fix it",
+                        "fix_about": d.get("fix_about", "")})
+        self.diag_cache = (time.time(), {"keys": list(keys), "found": found})
+        return found
+
+    def _stack_text(self, args, timeout):
+        """stack.py's output (stdout and stderr) for `args`; "" when it cannot run."""
+        env = {k: v for k, v in os.environ.items()
+               if k != "POL_DEPLOYER_TOKEN" and v != self.cfg.token}
+        try:
+            r = subprocess.run([self.cfg.python, self.cfg.stack] + args, cwd=self.cfg.core,
+                               env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return r.stdout.decode("utf-8", "replace")
 
     def _stack_json(self, args, timeout):
         env = {k: v for k, v in os.environ.items()
@@ -3115,7 +3286,11 @@ class Deployer:
                                "POL_ADMIN_GAME_%s_TOKEN" % mod.upper()] if mod else []),
                 "ports": e.get("ports", []),
                 "notes": e.get("notes", ""),
+                "problems": [],
             })
+        found = self.diagnose(catalog, [g["key"] for g in games if g["installed"] and g["enabled"]])
+        for g in games:
+            g["problems"] = found.get(g["key"], [])
         out = {"games": games,
                "core": {"running": ps["core"]["running"] if ps_ok else None,
                         "services": ps["core"].get("services", {}) if ps_ok else {}},
@@ -3226,6 +3401,7 @@ class Deployer:
                 "code_why": devchannel.REVOKED if code_ok is False else None,
                 "ghcr": self.cfg.ghcr, "problem": ch.get("problem"), "keys": key_rows,
                 "images": shown, "install_id": self.install_id, "short_codes": bool(issuer),
+                "mode": "updaters" if self.cfg.updaters_only else "full",
                 "issuer": {"value": issuer or devchannel.ISSUER_OFF, "from": where,
                            "default": devchannel.DEFAULT_ISSUER}}
 
@@ -3475,7 +3651,18 @@ def make_handler(dep):
                 return self.send_json(200, {"ok": True, "version": VERSION,
                                             "busy": bool(dep.busy()), "paths": dep.cfg.paths,
                                             "problem": dep.cfg.paths_note
-                                            if dep.cfg.paths == "wrong" else None})
+                                            if dep.cfg.paths == "wrong" else None,
+                                            "mode": "updaters" if cfg.updaters_only else "full"})
+            if cfg.updaters_only:
+                if parts == ["api", "games"]:
+                    return self.send_json(200, {"games": [], "core": {}, "mode": "updaters",
+                                                "options": {"channel": "stable", "mode": "updaters"}})
+                if parts == ["api", "updates"]:
+                    return self.send_json(200, {"checked_at": None, "checking": False, "items": [],
+                                                "mode": "updaters"})
+                if parts not in (["api", "channel"], ["api", "jobs"]) and \
+                        not (len(parts) in (3, 4) and parts[:2] == ["api", "jobs"]):
+                    return self.send_json(409, {"error": UPDATERS_ONLY})
             if parts == ["api", "games"]:
                 return self.send_json(200, dep.games())
             if parts == ["api", "updates"]:
@@ -3663,6 +3850,9 @@ def make_handler(dep):
                 self.close_connection = True
                 return
             path = urllib.parse.urlsplit(self.path).path.rstrip("/")
+            if cfg.updaters_only and path not in ("/api/updater", "/api/channel"):
+                self.close_connection = True
+                return self.send_json(409, {"error": UPDATERS_ONLY})
             if path == "/api/uploads":
                 return self.upload()
             if path not in ("/api/actions", "/api/channel", "/api/updater", "/api/patches/feed"):
@@ -3681,6 +3871,9 @@ def make_handler(dep):
             if not isinstance(body, dict):
                 return self.send_json(400, {"error": "the body must be a JSON object"})
             if path == "/api/channel":
+                if cfg.updaters_only and set(body) != {"issuer"}:
+                    # nothing of its own has dev builds: a paired game's switch carries its code
+                    return self.send_json(409, {"error": UPDATERS_ONLY_CHANNEL})
                 return self.send_json(*dep.channel_request(body))
             if path == "/api/patches/feed":
                 return self.send_json(*dep.feed_set(body))
@@ -3704,6 +3897,12 @@ def make_handler(dep):
                                             % (action, ", ".join(CORE_ACTIONS))})
             if action == "import":
                 code, obj = dep.import_request(body, catalog)
+            elif action == "fix":
+                fid = body.get("fix")
+                if not any(d["id"] == fid for d in diagnoses(catalog[game])):
+                    return self.send_json(400, {"error": "%s has no known problem %r with a fix"
+                                                % (catalog[game]["name"], fid)})
+                code, obj = dep.start("fix", game, {"fix": fid})
             else:
                 code, obj = dep.start(action, game)
             self.send_json(code, obj)
@@ -3711,6 +3910,8 @@ def make_handler(dep):
         def do_DELETE(self):
             if not self.authed():
                 return
+            if cfg.updaters_only:
+                return self.send_json(409, {"error": UPDATERS_ONLY})
             parts = [p for p in urllib.parse.urlsplit(self.path).path.split("/") if p]
             if len(parts) != 3 or parts[:2] != ["api", "uploads"]:
                 return self.send_json(404, {"error": "not found"})
@@ -3807,22 +4008,31 @@ def main(argv=None):
         return channel_cli(args)
     cfg = make_config(args)
     cfg.container = args.container or own_container()
-    cfg.paths, cfg.paths_note = check_paths(cfg, cfg.container)
-    say(("paths: " if cfg.paths != "wrong" else "") + cfg.paths_note)
+    if cfg.updaters_only:
+        cfg.paths, cfg.paths_note = "unchecked", "no OpenLobby checkout (updaters only)"
+    else:
+        cfg.paths, cfg.paths_note = check_paths(cfg, cfg.container)
+        say(("paths: " if cfg.paths != "wrong" else "") + cfg.paths_note)
     dep = Deployer(cfg)
     srv = ThreadingHTTPServer((cfg.host, cfg.port), make_handler(dep))
     srv.daemon_threads = True
-    dep.updates.start()
+    if not cfg.updaters_only:
+        dep.updates.start()
 
     def stop(*_):
         threading.Thread(target=srv.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
-    ch = devchannel.read_channel(cfg.core)
-    say("version %s listening on %s:%d; checkouts in %s, core %s%s%s%s"
-        % (VERSION, cfg.host, srv.server_address[1], cfg.root, cfg.core,
-           ", published images" if cfg.ghcr else "",
-           ", client folders in %s" % cfg.clients if cfg.clients else "",
-           ", on Dev: " + ", ".join(ch["dev"]) if ch["dev"] else ""))
+    if cfg.updaters_only:
+        say("version %s listening on %s:%d; updaters of paired games only (POL_DEPLOY_MODE=updaters)%s"
+            % (VERSION, cfg.host, srv.server_address[1],
+               "" if cfg.container else "; not in a container, so no updater can run"))
+    else:
+        ch = devchannel.read_channel(cfg.core)
+        say("version %s listening on %s:%d; checkouts in %s, core %s%s%s%s"
+            % (VERSION, cfg.host, srv.server_address[1], cfg.root, cfg.core,
+               ", published images" if cfg.ghcr else "",
+               ", client folders in %s" % cfg.clients if cfg.clients else "",
+               ", on Dev: " + ", ".join(ch["dev"]) if ch["dev"] else ""))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

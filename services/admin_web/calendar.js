@@ -11,6 +11,8 @@ const CAL_MONTHS = ["January", "February", "March", "April", "May", "June", "Jul
 const CAL_KINDS = { event: "Event", maintenance: "Maintenance", match: "Match", community: "Community night",
                     reminder: "Reminder" };
 const CAL_LANES = 3;
+// the panel's own entries, by one name everywhere: the chip, an entry's details, the list
+const CAL_OWN = "Server entries", CAL_OWN_ONE = "Server entry";
 const CAL_HOUR_PX = 28;
 
 try {
@@ -94,24 +96,35 @@ async function loadCalendar() {
 
 function calToolbar() {
   document.querySelectorAll("#tab-calendar [data-calview]").forEach((b) => b.classList.toggle("active", b.dataset.calview === CAL.view));
-  $("#calZone").textContent = CAL.utc ? "UTC" : "My time";
-  $("#calZone").title = "Times shown in " + calZone() + ". Click to switch.";
+  $("#calZone").textContent = CAL.utc ? "Times: UTC" : "Times: mine";
+  $("#calZone").title = `Times are shown in ${calZone()}. Click to show them in ${CAL.utc ? "your own time" : "UTC"}.`;
   $("#calNew").hidden = !can("calendar_edit");
 }
 
 function calRender() {
   const d = CAL.data || {};
   const seen = new Set((d.entries || []).map((e) => (e.source === "panel" ? "_panel" : e.game)));
-  const chips = (d.games || []).filter((g) => seen.has(g.key)).map((g) => [g.key, g.short || g.title, calColour({ game: g.key })]);
-  if (seen.has("_panel")) chips.push(["_panel", "Our entries", "own"]);
+  const chips = (d.games || []).filter((g) => seen.has(g.key)).map((g) => [g.key, g.short || g.title, calColour({ game: g.key })])
+    .sort((a, b) => a[1].localeCompare(b[1]));
+  if (seen.has("_panel")) chips.push(["_panel", CAL_OWN, "own"]);
   $("#calChips").innerHTML = chips.map(([k, label, c]) =>
-    `<button class="cal-chip${CAL.hide.has(k) ? " off" : ""}" data-calhide="${esc(k)}"><i class="cal-dot ${c}"></i>${esc(label)}</button>`).join("")
-    || '<span class="muted">Nothing scheduled in this range.</span>';
+    `<button class="cal-chip${CAL.hide.has(k) ? " off" : ""}" data-calhide="${esc(k)}" aria-pressed="${!CAL.hide.has(k)}"`
+    + ` title="${CAL.hide.has(k) ? "Show" : "Hide"} ${esc(label)}"><i class="cal-dot ${c}"></i>${esc(label)}</button>`).join("");
+  $("#calChips").hidden = !chips.length;
   $("#calProblems").textContent = (d.problems || []).join("; ");
   $("#calProblems").hidden = !(d.problems || []).length;
   if (CAL.view === "week") calWeek();
   else if (CAL.view === "list") calList();
   else calMonth();
+}
+
+// One message when the range shows nothing: everything hidden by the names above, or nothing at all.
+function calEmpty() {
+  if (calShown().length) return "";
+  const any = ((CAL.data || {}).entries || []).length > 0;
+  const range = CAL.view === "month" ? "in " + calTitle() : "from " + calTitle().replace(" - ", " to ");
+  return `<p class="hint cal-empty">${any ? "Everything here is hidden. Click a name above to show it again."
+    : `Nothing scheduled ${esc(range)}.`}${!any && can("calendar_edit") ? " Use New entry, or the + on a day, to add one." : ""}</p>`;
 }
 
 // Bars for one row of days: [{e, s, n, lane}] with s the first column and n how many.
@@ -147,6 +160,7 @@ function calMonth() {
   const month = calParts(CAL.anchor.getTime()).m;
   const today = calDay(Date.now());
   const shown = calShown();
+  const edit = can("calendar_edit");
   let html = `<div class="cal-head">${CAL_DOW.map((d) => `<div>${d}</div>`).join("")}</div>`;
   for (let w = 0; w < 6; w++) {
     const ws = calAddDays(lo, w * 7);
@@ -159,11 +173,17 @@ function calMonth() {
       const p = calParts(day);
       html += `<div class="cal-day${p.m !== month ? " out" : ""}${day === today ? " today" : ""}" data-calday="${day}">`
         + `<span class="cal-num">${p.d}</span>`
+        + (edit ? `<button class="cal-add" data-caladd="${day}" title="Add an entry on ${esc(calDate(day))} (or double-click the day)"`
+          + ` aria-label="Add an entry on ${esc(calDate(day))}">+</button>` : "")
         + (more[i] ? `<button class="cal-more" data-calday="${day}">+${more[i]} more</button>` : "") + `</div>`;
     }
     html += `<div class="cal-bars">${bars.filter((r) => r.lane < CAL_LANES).map(calBarHtml).join("")}</div></div>`;
   }
-  $("#calBody").innerHTML = `<div class="cal-month">${html}</div>`;
+  // a phone's grid has room for coloured bars only: the month's entries are listed under it
+  const first = calAt(calParts(CAL.anchor.getTime()).y, month, 1);
+  const next = calAt(calParts(first).y, month + 1, 1);
+  $("#calBody").innerHTML = calEmpty() + `<div class="cal-month">${html}</div>`
+    + `<div class="cal-monthlist">${calListHtml(first, next)}</div>`;
 }
 
 function calWeek() {
@@ -209,13 +229,17 @@ function calWeek() {
     cols += `</div>`;
   }
   const hours = Array.from({ length: 24 }, (_, h) => `<div>${pad2(h)}:00</div>`).join("");
-  $("#calBody").innerHTML = `<div class="cal-wk">${head}<div class="cal-wk-scroll" id="calScroll"><div class="cal-wk-grid">`
+  $("#calBody").innerHTML = calEmpty() + `<div class="cal-wk">${head}<div class="cal-wk-scroll" id="calScroll"><div class="cal-wk-grid">`
     + `<div class="cal-wk-hours">${hours}</div>${cols}</div></div></div>`;
   $("#calScroll").scrollTop = 8 * CAL_HOUR_PX;
 }
 
 function calList() {
   const [lo, hi] = calRange();
+  $("#calBody").innerHTML = calListHtml(lo, hi) || calEmpty();
+}
+const calWho = (e) => (e.source === "panel" ? `${e.game ? calGameName(e.game) : "All games"}, ${CAL_OWN_ONE.toLowerCase()}` : calGameName(e.game));
+function calListHtml(lo, hi) {
   const shown = calShown();
   const today = calDay(Date.now());
   let html = "";
@@ -231,11 +255,28 @@ function calList() {
           : `${calClock(s)} until ${calDate(t - 1)} ${calClock(t)}`;
         const sessions = (e.times || []).length ? `, ${e.times.length} session${e.times.length === 1 ? "" : "s"}` : "";
         return `<li data-calentry="${esc(e.id)}"><span class="t1"><i class="cal-dot ${calColour(e)}"></i>${esc(e.title)}`
-          + `<span class="cal-sub">${esc(e.source === "panel" ? (e.game ? calGameName(e.game) : "All games") : calGameName(e.game))}</span></span>`
+          + `<span class="cal-sub">${esc(calWho(e))}</span></span>`
           + `<span class="t2">${esc(when)}${esc(sessions)}</span></li>`;
       }).join("") + `</ul>`;
   }
-  $("#calBody").innerHTML = html || '<p class="hint">Nothing scheduled in the next six weeks.</p>';
+  return html;
+}
+
+// one day's entries, from "+N more" or a tap on a phone's day: the saved view stays as it is
+function calDayOpen(day) {
+  const next = calAddDays(day, 1);
+  const here = calShown().filter((e) => { const [s, t] = calMs(e); return s < next && t > day; })
+    .sort((a, b) => a.start - b.start);
+  $("#calDetTitle").textContent = calDate(day);
+  $("#calDetBody").innerHTML = here.length ? `<ul class="feed cal-list">` + here.map((e) => {
+    const [s, t] = calMs(e);
+    const when = e.all_day || !calTimed(e) ? "All day" : `${calClock(s)} - ${calClock(t)}`;
+    return `<li data-calentry="${esc(e.id)}"><span class="t1"><i class="cal-dot ${calColour(e)}"></i>${esc(e.title)}`
+      + `<span class="cal-sub">${esc(calWho(e))}</span></span><span class="t2">${esc(when)}</span></li>`;
+  }).join("") + `</ul>` : `<p class="muted">Nothing that day.</p>`;
+  $("#calDetEdit").hidden = true;
+  $("#calDetDel").hidden = true;
+  $("#calDetModal").classList.add("show");
 }
 
 // ---- one entry ----
@@ -243,7 +284,7 @@ function calOpen(id) {
   const e = ((CAL.data || {}).entries || []).find((x) => x.id === id);
   if (!e) return;
   const [s, t] = calMs(e);
-  const who = e.source === "panel" ? (e.game ? calGameName(e.game) : "All games") : calGameName(e.game);
+  const who = e.source === "panel" && !e.game ? "All games" : calGameName(e.game);
   const when = e.all_day ? `${calDate(s)}${calKey(s) !== calKey(t - 1) ? " - " + calDate(t - 1) : ""}, all day`
     : `${calDate(s)} ${calClock(s)} - ${calKey(s) !== calKey(t - 1) ? calDate(t - 1) + " " : ""}${calClock(t)}`;
   const kind = CAL_KINDS[e.kind] || (e.kind ? e.kind[0].toUpperCase() + e.kind.slice(1) : "");
@@ -253,7 +294,7 @@ function calOpen(id) {
   $("#calDetBody").innerHTML = `<div class="kv"><span class="muted">When</span><span style="display:block">${esc(when)}<span class="muted cal-z">${esc(calZone())}</span></span>`
     + `<span class="muted">Game</span><span><i class="cal-dot ${calColour(e)}"></i>${esc(who)}</span>`
     + (kind ? `<span class="muted">Kind</span><span>${esc(kind)}</span>` : "")
-    + `<span class="muted">From</span><span>${e.source === "panel" ? `Added here by ${esc(e.by || "?")}` : `${esc(calGameName(e.game))}'s own schedule`}</span></div>`
+    + `<span class="muted">From</span><span>${e.source === "panel" ? `${CAL_OWN_ONE}, added by ${esc(e.by || "?")}` : `${esc(calGameName(e.game))}'s own schedule`}</span></div>`
     + (e.about ? `<p>${esc(e.about)}</p>` : "")
     + (sessions ? `<h4>Sessions</h4><ul class="feed cal-list">${sessions}</ul>` : "");
   const mine = e.editable && can("calendar_edit");
@@ -280,7 +321,8 @@ function calEdit(id, day) {
   $("#calEdId").value = e ? e.id : "";
   $("#calEdName").value = e ? e.title : "";
   $("#calEdGame").innerHTML = `<option value="">All games</option>`
-    + ((CAL.data || {}).games || []).map((g) => `<option value="${esc(g.key)}">${esc(g.title)}</option>`).join("");
+    + ((CAL.data || {}).games || []).slice().sort((a, b) => String(a.title).localeCompare(String(b.title)))
+      .map((g) => `<option value="${esc(g.key)}">${esc(g.title)}</option>`).join("");
   $("#calEdGame").value = e ? e.game || "" : "";
   $("#calEdKind").value = e ? e.kind || "event" : "event";
   $("#calEdAll").checked = e ? !!e.all_day : false;
@@ -352,9 +394,13 @@ document.addEventListener("click", (e) => {
     calSave(); return calRender();
   }
   const more = t.closest(".cal-more");
-  if (more) { CAL.anchor = new Date(+more.dataset.calday); CAL.view = "list"; calSave(); return loadCalendar(); }
+  if (more) return calDayOpen(+more.dataset.calday);
+  const add = t.closest("[data-caladd]");
+  if (add) return calEdit(null, +add.dataset.caladd);
   const cell = t.closest(".cal-day");
   if (cell && can("calendar_edit") && e.detail === 2) return calEdit(null, +cell.dataset.calday);
+  // a phone's day is too small for its bars to be tapped: the day opens with its entries
+  if (cell && matchMedia("(max-width: 640px)").matches) return calDayOpen(+cell.dataset.calday);
   if (t.closest("#calPrev")) return calMove(-1);
   if (t.closest("#calNext")) return calMove(1);
   if (t.closest("#calToday")) { CAL.anchor = new Date(); return loadCalendar(); }

@@ -45,6 +45,15 @@ PERMS = {
     "health": "See service status and backups",
     "settings": "Change GM alert and service check settings",
 }
+#: The same permissions as a few words each, for the moderators list.
+PERM_SHORT = {
+    "gm": "GM desk", "codes": "Make codes", "codes_void": "Void codes", "reports": "Reports",
+    "accounts_view": "Look up accounts", "accounts_manage": "Manage accounts",
+    "accounts_delete": "Delete accounts", "people": "People", "people_link": "Link people",
+    "news_edit": "Write news", "news_publish": "Publish news", "pml": "PML Preview",
+    "calendar": "Calendar", "calendar_edit": "Edit calendar", "audit": "Activity log",
+    "health": "Service status", "settings": "Alert settings",
+}
 # ...then every game module's own: "game.<key>" to see it, "game.<key>.<id>"
 # per tool and action (adminmodules.Module.perms). PERMS holds them as found
 # at start; perm_labels() is the current list, which also has a game that
@@ -250,13 +259,18 @@ def audit(conn, actor, role, action, target=None, detail=None, ok=True,
     conn.commit()
 
 
-def audit_list(conn, limit=200, actor=None, before=None):
+def audit_list(conn, limit=200, actor=None, before=None, before_id=None):
+    """Newest first. `before` (and `before_id`, for rows sharing that time) pages on from the
+    last row a caller already has."""
     q, args = "SELECT * FROM admin_audit", []
     where = []
     if actor:
         where.append("lower(actor) = lower(%s)")
         args.append(actor)
-    if before:
+    if before and before_id:
+        where.append("(at < %s OR (at = %s AND id < %s))")
+        args += [float(before), float(before), int(before_id)]
+    elif before:
         where.append("at < %s")
         args.append(float(before))
     if where:

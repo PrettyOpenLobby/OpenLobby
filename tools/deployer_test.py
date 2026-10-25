@@ -1281,6 +1281,60 @@ def test_updater_channels(t, servers, dock, d, game):
         iss.stop()
 
 
+class UpdatersOnly(Server):
+    """A deployer started with POL_DEPLOY_MODE=updaters: no --root, no catalog, no stack.py."""
+
+    def argv(self, port):
+        return [sys.executable, DEPLOYER, "--bind", "127.0.0.1:%d" % port] + self.args
+
+
+def test_updaters_only(t, servers):
+    """POL_DEPLOY_MODE=updaters (docs/deployer.md, "A deployer for paired games only"): it
+    starts without an OpenLobby checkout, runs a paired game's updater, and refuses the rest."""
+    sys.path.insert(0, os.path.join(ROOT, "services", "deployer"))
+    import gameupdater as gu
+    dock, d, game = updater_tree(t)
+    state = os.path.join(t.tmp, "state-updaters")
+    s = UpdatersOnly(t, extra_env={"FAKE_UPD_DIR": d, "POL_DEPLOY_MODE": "updaters",
+                                   "POL_DEPLOY_ROOT": ""},
+                     args=["--container", "c0ffee", "--docker", dock, "--minute", "0.2", "--state", state])
+    servers.append(s)
+    c = s.start()
+    code, h = c.get("/api/health")
+    ok(code == 200 and h.get("mode") == "updaters" and h.get("problem") is None,
+       "updaters only: starts with no checkout, says so in health (%s)" % h)
+    code, g = c.get("/api/games")
+    ok(code == 200 and g.get("games") == [] and g.get("mode") == "updaters",
+       "updaters only: no games (%s)" % g)
+    code, u = c.get("/api/updates")
+    ok(code == 200 and u.get("items") == [], "updaters only: nothing of its own to update")
+    code, ch = c.get("/api/channel")
+    ok(code == 200 and ch.get("mode") == "updaters" and ch.get("keys") == [] and ch.get("unlocked") is False,
+       "updaters only: the channel answer has no keys of its own (%s)" % {k: ch.get(k) for k in ("mode", "keys")})
+    for method, path, body in (("POST", "/api/actions", {"action": "install", "game": "kart"}),
+                               ("POST", "/api/patches/feed", {"enabled": True}),
+                               ("GET", "/api/browse?path=", None), ("GET", "/api/patches", None),
+                               ("GET", "/api/uploads", None), ("DELETE", "/api/uploads/x", None)):
+        code, r = c.call(method, path, body)
+        ok(code == 409 and "only runs the updaters" in (r or {}).get("error", ""),
+           "updaters only: %s %s refused (%s)" % (method, path, code))
+    code, r = c.call("POST", "/api/channel", {"unlock": "ABCD-EFGH-JKMN"})
+    ok(code == 409 and "Dev on that game's row" in r.get("error", ""),
+       "updaters only: unlocking is refused, with where the code goes instead")
+    code, r = c.call("POST", "/api/updater", {"game": "kart", "title": "Kart Club", "updater": {
+        "folder": game, "command": ["python", "ok.py", "--yes"], "timeout_minutes": 60}})
+    ok(code == 202, "updaters only: POST /api/updater starts a job (%s %s)" % (code, r))
+    j = c.wait(r["job"], timeout=90) if code == 202 else {}
+    ok(j.get("state") == "ok" and j.get("summary") == "The updater of Kart Club finished.",
+       "updaters only: the updater ran (%s, %s)" % (j.get("state"), j.get("summary")))
+    seen = gu.daemon_path(game)
+    runs = [x["args"] for x in upd_calls(d) if x["args"][0] == "run" and "--network" not in x["args"]]
+    ok(runs and 'type=bind,"source=%s","target=%s"' % (seen, seen) in runs[-1],
+       "updaters only: in the game's folder as the daemon sees it")
+    ok(not os.listdir(os.path.join(state, "no-checkout")), "updaters only: nothing written where a checkout would be")
+    s.stop()
+
+
 def test_updater(t, servers):
     """POST /api/updater: the job that runs a paired game's updater in a container of the
     deployer's own image, against the stand-in docker."""
@@ -2554,7 +2608,9 @@ def _test_channel(t, servers, reg):
         t.clear_calls()
 
     def compose():
-        return [e for e in senvs() if e["args"][0] == "compose"]
+        # what pulled or restarted something: not the read-only log reads of the known-problem scan
+        return [e for e in senvs() if e["args"][0] == "compose"
+                and next((a for a in e["args"][1:] if not a.startswith("--")), "") != "logs"]
 
     def switch(c, key, to, timeout=60):
         st, r = c.call("POST", "/api/channel", {"key": key, "to": to})
@@ -3884,6 +3940,7 @@ def main():
         test_check_paths(t)
         test_paths_server(t, servers)
         test_updater(t, servers)
+        test_updaters_only(t, servers)
         test_channel(t, servers)
         run_patch_tests(t, servers)
         hits = scan_for_token(t, servers)

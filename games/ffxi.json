@@ -84,5 +84,12 @@
     {"port": "8088", "protocol": "tcp", "service": "world", "host": "127.0.0.1"}
   ],
   "admin_module": "ffxi",
-  "notes": "Needs no files from the client on the server: the world is LandSandBoat's own prebuilt image. The client must be the version LSB_CLIENT_VER names when LSB_VER_LOCK is not 0. The title plugin (ffxititle) is required: without it the world connect fails with POL-0001. FFXI must be in the core's POL_LOBBY_CONTENT_IDS for the Play button. docker-compose.lsb-test.yml (a second world) is not part of this entry."
+  "notes": "Needs no files from the client on the server: the world is LandSandBoat's own prebuilt image. The client must be the version LSB_CLIENT_VER names when LSB_VER_LOCK is not 0. The title plugin (ffxititle) is required: without it the world connect fails with POL-0001. FFXI must be in the core's POL_LOBBY_CONTENT_IDS for the Play button. docker-compose.lsb-test.yml (a second world) is not part of this entry.",
+  "diagnose": [
+    {"id": "db-password", "services": ["connect", "search", "world", "map"],
+     "match": "Access denied for user '",
+     "say": "The FFXI servers cannot sign in to their database. LSB_DB_PASSWORD in the FFXI .env is not the password the database was created with: MariaDB takes it from .env only the first time it starts.",
+     "fix": "lsb-db-password", "fix_label": "Give the database the .env password",
+     "fix_about": "Signs in to the database as root (LSB_DB_ROOT_PASSWORD) and sets the database user's password to LSB_DB_PASSWORD, then restarts the FFXI servers. Nothing is deleted."}
+  ]
 }
