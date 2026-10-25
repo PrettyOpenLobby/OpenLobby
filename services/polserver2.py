@@ -339,6 +339,27 @@ class Server:
         #: deploy gate holds this service back instead of cutting a download,
         #: which the client cannot resume: it starts the update over.
         self.updating = 0
+        #: {client address: monotonic time of its last list or file request}.
+        #: A console fetches an update one file per connection, so between two
+        #: files `updating` is 0 and a deploy in that gap cut the update just
+        #: the same (a dozen restarts on 2026-10-24 alone). A client stays
+        #: counted for `update_hold` seconds after its last request.
+        self.recent = {}
+        try:
+            self.update_hold = float(os.environ.get("POLP_UPDATE_HOLD", "") or 300)
+        except ValueError:
+            self.update_hold = 300.0
+
+    def live_updates(self, now=None):
+        """Updates in progress, for the deploy gate: connections open on a
+        list or file request, or else the clients that made one within
+        `update_hold` seconds."""
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            for ip in [ip for ip, t in self.recent.items()
+                       if now - t > self.update_hold]:
+                del self.recent[ip]
+            return max(self.updating, len(self.recent))
 
     def log(self, msg):
         if self.verbose:
@@ -405,10 +426,12 @@ class Server:
                     self.log(f"[{addr[0]}] bad checksum, dropping")
                     return
                 cmd = struct.unpack_from("<I", pkt, 12)[0]
-                if cmd in (1, 3) and not updating:
-                    updating = True
+                if cmd in (1, 3):
                     with self.lock:
-                        self.updating += 1
+                        self.recent[addr[0]] = time.monotonic()
+                        if not updating:
+                            self.updating += 1
+                    updating = True
                 reply = self.dispatch(pkt, cmd, addr, dlhost)
                 if reply is None:
                     return
@@ -1004,7 +1027,7 @@ def main():
     # downloads were running.
     try:
         import live_sessions
-        live_sessions.start_heartbeat("patch", lambda: srv.updating)
+        live_sessions.start_heartbeat("patch", srv.live_updates)
     except Exception as e:
         print(f"[*] live-session heartbeat not started: {e!r}", flush=True)
     try:

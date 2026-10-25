@@ -3818,10 +3818,17 @@ def run_patch_tests(t, servers):
     k.port = s.port
     try:
         test_patch_formats(c, k)
-        uid = test_patch_uploads(c, s.port, k)
-        test_patch_browse(c, k)
-        test_patch_jobs(c, k, t, uid)
-        test_patch_feed(c, k, t)
+        if docker_open_to_me():
+            # A user who may use the Docker socket (a CI runner): the deployer refuses to run
+            # the .polpatch tools, so uploads, patch jobs and the feed's fetches cannot run here.
+            code, h, r = upload(s.port, open(k.full, "rb").read(), name="TetraMaster full.polpatch")
+            ok(code == 409 and "Docker socket" in (r or {}).get("error", ""),
+               "upload a .polpatch as a user who may use the Docker socket: refused (%s %s)" % (code, r))
+        else:
+            uid = test_patch_uploads(c, s.port, k)
+            test_patch_browse(c, k)
+            test_patch_jobs(c, k, t, uid)
+            test_patch_feed(c, k, t)
         test_patch_leaks(k, t)
     finally:
         s.stop()
