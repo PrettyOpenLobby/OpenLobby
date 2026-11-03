@@ -188,7 +188,7 @@ chk("the game's own description wins, the file's services stay",
 port.stop()
 kart = M.load(reload=True).get("kart")
 chk("with the game down, the file stands in and says why",
-    (kart.title, kart.origin, any("stands in" in p for p in M.problems())),
+    (kart.title, kart.origin, any("Couldn't reach" in p for p in M.problems())),
     ("Kart Club (file)", "file", True))
 del os.environ["POL_ADMIN_MODULES_DIR"]
 host, pnum = port.start()
