@@ -139,7 +139,7 @@ def main():
             [b.js("document.querySelector('%s').hidden" % s) for s in ("#chanUnlock", "#chanLock", "#chanGo")],
             [True, True, True])
         chk("  it says the code goes with the game's switch",
-            "pick Dev on the game's row" in (b.js("document.querySelector('#chanHint').textContent") or ""), True)
+            "pick Dev on a game" in (b.js("document.querySelector('#chanHint').textContent") or ""), True)
         if shots:
             b.call("Emulation.setDeviceMetricsOverride", width=1440,
                    height=int(b.js("document.body.scrollHeight")), deviceScaleFactor=1, mobile=False)

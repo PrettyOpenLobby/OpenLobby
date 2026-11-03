@@ -140,10 +140,10 @@ def _open(key, sub, method, query, body, ctype, actor):
         if e.code == 403:
             # the tool refused our token: a configuration fault, not the caller's
             e.close()
-            return None, _error(502, "The %s tools refused the panel's token." % title(key), sub, key)
+            return None, _error(502, "%s turned the panel away. Check its token under Modules." % title(key), sub, key)
         return e, None
     except (urllib.error.URLError, OSError, ValueError):
-        return None, _error(502, "The %s tools are not reachable right now." % title(key), sub, key)
+        return None, _error(502, "Couldn't reach %s. Try again in a minute." % title(key), sub, key)
 
 
 def _finish(key, sub, r):
@@ -156,9 +156,9 @@ def _finish(key, sub, r):
         try:
             data = r.read(MAX_BODY if error else MAX_REPLY + 1)
         except (OSError, ValueError):
-            return _error(502, "The %s tools are not reachable right now." % title(key), sub, key)
+            return _error(502, "Couldn't reach %s. Try again in a minute." % title(key), sub, key)
     if len(data) > MAX_REPLY:
-        return _error(502, "The %s tools answered with more than %d MB, more than the panel passes on."
+        return _error(502, "%s sent a page over %d MB, too big to show."
                       % (title(key), MAX_REPLY >> 20), sub, key)
     if rtype.startswith("text/html"):
         nonce = secrets.token_urlsafe(16)

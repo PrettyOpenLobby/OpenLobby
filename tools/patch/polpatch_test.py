@@ -417,6 +417,38 @@ def main():
         check(rc == 1 and "import the updates in order" in txt,
               "apply on the command line exits 1 with the sentence")
 
+        print("a bundle folder built as if it were an install")
+        rc, txt = cli("build-full", "--source", bundle, "--walk", "--region", "W2U",
+                      "--product", "0002", "--version", V3,
+                      "-o", os.path.join(out, "wrapped.polpatch"))
+        check(rc != 0 and "a patch bundle's own file" in txt
+              and not os.path.exists(os.path.join(out, "wrapped.polpatch")),
+              "build-full refuses a bundle folder as its source")
+        # Make the file an older toolkit would have made, to check the other two guards.
+        import polsynth
+        wrapped = os.path.join(out, "wrapped.polpatch")
+        guard = polbundle.wrapped_path
+        polsynth.wrapped_path = polbundle.wrapped_path = lambda paths: None
+        try:
+            lib.build_full(bundle, "W2U", "0002", wrapped, version=V3, walk=True)
+        finally:
+            polsynth.wrapped_path = polbundle.wrapped_path = guard
+        problems = lib.verify(wrapped)
+        check(any("a patch bundle's own file" in p for p in problems),
+              "verify refuses a .polpatch whose files are a bundle's")
+        wm = os.path.join(tmp, "wrapped-mirrors")
+        os.makedirs(wm)
+        why = raises(lib.apply, wrapped, wm)
+        check(why is not None and "a patch bundle's own file" in why and os.listdir(wm) == [],
+              "apply refuses it and installs nothing")
+        with zipfile.ZipFile(wrapped) as zf:
+            for n in zf.namelist():
+                if n.startswith(lib.BUNDLE_PREFIX):
+                    write(os.path.join(wm, "W2U-0002"), n[len(lib.BUNDLE_PREFIX):], zf.read(n))
+        import polserver2
+        check(polserver2.load_bundles(wm) == {} and len(polserver2.load_bundles(mirrors)) == 1,
+              "polserver2 will not serve one already in mirrors/, and still serves a real one")
+
         print("served")
         reference = os.path.join(tmp, "reference")
         shutil.copytree(install, reference)

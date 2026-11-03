@@ -27,10 +27,10 @@ import adminmodules
 #: moderator who could add moderators could give themselves everything.
 PERMS = {
     "gm": "GM desk: answer GM calls, the duty switch, chat",
-    "codes": "Make registration codes (and see the ones they made)",
+    "codes": "Make registration codes and see the ones they made",
     "codes_void": "Void unused registration codes",
-    "reports": "Read user reports and tester issue reports, and close them",
-    "accounts_view": "Look up accounts (read-only)",
+    "reports": "Read player reports and bug reports, and close them",
+    "accounts_view": "Look up accounts without changing them",
     "accounts_manage": "Manage accounts: create, passwords, login tokens, content, "
                        "refusals, notices, kick, outside mail",
     "accounts_delete": "Delete accounts",
@@ -38,8 +38,9 @@ PERMS = {
     "people_link": "People: link and unlink logins, merge people, add people and notes",
     "news_edit": "Write and save announcements",
     "news_publish": "Publish announcements to players",
+    "comsites": "Community sites: register fan sites and give them their banner code",
     "pml": "PML Preview",
-    "calendar": "See the calendar (each game's entries need that game's permission)",
+    "calendar": "See the calendar. Game entries also need that game's access",
     "calendar_edit": "Add, change and delete the panel's own calendar entries",
     "audit": "See the activity log",
     "health": "See service status and backups",
@@ -50,15 +51,35 @@ PERM_SHORT = {
     "gm": "GM desk", "codes": "Make codes", "codes_void": "Void codes", "reports": "Reports",
     "accounts_view": "Look up accounts", "accounts_manage": "Manage accounts",
     "accounts_delete": "Delete accounts", "people": "People", "people_link": "Link people",
-    "news_edit": "Write news", "news_publish": "Publish news", "pml": "PML Preview",
+    "news_edit": "Write news", "news_publish": "Publish news", "comsites": "Community sites",
+    "pml": "PML Preview",
     "calendar": "Calendar", "calendar_edit": "Edit calendar", "audit": "Activity log",
     "health": "Service status", "settings": "Alert settings",
 }
-# ...then every game module's own: "game.<key>" to see it, "game.<key>.<id>"
-# per tool and action (adminmodules.Module.perms). PERMS holds them as found
-# at start; perm_labels() is the current list, which also has a game that
-# described itself later (adminmodules.remote).
-PERMS.update(adminmodules.all_perms())
+#: ...then the game permissions, the same for every game module (games added later
+#: included): adminmodules.CATEGORIES, saved as "games.<category>". A game can be left out
+#: of one: "games.<category>:not:<key>". Any of them in a game also lets the moderator see
+#: that game. A game's updates stay the owner's.
+GAME_PERMS = {
+    "games.see": "See games: status, who is playing, rooms",
+    "games.message": "Send messages: announcements, GM notices, lobby and chat messages",
+    "games.kick": "Disconnect players",
+    "games.ban": "Ban and mute: bans, mutes and refused logins",
+    "games.help": "Help requests: each game's help desk and GM chat",
+    "games.edit": "Change game data: characters, items, events and every other tool",
+    "games.logs": "Server logs: each game's Logs tab",
+}
+GAME_SHORT = {
+    "games.see": "See games", "games.message": "Send messages", "games.kick": "Disconnect players",
+    "games.ban": "Ban and mute", "games.help": "Help requests", "games.edit": "Change game data",
+    "games.logs": "Server logs",
+}
+#: one line under a game permission in the editor, only where the label alone misleads
+GAME_HINTS = {
+    "games.edit": "Characters, items, events and any other game tool.",
+    "games.help": "Help desks, GM chat and game help in the Inbox.",
+}
+PERM_SHORT.update(GAME_SHORT)
 
 #: The PlayOnline core's permissions: players' accounts and codes, GM calls,
 #: reports, news and the PML preview. A panel run without the core
@@ -66,13 +87,13 @@ PERMS.update(adminmodules.all_perms())
 #: and a moderator who was given one before simply does not hold it there.
 POL_PERMS = frozenset(("gm", "codes", "codes_void", "reports", "accounts_view",
                        "accounts_manage", "accounts_delete", "news_edit",
-                       "news_publish", "pml"))
+                       "news_publish", "comsites", "pml"))
 
 
 def perm_labels():
-    """{perm: label}: the panel's own permissions, then every game module's."""
+    """{perm: label}: the panel's own permissions, then the game permissions."""
     out = dict(PERMS)
-    out.update(adminmodules.all_perms())
+    out.update(GAME_PERMS)
     if adminmodules.core_off():
         for p in POL_PERMS:
             out.pop(p, None)
@@ -92,16 +113,60 @@ class ModError(ValueError):
 
 
 def clean_perms(perms):
+    """What is saved: the panel's own permissions and the game permissions, with the games
+    each leaves out. An old list (per game, as an older script or test may still send) is
+    kept in the old form, which reads as it always did (perms_of); the owner's editor
+    sends the new form, so saving a moderator there converts them. Turning an old list
+    into the new form needs every game the panel knows, which this process may not."""
+    perms = list(perms or [])
     known = perm_labels()
-    got = [p for p in adminmodules.expand_legacy(perms or []) if p in known]
-    return sorted(set(got))
+    if adminmodules.is_legacy(perms):
+        games = set(adminmodules.all_perms())
+        return sorted({p for p in adminmodules.expand_legacy(perms)
+                       if (p in known and not p.startswith(adminmodules.GRANT))
+                       or (p in games and not p.endswith(".update"))})
+    held = adminmodules.grants(perms)
+    out = {p for p in perms if p in known and not p.startswith(adminmodules.GRANT)}
+    for cat, left_out in held.items():
+        out.add(adminmodules.GRANT + cat)
+        out |= {"%s%s:not:%s" % (adminmodules.GRANT, cat, k) for k in left_out}
+    return sorted(out)
+
+
+def _saved(row):
+    return [p for p in (row["perms"] or "").split(",") if p]
+
+
+def grants_of(row):
+    """A moderator's permissions as the owner edits them: the panel's own and the game
+    permissions (clean_perms). One saved per game reads as its new form here, and is saved
+    that way the next time the owner saves the moderator."""
+    saved = _saved(row)
+    if adminmodules.is_legacy(saved):
+        saved = adminmodules.from_legacy(saved)
+    return clean_perms(saved)
 
 
 def perms_of(row):
-    """A moderator's permissions. One saved before game modules held
-    "games_<key>"; that reads as everything in that game."""
+    """Everything a moderator may do, as the panel checks it: the panel's own permissions,
+    then every game permission ("game.<key>[.<id>]") their game permissions give. One saved
+    per game, before the game permissions, keeps exactly what it held (the old
+    "games_<key>" reads as everything in that game but its logs) until the owner saves it
+    again; a game's updates are the owner's either way."""
+    saved = _saved(row)
     known = perm_labels()
-    return [p for p in adminmodules.expand_legacy((row["perms"] or "").split(",")) if p in known]
+    core = [p for p in adminmodules.expand_legacy(saved)
+            if p in known and not p.startswith(adminmodules.GRANT)]
+    if adminmodules.is_legacy(saved):
+        games = adminmodules.legacy_granted(saved)
+    else:
+        games = adminmodules.granted(saved)
+    return sorted(set(core)) + sorted(games)
+
+
+def owner_perms():
+    """The owner's list, for the pages that show one: everything."""
+    return sorted(set(perm_labels()) | set(adminmodules.all_perms()))
 
 
 def fingerprint(row):

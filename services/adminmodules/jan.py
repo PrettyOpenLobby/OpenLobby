@@ -95,13 +95,14 @@ def _parse(doc, st):
 
 MODULE = Module(
     "jan", "JongHoLow", platform="PlayOnline: PS2", content_ids=[3],
+    about="Mahjong.",
     markers=["authsess-jan"], self_described=True,   # its board's janadmin.py speaks the protocol
     actions=[
         Action("notice", "GM notice", _notice, kind="announce",
                fields=[{"id": "text", "label": "Message", "type": "text"}],
-               about="Opens the GM notice window for every player at a table (the 2004 client)."),
+               about="Shows a GM notice at every table."),
         Action("close", "Close the notice", _close,
-               about="Closes the GM notice window again."),
+               about="Closes the GM notice."),
         Action("kick", "Kick a player", _kick, kind="kick", danger=True,
                fields=[{"id": "handles", "label": "Handle", "type": "text"}],
                about="Sends the player out of JongHoLow on their next move."),

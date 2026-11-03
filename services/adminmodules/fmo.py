@@ -15,9 +15,11 @@ def _parse(doc, st):
 
 MODULE = Module(
     "fmo", "Front Mission Online", short="FMO", platform="PlayOnline: PC and PS2",
+    about="Online mech battles.",
     content_ids=[4], markers=["fmo"],
     tools=[Tool("npcs", "Lobby NPCs", ""), Tool("gates", "Story gates", "gates"),
-           Tool("coliseum", "Coliseum", "coliseum"), Tool("war", "War", "war")],
+           Tool("coliseum", "Coliseum", "coliseum"), Tool("war", "War", "war"),
+           Tool("rules", "Rules", "rules")],
     services=[Service(["{core}-fmo-1"], {61300: "lobby"},
                       warning="Everyone in Front Mission Online is disconnected.")],
     live=sources.board(_parse, markers=["fmo"]),

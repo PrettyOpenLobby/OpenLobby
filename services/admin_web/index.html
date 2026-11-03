@@ -101,7 +101,7 @@
        it keeps its natural size, so a select does not push its button onto the
        next line. */
     textarea,
-    :is(div:not([class]), label, details, .panel, .card, .ga-box, .acct-sec, .gx-act, .gmn-item,
+    :is(div:not([class]), label, details, .panel, .card, .ga-box, .acct-sec, .gmn-item,
         .row > div, .grow) > :is(input[type=text], input[type=password], input[type=datetime-local], select) {
       width: 100%; }
     /* short codes: a link code or a count does not need the whole row */
@@ -244,6 +244,27 @@
     .note.warn { border-left-color: var(--warn); }
     .note b { color: var(--text); font-weight: 600; }
     .narrow { max-width: 520px; }
+    /* Settings > Sign-in: password and Discord side by side, one column on a
+       narrow screen or when only one of them shows (.solo, set by applyRole). */
+    .signin-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+      gap: 18px; margin-bottom: 18px; }
+    .signin-grid > .panel { margin-bottom: 0; }
+    .signin-grid.solo { grid-template-columns: minmax(0, 1fr); }
+    .pw-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+    .pw-grid label { margin-top: 8px; }
+    .signin-grid.solo .pw-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    #mePanel .pw-grid > :first-child { grid-column: 1 / -1; max-width: calc(50% - 6px); }
+    .signin-grid.solo #mePanel .pw-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .signin-grid.solo #mePanel .pw-grid > :first-child { grid-column: auto; max-width: none; }
+    .pw-go { margin-top: 14px; }
+    .gml-state { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+    .me-perms { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: -4px 0 4px;
+      font-size: 12.5px; color: var(--muted); }
+    @media (max-width: 900px) { .signin-grid { grid-template-columns: minmax(0, 1fr); } }
+    @media (max-width: 560px) {
+      .pw-grid, .signin-grid.solo .pw-grid, .signin-grid.solo #mePanel .pw-grid { grid-template-columns: minmax(0, 1fr); }
+      #mePanel .pw-grid > :first-child { max-width: none; }
+    }
 
     /* News tab: pickers that SHOW the choice, and a live effect summary.
        Kind and Service each pick a piece of SE's own art, so the picker draws
@@ -984,7 +1005,16 @@
       border-top: 1px solid var(--line); }
     .perm-game .perm-view { flex: 0 0 210px; font-weight: 600; }
     .perm-tools { display: flex; flex-wrap: wrap; gap: 6px; }
-    .perm-tools .chip { padding: 3px 10px; font-size: 12.5px; }
+    .perm-cats { display: grid; gap: 6px 16px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+    .perm-cat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .perm-cat .hint { margin: 0 0 0 24px; }
+    .perm-out { margin-left: 24px; font-size: 12.5px; }
+    .perm-out > summary { cursor: pointer; color: var(--muted); list-style: none; }
+    .perm-out > summary::-webkit-details-marker { display: none; }
+    .perm-out > summary::before { content: "\25B8"; display: inline-block; width: 12px; }
+    .perm-out[open] > summary::before { transform: rotate(90deg); }
+    .perm-out .chips { gap: 4px; margin: 4px 0 2px; }
+    .perm-out .chip { padding: 2px 9px; font-size: 12px; }
     .panel h2 .h2act { margin-left: auto; font-size: 13px; font-weight: 500; color: var(--accent);
       text-decoration: none; }
     .panel h2 .h2sub { font-size: 13px; font-weight: 400; color: var(--muted); }
@@ -1033,6 +1063,7 @@
       table.cards td:empty { display: none; }
       table.cards td[colspan] { justify-content: flex-start; text-align: left; }
       table.cards .rowacts { justify-content: flex-start; width: 100%; }
+      table.cards .permchips { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
       table.cards td:last-child:has(.rowacts), table.cards td:last-child:has(button) {
         justify-content: flex-start; padding-top: 8px; }
       .toolbar .seg { flex-wrap: wrap; }
@@ -1107,6 +1138,12 @@
       border-bottom: 2px solid transparent; white-space: nowrap; }
     .gx-tabs a:hover { color: var(--text); }
     .gx-tabs a.on { color: var(--text); border-color: var(--accent); }
+    /* a grouped tab's own tools, under the bar */
+    .gx-subtabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 0 2px; }
+    .gx-subtabs a { padding: 4px 10px; border-radius: 999px; color: var(--muted); text-decoration: none;
+      font-size: 13px; border: 1px solid var(--line); white-space: nowrap; }
+    .gx-subtabs a:hover { color: var(--text); }
+    .gx-subtabs a.on { color: var(--text); border-color: var(--accent); }
     /* tiles sized to what they hold, not shared out across the width */
     .gx-stats { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(160px, 220px)); }
     .gx-stat { margin: 0; }
@@ -1131,6 +1168,8 @@
     details.dn-more { margin: 2px 0 0; font-size: 12px; }
     details.dn-more > summary { cursor: pointer; color: var(--muted); width: max-content; }
     details.dn-more > div { margin: 4px 0 2px; max-width: 70ch; }
+    .deploy-problem { margin: 8px 0 0; max-width: 46ch; }
+    .deploy-problem button { margin-top: 6px; }
     .gx-patches tr.gp-row { cursor: pointer; }
     .gx-patches tr.gp-row:hover td { background: var(--panel2); }
     .gx-patches tr[data-gpbody] > td { background: var(--bg); }
@@ -1142,12 +1181,22 @@
     .gx-facts { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 10px 0 0; font-size: 13px; }
     .gx-facts dt { color: var(--muted); } .gx-facts dd { margin: 0; }
     .gx-ops { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
-    .gx-acts { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-    .gx-act { display: flex; flex-direction: column; gap: 8px; background: var(--panel2);
-      border-radius: 9px; padding: 12px 14px; }
-    .gx-act label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
-    .gx-act button { align-self: flex-start; }
-    .gx-act input[type=text] { background: var(--bg); width: 100%; }
+    /* a game's actions: a button each, in groups; the fields open in #gxActModal */
+    .gx-agroup { display: grid; grid-template-columns: 96px 1fr; gap: 10px; align-items: baseline;
+      padding: 8px 0; border-top: 1px solid var(--line); }
+    .gx-acts h3 + .gx-agroup { border-top: 0; padding-top: 0; }
+    .gx-agroup:has(> .gx-abtns:only-child) { grid-template-columns: 1fr; }
+    .gx-ahead { font-size: 12px; color: var(--muted); }
+    .gx-abtns { display: flex; flex-wrap: wrap; gap: 8px; }
+    .gx-abtns button { font-size: 13px; padding: 6px 12px; }
+    .gx-amodal > .pk { margin: 0; }
+    .modal .card > p.gx-aerr { color: var(--bad); font-size: 13px; margin: 12px 0 0; }
+    .gx-aask { color: var(--bad); font-size: 13.5px; font-weight: 600; }
+    @media (max-width: 560px) {
+      .gx-agroup { grid-template-columns: 1fr; gap: 6px; }
+      #gxActModal { padding: 10px; }
+      #gxActModal .card { max-width: none; }
+    }
     /* the player picker (picker.js) */
     .pk { position: relative; width: 100%; min-width: 0; color: var(--text); font-size: 14px; }
     .pk .pk-q { width: 100%; padding-right: 34px; }
@@ -1310,7 +1359,7 @@
       .pv-editor { height: 420px; }
     }
     @media (max-width: 800px) {
-      .pv { grid-template-columns: 1fr; }
+      .pv { grid-template-columns: minmax(0, 1fr); }
       /* a phone: the page first, the page list after it */
       .pv-main { order: 1; }
       .pv-side { position: static; max-height: 420px; order: 2; }
@@ -1551,6 +1600,24 @@
       .pp-cards, .pp-two { grid-template-columns: 1fr; }
       .pp-when { width: 56px; }
     }
+    /* News > Community sites */
+    .cs-skins { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 4px 0 10px; }
+    .cs-skin { padding: 3px; border: 2px solid var(--line); border-radius: 8px; background: var(--panel2);
+               cursor: pointer; text-align: left; color: var(--text); font: inherit; }
+    .cs-skin img { display: block; width: 100%; aspect-ratio: 480 / 100; border-radius: 4px; }
+    .cs-skin span { display: block; font-size: 12px; color: var(--muted); padding: 3px 2px 0; }
+    .cs-skin[aria-checked="true"] { border-color: var(--accent); }
+    .cs-skin:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .cs-checks { gap: 18px; margin-top: 8px; }
+    .cs-checks label { display: flex; gap: 6px; align-items: center; margin: 0; font-weight: normal; }
+    .cs-code { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 10px; }
+    .cs-code pre { flex: 1; min-width: 0; margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--panel2);
+                   border: 1px solid var(--line); white-space: pre; overflow-x: auto; font-size: 12.5px; }
+    .cs-livehead { display: flex; gap: 16px; align-items: baseline; margin-top: 4px; }
+    .cs-livehead label { margin: 0; }
+    .cs-ja { font-weight: normal; display: flex; gap: 6px; align-items: center; }
+    #csLive { margin-bottom: 10px; }
+    .cs-preview { display: block; width: 480px; max-width: 100%; height: 100px; border: 0; background: #000; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -1588,8 +1655,11 @@
         <button data-tab="issues">Bug reports<span class="navbadge" id="issuesBadge" hidden></span></button>
         <button data-tab="gamehelp">Game help<span class="navbadge" id="helpBadge" hidden></span></button>
       </nav>
+      <nav class="subtabs" data-group="news" aria-label="News" hidden>
+        <button data-tab="news">Announcements</button><button data-tab="comsites">Community sites</button>
+      </nav>
       <nav class="subtabs" data-group="settings" aria-label="Settings" hidden>
-        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts" id="alertsTab">Alerts and checks</button><button data-tab="bots">Bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="activity">Activity log</button>
+        <button data-tab="security">Sign-in</button><button data-tab="mods">Moderators</button><button data-tab="alerts" id="alertsTab">Alerts and checks</button><button data-tab="bots">Bots</button><button data-tab="modules">Modules</button><button data-tab="deploy" id="deployTab" hidden>Install games</button><button data-tab="logs">Logs</button><button data-tab="activity">Activity log</button>
       </nav>
   <main>
     <!-- OVERVIEW -->
@@ -1642,7 +1712,7 @@
         <div class="panel">
           <div class="toolbar">
             <div class="grow"><label for="ppSearch" class="sr">Search people</label>
-              <input type="search" id="ppSearch" data-search placeholder="Search any name, ID or login in any game"></div>
+              <input type="search" id="ppSearch" data-search placeholder="Search names, IDs and logins"></div>
             <div class="seg" id="ppFilter"><button data-f="all" class="on">All</button><button data-f="online">Online</button><button data-f="dupes">Possible duplicates</button></div>
             <span class="count" id="ppCount"></span>
             <button class="act sm" id="ppNew" data-perm="people_link">New person</button>
@@ -1670,14 +1740,14 @@
             <input type="text" id="codeCount" value="1" inputmode="numeric" maxlength="2"
                    title="1-50. More than one always uses random codes."></div>
         </div>
-        <p class="hint" id="codeHint">Format XXXX-XXXX-XXXX-XXXX-XXXX. Leave blank for a random code.</p>
+        <p class="hint" id="codeHint">Leave blank for a random code.</p>
         <label>Grants content</label>
         <div class="chips" id="contentChips"></div>
         <div class="row">
-          <div style="flex:3"><label>Note (optional)</label>
-            <input type="text" id="note" placeholder="e.g. launch giveaway"></div>
-          <div style="flex:1"><label>Expires after (days)</label>
-            <input type="text" id="codeExpire" inputmode="numeric" maxlength="4" placeholder="never"></div>
+          <div style="flex:3"><label for="note">Note</label>
+            <input type="text" id="note" placeholder="Optional"></div>
+          <div style="flex:1"><label for="codeExpire">Days valid</label>
+            <input type="text" id="codeExpire" inputmode="numeric" maxlength="4" placeholder="Forever"></div>
         </div>
         <div style="margin-top:14px"><button class="act" id="createBtn">Create code</button></div>
         <div id="newCodes" hidden>
@@ -1697,7 +1767,7 @@
             <button data-f="all">All</button>
           </div>
           <div class="grow"><input type="search" id="codeSearch" data-search
-               placeholder="Search code, note, content or who redeemed it"></div>
+               placeholder="Search codes"></div>
           <span class="count" id="codeCountLbl"></span>
           <button class="ghost sm" id="codeCopyShown">Copy shown</button>
           <button class="danger sm" id="codeVoidShown" data-perm="codes_void">Void shown</button>
@@ -1716,10 +1786,10 @@
         <h2>Accounts</h2>
         <div class="toolbar">
           <div class="grow"><input type="search" id="accSearch" data-search
-               placeholder="Search PlayOnline ID, handle, content or client"></div>
+               placeholder="Search accounts"></div>
           <div class="seg" id="accFilter">
             <button data-f="all" class="on">All</button>
-            <button data-f="unlinked" title="Owns content the launcher cannot see">Not playable</button>
+            <button data-f="unlinked" title="Owns titles the launcher can't see">Not playable</button>
             <button data-f="nocontent">No content</button>
           </div>
           <span class="count" id="accCount"></span>
@@ -1743,18 +1813,17 @@
           <div class="btn"><button class="danger" id="revokeBtn">Revoke</button></div>
           <div class="btn" style="margin-left:auto"><button class="ghost" id="grantNoneBtn">Clear</button></div>
         </div>
-        <p class="hint">Both act only on the ticked titles. Granting a title again brings its characters back.</p>
       </div>
       <div class="panel" id="createPanel">
         <h2>Create an account</h2>
-        <p class="hint">The password is shown once, when the account is made.</p>
+        <p class="hint">The password is shown only once.</p>
         <div class="row">
-          <div style="flex:1"><label>Handle <span class="hint" style="display:inline">(blank = Player####)</span></label>
-            <input type="text" id="newHandle" maxlength="15" autocomplete="off" spellcheck="false"></div>
-          <div style="flex:1"><label>Password <span class="hint" style="display:inline">(blank = generated)</span></label>
-            <input type="text" id="newPw" maxlength="15" autocomplete="off" spellcheck="false" class="mono"></div>
-          <div style="flex:1"><label>Registration code <span class="hint" style="display:inline">(optional)</span></label>
-            <input type="text" id="newCode" maxlength="24" autocomplete="off" spellcheck="false" class="mono"
+          <div style="flex:1"><label for="newHandle">Handle</label>
+            <input type="text" id="newHandle" placeholder="Player####" maxlength="15" autocomplete="off" spellcheck="false"></div>
+          <div style="flex:1"><label for="newPw">Password</label>
+            <input type="text" id="newPw" placeholder="Random" maxlength="15" autocomplete="off" spellcheck="false" class="mono"></div>
+          <div style="flex:1"><label for="newCode">Registration code</label>
+            <input type="text" id="newCode" placeholder="Optional" maxlength="24" autocomplete="off" spellcheck="false" class="mono"
                    title="A code's titles replace the ones ticked below"></div>
         </div>
         <label>Content</label>
@@ -1772,7 +1841,7 @@
         <div class="ib-bar filterbar">
           <label for="ibSource" class="sr">Where from</label>
           <select id="ibSource"></select>
-          <div class="seg" id="ibState" aria-label="Show"><button data-s="waiting" class="on">Waiting on us</button><button data-s="open">Open</button><button data-s="closed">Closed</button><button data-s="all">All</button></div>
+          <div class="seg" id="ibState" aria-label="Show"><button data-s="waiting" class="on">Waiting</button><button data-s="open">Open</button><button data-s="closed">Closed</button><button data-s="all">All</button></div>
           <label for="ibGame" class="sr">Game</label>
           <select id="ibGame"><option value="">Any game</option></select>
           <span id="ibWho"></span>
@@ -1791,12 +1860,11 @@
     <section id="tab-reports" class="tab">
       <div class="panel">
         <h2>Player reports</h2>
-        <p class="hint">Sent from the Viewer's Report User dialog. Click a row to read and answer it.</p>
         <div class="toolbar filterbar">
-          <div class="seg" id="repFilter" aria-label="Show"><button data-f="waiting">Waiting on us</button><button data-f="open" class="on">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button></div>
+          <div class="seg" id="repFilter" aria-label="Show"><button data-f="waiting">Waiting</button><button data-f="open" class="on">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button></div>
           <select id="repTitle" class="tri-sel" aria-label="Game"><option value="">Any game</option></select>
           <div class="grow"><input type="search" id="repSearch" data-search
-               placeholder="Search reported player, reporter or explanation"></div>
+               placeholder="Search reports"></div>
           <span class="count" id="repCount"></span>
         </div>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Received</th><th>Reported</th><th>Where</th>
@@ -1809,23 +1877,23 @@
           <div class="tri-head"><span class="tri-st" id="repStChip"></span>
             <span class="tri-by" id="repStBy"></span></div>
           <input type="text" id="repStNote" maxlength="500"
-                 placeholder="Note (optional), e.g. fixed in the next update">
+                 placeholder="Add a note">
           <div class="tri-acts" id="repStActs"></div>
         </div>
         <pre id="reportExpl" style="white-space:pre-wrap"></pre>
         <p class="hint" id="repWho"></p>
         <div class="rep-reply">
           <h3>Answer the reporter</h3>
-          <p class="hint">Sent as a PlayOnline mail from the GM to <span id="repReplyTo" class="mono"></span>.</p>
+          <p class="hint">Sent by PlayOnline Mail to <span id="repReplyTo" class="mono"></span>.</p>
           <div id="repReplies"></div>
           <textarea id="repReplyText" rows="5" maxlength="2000"
-                    placeholder="Thank you for your report. We looked into it and..."></textarea>
+                    placeholder="Your answer"></textarea>
           <div class="tri-acts rep-send">
             <label class="chip" id="repReplyCloseWrap"><input type="checkbox" id="repReplyClose"> Mark resolved after sending</label>
             <button class="act sm" id="repReplySend">Send answer</button>
           </div>
         </div>
-        <p class="hint" id="reportLogHint">Attached chat log:</p>
+        <p class="hint" id="reportLogHint">Chat log</p>
         <pre id="reportLog" style="white-space:pre-wrap; overflow-x:auto"></pre>
       </div>
     </section>
@@ -1838,13 +1906,12 @@
     <section id="tab-gamehelp" class="tab">
       <div class="panel">
         <h2>Game help</h2>
-        <p class="hint">Players' help requests from inside the games, answered here.</p>
         <div class="toolbar filterbar">
-          <div class="seg" id="ghFilter" aria-label="Show"><button data-f="waiting" class="on">Waiting on us</button><button data-f="open">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button></div>
+          <div class="seg" id="ghFilter" aria-label="Show"><button data-f="waiting" class="on">Waiting</button><button data-f="open">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button></div>
           <span class="count" id="ghCount"></span>
         </div>
         <p class="hint" id="ghProblems" hidden></p>
-        <p class="hint" id="ghNone" hidden>No game here has a help desk the panel can read yet.</p>
+        <p class="hint" id="ghNone" hidden>No games with a help desk.</p>
         <div class="gh-split solo">
           <ul class="feed gh-list" id="ghList"></ul>
           <div class="gh-thread" id="ghThread"></div>
@@ -1855,12 +1922,11 @@
     <section id="tab-issues" class="tab">
       <div class="panel">
         <h2>Bug reports</h2>
-        <p class="hint">Sent from the in-game report shortcut, with the player's logs and the matching server logs. Click a row to open one.</p>
         <div class="toolbar filterbar">
           <div class="seg" id="issFilter" aria-label="Show"><button data-f="open" class="on">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button></div>
           <select id="issTitle" class="tri-sel" aria-label="Game"><option value="">Any game</option></select>
           <div class="grow"><input type="search" id="issSearch" data-search
-               placeholder="Search player, machine or description"></div>
+               placeholder="Search bug reports"></div>
           <span class="count" id="issCount"></span>
         </div>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Received</th><th>Who</th><th>Game</th>
@@ -1868,18 +1934,18 @@
           <tbody id="issuesBody"></tbody></table></div>
       </div>
       <div class="panel" id="issueDetail" style="display:none">
-        <h2>Bug report <span id="issueId" class="mono"></span></h2>
+        <h2>Bug report <span id="issueId"></span></h2>
         <div class="tri-box" id="issStatus">
           <div class="tri-head"><span class="tri-st" id="issStChip"></span>
             <span class="tri-by" id="issStBy"></span></div>
           <input type="text" id="issStNote" maxlength="500"
-                 placeholder="Note (optional), e.g. fixed in the next update">
+                 placeholder="Add a note">
           <div class="tri-acts" id="issStActs"></div>
         </div>
         <p class="hint" id="issueWarn" style="display:none; color:var(--warn,#c80)"></p>
         <pre id="issueDesc" style="white-space:pre-wrap"></pre>
         <div id="issueShot"></div>
-        <p class="hint">Files:</p>
+        <p class="hint">Files</p>
         <div id="issueFiles" class="mono" style="line-height:1.9"></div>
         <h3 id="issueViewName" class="mono" style="display:none"></h3>
         <pre id="issueView" style="white-space:pre-wrap; overflow-x:auto;
@@ -1911,13 +1977,13 @@
         <div class="panel gm-inbox">
           <div class="gm-inbox-head">
             <h2>Requests</h2>
-            <div class="seg" id="gmFilter" aria-label="Show"><button data-f="waiting">Waiting on us</button><button data-f="open" class="on">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button></div>
+            <div class="seg" id="gmFilter" aria-label="Show"><button data-f="waiting">Waiting</button><button data-f="open" class="on">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button></div>
           </div>
           <div id="gmList"></div>
         </div>
 
         <div class="panel gm-conv">
-          <div class="gm-ticket-empty" id="gmEmpty" hidden>Pick a request to read it.</div>
+          <div class="gm-ticket-empty" id="gmEmpty" hidden>Select a request.</div>
           <div id="gmTicket" hidden>
             <div class="gm-ticket-head">
               <div>
@@ -1937,7 +2003,7 @@
             <div class="gm-log" id="gmLog"></div>
             <div class="gm-compose">
               <textarea id="gmSay" rows="2" maxlength="400"
-                placeholder="Reply to the player. Enter sends, Shift+Enter for a new line."></textarea>
+                placeholder="Reply to the player"></textarea>
               <button class="act" id="gmSend">Send</button>
             </div>
             <div class="hint" id="gmComposeHint"></div>
@@ -1947,16 +2013,13 @@
 
       <details class="panel gm-diag" id="gmDutyPanel">
         <summary>Duty</summary>
-        <p class="hint">While nobody is on duty, a new request gets an automatic reply by
-          PlayOnline Mail saying a GM will answer by mail. While GMs are on duty, only they get
-          alerts. Duty from this page lasts while the page is open; from Discord, for the hours
-          you choose. Link your Discord account under Settings, <a href="#security">Sign-in</a>.</p>
+        <p class="hint">With nobody on duty, players get an automatic mail reply.</p>
         <div id="gmDutyList" class="gmn-sec"></div>
       </details>
 
       <details class="panel gm-diag" id="gmNotices">
         <summary>Notices</summary>
-        <p class="hint">The list players read on Service &amp; Support &gt; GM Call &gt; Next. Publishing updates the page right away.</p>
+        <p class="hint">Shown in Service &amp; Support &gt; GM Call &gt; Next.</p>
         <div class="row" style="margin-top:6px">
           <div><label>Language</label>
             <select id="gmnLoc"><option value="en-US">English</option><option value="ja-JP">Japanese</option></select></div>
@@ -1985,6 +2048,72 @@
         <div id="calBody"></div>
       </div>
     </section>
+    <!-- COMMUNITY SITES (comsites.js) -->
+    <section id="tab-comsites" class="tab">
+      <div class="panel" id="csForm">
+        <h2 id="csFormTitle">Register a community site</h2>
+        <p class="hint">A fan site gets the Community Site Tool, the 480 by 100 banner with its name,
+          its game's news, a featured site, a random one and the Q&amp;A search. Save the site,
+          then send its owner the code it shows.</p>
+        <input type="hidden" id="csId">
+        <div class="row">
+          <div style="flex:2"><label for="csName">Site name</label>
+            <input type="text" id="csName" maxlength="60" placeholder="Shown in the banner's top bar"></div>
+          <div style="flex:3"><label for="csUrl">Address</label>
+            <input type="text" id="csUrl" maxlength="300" inputmode="url" placeholder="https://"
+                   autocomplete="off" spellcheck="false"></div>
+        </div>
+        <div class="row">
+          <div style="flex:1"><label for="csGame">Game</label><select id="csGame"></select></div>
+          <div style="flex:2"><label for="csAbout">Directory line</label>
+            <input type="text" id="csAbout" maxlength="200" placeholder="Optional, one line about the site"></div>
+        </div>
+        <label>Skin</label>
+        <div class="cs-skins" id="csSkins" role="radiogroup" aria-label="Skin"></div>
+        <div class="cs-livehead"><label for="csLive">Preview</label>
+          <label class="cs-ja"><input type="checkbox" id="csLiveJa"> On a Japanese page</label></div>
+        <iframe id="csLive" class="cs-preview" title="Preview of this site's banner" sandbox="allow-scripts allow-popups"></iframe>
+        <div class="row">
+          <div style="flex:2" data-perm="accounts_view"><label for="csOwner">Owner's PlayOnline account</label>
+            <input type="text" id="csOwner" placeholder="Optional"></div>
+          <div style="flex:2"><label for="csNote">Staff note</label>
+            <input type="text" id="csNote" maxlength="500" placeholder="Optional, never shown on the banner"></div>
+        </div>
+        <div class="row cs-checks">
+          <label><input type="checkbox" id="csListed" checked> Listed in the directory and among random sites</label>
+          <label><input type="checkbox" id="csFeatured"> Can be the featured site</label>
+        </div>
+        <div style="margin-top:14px">
+          <button class="act" id="csSave">Save site</button>
+          <button class="ghost" id="csCancel" hidden>Cancel</button>
+        </div>
+      </div>
+      <div class="panel" id="csCode" hidden>
+        <h2 id="csCodeTitle">Code for the site</h2>
+        <p class="hint">Paste this into the site's page where the banner should go.</p>
+        <label>With a script tag</label>
+        <div class="cs-code"><pre class="mono" id="csScript"></pre>
+          <button class="ghost sm" data-copyfrom="csScript">Copy</button></div>
+        <label>For sites that don't allow inline script</label>
+        <div class="cs-code"><pre class="mono" id="csTag"></pre>
+          <button class="ghost sm" data-copyfrom="csTag">Copy</button></div>
+        <label>Preview</label>
+        <iframe id="csPreview" class="cs-preview" title="Banner preview" sandbox="allow-scripts allow-popups"></iframe>
+        <p class="hint">How the banner looks with this record. A change reaches the banner on fan
+          sites within a minute or two.</p>
+      </div>
+      <div class="panel">
+        <h2>Registered sites</h2>
+        <div class="toolbar">
+          <div class="grow"><input type="search" id="csSearch" data-search placeholder="Search sites"></div>
+          <span class="count" id="csCount"></span>
+        </div>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>ID</th><th>Site</th><th>Game</th>
+          <th>Skin</th><th>Shown</th><th>Owner</th><th>Added</th><th></th></tr></thead>
+          <tbody id="csBody"></tbody></table></div>
+      </div>
+    </section>
+
     <section id="tab-news" class="tab">
       <div class="panel nw-bar">
         <div>
@@ -1993,7 +2122,7 @@
         </div>
         <div class="nw-acts">
           <button class="ghost" id="newsAddBtn">New announcement</button>
-          <button class="ghost" id="newsSaveBtn" title="Save the announcements on the server. Players see them once you publish.">Save</button>
+          <button class="ghost" id="newsSaveBtn" title="Save without publishing">Save</button>
           <button class="act" id="newsPublishBtn" data-perm="news_publish">Publish&hellip;</button>
         </div>
       </div>
@@ -2007,7 +2136,7 @@
       <div class="nw-grid">
         <div>
           <div class="panel" id="newsForm">
-            <label for="nTitle">Headline <span class="hint" style="display:inline">(what the ticker shows)</span></label>
+            <label for="nTitle">Headline</label>
             <input type="text" id="nTitle" spellcheck="true" maxlength="120">
 
             <div class="nw-row">
@@ -2031,14 +2160,14 @@
 
             <label for="nBody">Story</label>
             <textarea id="nBody" spellcheck="true" rows="5"></textarea>
-            <div class="hint">A blank line starts a new paragraph. Leave it empty for a headline with no story page.</div>
+            <div class="hint">Leave empty for a headline with no story page.</div>
 
             <details class="nw-more" id="nwMore">
               <summary>More options</summary>
-              <label for="nLink">Link instead of a story page <span class="hint" style="display:inline">(optional; must end in ? or &amp;)</span></label>
-              <input type="text" id="nLink" spellcheck="false" class="mono" placeholder="http://...">
+              <label for="nLink">Link instead of a story page</label>
+              <input type="text" id="nLink" spellcheck="false" class="mono" placeholder="Ends in ? or &amp;">
               <label class="chip" style="display:inline-flex; margin-top:10px">
-                <input type="checkbox" id="nStatus"> Also list under Status / Maintenance (current or recent issues)
+                <input type="checkbox" id="nStatus"> Also list under Status / Maintenance
               </label>
               <div class="effect" id="nEffect"></div>
             </details>
@@ -2069,15 +2198,16 @@
       <!-- Maintenance warning: forced news before Play, and a message to everyone online. -->
       <div class="panel" id="maintPanel" data-perm="news_publish">
         <h2 style="margin:0 0 2px">Maintenance warning</h2>
-        <div class="hint" id="maintHint">The notice opens on a title page before the player can press Play, the way the retail service announced maintenance. The message reaches everyone who is online now, in a game or not.</div>
+        <div class="hint" id="maintHint" hidden></div>
         <div class="nw-status" id="maintStatus">&hellip;</div>
         <label for="maintSubject">Subject</label>
         <input type="text" id="maintSubject" maxlength="60" spellcheck="true" placeholder="All Worlds Maintenance" aria-describedby="maintSubjectCut">
         <div class="hint pol-only" id="maintSubjectCut"></div>
         <label for="maintText">Text</label>
         <textarea id="maintText" rows="4" spellcheck="true" placeholder="Maintenance begins at 10:00 UTC and lasts about one hour."></textarea>
-        <label class="pol-only">Show the notice on <span class="hint" style="display:inline">(none ticked: every title)</span></label>
+        <label class="pol-only">Show the notice on</label>
         <div class="chips pol-only" id="maintTitles"></div>
+        <div class="hint pol-only">None ticked means every title.</div>
         <div class="nw-formbtns">
           <button class="act sm pol-only" id="maintPostBtn">Show notice before Play</button>
           <button class="act sm" id="maintMsgBtn">Message everyone online</button>
@@ -2085,7 +2215,7 @@
           <button class="ghost sm pol-only" id="maintClearBtn">Take notice down</button>
         </div>
         <div id="maintGamesWrap" hidden>
-          <label><span id="maintGamesLabel">Also announce inside these games</span> <span class="hint" style="display:inline">(players in the game see it in their chat)</span></label>
+          <label><span id="maintGamesLabel">Also announce in these games</span></label>
           <div class="chips" id="maintGames"></div>
         </div>
       </div>
@@ -2112,7 +2242,7 @@
         <!-- page browser -->
         <aside class="pv-side panel">
           <input type="search" id="fSearch" data-search spellcheck="false"
-                 placeholder="Search pages by title or path">
+                 placeholder="Search pages">
           <div class="pv-row">
             <div class="seg" id="fKindSeg">
               <button data-f="page" class="on">Pages</button>
@@ -2160,7 +2290,7 @@
             <button class="ghost sm" id="pvFwd" title="Forward (Alt+Right)">&#8594;</button>
             <div class="pv-title">
               <div id="pvTitle">PML preview</div>
-              <div class="pv-pathrow"><span id="pvPath" class="muted" translate="no"></span><input id="pvQuery" spellcheck="false" placeholder="?query" title="The query the page is opened with, as a link would pass it. Press Enter to reopen the page."></div>
+              <div class="pv-pathrow"><span id="pvPath" class="muted" translate="no"></span><input id="pvQuery" spellcheck="false" placeholder="?query" title="Query string. Enter reopens the page."></div>
             </div>
             <div class="seg" id="pvZoom">
               <button data-z="fit" class="on">Fit</button>
@@ -2169,7 +2299,7 @@
             </div>
             <button class="ghost sm" id="pvPin">☆ Pin</button>
             <button class="ghost sm" id="pvMissingBtn" title="Highlight images the mirror does not have">Missing art</button>
-            <button class="ghost sm" id="pvInteractive" title="Run the page as the Viewer does: actions, menus, animation, timers and focus">Interactive</button>
+            <button class="ghost sm" id="pvInteractive" title="Run the page as the Viewer does">Interactive</button>
             <button class="ghost sm" id="pvRestart" title="Run the page again from the start">Restart page</button>
             <button class="ghost sm" id="pvInspect" title="Click an element to see its settings and source line">Inspect</button>
             <button class="ghost sm" id="pvSourceBtn">Source</button>
@@ -2203,7 +2333,7 @@
             <textarea id="pml" spellcheck="false" wrap="off"
                       placeholder="Paste or edit PML here."></textarea>
           </div>
-          <div class="hint">Edits redraw as you type. They are not saved to the server.</div>
+          <div class="hint">Edits are not saved.</div>
         </div>
       </div>
     </section>
@@ -2226,34 +2356,40 @@
             <button data-view="fluxer">Fluxer <span class="cnt" data-cnt="fluxer"></span></button>
           </div>
         </div>
-        <p class="hint">Every game's bots in one place. Paste a token and Save, and the bot restarts on it
-          within about a minute.</p>
-        <div class="note warn" id="botsNoKey" hidden>Tokens cannot be stored yet: the server has no
-          <span title="POL_BOT_KEY in .env, for the admin and the bot services">sealing key</span>.
-          Whoever runs the server sets one (any long random string) for the admin and bot services.
-          Page addresses and Fluxer channels can still be saved.</div>
+        <div class="note warn" id="botsNoKey" hidden>Tokens can't be saved until the server has a
+          <span title="POL_BOT_KEY in .env">bot key</span>. Addresses and Fluxer channels still save.</div>
         <details class="bots-how">
-          <summary>How to set up a bot</summary>
-          <p class="hint" data-for="discord">Create an application in the Discord developer portal and copy
-            its bot token (Bot, Reset Token). Paste it here and Save. Give the board a public https address
-            pointing at its port on the server and save that too. Then use Invite to add the bot to a server,
-            and Set endpoint once the card says it is running. In the server, run its board command in the
-            channel it should post in.</p>
-          <p class="hint" data-for="fluxer" hidden>Create the bot in Fluxer and add it to the server, then
-            paste its token and the ids of the channels it should post in. Fluxer has no slash commands, so
-            the channels are chosen here.</p>
-          <p class="hint">Anything left empty keeps what the server's own settings say. Tokens are stored
-            sealed and never shown again.</p>
+          <summary>Setup</summary>
+          <p class="hint" data-for="discord">Paste the bot token from the Discord developer portal and the board's
+            https address, then Save. Use Invite, then Set endpoint once it is running.</p>
+          <p class="hint" data-for="fluxer" hidden>Add the bot to your Fluxer server, then paste its token
+            and channel IDs.</p>
         </details>
       </div>
       <div class="botgrid" id="botsList"></div>
       <p class="hint bots-rest" id="botsRest" hidden></p>
     </section>
 
+    <!-- LOGS (owner only): adminlogs.py -->
+    <section id="tab-logs" class="tab">
+      <div class="panel">
+        <h2>Logs</h2>
+        <p class="hint">Download logs to attach to a report.</p>
+        <p class="muted" id="logEmpty" hidden>No logs here.</p>
+        <div class="filterbar" id="logBody">
+          <label for="logArea" class="sr">Area</label>
+          <select id="logArea"><option value="all">Everything</option></select>
+          <label for="logLines" class="sr">Lines</label>
+          <select id="logLines"><option value="500">Last 500 lines</option><option value="2000" selected>Last 2,000 lines</option><option value="10000">Last 10,000 lines</option></select>
+          <label class="chip"><input type="checkbox" id="logAddr"> Keep addresses</label>
+          <button class="act sm" id="logGet">Download</button>
+        </div>
+      </div>
+    </section>
+
     <section id="tab-deploy" class="tab">
       <div class="panel" id="deployPanel" hidden>
-        <h2>Games this server can run</h2>
-        <p class="hint">The deployer installs, turns on and updates the games in OpenLobby's catalog, one job at a time.</p>
+        <h2>Games</h2>
         <p class="hint" id="deployProblem" style="color: var(--bad)" hidden></p>
         <div class="toolbar deploy-check" id="deployCheck"></div>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>State</th>
@@ -2267,8 +2403,6 @@
       </div>
       <div class="panel" id="patchPanel" hidden>
         <h2>Patch bundles</h2>
-        <p class="hint">What the patch service hands each title's client. A .polpatch holds Square Enix's files
-          for your own servers; it cannot be downloaded from here.</p>
         <div class="toolbar">
           <button class="act sm" id="patchImport">Import a .polpatch</button>
           <button class="ghost sm" id="patchBuild">Build from an install</button>
@@ -2282,8 +2416,6 @@
            once, in the access code box under Update channel. -->
       <div class="panel" id="feedPanel" hidden>
         <h2>Patches from the developers <span class="pill env" id="feedPill">Off</span></h2>
-        <p class="hint">Bundles the developers keep for the servers they gave an access code. They work on
-          Stable too. Getting one brings a title to the newest version, a few files at a time when you already have it.</p>
         <div class="toolbar" id="feedOff">
           <button class="act sm" id="feedOn">Turn on</button>
         </div>
@@ -2311,11 +2443,9 @@
           <p class="hint chan-warn" id="chanWarn" role="alert" hidden></p>
           <div class="ga-box" id="chanForm" hidden>
             <h3 id="chanFormHead">Access code from the developers</h3>
-            <p class="hint" style="margin-top:0">It unlocks the dev builds, and patches from the developers when the
-              code includes them. Typed here before you switch a paired game to Dev, it goes with that switch too.
-              The deployer keeps it; this page never shows it again.</p>
+            <p class="hint" style="margin-top:0">Unlocks dev builds and developer patches.</p>
             <div class="row">
-              <div style="flex:1 1 280px"><label for="chanCode">Access code (a short code like <span class="nowrap">ABCD-EFGH-JKMN</span>, or a full olx code)</label>
+              <div style="flex:1 1 280px"><label for="chanCode">Access code</label>
                 <input type="password" id="chanCode" class="mono" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH-JKMN or olx1..."></div>
             </div>
             <div class="ga-result bad" id="chanResult" role="alert" hidden></div>
@@ -2366,9 +2496,6 @@
       <!-- Games stored in the panel (adminpair.py): added by hand, or paired by their setup program. -->
       <div class="panel" id="addedPanel">
         <h2>Games added here</h2>
-        <p class="hint">A game server with an OpenLobby admin port can be added by hand, with its
-          admin address and token, or by its own setup program with a one-time code. The panel keeps
-          the token and never shows it again.</p>
         <div class="toolbar">
           <button class="act sm" id="gaOpen">Add a game</button>
           <button class="ghost sm" id="pairOpen">Pair with a setup program</button>
@@ -2376,15 +2503,13 @@
         <div class="ga-box" id="gaForm" hidden>
           <h3 id="gaTitle">Add a game</h3>
           <div class="row">
-            <div style="flex:0 1 150px"><label for="gaKey">Key</label>
+            <div style="flex:0 1 150px"><label for="gaKey" title="1 to 16 lower-case letters and digits">Key</label>
               <input type="text" id="gaKey" class="mono" maxlength="16" autocomplete="off" spellcheck="false" placeholder="kart"></div>
             <div style="flex:2 1 240px"><label for="gaUrl">Admin address</label>
               <input type="text" id="gaUrl" class="mono" maxlength="300" autocomplete="off" spellcheck="false" placeholder="http://kart:8820"></div>
             <div style="flex:2 1 200px"><label for="gaToken">Token</label>
               <input type="password" id="gaToken" class="mono" maxlength="512" autocomplete="new-password" spellcheck="false"></div>
           </div>
-          <div class="hint">The key is the one the game's module.json gives: 1 to 16 lower-case letters
-            and digits. The address is where its admin port answers, as seen from this panel.</div>
           <div class="ga-result" id="gaResult" hidden></div>
           <div class="toolbar" style="margin-top:12px">
             <button class="ghost sm" id="gaTest">Test</button>
@@ -2394,8 +2519,7 @@
         </div>
         <div class="ga-box" id="pairBox" hidden>
           <h3>Pair with a setup program</h3>
-          <p class="hint" style="margin-top:0">Run the game's setup program on this machine and type
-            this code when it asks for one. It finds the panel by itself.</p>
+          <p class="hint" style="margin-top:0">Type this code into the game's setup program.</p>
           <div class="pair-code mono" id="pairCode" aria-live="polite"></div>
           <div class="pair-state" id="pairState"></div>
           <div class="toolbar" style="margin-top:12px">
@@ -2412,18 +2536,15 @@
            codes exist. The kind picker and column show only with more than one kind. -->
       <div class="panel" id="devCodesPanel" hidden>
         <h2>Dev access codes</h2>
-        <p class="hint">Short codes that unlock the dev channel for one server each. The first server to
-          enter one keeps it; any other server is refused, so a code that was passed on after use unlocks
-          nothing. Revoke one to lock that server out.</p>
         <div class="hint dc-why" id="dcWhy"></div>
         <div class="row dc-form">
           <div class="dc-kind" id="dcKindBox" style="flex:1 1 160px" hidden><label for="dcKind">Kind</label>
             <select id="dcKind"></select></div>
           <div style="flex:0 1 110px"><label for="dcCount">How many</label>
             <input type="text" id="dcCount" value="1" inputmode="numeric" maxlength="3"></div>
-          <div style="flex:2 1 240px"><label for="dcNote">For <span class="hint" style="display:inline">(needed)</span></label>
-            <input type="text" id="dcNote" maxlength="120" autocomplete="off" required aria-required="true" placeholder="who gets them, e.g. Kart Club testers"></div>
-          <div class="dc-go"><button class="act sm" id="dcMake" disabled title="Say who they are for first">Make codes</button></div>
+          <div style="flex:2 1 240px"><label for="dcNote">For</label>
+            <input type="text" id="dcNote" maxlength="120" autocomplete="off" required aria-required="true" placeholder="Who gets them"></div>
+          <div class="dc-go"><button class="act sm" id="dcMake" disabled title="Fill in For first">Make codes</button></div>
         </div>
         <div class="ga-result bad" id="dcResult" role="alert" hidden></div>
         <div class="ga-box" id="dcNew" hidden>
@@ -2439,9 +2560,6 @@
       </div>
       <div class="panel">
         <h2>Game modules</h2>
-        <p class="hint" title="Module files: services/adminmodules and POL_ADMIN_MODULES_DIR. Which show: POL_ADMIN_MODULES. See docs/admin-modules.md.">Every game the panel
-          knows: those that come with OpenLobby, those in this server's modules folder, and game servers that
-          describe themselves. This server's settings pick which ones show.</p>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Game</th><th>Key</th><th>From</th>
           <th>Address set in</th><th>Shown</th><th>Tools</th><th>Live status</th></tr></thead>
           <tbody id="modulesBody"></tbody></table></div>
@@ -2449,42 +2567,56 @@
     </section>
 
     <section id="tab-security" class="tab">
-      <!-- A moderator's own password. The owner's is the panel below. -->
-      <div class="panel narrow" id="mePanel" data-sub="account" hidden>
-        <h2>Your password</h2>
-        <div class="note" id="meState"></div>
-        <label>Current password</label>
-        <input type="password" id="meCurrent" autocomplete="current-password">
-        <label>New password</label>
-        <input type="password" id="meNew" autocomplete="new-password">
-        <label>Confirm new password</label>
-        <input type="password" id="meNew2" autocomplete="new-password">
-        <div style="margin-top:16px"><button class="act" id="meSave">Change password</button></div>
-        <div class="hint">At least 8 characters. Changing it signs out your other
-          browsers.</div>
+      <!-- Account view: the password panel (the owner's or a moderator's own) and the
+           Discord link side by side, the browsers full width under them. applyRole marks
+           the grid .solo when only one of its panels is showing. -->
+      <div class="signin-grid" id="signinGrid" data-sub="account">
+        <div class="panel" id="mePanel" hidden>
+          <h2>Password</h2>
+          <div id="meState"></div>
+          <div class="pw-grid">
+            <div><label for="meCurrent">Current password</label>
+              <input type="password" id="meCurrent" autocomplete="current-password"></div>
+            <div><label for="meNew">New password</label>
+              <input type="password" id="meNew" autocomplete="new-password" placeholder="At least 8 characters"></div>
+            <div><label for="meNew2">Confirm new password</label>
+              <input type="password" id="meNew2" autocomplete="new-password"></div>
+          </div>
+          <div class="pw-go"><button class="act" id="meSave">Change password</button></div>
+        </div>
+
+        <div class="panel" id="ownerPanel" data-owner>
+          <h2>Username and password</h2>
+          <div id="secState"></div>
+          <div class="pw-grid">
+            <div><label for="secUser">Username</label>
+              <input type="text" id="secUser" autocomplete="username" placeholder="admin"></div>
+            <div id="secCurrentWrap"><label for="secCurrent">Current password</label>
+              <input type="password" id="secCurrent" autocomplete="current-password"></div>
+            <div><label for="secNew">New password</label>
+              <input type="password" id="secNew" autocomplete="new-password" placeholder="Leave empty to keep"></div>
+            <div><label for="secNew2">Confirm new password</label>
+              <input type="password" id="secNew2" autocomplete="new-password"></div>
+          </div>
+          <div class="pw-go"><button class="act" id="secSave">Save</button></div>
+        </div>
+
+        <div class="panel" id="gmLinkPanel" data-perm="gm">
+          <h2>Discord</h2>
+          <div id="gmDiscordState" class="gml-state"></div>
+          <div class="gml-row" id="gmDiscordLinkRow">
+            <label for="gmDiscordCode">Link code</label>
+            <input type="text" id="gmDiscordCode" class="mono" maxlength="12" autocomplete="off" spellcheck="false">
+            <button class="act sm" id="gmDiscordLink">Link</button>
+          </div>
+          <div id="gmDiscordUnlinkRow" hidden>
+            <button class="ghost sm" id="gmDiscordUnlink">Unlink</button>
+          </div>
+        </div>
       </div>
 
-      <div class="panel narrow" data-owner data-sub="account">
-        <h2>Operator sign-in</h2>
-        <div id="secState"></div>
-        <label>Username</label>
-        <input type="text" id="secUser" autocomplete="username" placeholder="admin">
-        <div id="secCurrentWrap">
-          <label>Current password</label>
-          <input type="password" id="secCurrent" autocomplete="current-password">
-        </div>
-        <label>New password</label>
-        <input type="password" id="secNew" autocomplete="new-password">
-        <label>Confirm new password</label>
-        <input type="password" id="secNew2" autocomplete="new-password">
-        <div style="margin-top:16px"><button class="act" id="secSave">Save</button></div>
-        <div class="hint">Leave the new password empty to keep the current one and change only the
-          username. A new password needs at least 8 characters. Saving signs out your other browsers.
-          Moderators stay signed in.</div>
-      </div>
       <div class="panel" id="modsPanel" data-owner data-sub="mods">
         <h2>Moderators</h2>
-        <p class="hint">Additional logins with limited access. A moderator can only use the areas ticked for them. Adding moderators and the operator sign-in stay with the owner.</p>
         <div class="toolbar">
           <button class="act sm" id="modAdd">Add moderator</button>
           <span class="count" id="modCount"></span>
@@ -2496,31 +2628,14 @@
           <tbody id="modsBody"></tbody></table></div>
       </div>
 
-      <div class="panel narrow" id="gmLinkPanel" data-perm="gm" data-sub="account">
-        <h2>GM Discord link</h2>
-        <p class="hint">Link this login to a Discord account so <code class="mono">/gm duty</code>
-          and the Knock button on GM call alerts act as you. Run <code class="mono">/gm link</code>
-          in Discord and paste the code below.</p>
-        <div id="gmDiscordState" class="hint" style="margin:4px 0 6px"></div>
-        <div class="gml-row" id="gmDiscordLinkRow">
-          <label for="gmDiscordCode">Link code</label>
-          <input type="text" id="gmDiscordCode" class="mono" maxlength="12" autocomplete="off" spellcheck="false">
-          <button class="act sm" id="gmDiscordLink">Link</button>
-        </div>
-        <div id="gmDiscordUnlinkRow" style="margin-top:6px" hidden>
-          <button class="ghost sm" id="gmDiscordUnlink">Unlink Discord</button>
-        </div>
-      </div>
-
       <div class="panel pol-only" id="alertsPanel" data-perm="settings" data-sub="alerts">
         <h2>GM call alerts</h2>
-        <p class="hint">New GM calls are posted to a Discord channel and sent to every
-          device that turned alerts on from the GM Calls tab.</p>
+        <p class="hint">Turn on alerts for a device from the GM calls tab.</p>
         <div class="row">
           <div style="flex:3"><label>Discord webhook URL <span class="hint" id="discordHint" style="display:inline"></span></label>
             <input type="text" id="discordUrl" autocomplete="off" spellcheck="false"
                    placeholder="https://discord.com/api/webhooks/..."></div>
-          <div style="flex:2"><label>Panel address <span class="hint" style="display:inline">(optional, linked in alerts)</span></label>
+          <div style="flex:2"><label for="panelUrl">Panel address</label>
             <input type="text" id="panelUrl" autocomplete="off" spellcheck="false"
                    placeholder="https://admin.example.ts.net"></div>
         </div>
@@ -2529,7 +2644,7 @@
           <button class="ghost sm" id="discordTest">Send test to Discord</button>
           <button class="danger sm" id="discordClear">Remove webhook</button>
         </div>
-        <div class="tablewrap"><table class="cards"><thead><tr><th>Device with alerts</th>
+        <div class="tablewrap"><table class="cards"><thead><tr><th>Device</th>
           <th>Login</th><th>Added</th><th>Last delivered</th></tr></thead>
           <tbody id="alertDevices"></tbody></table></div>
         <details style="margin-top:12px">
@@ -2540,8 +2655,7 @@
 
       <div class="panel" id="checksPanel" data-perm="settings" data-sub="alerts">
         <h2>Service checks</h2>
-        <p class="hint">Shown on the Overview. One per line: a name and a port, or a
-          name and <code class="mono">host:port</code>.</p>
+        <p class="hint">One per line, such as <code class="mono">Lobby 7000</code> or <code class="mono">Lobby host:7000</code>.</p>
         <div class="row checks-row">
           <div style="flex:3"><label>Checks</label>
             <textarea id="healthTargets" rows="8" spellcheck="false"></textarea></div>
@@ -2553,11 +2667,10 @@
 
       <div class="panel" id="auditPanel" data-perm="audit" data-sub="activity">
         <h2>Activity</h2>
-        <p class="hint">Changes made through the panel, newest first. Passwords are never recorded.</p>
         <div class="toolbar filterbar">
           <div style="flex:0 0 200px"><select id="auditActor" aria-label="Who"><option value="">Everyone</option></select></div>
           <div class="grow"><input type="search" id="auditSearch" data-search
-               placeholder="Filter what was done or to what"></div>
+               placeholder="Search activity"></div>
           <span class="count" id="auditCount"></span>
         </div>
         <div class="tablewrap audit-scroll"><table class="cards">
@@ -2567,15 +2680,14 @@
       </div>
 
       <div class="panel" data-sub="account">
-        <h2>Signed-in browsers</h2>
-        <p class="hint">Browsers currently signed in. Remembered sign-ins last 30 days; others end when the browser closes or after 12 idle hours.</p>
+        <h2>Browsers</h2>
         <div class="toolbar">
           <span class="count" id="sessCount"></span>
-          <button class="ghost sm" id="sessOthers" hidden>Sign out my other browsers</button>
+          <button class="ghost sm" id="sessOthers" hidden>Sign out other browsers</button>
           <button class="danger sm" id="sessMods" hidden>Sign out all moderators</button>
         </div>
         <div class="tablewrap"><table class="cards"><thead><tr><th>Browser</th><th>From</th>
-          <th>Signed in</th><th>Last active</th><th>Kind</th><th></th></tr></thead>
+          <th>Signed in</th><th>Last active</th><th></th></tr></thead>
           <tbody id="sessBody"></tbody></table></div>
       </div>
     </section>
@@ -2594,7 +2706,7 @@
       <div id="impUpload">
         <label class="imp-drop" id="impDrop">
           <input type="file" id="impFile" accept=".zip,.tar,.tar.gz,.tgz" hidden>
-          <span>Drop a .zip or .tar.gz of the game folder here, or click to pick one.</span>
+          <span>Drop a .zip or .tar.gz of the game folder, or click to choose one.</span>
         </label>
         <div class="imp-progress" id="impProgress" hidden><div class="bar"><span id="impBar"></span></div><span class="muted" id="impPct"></span></div>
         <ul class="feed imp-list" id="impUploads"></ul>
@@ -2606,9 +2718,9 @@
       <div class="imp-build" id="impBuild" hidden>
         <label>Region<input type="text" id="impRegion" maxlength="3" placeholder="W2U" autocomplete="off"></label>
         <label>Product<input type="text" id="impProduct" maxlength="4" placeholder="0002" autocomplete="off"></label>
-        <label>Version<input type="text" id="impVersion" maxlength="10" placeholder="read from the install" autocomplete="off"></label>
-        <label>Other regions<input type="text" id="impAliases" placeholder="e.g. W20" autocomplete="off"></label>
-        <label class="chip"><input type="checkbox" id="impWalk"> Every file in the folder, not the install's file list</label>
+        <label>Version<input type="text" id="impVersion" maxlength="10" placeholder="From the install" autocomplete="off"></label>
+        <label>Other regions<input type="text" id="impAliases" placeholder="W20" autocomplete="off"></label>
+        <label class="chip"><input type="checkbox" id="impWalk"> Include every file in the folder</label>
       </div>
       <div class="imp-missing" id="impMissing" hidden></div>
       <div class="foot">
@@ -2656,12 +2768,12 @@
   <div class="modal" id="delModal">
     <div class="card">
       <h3>Delete <code class="mono" id="delPolid"></code>?</h3>
-      <p>This deletes the account and everything listed below. It cannot be undone.</p>
+      <p>This can't be undone.</p>
       <div class="inv" id="delInv"></div>
       <label>Type <code class="mono" id="delEcho"></code> to confirm</label>
       <input type="text" id="delConfirm" spellcheck="false" autocomplete="off">
       <label class="chip" style="margin-top:12px; display:inline-flex">
-        <input type="checkbox" id="delRelease"> Return their registration code(s) to the unused pool
+        <input type="checkbox" id="delRelease"> Make their registration codes usable again
       </label>
       <div class="foot">
         <button class="ghost" id="delCancel">Cancel</button>
@@ -2674,7 +2786,7 @@
   <div class="modal" id="stateModal">
     <div class="card">
       <h3>Login refusal for <code class="mono" id="statePolid"></code></h3>
-      <p>A nonzero code blocks the next login for every member under this PlayOnline ID.</p>
+      <p>Applies to every member on this PlayOnline ID.</p>
       <label>Common refusals</label>
       <div class="state-choices" id="stateChoices">
         <button class="ghost" type="button" data-code="0">Allow login</button>
@@ -2694,12 +2806,12 @@
         <option value="custom">Choose expiration</option>
       </select>
       <div id="stateUntilWrap" style="display:none">
-        <label for="stateUntil">Expires at (your local time)</label>
+        <label for="stateUntil">Expires</label>
         <input type="datetime-local" id="stateUntil">
       </div>
       <p class="hint" id="stateDurationHint"></p>
       <label class="chip" style="margin-top:12px; display:inline-flex">
-        <input type="checkbox" id="stateKick" checked> Kick current sessions when setting a refusal
+        <input type="checkbox" id="stateKick" checked> Kick them now
       </label>
       <div class="foot">
         <button class="ghost" id="stateCancel">Cancel</button>
@@ -2712,7 +2824,7 @@
   <div class="modal" id="infoModal">
     <div class="card">
       <h3>Login notice for <code class="mono" id="infoPolid"></code></h3>
-      <p>A message the player sees after signing in. It does not stop them signing in.</p>
+      <p>Shown to the player after they sign in.</p>
       <label for="infoCode">Client message</label>
       <select id="infoCode"></select>
       <p class="hint" id="infoMeaning" style="margin-top:10px"></p>
@@ -2723,7 +2835,6 @@
             <option value="always">Every login</option>
           </select></div>
       </div>
-      <p class="hint">Once: the message goes back to None after the player has seen it.</p>
       <div class="foot">
         <button class="ghost" id="infoCancel">Cancel</button>
         <button class="act" id="infoGo">Save notice</button>
@@ -2743,7 +2854,7 @@
       <label class="chip" style="margin-top:14px; display:inline-flex">
         <input type="checkbox" id="pwResetToken"> Also reset the login token
       </label>
-      <p class="hint" style="margin-top:8px">The lobby also checks a login token recorded on first sign-in. Reset it only if the player cannot get into the lobby; the next client to sign in is then trusted.</p>
+      <p class="hint" style="margin-top:8px">Only if they can't get into the lobby.</p>
       <div class="foot">
         <button class="ghost" id="pwCancel">Cancel</button>
         <button class="act" id="pwGo">Save password</button>
@@ -2783,7 +2894,7 @@
         <label id="ppLinkWhoLabel" for="ppLinkQ">Their account</label>
         <div id="ppLinkWho"></div>
       </div>
-      <label for="ppLinkWhy">Why you are linking it (kept in the history)</label>
+      <label for="ppLinkWhy">Reason</label>
       <textarea id="ppLinkWhy" rows="2" maxlength="300" class="pp-text"></textarea>
       <div class="pp-warn" id="ppLinkWarn"></div>
       <p class="hint pp-err" id="ppLinkErr" hidden></p>
@@ -2801,7 +2912,7 @@
       <label for="ppMergeQ">The person to merge in</label>
       <div id="ppMergeWho"></div>
       <label class="chip pp-force" id="ppMergeForceWrap" hidden><input type="checkbox" id="ppMergeForce">
-        Merge even if both have a PlayOnline account (owner)</label>
+        Merge even if both have a PlayOnline account</label>
       <p class="hint pp-err" id="ppMergeErr" hidden></p>
       <div class="foot">
         <button class="ghost" id="ppMergeCancel">Cancel</button>
@@ -2818,13 +2929,14 @@
       <input type="text" id="modUser" autocomplete="off" spellcheck="false" maxlength="64">
       <label>Allowed to</label>
       <div id="modPerms" class="perm-edit"></div>
-      <label class="pol-only">Registration codes per 24 hours <span class="hint" style="display:inline">(blank = no limit)</span></label>
-      <input type="text" id="modLimit" class="pol-only" inputmode="numeric" maxlength="5" placeholder="no limit">
-      <label class="pol-only">Codes may grant <span class="hint" style="display:inline">(none ticked = any title)</span></label>
+      <label class="pol-only" for="modLimit">Registration codes per 24 hours</label>
+      <input type="text" id="modLimit" class="pol-only" inputmode="numeric" maxlength="5" placeholder="No limit">
+      <label class="pol-only">Codes may grant</label>
       <div class="chips pol-only" id="modTitles"></div>
+      <div class="hint pol-only">None ticked means any title.</div>
       <div id="modPwWrap">
-        <label>Password <span class="hint" style="display:inline">(blank = generated and shown once)</span></label>
-        <input type="text" id="modPw" autocomplete="new-password" spellcheck="false" class="mono">
+        <label for="modPw">Password</label>
+        <input type="text" id="modPw" placeholder="Random, shown once" autocomplete="new-password" spellcheck="false" class="mono">
       </div>
       <div class="foot">
         <button class="ghost" id="modCancel">Cancel</button>
@@ -2836,7 +2948,7 @@
   <div class="modal" id="tokModal">
     <div class="card">
       <h3>Login tokens for <code class="mono" id="tokPolid"></code></h3>
-      <p class="hint">One entry per device that has signed in to the lobby. If one device is refused with &ldquo;incorrect PlayOnline ID or password&rdquo; while others work, clear its entry. Its next sign-in records a new token.</p>
+      <p class="hint">Clear a device that gets &ldquo;incorrect PlayOnline ID or password&rdquo; while others work.</p>
       <div class="inv" id="tokList"></div>
       <div class="foot">
         <button class="ghost" id="tokClose">Close</button>
@@ -2855,5 +2967,6 @@
   <script src="/static/app.js"></script>
   <script src="/static/people.js"></script>
   <script src="/static/inbox.js"></script>
+  <script src="/static/comsites.js"></script>
 </body>
 </html>

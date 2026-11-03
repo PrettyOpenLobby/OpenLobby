@@ -328,6 +328,25 @@ def game_contentid(cid):
             + _tail())
 
 
+#: Every missing page doubles as a call
+#: for donor drives, which is how lost pages have been coming back (an old
+#: console's Viewer URL cache still holds the pages its owner browsed).
+DONOR_NOTE = ("Many PlayOnline pages were lost when the service closed. If you have an "
+              "old PlayStation 2 hard drive that ran PlayOnline, especially a Japanese "
+              "one, it may still hold this page in its cache. Please consider donating "
+              "it to the OpenLobby project so pages like this one can be recovered.")
+
+
+def donor_note(y=160, h=124):
+    """The donor-drive paragraph: fbTx (15 px, wraps in its 520 px box). pmlfit
+    puts it at ~4.8 lines; a line is 15*1.2 + vspacing 4 = 22 px, so 124 px
+    holds 5 with room to spare."""
+    return ('<sheet name="shDn" pos="60,%d" size="520,%d" border="0" alpha="1" '
+            'delay="150" appeartime="200" wait="2">\r\n'
+            '\t<text size="520,%d" style="fbTx">%s</text>\r\n'
+            '</sheet>\r\n' % (y, h, h, esc(DONOR_NOTE)))
+
+
 def unavailable(rel):
     """Any other whole page: say so, and offer a way back.
 
@@ -351,7 +370,8 @@ def unavailable(rel):
             + '<body altbgcolor="#00000000">\r\n'
             + _heading("Page not available",
                        "This page is not available on this server.")
-            + _rows(rows, "backward:")
+            + donor_note()
+            + _rows(rows, "backward:", y0=300)
             + _tail())
 
 

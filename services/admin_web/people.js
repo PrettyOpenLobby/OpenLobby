@@ -39,11 +39,11 @@ async function loadPeopleList() {
   document.body.classList.toggle("pp-core-off", !core);
   $("#ppFilter").querySelector('[data-f="online"]').hidden = !core;
   $("#ppHint").textContent = core && PP.rows.some((p) => p.accounts.some((a) => a.staff))
-    ? "* linked by staff, not yet proven by the player." : "";
-  $("#ppCount").textContent = PP.rows.length >= 100 ? "the first 100" : PP.rows.length ? `${PP.rows.length}` : "";
+    ? "* Linked by staff" : "";
+  $("#ppCount").textContent = PP.rows.length >= 100 ? "First 100" : PP.rows.length ? `${PP.rows.length}` : "";
   $("#ppBody").innerHTML = PP.rows.map((p) => {
     const href = p.id ? `#people/${p.id}` : `#people/pol/${encodeURIComponent(p.polid || "")}`;
-    let sub = p.pol ? (p.polid ? esc(p.polid) : "PlayOnline account") : (core ? "no PlayOnline account" : "");
+    let sub = p.pol ? (p.polid ? esc(p.polid) : "PlayOnline account") : (core ? "No PlayOnline account" : "");
     const maybe = (p.maybe || []).map((o) => {
       // the one without a PlayOnline account goes into the one with it; else the newer into the older
       const into = can("people_link") && p.id && !(p.pol && o.pol) && ((!p.pol && o.pol) || (!p.pol && !o.pol && p.id > o.id));
@@ -62,7 +62,7 @@ async function loadPeopleList() {
       + `<td data-label="Accounts" class="muted">${accts}</td>`
       + `<td data-label="Playing now" class="pp-core">${p.online ? '<span class="dot ok" aria-hidden="true"></span> PlayOnline' : '<span class="muted">-</span>'}</td>`
       + `<td data-label="Last seen" class="muted pp-core">${esc(ppSeen(p))}</td></tr>`;
-  }).join("") || `<tr><td colspan="4" class="muted">${PP.filter === "dupes" ? "No two people look alike." : q ? "Nobody matches." : core ? "No people yet." : "No people yet. Add one with New person, or link a login to them."}</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="muted">${PP.filter === "dupes" ? "No duplicates." : q ? "No matches." : "No people yet."}</td></tr>`;
 }
 
 $("#ppBody").addEventListener("click", async (e) => {
@@ -70,11 +70,10 @@ $("#ppBody").addEventListener("click", async (e) => {
   if (!b) return;
   const from = b.dataset.fromName, into = b.dataset.intoName;
   if (!await uiAsk({ title: `Merge ${from} into ${into}?`, ok: "Merge",
-                     text: `${from}'s linked logins and notes move to ${into}, and ${from}'s page leads to ${into} from now on. `
-                       + "Only merge them if you know they are the same person." })) return;
+                     text: `Logins and notes move to ${into}.` })) return;
   try {
     await post("/api/person", { action: "merge", id: +b.dataset.mergeInto, other: +b.dataset.mergeFrom });
-    toast(`Merged ${from} into ${into}`);
+    toast("Merged.");
     loadPeopleList();
   } catch (err) { toast(err.message, true); }
 });
@@ -88,8 +87,8 @@ $("#ppFilter").addEventListener("click", (e) => {
   loadPeopleList();
 });
 $("#ppNew").onclick = async () => {
-  const got = await uiAsk({ title: "New person", ok: "Add the person",
-                            fields: [{ id: "name", label: "Their name, as staff will know them", max: 80, required: true }] });
+  const got = await uiAsk({ title: "New person", ok: "Add",
+                            fields: [{ id: "name", label: "Name", max: 80, required: true }] });
   if (!got) return;
   const name = got.name;
   try {
@@ -101,18 +100,17 @@ $("#ppNew").onclick = async () => {
 // ---- a person's page ----
 function linkLine(l) {
   const when = l.at ? ppDate(l.at) : "";
-  const login = l.name && l.name !== l.key ? `${esc(l.name)} (id ${esc(l.key)})` : esc(l.key || l.name);
+  const login = l.name && l.name !== l.key ? `${esc(l.name)}, ID ${esc(l.key)}` : esc(l.key || l.name);
   if (l.system === "pol") {
-    if (l.hidden) return "A PlayOnline account. Seeing it needs the accounts permission.";
+    if (l.hidden) return "PlayOnline account";
     const hs = (PP.cur.handles || []);
     return `PlayOnline ID ${esc(l.key)}` + (hs.length ? `, ${hs.length > 1 ? "handles" : "handle"} ${esc(hs.join(", "))}` : "");
   }
   if (l.how === "staff") {
-    return `${l.system === "discord" ? "Discord user" : "Login"} ${login}. ${esc(l.by || "Staff")} linked it ${esc(when)}`
-      + (l.why ? `: "${esc(l.why)}"` : "");
+    return `${login}. ${esc(l.by || "Staff")}, ${esc(when)}` + (l.why ? `. "${esc(l.why)}"` : "");
   }
-  if (l.source === "bot") return `${login}, through the Discord bot's link command`;
-  return `Login ${login}, linked on the website${when ? " " + esc(when) : ""}`;
+  if (l.source === "bot") return `${login}, linked with the Discord bot`;
+  return `${login}, linked on the website${when ? " " + esc(when) : ""}`;
 }
 
 async function openPerson(which) {
@@ -131,10 +129,10 @@ async function openPerson(which) {
 function renderPerson() {
   const p = PP.cur, core = p.core !== false;
   const since = ppDate(p.created_at);
-  let status = `Person since ${esc(/^\d\d-\d\d$/.test(since) ? new Date().getFullYear() + "-" + since : since)}.`;
-  if (p.online) status += " Signed in to PlayOnline now.";
-  else if (p.last_seen) status += ` Last signed in ${esc(ago(isoMs(p.last_seen)))}.`;
-  else if (core && !p.pol) status += " No PlayOnline account.";
+  let status = `Added ${esc(/^\d\d-\d\d$/.test(since) ? new Date().getFullYear() + "-" + since : since)}`;
+  if (p.online) status += " · Online now";
+  else if (p.last_seen) status += ` · Last online ${esc(ago(isoMs(p.last_seen)))}`;
+  else if (core && !p.pol) status += " · No PlayOnline account";
   const pill = (l) => l.how === "staff" ? '<span class="pp-how staff">Linked by staff</span>' : '<span class="pp-how">Proven</span>';
   const cards = p.links.map((l) => {
     const cava = l.avatar ? `<img class="pp-cava" src="${esc(l.avatar)}" alt="" referrerpolicy="no-referrer">` : "";
@@ -142,13 +140,13 @@ function renderPerson() {
       + `<div class="pp-card-d">${linkLine(l)}</div>`
       + (l.how === "staff" && p.can_link ? `<button class="pp-mini" data-unlink="${l.id}" data-what="${esc(l.title + " " + (l.name || l.key))}">Unlink</button>` : "")
       + `</div>`;
-  }).join("") || `<div class="muted">No logins linked yet.</div>`;
+  }).join("") || `<div class="muted">No linked accounts.</div>`;
   const verb = (a) => a.kind === "ban" ? `Ban in ${a.title}...` : `Kick from ${a.title}`;
   const acts = p.actions.map((a, i) => `<button class="${a.kind === "ban" ? "pp-btn bad" : "pp-btn"}" data-act="${i}" title="${esc(a.label)}">${esc(verb(a))}</button>`).join("");
   const games = (p.games || []).map((g) => `<a href="#games/${esc(g.key)}">${esc(g.title)} page</a>`).join(" · ");
   const noteBox = p.can_link ? `<details class="pp-note" id="ppNotes"><summary>Add a note</summary>
-      <textarea id="ppNoteText" rows="3" maxlength="2000" placeholder="Only staff see notes."></textarea>
-      <div class="pp-foot"><button class="act" id="ppNoteSave">Save the note</button></div></details>` : "";
+      <textarea id="ppNoteText" rows="3" maxlength="2000" placeholder="Staff only"></textarea>
+      <div class="pp-foot"><button class="act" id="ppNoteSave">Save note</button></div></details>` : "";
   const headAva = p.avatar
     ? `<img class="pp-ava" src="${esc(p.avatar)}" alt="Discord avatar" referrerpolicy="no-referrer">`
     : `<div class="pp-ava" aria-hidden="true">${esc((p.name || "?").slice(0, 1).toUpperCase())}</div>`;
@@ -164,12 +162,11 @@ function renderPerson() {
     </div>
     <div class="panel"><h2>Linked accounts</h2><div class="pp-cards">${cards}</div></div>
     <div class="pp-two">
-      <div class="panel"><h2>In the games</h2><div id="ppGames"><div class="muted">Asking the games...</div></div>
+      <div class="panel"><h2>Games</h2><div id="ppGames"><div class="muted">Loading...</div></div>
         ${games && !acts ? `<div class="pp-games">${games}</div>` : ""}</div>
       ${acts ? `<div class="panel"><h2>Actions</h2>
         <div class="pp-acts">${acts}</div>
         ${games ? `<div class="pp-games">${games}</div>` : ""}
-        <div class="hint">Every action is in the activity log.</div>
       </div>` : ""}
     </div>
     ${tabAllowed("inbox") ? `<div class="panel pp-inbox" id="ppInboxPanel" hidden><h2>Inbox<a class="h2act" href="#inbox/person/${p.id}">All their cases</a></h2>
@@ -199,7 +196,7 @@ async function loadPersonInbox(id) {
   box.innerHTML = (ibRows(PP.inbox.map((t) => Object.assign({}, t, { person: null })), false)
     + (r.total > PP.inbox.length ? `<li class="empty"><a href="#inbox/person/${id}">${r.total - PP.inbox.length} older</a></li>` : "")
     + ((r.problems || []).length ? `<li class="empty">${esc(r.problems.join(". "))}.</li>` : ""))
-    || `<li class="empty">No cases from ${esc(PP.cur.name)}.</li>`;
+    || `<li class="empty">No cases.</li>`;
 }
 
 function renderHistory() {
@@ -208,7 +205,7 @@ function renderHistory() {
     let why = "";
     try { const d = JSON.parse(h.detail || "{}"); why = d.why || ""; } catch (e) { why = ""; }
     const text = h.kind === "people" ? `${esc(h.by)} ${esc(h.text)}${why ? `: "${esc(why)}"` : ""}.`
-      : `${esc(h.by)}: ${esc(h.text)} (PlayOnline account).`;
+      : `${esc(h.by)}: ${esc(h.text)}.`;
     return { at: h.at, kind: h.kind, html: text };
   }).concat(p.notes.map((n) => ({ at: n.at, kind: "note", html: `Note by ${esc(n.by)}: "${esc(n.text)}"` })));
   items.sort((a, b) => b.at - a.at);
@@ -230,7 +227,7 @@ async function loadPersonGames(id) {
     g.characters.forEach((c) => rows.push(`<div class="pp-grow-row"><span>${c.online ? '<span class="dot ok" aria-label="online"></span> ' : ""}<b>${esc(g.title)}</b>, ${esc(c.name)}</span><span class="muted">${esc(c.detail)}</span></div>`));
     if (g.note) rows.push(`<div class="muted">${esc(g.title)}: ${esc(g.note)}</div>`);
   });
-  box.innerHTML = rows.join("") || `<div class="muted">${(r.asked || []).length ? "None of " + esc(r.asked.join(", ")) + " knows this person yet." : "No game here can look up players."}</div>`;
+  box.innerHTML = rows.join("") || `<div class="muted">${(r.asked || []).length ? "Not found in any game." : "No games to check."}</div>`;
   if ((r.problems || []).length) box.innerHTML += `<div class="muted">${esc(r.problems.join("; "))}</div>`;
 }
 
@@ -250,10 +247,10 @@ $("#ppPageView").addEventListener("click", async (e) => {
     return;
   }
   if (t.closest("#ppRenameBtn")) {
-    const got = await uiAsk({ title: `Rename ${PP.cur.name}`, ok: "Rename", text: "The name staff know them by. The old name stays in the history.",
+    const got = await uiAsk({ title: `Rename ${PP.cur.name}`, ok: "Rename",
                               fields: [{ id: "name", label: "Name", value: PP.cur.name, max: 80, required: true }] });
     if (!got || got.name === PP.cur.name) return;
-    try { await personPost({ action: "rename", name: got.name }); toast("Renamed"); openPerson({ id: PP.cur.id }); }
+    try { await personPost({ action: "rename", name: got.name }); toast("Renamed."); openPerson({ id: PP.cur.id }); }
     catch (err) { toast(err.message, true); }
     return;
   }
@@ -266,18 +263,17 @@ $("#ppPageView").addEventListener("click", async (e) => {
   if (t.closest("#ppNoteSave")) {
     const text = $("#ppNoteText").value.trim();
     if (!text) return toast("Write the note first.", true);
-    try { await personPost({ action: "note", text }); toast("Note saved"); openPerson({ id: PP.cur.id }); }
+    try { await personPost({ action: "note", text }); toast("Saved."); openPerson({ id: PP.cur.id }); }
     catch (err) { toast(err.message, true); }
     return;
   }
   const un = t.closest("button[data-unlink]");
   if (un) {
     const got = await uiAsk({ title: `Unlink ${un.dataset.what}?`, ok: "Unlink", danger: true,
-                              text: `It stops being ${PP.cur.name}'s. The link and your reason stay in the history.`,
-                              fields: [{ id: "why", label: "Why", rows: 2, max: 300, required: "Say why you are unlinking it." }] });
+                              fields: [{ id: "why", label: "Reason", rows: 2, max: 300, required: "Add a reason." }] });
     if (!got) return;
     const why = got.why;
-    try { await personPost({ action: "unlink", link: +un.dataset.unlink, why }); toast("Unlinked"); openPerson({ id: PP.cur.id }); }
+    try { await personPost({ action: "unlink", link: +un.dataset.unlink, why }); toast("Unlinked."); openPerson({ id: PP.cur.id }); }
     catch (err) { toast(err.message, true); }
     return;
   }
@@ -293,7 +289,7 @@ $("#ppPageView").addEventListener("click", async (e) => {
     if (got !== true) Object.assign(params, got);
     try {
       const r = await post("/api/modules/action", { key: a.game, action: a.id, params });
-      toast(r.msg || "Done");
+      toast(r.msg || "Done.");
     } catch (err) { toast(err.message, true); }
   }
 });
@@ -305,9 +301,7 @@ function openLinkDialog() {
   $("#ppLinkGames").hidden = $("#ppLinkGames").previousElementSibling.hidden = false;
   $("#ppLinkWhoLabel").hidden = false;
   $("#ppLinkTitle").textContent = `Link an account to ${p.name}`;
-  $("#ppLinkAbout").textContent = p.core !== false
-    ? 'Find their account in a game and link it. It shows as "Linked by staff" until the player proves it on the website.'
-    : 'Find their account in a game and link it. It shows as "Linked by staff", with your name and your reason.';
+  $("#ppLinkAbout").textContent = "";
   $("#ppLinkGames").innerHTML = p.link_targets.map((t, i) => `<button type="button" data-t="${i}">${esc(t.title)}</button>`).join("");
   $("#ppLinkWhy").value = "";
   $("#ppLinkWho").innerHTML = "";
@@ -332,11 +326,11 @@ function pickLinkTarget(i) {
     // the rows the picker showed, to know whom a picked login belongs to already
     let shown = [];
     PP.link.pk = makePicker({
-      id: "ppLinkQ", placeholder: `Search ${t.title} by name or id`,
+      id: "ppLinkQ", placeholder: `Search ${t.title}`,
       search: (q) => api(`/api/people/logins?game=${encodeURIComponent(t.game)}&q=${encodeURIComponent(q)}`)
         .then((r) => (shown = r.players || []).map((x) => Object.assign({}, x, {
-          detail: [x.detail, x.person ? (x.person.id === PP.cur.id ? "Already linked to " + PP.cur.name
-            : `Already linked to ${x.person.name} (another person)`) : ""].filter(Boolean).join(". ")}))),
+          detail: [x.detail, x.person ? (x.person.id === PP.cur.id ? "Already linked here"
+            : `Linked to ${x.person.name}`) : ""].filter(Boolean).join(". ")}))),
       onpick: (row) => {
         PP.link.picked = Object.assign({ name: row.label, key: row.id },
                                        shown.find((x) => String(x.id) === row.id) || {});
@@ -346,9 +340,9 @@ function pickLinkTarget(i) {
     box.appendChild(PP.link.pk.el);
     PP.link.pk.box.addEventListener("input", () => { PP.link.picked = null; linkWarn(); });
   } else {
-    $("#ppLinkWhoLabel").textContent = "Their Discord user id";
-    box.innerHTML = `<input type="text" id="ppLinkDid" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="for example 123456789012345678">`
-      + `<label for="ppLinkDname">Their Discord name (optional)</label><input type="text" id="ppLinkDname" autocomplete="off" spellcheck="false">`;
+    $("#ppLinkWhoLabel").textContent = "Discord user ID";
+    box.innerHTML = `<input type="text" id="ppLinkDid" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="123456789012345678">`
+      + `<label for="ppLinkDname">Discord name</label><input type="text" id="ppLinkDname" autocomplete="off" spellcheck="false">`;
     PP.link.pk = null;
     box.querySelectorAll("input").forEach((x) => x.addEventListener("input", linkWarn));
   }
@@ -367,32 +361,32 @@ function linkChoice() {
   return { system: "discord", key: id.trim(), name: (($("#ppLinkDname") || {}).value || "").trim() || id.trim() };
 }
 
+// the note under the form shows only when it has something to say
 function linkWarn() {
+  linkWarnText();
+  const warn = $("#ppLinkWarn");
+  warn.hidden = !warn.textContent.trim();
+}
+
+function linkWarnText() {
   if (PP.link && PP.link.mode === "login") return loginLinkWarn();
   const c = linkChoice(), p = PP.cur, t = PP.link && PP.link.target;
   const go = $("#ppLinkGo"), warn = $("#ppLinkWarn");
   if (!c) {
     go.textContent = "Link"; go.disabled = true;
-    warn.textContent = t ? (t.search ? `Search for their ${t.title} account and pick it.` : "Type their Discord user id.") : "Pick a game.";
+    warn.textContent = t ? "" : "Pick a game.";
     return;
   }
   go.textContent = `Link ${c.name}`;
   if (c.person && c.person.id !== p.id) {
     go.disabled = true;
-    warn.innerHTML = `${esc(c.name)} already belongs to ${esc(c.person.name)}. A login belongs to one person: `
-      + `<a href="#people/${c.person.id}" id="ppLinkOther">open ${esc(c.person.name)}</a> and merge the two people if they are the same person.`;
+    warn.innerHTML = `Already linked to <a href="#people/${c.person.id}" id="ppLinkOther">${esc(c.person.name)}</a>. `
+      + `Merge them if they're the same person.`;
     return;
   }
-  if (c.person) { go.disabled = true; warn.textContent = `That login is linked to ${p.name} already.`; return; }
+  if (c.person) { go.disabled = true; warn.textContent = "Already linked here."; return; }
   go.disabled = false;
-  if (c.system === "discord") {
-    const who = c.name === c.key ? `Discord user ${c.key}` : `${c.name} (Discord user ${c.key})`;
-    warn.textContent = `${who} will be listed on ${p.name}'s page as their Discord account, marked as linked by staff. `
-      + `Moderators who may see linked accounts will see it.`;
-    return;
-  }
-  warn.textContent = `${c.name} will be ${p.name}'s ${t.title} account: its characters show on ${p.name}'s page, `
-    + `and ${t.title}'s actions on that page (such as kick or ban) act on it. Moderators who may see linked accounts will see the link.`;
+  warn.textContent = "";
 }
 
 $("#ppLinkGames").addEventListener("click", (e) => {
@@ -408,13 +402,12 @@ $("#ppLinkModal").addEventListener("click", (e) => {
 function openLoginLinkDialog(lg, after) {
   PP.link = { mode: "login", lg, after, login: lg.key ? { key: lg.key, name: lg.name || lg.key } : null, person: null };
   $("#ppLinkTitle").textContent = `Link ${lg.name || lg.key} to a person`;
-  $("#ppLinkAbout").textContent = `${lg.name || lg.key} asked for help in ${lg.title || "a game"}, and nobody here has that login yet. `
-    + "Pick the person it belongs to. It shows as \"Linked by staff\" on their page.";
+  $("#ppLinkAbout").textContent = "";
   $("#ppLinkGames").hidden = $("#ppLinkGames").previousElementSibling.hidden = true;
   $("#ppLinkWhy").value = "";
   $("#ppLinkErr").hidden = true;
   $("#ppLinkWhoWrap").hidden = false;
-  $("#ppLinkWhoLabel").textContent = "The person";
+  $("#ppLinkWhoLabel").textContent = "Person";
   const box = $("#ppLinkWho");
   box.innerHTML = "";
   if (!lg.key && lg.search) {
@@ -423,7 +416,7 @@ function openLoginLinkDialog(lg, after) {
     lab.textContent = `Their ${lg.title} account`;
     lab.htmlFor = "ppLinkLoginQ";
     const pk = makePicker({
-      id: "ppLinkLoginQ", placeholder: `Search ${lg.title} by name or id`,
+      id: "ppLinkLoginQ", placeholder: `Search ${lg.title}`,
       search: (q) => api(`/api/people/logins?game=${encodeURIComponent(lg.game)}&q=${encodeURIComponent(q)}`)
         .then((r) => (r.players || []).map((x) => Object.assign({}, x, {
           detail: [x.detail, x.person ? `Already linked to ${x.person.name}` : ""].filter(Boolean).join(". ") }))),
@@ -434,7 +427,7 @@ function openLoginLinkDialog(lg, after) {
     box.append(lab, pk.el);
     $("#ppLinkWhoLabel").hidden = true;
     const lab2 = document.createElement("label");
-    lab2.textContent = "The person";
+    lab2.textContent = "Person";
     lab2.htmlFor = "ppLinkPersonQ";
     box.append(lab2);
   } else {
@@ -444,7 +437,7 @@ function openLoginLinkDialog(lg, after) {
   const ppk = makePicker({
     id: "ppLinkPersonQ", placeholder: "Search people by name, ID or login",
     search: (q) => api(`/api/people?q=${encodeURIComponent(q)}`).then((r) => [{ id: "new:", label: `A new person named ${lg.name || lg.key}`,
-      detail: "Made now, with this login", online: null }].concat((r.people || []).slice(0, 19).map((x) => ({
+      detail: "New", online: null }].concat((r.people || []).slice(0, 19).map((x) => ({
         id: x.id ? "id:" + x.id : "pol:" + x.polid, label: x.name, online: x.online === null ? null : !!x.online,
         avatar: x.avatar || null,
         detail: [x.polid || "", x.accounts.map((a) => a.title).join(", ")].filter(Boolean).join(". ") })))),
@@ -460,16 +453,13 @@ function loginLinkWarn() {
   const L = PP.link, go = $("#ppLinkGo"), warn = $("#ppLinkWarn");
   go.disabled = !(L.login && L.person);
   go.textContent = L.login ? `Link ${L.login.name}` : "Link";
-  if (!L.login) { warn.textContent = `Find their ${L.lg.title} account and pick it.`; return; }
-  if (!L.person) { warn.textContent = "Search for the person and pick them, or pick a new person."; return; }
-  const who = L.person.id === "new:" ? `a new person named ${L.lg.name || L.login.name}` : L.person.label;
-  warn.textContent = `${L.login.name} will be ${who}'s ${L.lg.title} account: its help requests and characters show on their page.`;
+  warn.textContent = "";
 }
 
 async function loginLinkGo() {
   const L = PP.link, err = $("#ppLinkErr");
   const why = $("#ppLinkWhy").value.trim();
-  if (!why) { err.textContent = "Say why you are linking it: it is kept in the history."; err.hidden = false; return; }
+  if (!why) { err.textContent = "Add a reason."; err.hidden = false; return; }
   try {
     let id;
     if (L.person.id === "new:") id = (await post("/api/person", { action: "create", name: L.lg.name || L.login.name })).id;
@@ -477,7 +467,7 @@ async function loginLinkGo() {
     else id = (await api("/api/person?polid=" + encodeURIComponent(L.person.id.slice(4)))).id;
     await post("/api/person", { action: "link", id, system: L.lg.system, key: L.login.key, name: L.login.name, why });
     $("#ppLinkModal").classList.remove("show");
-    toast(`Linked ${L.login.name}`);
+    toast("Linked.");
     if (L.after) L.after();
   } catch (e) { err.textContent = e.message; err.hidden = false; }
 }
@@ -488,11 +478,11 @@ $("#ppLinkGo").onclick = async () => {
   const why = $("#ppLinkWhy").value.trim();
   const err = $("#ppLinkErr");
   if (!c) return;
-  if (!why) { err.textContent = "Say why you are linking it: it is kept in the history."; err.hidden = false; return; }
+  if (!why) { err.textContent = "Add a reason."; err.hidden = false; return; }
   try {
     await personPost({ action: "link", system: c.system, key: c.key, name: c.name, why });
     $("#ppLinkModal").classList.remove("show");
-    toast(`Linked ${c.name}`);
+    toast("Linked.");
     openPerson({ id: PP.cur.id });
   } catch (e) { err.textContent = e.message; err.hidden = false; }
 };
@@ -501,8 +491,7 @@ $("#ppLinkGo").onclick = async () => {
 function openMergeDialog() {
   const p = PP.cur;
   $("#ppMergeTitle").textContent = `Merge someone into ${p.name}`;
-  $("#ppMergeAbout").textContent = `Their linked logins and notes move to ${p.name}, and their page leads here from now on. `
-    + "Two people who each have a PlayOnline account stay two people.";
+  $("#ppMergeAbout").textContent = `Logins and notes move to ${p.name}.`;
   $("#ppMergeErr").hidden = true;
   $("#ppMergeForce").checked = false;
   $("#ppMergeForceWrap").hidden = !p.can_force || p.core === false;
@@ -514,7 +503,7 @@ function openMergeDialog() {
       .filter((x) => x.id !== p.id).slice(0, 20)
       .map((x) => ({ id: x.id ? "id:" + x.id : "pol:" + x.polid, label: x.name, online: x.online === null ? null : !!x.online,
                      avatar: x.avatar || null,
-                     detail: [x.polid || (x.pol ? "PlayOnline account" : p.core !== false ? "no PlayOnline account" : ""),
+                     detail: [x.polid || (x.pol ? "PlayOnline account" : p.core !== false ? "No PlayOnline account" : ""),
                               x.accounts.map((a) => a.title).join(", ")].filter(Boolean).join(". ") }))),
   });
   box.appendChild(PP.merge.el);
@@ -525,13 +514,13 @@ $("#ppMergeModal").addEventListener("click", (e) => { if (e.target === $("#ppMer
 $("#ppMergeGo").onclick = async () => {
   const pk = PP.merge && PP.merge.picked();
   const err = $("#ppMergeErr");
-  if (!pk) { err.textContent = "Search for the person to merge and pick them."; err.hidden = false; return; }
+  if (!pk) { err.textContent = "Pick a person."; err.hidden = false; return; }
   const body = { action: "merge", force: $("#ppMergeForce").checked };
   if (pk.id.startsWith("id:")) body.other = pk.id.slice(3); else body.other_polid = pk.id.slice(4);
   try {
     await personPost(body);
     $("#ppMergeModal").classList.remove("show");
-    toast(`Merged ${pk.label} into ${PP.cur.name}`);
+    toast("Merged.");
     openPerson({ id: PP.cur.id });
   } catch (e) { err.textContent = e.message; err.hidden = false; }
 };

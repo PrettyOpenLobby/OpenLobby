@@ -44,7 +44,7 @@ should refuse a request without the right token.
      "fields": [{"id": "text", "label": "Message", "type": "text"}]},
     {"id": "kick", "label": "Kick a player", "kind": "kick", "danger": true,
      "fields": [{"id": "handles", "label": "Handle", "type": "text"}]},
-    {"id": "mute", "label": "Mute a racer", "danger": true,
+    {"id": "mute", "label": "Mute a racer", "danger": true, "perm": "ban",
      "fields": [{"id": "racer", "label": "Racer", "type": "player"}]}
   ],
   "players": true,
@@ -62,8 +62,23 @@ the panel shows it inside its own page and passes the page's requests through,
 so a tool owns its path and everything under it (`laps`, `laps.json`,
 `laps/edit`). The panel never passes a browser's request to `/openlobby/`.
 
-Each tool and each action is a separate moderator permission, so an owner can
-let a moderator post banners without letting them kick.
+A game with many tools can give them a `"group"` (a short name such as
+`"Players"`). Tools of one group share a single tab, which opens the first of
+them, and a row under the tab bar switches between them. Each tool keeps its
+own path and permission, so a moderator who may use only some of a group sees
+only those (a group left with one tool is shown as that tool). A panel that
+does not know groups shows every tool as a tab of its own.
+
+Moderators are given seven game permissions that hold in every game: see
+games, send messages, disconnect players, ban and mute, help requests, change
+game data and server logs. Each tool and action belongs to one of them. The
+panel picks it from the action's `kind` (`announce`, `kick`) and the words of
+the id and label (help, faq and GM chat are help requests; log is server logs;
+ban, mute and refuse are ban and mute; announce, notice, message, chat, tip and
+news are messages), and anything else is changing game data. To choose it
+yourself, give the tool or action a `"perm"`: one of `see`, `message`, `kick`,
+`ban`, `help`, `edit`, `logs`. An owner can leave a game out of any of the
+seven, so one moderator can kick everywhere but in your game.
 
 A field's `type` is `text` (the default) or `player`. A `player` field is a
 search box: the moderator types part of a name or id and picks from a list, and
@@ -143,7 +158,7 @@ panel keeps them whatever the rest says (docs/installs.md, "Updates"):
 
 Only for a game whose `update` object says `"apply": true`. The panel sends
 it, with the token and `X-Devtool-Actor`, and an empty body, when the owner
-or a moderator with `game.<key>.update` presses Update. Answer at once and
+presses Update. Moderators cannot. Answer at once and
 update afterwards: `202 {"ok": true, "msg": "..."}` when it started, `409
 {"ok": false, "msg": "..."}` while an update already runs, `503 {"ok":
 false, "msg": "..."}` when it cannot update now. The panel shows `msg` as

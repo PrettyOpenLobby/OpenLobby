@@ -164,7 +164,7 @@ def core_on(kport):
         print("staff links")
         code, d = link.call("api/person", {"action": "link", "id": aid, "system": "kartid", "key": "9",
                                            "name": "Mira", "why": "  "})
-        chk("a link needs a reason", (code, "why" in d.get("error", "")), (400, True))
+        chk("a link needs a reason", (code, "reason" in d.get("error", "")), (400, True))
         code, d = link.call("api/person", {"action": "link", "id": aid, "system": "kartid", "key": "9",
                                            "name": "Mira", "why": "asked in Discord, same email"})
         chk("with one it is linked", (code, d.get("id")), (200, aid))
@@ -199,7 +199,7 @@ def core_on(kport):
         chk("...Discord too", (code, "Arden" in d.get("error", "")), (409, True))
         code, d = link.call("api/person", {"action": "link", "id": aid, "system": "kartid", "key": "9",
                                            "why": "again"})
-        chk("linking it twice to the same person says so", (code, "already" in d.get("error", "")), (409, True))
+        chk("linking it twice to the same person says so", (code, "Already" in d.get("error", "")), (409, True))
         code, d = link.call("api/people/logins?game=kart&q=")
         taken = {p["id"]: (p.get("person") or {}).get("name") for p in d.get("players", [])}
         chk("the Link dialog's search says whose logins are taken",

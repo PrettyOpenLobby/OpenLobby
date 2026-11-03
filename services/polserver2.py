@@ -277,12 +277,34 @@ class Bundle:
         return full
 
 
+def wrapped_bundle(b):
+    """A client path in `b`'s list that is a bundle's own file, or None.
+
+    Such a tree was built from a bundle folder as if it were an install, and a
+    client served it writes the bundle's files over its own (polbundle.bundle_file).
+    """
+    from polbundle import wrapped_path
+    from slc import slc_decompress
+    try:
+        lines = slc_decompress(b.patchlist).decode("latin-1").splitlines()
+    except Exception:
+        return None
+    return wrapped_path(l[5:-2] for l in lines if l.startswith("file ") and l.endswith(" {"))
+
+
 def load_bundles(root):
     out = {}
     for name in sorted(os.listdir(root)):
         p = os.path.join(root, name)
         if os.path.isdir(p) and os.path.exists(os.path.join(p, "patchlist.raw")):
             b = Bundle(p)
+            bad = wrapped_bundle(b)
+            if bad:
+                print(f"[!] NOT SERVING {name}: its list sends clients {bad!r}, a "
+                      f"patch bundle's own file. It was built from a bundle folder as "
+                      f"if that were an installed title, and a client would write it "
+                      f"over its install. Remove it and import the real .polpatch.")
+                continue
             out[(b.region, b.product)] = b
             for alias in b.aliases:
                 # A real bundle for that region always wins: aliases fill gaps,

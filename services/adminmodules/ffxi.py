@@ -39,6 +39,7 @@ def _player(m, who):
 
 MODULE = Module(
     "ffxi", "Final Fantasy XI", short="FFXI", platform="PlayOnline: PC and PS2",
+    about="Online RPG.",
     content_ids=[1, 15],
     tools=[Tool("federation", "Federation", ""),
            Tool("notices", "Notices", "notices"),

@@ -140,13 +140,13 @@ def hand_added(owner, mod, kport, dport, dead):
     chk("an address without http://: 400", (code, "http://" in r.get("error", "")), (400, True))
     code, r = owner.call("api/modules/test", {"key": "kart", "url": kurl, "token": "wrong-token-000"})
     chk("a wrong token: the game refused it", (code, r.get("error")),
-        (400, "The game at %s refused that token." % kurl))
+        (400, "The game at %s rejected that token." % kurl))
     code, r = owner.call("api/modules/test", {"key": "kart", "url": dead, "token": TOKEN})
-    chk("nothing answering: said so", (code, r.get("error", "").startswith("Nothing answered at %s" % dead)),
+    chk("nothing answering: said so", (code, r.get("error", "").startswith("Couldn't reach %s" % dead)),
         (400, True))
     code, r = owner.call("api/modules/test", {"key": "kart", "url": "http://127.0.0.1:%d" % dport,
                                               "token": "derby-token-0123456789"})
-    chk("a game that calls itself something else", (code, "calls itself 'derby'" in r.get("error", "")),
+    chk("a game that calls itself something else", (code, "its key is derby, not kart" in r.get("error", "")),
         (400, True))
     code, r = owner.call("api/modules/test", {"key": "kart", "url": kurl + "/", "token": TOKEN})
     g = r.get("game") or {}
@@ -226,10 +226,10 @@ def pairing(owner, mod, anon, kport, dport):
         (403, "That code is wrong. Check it against the one the panel shows."))
     code, r = anon.call("api/pair", dict(body, url="http://127.0.0.1:%d" % dport, token="derby-token-0123456789"))
     chk("a game that calls itself something else: 400",
-        (code, "calls itself 'derby'" in r.get("error", "")), (400, True))
+        (code, "its key is derby, not kart" in r.get("error", "")), (400, True))
     chk("  and the code is still good", owner.call("api/pair/code?code=" + pc)[1].get("state"), "waiting")
     code, r = anon.call("api/pair", dict(body, token="wrong-token-000"))
-    chk("a token the game refuses: 400", (code, "refused that token" in r.get("error", "")), (400, True))
+    chk("a token the game refuses: 400", (code, "rejected that token" in r.get("error", "")), (400, True))
     code, r = anon.call("api/pair", dict(body, key="Kart"))
     chk("a key that does not fit: 400", code, 400)
 
@@ -289,9 +289,9 @@ def pairing(owner, mod, anon, kport, dport):
     chk("the activity log", got, [
         (OWNER, "made a pairing code for a setup program", True),
         ("setup program", "a setup program tried to pair kart with a wrong code", False),
-        ("setup program", "a setup program could not pair kart: The game at %s answered, but it calls itself "
-         "'derby', the panel calls it 'kart'." % ("http://127.0.0.1:%d" % dport), False),
-        ("setup program", "a setup program could not pair kart: The game at %s refused that token." % kurl, False),
+        ("setup program", "a setup program could not pair kart: The game at %s sent a bad reply: "
+         "its key is derby, not kart." % ("http://127.0.0.1:%d" % dport), False),
+        ("setup program", "a setup program could not pair kart: The game at %s rejected that token." % kurl, False),
         ("setup program", "paired Kart Club through its setup program", True),
         ("setup program", "a setup program tried to pair kart with a used code", False),
         (OWNER, "made a pairing code for a setup program", True),
@@ -376,7 +376,7 @@ def updaters(owner, mod, anon, kport):
     code, r = owner.call("api/updates/run", {"key": "kart"})
     chk("a requested updater does not run", (code, r.get("error")), (404, "That game has no approved updater."))
     code, r = owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": "0" * 16})
-    chk("approving another updater than the one shown: 409", (code, "changed since" in r.get("error", ""),
+    chk("approving another updater than the one shown: 409", (code, "updater changed" in r.get("error", ""),
                                                              updater_row()["state"]), (409, True, "requested"))
     n = audit_top()
     code, r = owner.call("api/modules/game", {"action": "approve_updater", "key": "kart", "id": u["id"]})

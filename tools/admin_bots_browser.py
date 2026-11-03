@@ -138,7 +138,7 @@ def main():
             b.call("Emulation.setDeviceMetricsOverride", width=1400, height=1000,
                    deviceScaleFactor=1, mobile=False)
         chk("the switch shows the Fluxer view", (b.js(view), b.js("%s.querySelector('.pill').innerText" % tm)),
-            ("fluxer", "Restarting onto the new values"))
+            ("fluxer", "Restarting"))
         chk("  with its own how-to, the Discord one hidden",
             b.js("[...document.querySelectorAll('#tab-bots [data-for]')].map(e=>e.dataset.for+':'+e.hidden)"),
             ["discord:true", "fluxer:false"])

@@ -239,14 +239,14 @@ def link(db, person, system, key, name, why, by):
     if not system or not key:
         raise PeopleError("Pick the account to link.")
     if system == POL:
-        raise PeopleError("A PlayOnline account is a person of its own: merge the two people instead.")
+        raise PeopleError("Merge the two people instead.")
     if not why:
-        raise PeopleError("Say why you are linking it: it is kept in the history.")
+        raise PeopleError("Add a reason.")
     other, said = owner_of(db, system, key)
     if other is not None and other["id"] == person["id"]:
-        raise PeopleError("%s is linked to %s already." % (name, person["name"]), 409)
+        raise PeopleError("Already linked here.", 409)
     if said:
-        raise PeopleError(said + " Merge the two people if they are the same person.", 409,
+        raise PeopleError(said + " Merge them if they're the same person.", 409,
                           person={"id": other["id"], "name": other["name"]} if other else None)
     return db.execute("INSERT INTO person_link (person_id, system, key, name, how, \"by\", why, at)"
                       " VALUES (%s,%s,%s,%s,'staff',%s,%s,%s) RETURNING *",
@@ -256,7 +256,7 @@ def link(db, person, system, key, name, why, by):
 def unlink(db, person, link_id, why):
     why = _clean(why, WHY_MAX)
     if not why:
-        raise PeopleError("Say why you are unlinking it: it is kept in the history.")
+        raise PeopleError("Add a reason.")
     try:
         link_id = int(link_id)
     except (TypeError, ValueError):
@@ -266,8 +266,7 @@ def unlink(db, person, link_id, why):
     if row is None:
         raise PeopleError("No such link.", 404)
     if row["how"] != "staff":
-        raise PeopleError("Only links staff made can be removed here. A proven login is removed"
-                          " by the player, or with the account.")
+        raise PeopleError("Only staff links can be removed here.")
     db.execute("DELETE FROM person_link WHERE id = %s", (link_id,))
     return row
 
@@ -279,8 +278,7 @@ def merge(db, into, other, force=False):
         raise PeopleError("That is the same person.")
     a, b = polid_of(db, into["id"]), polid_of(db, other["id"])
     if a and b and not force:
-        raise PeopleError("Both have a PlayOnline account (%s and %s), so they are two people."
-                          " Only the owner can merge them anyway." % (a, b), 409, both_pol=True)
+        raise PeopleError("Both have a PlayOnline account. Only the owner can merge them.", 409, both_pol=True)
     db.execute("UPDATE person_link SET person_id = %s WHERE person_id = %s", (into["id"], other["id"]))
     db.execute("UPDATE person_note SET person_id = %s WHERE person_id = %s", (into["id"], other["id"]))
     db.execute("UPDATE person SET merged_into = %s WHERE merged_into = %s", (into["id"], other["id"]))

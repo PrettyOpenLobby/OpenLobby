@@ -398,6 +398,8 @@ services:
       POL_DEV_ISSUER_FORGEJO_URL: "${POL_DEV_ISSUER_FORGEJO_URL:-}"
       POL_DEV_ISSUER_FORGEJO_USER: "${POL_DEV_ISSUER_FORGEJO_USER:-}"
       POL_DEV_ISSUER_FORGEJO_AUTH: "${POL_DEV_ISSUER_FORGEJO_AUTH:-}"
+      # the site serving the fan-site banner; set, the panel gets News > Community sites
+      POL_COMTOOL_URL: "${POL_COMTOOL_URL:-}"
       POL_DEV_ISSUER_SCOPES: "${POL_DEV_ISSUER_SCOPES:-}"
     ports:
       - "127.0.0.1:8090:8090"

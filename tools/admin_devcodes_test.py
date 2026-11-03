@@ -181,7 +181,7 @@ def not_issuing(tmp, base_env):
         owner, anon = Client(url), Client(url)
         owner.login(OWNER, OWNER_PW)
         code, r = owner.call("api/devcodes")
-        chk("its page: not issuing, and why", (code, r.get("issuing"), "POL_DEV_ISSUER_CODE" in (r.get("why") or "")),
+        chk("its page: not issuing, and why", (code, r.get("issuing"), "access code isn't set" in (r.get("why") or "")),
             (200, False, True))
         code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "Kart Club testers"})
         chk("  making codes still works (for later)", (code, len(r.get("codes") or [])), (200, 1))
@@ -201,7 +201,7 @@ def shared(tmp, base_env):
         chk("moderator signs in", mod.login("mod_set", "pass for mod_set"), 200)
         code, r = owner.call("api/devcodes")
         chk("its page: issuing, no minting, says the codes share one access code",
-            (code, r.get("issuing"), r.get("minting"), "same shared access code" in (r.get("why") or ""), r.get("codes")),
+            (code, r.get("issuing"), r.get("minting"), "share one access code" in (r.get("why") or ""), r.get("codes")),
             (200, True, False, True, []))
         for what, body, said in (("0 codes", {"count": 0, "note": "x"}, "Make 1 to 100 codes at a time."),
                                  ("101 codes", {"count": 101, "note": "x"}, "Make 1 to 100 codes at a time."),
@@ -247,7 +247,7 @@ def shared(tmp, base_env):
         code, r = redeem(anon, c1, INSTALL_B)
         chk("another install: 409", (code, "another server" in r.get("error", "")), (409, True))
         code, r = redeem(anon, c2, INSTALL_A)
-        chk("the first install with a second code: 409, it holds one", (code, "already redeemed" in r.get("error", "")),
+        chk("the first install with a second code: 409, it holds one", (code, "already has a dev code" in r.get("error", "")),
             (409, True))
         row = sql("SELECT * FROM dev_codes WHERE code = %s", (devchannel.short_code(c1),))[0]
         chk("  the code is bound to the first install", (row["install_id"], bool(row["redeemed_at"]), row["token"]),
@@ -295,7 +295,7 @@ def minting(tmp, base_env, fj, auth):
         owner.login(OWNER, OWNER_PW)
         code, r = owner.call("api/devcodes")
         chk("its page: minting, says Revoke deletes the token",
-            (r.get("issuing"), r.get("minting"), "Revoke deletes it" in (r.get("why") or "")), (True, True, True))
+            (r.get("issuing"), r.get("minting"), "own registry token" in (r.get("why") or "")), (True, True, True))
         c1, c2 = owner.call("api/devcodes", {"action": "make", "count": 2, "note": "Derby Night"})[1]["codes"]
         short1 = devchannel.short_code(c1)
         del fj.calls[:]
@@ -375,9 +375,9 @@ def kinds(tmp, base_env, kart, derby):
              [("Kart Club", True, True, ["read:package"]),
               ("Derby Night", True, True, ["read:package", "read:repository"])]))
         chk("  each kind says, in a sentence, that its codes get their own token",
-            [("Kart Club codes get a registry token of their own" in ks["kart"]["why"], kart.user in ks["kart"]["why"]),
-             ("Derby Night codes get a registry token of their own" in ks["derby"]["why"],
-              derby.user in ks["derby"]["why"])], [(True, True), (True, True)])
+            [("Kart Club codes each get their own registry token" in ks["kart"]["why"], ks["kart"]["issuing"]),
+             ("Derby Night codes each get their own registry token" in ks["derby"]["why"],
+              ks["derby"]["issuing"])], [(True, True), (True, True)])
         code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "x"})
         chk("make with no kind: 400, pick one", (code, r.get("error")), (400, "Pick which kind of code to make."))
         code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "x", "kind": "golf"})
@@ -439,8 +439,7 @@ def kinds(tmp, base_env, kart, derby):
             (["kart"], False, False, True))
         code, r = redeem(anon, d2, INSTALL_C)
         chk("redeem an unused derby code: 503 with a sentence", (code, r.get("error")),
-            (503, "This panel does not hand out that kind of dev code at the moment. Try again later, or "
-                  "ask the people who gave you the code."))
+            (503, "That kind of dev code isn't available right now. Try again later."))
         code, r = redeem(anon, d1, INSTALL_A)
         chk("  and the used one, even from its own install: 503", code, 503)
         code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "x", "kind": "derby"})
@@ -448,7 +447,7 @@ def kinds(tmp, base_env, kart, derby):
         n = audit_top()
         code, r = owner.call("api/devcodes", {"action": "revoke", "code": d1})
         chk("revoke the used derby code: 200, revoked, and it says the token was not deleted",
-            (code, r.get("token_deleted"), "was not deleted" in (r.get("warning") or ""),
+            (code, r.get("token_deleted"), "wasn't deleted" in (r.get("warning") or ""),
              "openlobby-dev-derby-" + devchannel.short_code(d1) in (r.get("warning") or ""), sorted(derby.tokens)),
             (200, False, True, True, ["1"]))
         chk("  in the activity log", audit_since(n)[0][1:], ("revoked the dev access code for Derby testers", True))
@@ -474,13 +473,13 @@ def kinds(tmp, base_env, kart, derby):
         code, r = owner.call("api/devcodes")
         ks = {k["key"]: k for k in r.get("kinds") or []}
         chk("a scope outside read:package and read:repository: the kind issues nothing, and says so",
-            (ks["derby"]["issuing"], "POL_DEV_ISSUER_DERBY_SCOPES may name only read:package and read:repository"
-             in ks["derby"]["why"], "write:package" in ks["derby"]["why"]), (False, True, True))
+            (ks["derby"]["issuing"], "scopes setting isn't valid"
+             in ks["derby"]["why"], "Derby Night codes are off" in ks["derby"]["why"]), (False, True, True))
         chk("two kinds sharing one Forgejo user: the second refused, and says why",
-            (ks["kart"]["issuing"], ks["polo"]["issuing"], "same Forgejo user as Kart Club" in ks["polo"]["why"]),
+            (ks["kart"]["issuing"], ks["polo"]["issuing"], "share a registry user with Kart Club" in ks["polo"]["why"]),
             (True, False, True))
         chk("entries that are not key:Label: a sentence each", (sorted(ks), len(r.get("problems") or []),
-                                                                all("POL_DEV_ISSUER_KINDS" in p for p in r["problems"])),
+                                                                all("dev code kinds setting" in p for p in r["problems"])),
             (["derby", "kart", "polo"], 2, True))
         code, r = owner.call("api/devcodes", {"action": "make", "count": 1, "note": "later", "kind": "derby"})
         chk("  a derby code can be made for later", code, 200)

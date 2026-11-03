@@ -14,7 +14,7 @@
 "use strict";
 
 function makePicker(opts) {
-  const o = Object.assign({ name: "", placeholder: "Search by name or id", limit: 20, delay: 250 }, opts);
+  const o = Object.assign({ name: "", placeholder: "Search by name or ID", limit: 20, delay: 250 }, opts);
   const uid = "pk" + (makePicker.n = (makePicker.n || 0) + 1);
   const el = document.createElement("div");
   el.className = "pk";
@@ -50,7 +50,7 @@ function makePicker(opts) {
     : on === false ? `<span class="pk-dot off" title="Offline"></span>` : `<span class="pk-dot"></span>`;
   const face = (r) => r.avatar ? `<img class="pk-ava" src="${escp(r.avatar)}" alt="" referrerpolicy="no-referrer">` : "";
   const draw = () => {
-    if (!st.rows.length) return show(`<div class="pk-note">${box.value.trim() ? "No player matches." : "No one is online."}</div>`);
+    if (!st.rows.length) return show(`<div class="pk-note">${box.value.trim() ? "No matches." : "No one online."}</div>`);
     show(st.rows.map((r, i) =>
       `<div class="pk-row${i === st.active ? " on" : ""}" role="option" id="${uid}-${i}" data-i="${i}"` +
       ` aria-selected="${i === st.active}">${dot(r.online)}${face(r)}<span class="pk-who"><b>${escp(r.label || r.id)}</b>` +
@@ -68,7 +68,7 @@ function makePicker(opts) {
     try { rows = await o.search(q, o.limit); } catch (e) {
       if (seq !== st.seq) return;
       st.rows = []; st.active = -1;
-      return show(`<div class="pk-note bad">The search failed: ${escp(e.message || e)}</div>`);
+      return show(`<div class="pk-note bad" title="${escp(e.message || e)}">Search failed. Try again.</div>`);
     }
     if (seq !== st.seq || document.activeElement !== box) return;   // a newer keystroke won, or we left
     st.rows = Array.isArray(rows) ? rows : [];

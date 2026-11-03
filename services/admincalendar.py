@@ -74,9 +74,9 @@ def gather(conn, lo, hi, can, owner):
                 try:
                     entries += f.result()
                 except Exception:          # noqa: BLE001 -- a game down is a note, not an error
-                    problems.append("%s: its calendar is not answering right now" % m.title)
+                    problems.append("Couldn't reach %s." % m.title)
             for f in pending:
-                problems.append("%s: its calendar took too long" % futs[f].title)
+                problems.append("Couldn't reach %s." % futs[f].title)
     for r in _own(conn):
         if r.get("end", 0) > lo and r.get("start", 0) < hi:
             entries.append(dict(r, source="panel", id="panel:" + r["id"], editable=True))

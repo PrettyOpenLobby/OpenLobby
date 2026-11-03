@@ -44,6 +44,7 @@ EXTRA = json.dumps({"xg": {"title": "Extra Game", "short": "XG",
 os.environ["POL_ADMIN_GAMES_EXTRA"] = EXTRA
 
 import accounts  # noqa: E402
+import adminmodules  # noqa: E402
 import adminusers  # noqa: E402
 from admin_http import Client, free_port, start_panel, stop  # noqa: E402
 
@@ -56,7 +57,7 @@ SEEN = []
 # A game that describes itself (adminmodules/remote.py, the OpenLobby admin
 # protocol): the panel is given its URL and token and nothing else.
 KART = {"v": 1, "key": "kart", "title": "Kart Club", "short": "Kart", "platform": "PS2 HDD",
-        "tools": [{"id": "laps", "label": "Lap times", "path": "laps"}],
+        "tools": [{"id": "laps", "label": "Lap times", "path": "laps", "group": "Races"}],
         "actions": [{"id": "banner", "label": "Banner message", "kind": "announce",
                      "fields": [{"id": "text", "label": "Message"}]},
                     {"id": "kick", "label": "Kick", "kind": "kick", "danger": True}],
@@ -175,7 +176,7 @@ def main():
         _code, g = c["gm_fmo"].call("api/games")
         chk("the FMO moderator is offered FMO only", [x["key"] for x in g["games"]], ["fmo"])
         chk("...with all of its tools",
-            [t["id"] for t in g["games"][0]["tools"]], ["npcs", "gates", "coliseum", "war"])
+            [t["id"] for t in g["games"][0]["tools"]], ["npcs", "gates", "coliseum", "war", "rules"])
         chk("a moderator with no game permission is offered none",
             c["gm_none"].call("api/games")[1]["games"], [])
         chk("the owner is offered every configured game",
@@ -184,11 +185,14 @@ def main():
         chk("an extra title is offered to its moderator, with its tools",
             [(x["key"], x["title"], [t["id"] for t in x["tools"]]) for x in g["games"]],
             [("xg", "Extra Game", ["home", "gates"])])
-        chk("...whose tools' permissions the panel lists",
-            ("game.xg" in adminusers.PERMS, "game.xg.gates" in adminusers.PERMS), (True, True))
+        chk("...whose tools' permissions the panel knows, as changing game data",
+            (adminmodules.game_perms(adminmodules.load()["xg"]).get("game.xg"),
+             adminmodules.game_perms(adminmodules.load()["xg"]).get("game.xg.gates")),
+            ("see", "edit"))
         chk("an old per-game grant reads as every tool of that game",
             sorted(adminusers.perms_of({"perms": "games_fmo,gm"})),
-            ["game.fmo", "game.fmo.coliseum", "game.fmo.gates", "game.fmo.npcs", "game.fmo.war", "gm"])
+            ["game.fmo", "game.fmo.coliseum", "game.fmo.gates", "game.fmo.npcs", "game.fmo.rules",
+             "game.fmo.war", "gm"])
         st, _h, body, _u = raw(c["gm_xg"], "games/xg/gates")
         chk("...and its page opens through the panel", (st, SEEN[-1]["path"]), (200, "/gates"))
         chk("the FMO moderator cannot open the extra title", raw(c["gm_fmo"], "games/xg/")[0], 403)
@@ -234,7 +238,7 @@ def main():
             ("application/octet-stream", 'attachment; filename="Wren.sav"'))
         st, _h, body, _u = raw(c["gm_fmo"], "games/fmo/gates/big.json")
         chk("JSON over the limit is still refused, never cut short",
-            (st, b"more than 1 MB" in body), (502, True))
+            (st, b"over 1 MB" in body), (502, True))
         st, _h, body, _u = raw(c["gm_fmo"], "games/fmo/gates")
         st, hd, body, _u = raw(c["gm_fmo"], "games/fmo/gates")
         chk("pages still come whole, with their nonce", (st, b"<script nonce=" in body), (200, True))
@@ -268,7 +272,7 @@ def main():
 
         st, _h, body, _u = raw(c["gm_fe"], "games/fe/")
         chk("a tool that refuses the panel's token reads as a panel fault",
-            (st, b"refused" in body), (502, True))
+            (st, b"turned the panel away" in body), (502, True))
         chk("a game the panel does not know is not found", raw(owner, "games/nope/")[0], 404)
 
         # one tool, not the whole game
@@ -304,13 +308,14 @@ def main():
             kart and (kart["title"], kart["platform"], [t["id"] for t in kart["tools"]],
                       [a["id"] for a in kart["actions"]]),
             ("Kart Club", "PS2 HDD", ["laps"], ["banner", "kick"]))
+        chk("...with its tools' tab groups", kart and [t.get("group") for t in kart["tools"]], ["Races"])
         live = kart["live"] if kart else {}
         chk("...and reports who is playing",
             (live.get("online"), [p["name"] for p in live.get("players", [])], live.get("summary"),
              live.get("rooms_label"), live.get("facts")),
             (2, ["Wren", "Ash"], "Grand prix tonight", "races", [{"label": "laps run", "value": 41}]))
-        chk("...its permissions are listed",
-            all(p in owner.call("api/session")[1].get("perm_labels", {}) for p in
+        chk("...its permissions are the owner's",
+            all(p in owner.call("api/session")[1].get("perms", []) for p in
                 ("game.kart", "game.kart.laps", "game.kart.banner")), True)
         st, _h, _b, _u = raw(c["gm_laps"], "games/kart/laps")
         chk("a moderator with its tool opens the tool", st, 200)
@@ -372,7 +377,7 @@ def main():
         owner = Client(url)
         owner.login(OWNER, OWNER_PW)
         st, _h, body, _u = raw(owner, "games/fmo/")
-        chk("an unreachable tool says so, as a page", (st, b"not reachable" in body), (502, True))
+        chk("an unreachable tool says so, as a page", (st, b"Couldn't reach" in body), (502, True))
     finally:
         stop(proc)
     print("all checks passed" if not bad else "%d check(s) FAILED" % bad)

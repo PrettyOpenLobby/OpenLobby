@@ -655,6 +655,12 @@ def _check_structure(m, lists, against):
         raise PolpatchError("bundle/patch.cfg has no rows.")
     if _count_row_lines(cfg) != len(rows):
         raise PolpatchError("bundle/patch.cfg has rows that cannot be parsed.")
+    bad = polbundle.wrapped_path(r["path"] for r in rows)
+    if bad:
+        raise PolpatchError(f"patch.cfg sends clients {bad!r}, a patch bundle's own "
+                            f"file: this .polpatch was built from a bundle folder as "
+                            f"if it were an installed title, and would make every "
+                            f"client write the bundle over its install.")
     for r in rows:
         if not VERSION_RE.fullmatch(r["version"]):
             raise PolpatchError(f"patch.cfg row for {r['path']} has version "

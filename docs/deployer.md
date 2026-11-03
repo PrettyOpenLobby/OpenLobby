@@ -490,6 +490,30 @@ log blanks them. When root is refused as well (its password was changed
 after the database was created too), the job says so and changes nothing:
 put both back in `.env` to what they were at the first start and restart.
 
+## Exporting logs
+
+When something goes wrong, the useful part is usually in a few services'
+logs. The deployer puts one area of the server into one text file to send
+with a report:
+
+    GET /api/logs/areas                  the areas this server has
+    GET /api/logs/export?area=patch      one area's file (area=all: every area)
+        &lines=2000                      log lines per service (at most 20000)
+        &addresses=1                     keep players' addresses whole
+
+The areas are the patch service, sign-in and lobby, the admin panel and the
+deployer, the database, and each game that is turned on. Each part of the
+file starts with its services' state (running, stopped, how long, which
+image), then each service's last lines with their times. A service the
+area names that this server does not have is listed as not set up.
+
+Before the file leaves the deployer it is cleaned: every value of a `.env`
+setting whose name says it is a secret (PASSWORD, TOKEN, SECRET, KEY) is
+blanked, and so are the deployer's token, session tokens, login digests,
+password fields and access codes. Players' internet addresses are cut to
+their first two numbers unless `addresses=1`; LAN, loopback and VPN
+addresses are kept, since they say how the server is wired.
+
 ## Jobs and logs
 
 One action runs at a time. Each is a job with an id, kept with its output

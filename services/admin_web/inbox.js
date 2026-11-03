@@ -47,10 +47,10 @@ function ibRenderBar(r) {
   const waiting = r.waiting || {};
   const total = Object.values(waiting).reduce((a, b) => a + b, 0);
   const n = (k) => (k === "all" ? total : waiting[k] || 0);
-  const tabs = [{ key: "all", title: "Every source" }].concat(r.sources || []);
+  const tabs = [{ key: "all", title: "All sources" }].concat(r.sources || []);
   if (IB.source !== "all" && !tabs.some((t) => t.key === IB.source)) IB.source = "all";
   $("#ibSource").innerHTML = tabs.map((t) => `<option value="${esc(t.key)}">${esc(t.title)}`
-    + `${n(t.key) ? ` (${n(t.key)} waiting)` : ""}</option>`).join("");
+    + `${n(t.key) ? ` (${n(t.key)})` : ""}</option>`).join("");
   $("#ibSource").value = IB.source;
   $("#ibSource").hidden = tabs.length < 3;
   document.querySelectorAll("#ibState button").forEach((b) => b.classList.toggle("on", b.dataset.s === IB.state));
@@ -74,7 +74,7 @@ function ibWho(t, can_link) {
   const lg = t.login || {};
   const who = esc(t.who || lg.name || "someone");
   const link = can_link && lg.system && lg.system !== "pol" && IB.last && IB.last.people
-    ? ` (<button type="button" class="ib-link" data-ib-link="${esc(ibKey(t))}">link to a person</button>)` : "";
+    ? ` <button type="button" class="ib-link" data-ib-link="${esc(ibKey(t))}">Link</button>` : "";
   return who + link;
 }
 
@@ -84,10 +84,10 @@ function ibMeta(t, can_link) {
   if (t.source === "gm") return `${esc(t.game_title)}. From ${who}${when ? ", " + esc(when) : ""}`;
   if (t.source === "report") return `${esc(t.source_title)}, ${esc(t.game_title)}. ${t.about ? "About " + esc(t.about) + ", from " : ""}${who}${when ? ", " + esc(when) : ""}`;
   if (t.source === "issue") return `${esc(t.source_title)}, ${esc(t.game_title)}. ${who}${t.about ? ", " + esc(t.about) : ""}${when ? ", " + esc(when) : ""}`;
-  return `${esc(t.source_title)}, ${esc(t.game_title)}${t.about ? " (" + esc(t.about) + ")" : ""}. ${who}${when ? ", " + esc(when) : ""}`;
+  return `${esc(t.source_title)}, ${esc(t.game_title)}${t.about ? ", " + esc(t.about) : ""}. ${who}${when ? ", " + esc(when) : ""}`;
 }
 
-const ibTitle = (t) => t.source === "gm" ? "GM call (confidential)" : (t.subject || "(no subject)");
+const ibTitle = (t) => t.source === "gm" ? "GM call" : (t.subject || "No subject");
 const ibState = (t) => t.state === "open" ? "waiting" : t.state;
 const IB_STATE_WORD = { waiting: "Waiting", answered: "Answered", closed: "Closed" };
 
@@ -98,9 +98,9 @@ function ibRows(rows, can_link) {
 }
 
 function ibRenderList(r) {
-  const empty = { waiting: "Nobody is waiting on us.", open: "Nothing open.",
-                  closed: "Nothing closed.", all: "Nothing here yet." }[IB.state] || "Nothing here.";
-  const none = !(r.sources || []).length ? "You can't read any of the Inbox's sources." : empty;
+  const empty = { waiting: "Nothing waiting.", open: "Nothing open.",
+                  closed: "Nothing closed.", all: "Nothing yet." }[IB.state] || "Nothing here.";
+  const none = !(r.sources || []).length ? "Nothing you can see." : empty;
   $("#ibList").innerHTML = ibRows(IB.rows, r.can_link) || `<li class="empty">${esc(none)}</li>`;
   const from = r.total ? r.offset + 1 : 0, to = r.offset + IB.rows.length;
   $("#ibPager").innerHTML = r.total > r.limit
@@ -119,8 +119,8 @@ async function ibOpen(t, quiet) {
   const can_link = IB.last && IB.last.can_link;
   const who = ibWho(t, can_link);
   const others = `<span class="ib-others"></span>`;
-  const head = (th) => `<p class="muted">Game help in ${esc(th.game_title)}, from ${who}`
-    + `${th.who.online === true ? " (online now)" : ""}.${th.closed ? " Closed." : ""} ${others}</p>`;
+  const head = (th) => `<p class="muted">${esc(th.game_title)} · ${who}`
+    + `${th.who.online === true ? " · online" : ""}${th.closed ? " · Closed" : ""} ${others}</p>`;
   const got = await renderHelpThread(pane, t.game, t.id, quiet, loadInbox, head);
   if (got) ibOthers(t);
   if (!quiet && got && window.matchMedia("(max-width: 760px)").matches) pane.scrollIntoView({ block: "start" });
@@ -137,8 +137,8 @@ async function ibOthers(t) {
   const box = $("#ibPane .ib-others");
   if (!box) return;
   box.innerHTML = rest.length
-    ? `Their other open cases: <a href="#inbox/person/${t.person.id}">${rest.length > 5 ? "more than 5" : rest.length}</a>.`
-    : "Their other open cases: none.";
+    ? `· <a href="#inbox/person/${t.person.id}">${rest.length > 5 ? "5+" : rest.length} other open</a>`
+    : "";
 }
 
 function ibGoTo(t) {
@@ -159,7 +159,7 @@ function ibPaintCounts(w) {
     const b = $(sel), n = w[src] || 0;
     if (!b) continue;
     b.textContent = n; b.hidden = !n;
-    b.title = n ? `${n} waiting on us` : "";
+    b.title = n ? `${n} waiting` : "";
   }
 }
 let IB_COUNT_SEQ = 0;

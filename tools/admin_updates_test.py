@@ -189,7 +189,7 @@ subjects = [c["subject"] for c in core["changes"]]
 chk("  50 changes, newest first, no merges",
     (len(subjects), subjects[0], "Merge branch side" in subjects), (50, "Change 69", False))
 chk("  dates in UTC", core["changes"][0]["date"], "2026-10-03T19:00:00Z")
-chk("  how: the default", core["how"], "Run docker compose pull and docker compose up -d.")
+chk("  how: the default", core["how"], "Update it on the server.")
 kart = it.get("kart") or {}
 chk("a game's own report, with its name and how",
     (kart.get("name"), kart.get("update"), kart.get("behind"), kart.get("how")),
@@ -197,7 +197,7 @@ chk("a game's own report, with its name and how",
 chk("  its strings trimmed and times in UTC",
     (kart["changes"][0]["subject"], kart["latest"]["date"]), ("Show lap times in the lobby", "2026-10-21T07:12:00Z"))
 derby = it.get("derby") or {}
-chk("a broken report: unknown, with a sentence", (derby.get("update"), "expected shape" in (derby.get("why") or "")),
+chk("a broken report: unknown, with a sentence", (derby.get("update"), "Couldn't read the update info" in (derby.get("why") or "")),
     ("unknown", True))
 chk("  and nothing of it shown", (derby["running"]["commit"], derby["changes"], derby["behind"]), (None, [], None))
 
@@ -219,10 +219,10 @@ chk("at main's head (a 12-digit revision): current", (core["update"], core["behi
 os.environ["OPENLOBBY_REVISION"] = ""
 core = items(U.overview())["core"]
 chk("built without a revision: unknown, the newest still shown",
-    (core["update"], core["latest"]["commit"], "without OPENLOBBY_REVISION" in core["why"]), ("unknown", sha(69), True))
+    (core["update"], core["latest"]["commit"], "Can't tell which version" in core["why"]), ("unknown", sha(69), True))
 os.environ["OPENLOBBY_REVISION"] = "release-candidate"
 core = items(U.overview())["core"]
-chk("a revision that is not a commit: unknown", (core["update"], "is not a commit" in core["why"]), ("unknown", True))
+chk("a revision that is not a commit: unknown", (core["update"], "Can't tell which version" in core["why"]), ("unknown", True))
 os.environ["OPENLOBBY_REVISION"] = "abcdef0123456789abcdef0123456789abcdef01"
 core = items(U.overview())["core"]
 chk("a commit the repository does not have: unknown", (core["update"], "is not in" in core["why"]), ("unknown", True))
@@ -350,11 +350,11 @@ for what, raw in (("not an object", ["available"]),
                   ("available but behind 0", dict(good, behind=0)),
                   ("changes not a list", dict(good, changes="lots"))):
     c = U.clean_item(raw, key="kart", name="Kart Club")
-    chk("%s: unknown with why" % what, (c["update"], "expected shape" in (c["why"] or ""), c["changes"]),
+    chk("%s: unknown with why" % what, (c["update"], "Couldn't read the update info" in (c["why"] or ""), c["changes"]),
         ("unknown", True, []))
 chk("no usable key: dropped", (U.clean_item(good), U.clean_item(dict(good, key="../x"))), (None, None))
 c = U.clean_item({"running": {}, "latest": {}, "update": "unknown"}, key="kart", name="Kart Club")
-chk("unknown without a why gets one", (c["update"], c["why"]), ("unknown", "Kart Club cannot tell whether it is up to date."))
+chk("unknown without a why gets one", (c["update"], c["why"]), ("unknown", "Kart Club can't tell if it's up to date."))
 for what, raw in (("null running and latest", {"update": "unknown", "running": None, "latest": None,
                                                 "why": "GitHub could not be reached."}),
                   ("no running or latest at all", {"update": "unknown", "why": "GitHub could not be reached."})):
@@ -362,7 +362,7 @@ for what, raw in (("null running and latest", {"update": "unknown", "running": N
     chk("unknown with %s keeps its own why" % what, (c["update"], c["why"]),
         ("unknown", "GitHub could not be reached."))
 c = U.clean_item({"update": "available", "running": None, "latest": None}, key="kart", name="Kart Club")
-chk("available still needs both objects", "expected shape" in (c["why"] or ""), True)
+chk("available still needs both objects", "Couldn't read the update info" in (c["why"] or ""), True)
 
 print("a game that applies its own update (path B) keeps its fields")
 c = U.clean_item(dict(good, apply=True, state="updating", message="  Building  the new image. " + "x" * 400),
@@ -373,7 +373,7 @@ chk("apply, state updating and its message (trimmed, capped)",
 c = U.clean_item(dict(good, apply=True, state="failed", why="The build failed."), key="kart", name="Kart Club")
 chk("state failed with its why", (c.get("apply"), c.get("state"), c["why"]), (True, "failed", "The build failed."))
 c = U.clean_item(dict(good, apply=True, state="failed", why=None), key="kart", name="Kart Club")
-chk("  failed without a why gets one", c["why"], "Kart Club says its update failed, without saying why.")
+chk("  failed without a why gets one", c["why"], "no reason given.")
 c = U.clean_item(dict(good, running="abc1234", apply=True, state="updating", message="Restarting."),
                  key="kart", name="Kart Club")
 chk("  kept on a report that does not fit the shape", (c["update"], c.get("apply"), c.get("state"), c.get("message")),

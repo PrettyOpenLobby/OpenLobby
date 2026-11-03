@@ -44,7 +44,7 @@ def configured():
 def _call(method, path, body=None, raw=False, timeout=TIMEOUT):
     conf = configured()
     if conf is None:
-        return 503, {"error": "No deployer is set up on this server (POL_DEPLOYER_URL)."}
+        return 503, {"error": "Game installs aren't set up on this server."}
     url, tok = conf
     req = urllib.request.Request(url + path, method=method,
                                  data=None if body is None else json.dumps(body).encode(),
@@ -57,9 +57,9 @@ def _call(method, path, body=None, raw=False, timeout=TIMEOUT):
     except urllib.error.HTTPError as e:
         data, status, state, log_at = e.read(MAX_LOG + 1), e.code, "", None
         if status == 401:
-            return 502, {"error": "The deployer refused the panel's token."}
+            return 502, {"error": "The game installer turned the panel away. Run OpenLobby Setup again."}
     except (urllib.error.URLError, OSError, ValueError):
-        return 503, {"error": "The deployer is not answering."}
+        return 503, {"error": "Couldn't reach the game installer. Try again in a minute."}
     if raw:
         # The log is read from an offset; a part the deployer has dropped (past its 1 MB
         # cap) is skipped, and X-Log-Offset says where the text really starts.
@@ -73,7 +73,7 @@ def _call(method, path, body=None, raw=False, timeout=TIMEOUT):
     try:
         got = json.loads(data or b"{}")
     except ValueError:
-        return 502, {"error": "The deployer answered something that is not JSON."}
+        return 502, {"error": "The game installer sent a bad reply. Try again."}
     return status, got if isinstance(got, dict) else {"data": got}
 
 
@@ -98,7 +98,7 @@ def updates(refresh=False):
     return _call("GET", "/api/updates" + ("?refresh=1" if refresh else ""))
 
 
-OLD_DEPLOYER = "This deployer has no update channels yet; update the core first, then try again."
+OLD_DEPLOYER = "Update OpenLobby first, then try again."
 
 
 #: what the panel passes on of the deployer's channel answer and of each image row: never
@@ -161,7 +161,7 @@ def channel_source(stable):
     url = out.get("url") if st == 200 else None
     if not isinstance(url, str) or not devchannel.SOURCE.match(url):
         return (404 if st in (200, 404) else st), {
-            "error": out.get("error") or "The deployer does not say where that source is."}
+            "error": out.get("error") or "Source not found."}
     return 200, {"url": url}
 
 
@@ -223,11 +223,11 @@ def set_channel(body):
     out.pop("code", None)
     out.pop("unlock", None)
     if status == 409:
-        got.setdefault("error", "Another job is still running; switch when it has finished.")
+        got.setdefault("error", "Another job is running. Try again when it ends.")
     elif status == 404:
         got = {"error": OLD_DEPLOYER}
     elif status == 400:
-        got.setdefault("error", "The deployer refused that.")
+        got.setdefault("error", "The game installer refused that.")
         if ("key" in out or "lock" in out or "issuer" in out) and \
                 str(got.get("error", "")).startswith("unknown fields"):
             got["error"] = OLD_DEPLOYER       # a deployer from before per-key switches
@@ -277,9 +277,9 @@ def action(act, game, item=None, source=None):
         body.update(item=item, source=src)
     status, out = _call("POST", "/api/actions", body)
     if status == 409:
-        out.setdefault("error", "Another job is still running; it is shown below.")
+        out.setdefault("error", "Another job is running. Try again when it ends.")
     elif status == 400:
-        out.setdefault("error", "The deployer does not know that game or action.")
+        out.setdefault("error", "Unknown game or action.")
     return status, out
 
 
@@ -318,11 +318,11 @@ def run_updater(key, title, rec, channel=None, switch=False, code=None):
     status, out = _call("POST", "/api/updater", body, timeout=CHANNEL_TIMEOUT if code else TIMEOUT)
     body.pop("code", None)
     if status == 409:
-        out.setdefault("error", "Another job is still running; it is shown below.")
+        out.setdefault("error", "Another job is running. Try again when it ends.")
     elif status == 404:
-        out = {"error": "This deployer cannot run game updaters yet; update the core first, then try again."}
+        out = {"error": "Update OpenLobby first, then try again."}
     elif status == 400:
-        out.setdefault("error", "The deployer refused that updater.")
+        out.setdefault("error", "The game installer refused that updater.")
     return status, out
 
 
@@ -348,9 +348,9 @@ def browse(path):
         return 400, {"error": "That folder is outside the clients folder."}
     st, out = _call("GET", "/api/browse?path=" + urllib.parse.quote(rel))
     if st == 409:
-        out.setdefault("error", "Browsing is off: set POL_DEPLOY_CLIENTS for the deployer.")
+        out.setdefault("error", "Folder browsing is off on this server.")
     elif st == 403:
-        out.setdefault("error", "The deployer cannot read that folder.")
+        out.setdefault("error", "Couldn't read that folder.")
     return st, out
 
 
@@ -371,9 +371,9 @@ def upload(stream, length, filename):
     percent-encoded UTF-8, and is passed on as it came (the deployer only displays it)."""
     conf = configured()
     if conf is None:
-        return 503, {"error": "No deployer is set up on this server (POL_DEPLOYER_URL)."}
+        return 503, {"error": "Game installs aren't set up on this server."}
     if not isinstance(length, int) or length <= 0:
-        return 411, {"error": "The upload needs a length."}
+        return 411, {"error": "Upload failed. Try again."}
     url, tok = conf
     u = urllib.parse.urlsplit(url)
     cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
@@ -393,7 +393,7 @@ def upload(stream, length, filename):
             conn.send(chunk)
             sent += len(chunk)
         if sent < length:
-            return 400, {"error": "The upload stopped part way (%d of %d bytes)." % (sent, length)}
+            return 400, {"error": "The upload stopped part way. Try again."}
         r = conn.getresponse()
         status, data = r.status, r.read(MAX_LOG)
     except (OSError, http.client.HTTPException):
@@ -402,20 +402,20 @@ def upload(stream, length, filename):
             r = conn.getresponse()
             status, data = r.status, r.read(MAX_LOG)
         except Exception:
-            return 503, {"error": "The deployer stopped answering during the upload."}
+            return 503, {"error": "The upload stopped. Try again."}
     finally:
         conn.close()
     if status == 401:
-        return 502, {"error": "The deployer refused the panel's token."}
+        return 502, {"error": "The game installer turned the panel away. Run OpenLobby Setup again."}
     try:
         out = json.loads(data or b"{}")
     except ValueError:
-        return 502, {"error": "The deployer answered something that is not JSON."}
+        return 502, {"error": "The game installer sent a bad reply. Try again."}
     out = out if isinstance(out, dict) else {"data": out}
     if status == 413:
-        out.setdefault("error", "The archive is bigger than the deployer takes.")
+        out.setdefault("error", "That file is too big.")
     elif status == 507:
-        out.setdefault("error", "The deployer's disk is full. Remove an old upload and try again.")
+        out.setdefault("error", "The disk is full. Remove an old upload and try again.")
     return status, out
 
 
@@ -433,7 +433,7 @@ def patches(recheck=False):
     if st == 202:
         return 200, out
     if st == 409 and not out.get("bundles"):
-        out.setdefault("error", "Patch bundles are off: the deployer has no mirrors folder (POL_DEPLOY_MIRRORS).")
+        out.setdefault("error", "Patch bundles are off on this server.")
         out["off"] = True
     return st, out
 
@@ -504,7 +504,7 @@ def patch_action(body):
     if act == "patch_build":
         version = body.get("version") or ""
         if version and (not isinstance(version, str) or not _VERSION.match(version)):
-            return 400, {"error": "A version looks like 20030429_0, or leave it empty to read it from the install."}
+            return 400, {"error": "A version looks like 20030429_0. Leave it empty to detect it."}
         if version:
             out["version"] = version
         if body.get("walk"):
@@ -517,10 +517,42 @@ def patch_action(body):
             out["aliases"] = aliases
     status, got = _call("POST", "/api/actions", out)
     if status == 409:
-        got.setdefault("error", "Another job is still running, or patch bundles are off on this server.")
+        got.setdefault("error", "Another job is running. Try again when it ends.")
     elif status == 404:
-        got.setdefault("error", "There is no bundle for that region and product.")
+        got.setdefault("error", "No bundle for that region and product.")
     elif status == 400:
-        got.setdefault("error", "The deployer refused that.")
+        got.setdefault("error", "The game installer refused that.")
     return status, got
 
+
+
+# ------------------------------------------------ logs to send with a report (Settings > Logs)
+EXPORT_MAX = 64 << 20       # the most of one log file the panel passes on
+EXPORT_TIMEOUT = 180.0      # every area's logs can take a while to gather
+
+
+def log_areas():
+    """(status, {"areas": [{"id", "name", "services", "about"}]}) from the deployer."""
+    return _call("GET", "/api/logs/areas")
+
+
+def log_export(area, lines, addresses):
+    """(200, the text as bytes) or (status, {"error"}): one area's logs from the deployer
+    (logexport.py there blanks secrets and shortens addresses)."""
+    conf = configured()
+    if conf is None:
+        return 503, {"error": "Game installs aren't set up on this server."}
+    url, tok = conf
+    q = urllib.parse.urlencode({"area": area, "lines": str(int(lines)), "addresses": "1" if addresses else "0"})
+    req = urllib.request.Request(url + "/api/logs/export?" + q, headers={"Authorization": "Bearer " + tok})
+    try:
+        with urllib.request.urlopen(req, timeout=EXPORT_TIMEOUT) as r:
+            return 200, r.read(EXPORT_MAX)
+    except urllib.error.HTTPError as e:
+        try:
+            got = json.loads(e.read(4096) or b"{}")
+        except ValueError:
+            got = {}
+        return (400 if e.code == 400 else 502), {"error": got.get("error") or "Couldn't get the logs. Try again."}
+    except (urllib.error.URLError, OSError, ValueError):
+        return 503, {"error": "Couldn't reach the game installer. Try again in a minute."}

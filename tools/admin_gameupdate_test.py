@@ -8,8 +8,8 @@ test sets exactly what it answers. Checks the game-applied update (path B): the 
 "state", "message" and "why" fields reaching the Updates list, POST /api/updates/apply sending
 POST /openlobby/update with the token, the actor and an empty body, and passing on the game's
 202, 409 and 503 with its message as given, any other status as "The game did not take the
-update request (HTTP n)"; the owner and a moderator with game.kart.update may press it, one
-without may not; then the status poll (/api/updates/state): updating with its message, done
+update request (HTTP n)"; the owner may press it, and no moderator may, not even one saved
+with the old game.kart.update; then the status poll (/api/updates/state): updating with its message, done
 when running.commit equals latest.commit and the update is "current", a failure written to the
 activity log once, and a game that stays away (POL_ADMIN_UPDATE_LOST shortened) "has not come
 back". Then the deployer-run updater (path A): the panel offers it only once the owner approved
@@ -239,36 +239,41 @@ def path_b(owner, upd, see, game):
         ("available", None, None, "Run Kart Club Setup and choose Update."))
     code, r = owner.call("api/updates/apply", {"key": "kart"})
     chk("  and Update is refused before the game is asked",
-        (code, r.get("error"), len(game.asked)), (409, "Kart Club does not offer to update itself from the panel.", 0))
+        (code, r.get("error"), len(game.asked)), (409, "Kart Club can't update itself from the panel.", 0))
     game.update = report()
     it = item(owner)
     chk("apply true: kept, the game updates itself", (it.get("apply"), it.get("via")), (True, "game"))
     labels = owner.call("api/mods")[1].get("perm_labels", {})
-    chk("game.kart.update is listed with the game's own permissions",
-        labels.get("game.kart.update"), "Kart Club: update it, when it can update itself")
+    chk("a game's updates are no permission to give, the owner's alone",
+        (labels.get("game.kart.update"), "game.kart.update" in owner.call("api/session")[1].get("perms", [])),
+        (None, True))
 
     n = audit_top()
     chk("a moderator without game.kart.update: 403", see.call("api/updates/apply", {"key": "kart"})[0], 403)
     chk("  nor the status poll", see.call("api/updates/state?key=kart")[0], 403)
     chk("  and the game was not asked", len(game.asked), 0)
+    chk("a moderator saved with the old game.kart.update: 403 too",
+        (upd.call("api/updates/apply", {"key": "kart"})[0], upd.call("api/updates/state?key=kart")[0],
+         len(game.asked)), (403, 403, 0))
+    upd = owner
     for status, body, want_code, want_msg in (
             (409, {"ok": False, "msg": "Kart Club is already updating."}, 409, "Kart Club is already updating."),
             (503, {"ok": False, "msg": "A race is on; try after it."}, 503, "A race is on; try after it."),
-            (500, {"ok": False, "msg": "boom"}, 502, "The game did not take the update request (HTTP 500)"),
-            (200, {"ok": True}, 502, "The game did not take the update request (HTTP 200)")):
+            (500, {"ok": False, "msg": "boom"}, 502, "Kart Club didn't start the update. Try again."),
+            (200, {"ok": True}, 502, "Kart Club didn't start the update. Try again.")):
         game.answer = (status, body)
         code, r = upd.call("api/updates/apply", {"key": "kart"})
         chk("the game answers %d: %d with %r" % (status, want_code, want_msg), (code, r.get("error")),
             (want_code, want_msg))
     one = game.asked[0]
     chk("POST /openlobby/update: the token, the actor, an empty body", (one["token"], one["actor"], one["body"]),
-        (TOKEN, "mod_upd", b""))
+        (TOKEN, OWNER, b""))
     game.answer = (202, {"ok": True, "msg": "Fetching the new version."})
     game.update = report("updating", message="Fetching the new version.")
     code, r = upd.call("api/updates/apply", {"key": "kart"})
     chk("202: taken, the game's message as given", (code, r), (200, {"ok": True, "msg": "Fetching the new version."}))
     chk("all in the activity log", audit_since(n),
-        [("mod_upd", "updated Kart Club", False)] * 4 + [("mod_upd", "updated Kart Club", True)])
+        [(OWNER, "updated Kart Club", False)] * 4 + [(OWNER, "updated Kart Club", True)])
 
     print("following it")
     code, s = upd.call("api/updates/state?key=kart")
@@ -298,8 +303,8 @@ def path_b(owner, upd, see, game):
     chk("  the Updates list keeps it", (it.get("state"), it.get("why"), it.get("via")),
         ("failed", "The build failed; the old version still runs.", "game"))
     chk("  written to the activity log once", audit_since(n),
-        [("mod_upd", "updated Kart Club", True),
-         ("mod_upd", "Kart Club: update failed: The build failed; the old version still runs.", False)])
+        [(OWNER, "updated Kart Club", True),
+         (OWNER, "Kart Club: update failed: The build failed; the old version still runs.", False)])
 
     game.update = report()
     upd.call("api/updates/apply", {"key": "kart"})
@@ -312,7 +317,7 @@ def path_b(owner, upd, see, game):
     time.sleep(6.5)
     code, s = upd.call("api/updates/state?key=kart")
     chk("  away past POL_ADMIN_UPDATE_LOST: has not come back", (s.get("lost"), s.get("message")),
-        (True, "Kart Club has not come back after updating; check its server"))
+        (True, "Kart Club hasn't come back after updating. Check its server."))
 
 
 def write_ops(tmp, at=None, **kart):
@@ -352,7 +357,7 @@ def path_ops(owner, upd, see, tmp):
     it = item(owner)
     o = (it or {}).get("ops") or {}
     chk("a game that reports no version still gets an item, unknown, saying so",
-        (it and it["update"], it and it["why"]), ("unknown", "Kart Club does not report which version it runs."))
+        (it and it["update"], it and it["why"]), ("unknown", "Kart Club doesn't report its version."))
     chk("  with its Update action and its timer: automatic, next check in two minutes",
         (o.get("action"), o.get("auto"), 100 < (o.get("next") or 0) - time.time() < 140, o.get("on"), o.get("off")),
         ("update-kart", True, True, "auto-on-kart", "auto-off-kart"))
@@ -386,7 +391,7 @@ def path_ops(owner, upd, see, tmp):
     chk("running: the list says who asked", item(owner)["ops"]["running"]["by"], OWNER)
     code, r = owner.call("api/updates/ops", {"key": "kart", "what": "update"})
     chk("  a second Update while it runs is refused", (code, r.get("error")),
-        (409, "That update is still running. Wait for it to finish."))
+        (409, "That update is still running."))
     last = {"action": "update-kart", "ok": True, "by": OWNER, "at": asked + 1, "took": 40,
             "result": "kart-sync.service finished (exit status 0).",
             "log": ["2026-10-23T21:44:48-0400 host kart-sync[1]: kart-sync: 1a2b -> 9f8e"]}

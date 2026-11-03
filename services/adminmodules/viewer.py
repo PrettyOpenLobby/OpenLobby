@@ -5,7 +5,7 @@ from adminmodules import Module, Service, Tool
 MODULE = Module(
     "viewer", "PlayOnline Viewer", short="POL Viewer", platform="PlayOnline platform",
     kind="platform", present=True,
-    about="Portal pages, the sign-up wizard and patching.",
+    about="Portal, sign-up and patches.",
     tools=[Tool("pml", "PML Preview", "pml", panel=True, perm="pml",
                 about="Draws portal and title pages the way the Viewer does.")],
     services=[Service(["{core}-patch-1", "{core}-http-1"], {54000: "patch", 443: "web"},

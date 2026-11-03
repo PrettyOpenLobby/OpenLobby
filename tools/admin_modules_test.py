@@ -74,8 +74,8 @@ chk("a panel page keeps its own permission and adds none",
     (mods["viewer"].perm("pml"), "game.viewer.pml" in perms), ("pml", False))
 chk("the old per-game grant expands to the whole game",
     sorted(M.expand_legacy(["games_fmo", "gm", "games_nope"])),
-    ["game.fmo", "game.fmo.coliseum", "game.fmo.gates", "game.fmo.npcs", "game.fmo.war",
-     "games_nope", "gm"])
+    ["game.fmo", "game.fmo.coliseum", "game.fmo.gates", "game.fmo.npcs", "game.fmo.rules",
+     "game.fmo.war", "games_nope", "gm"])
 chk("one tool is enough to see the game",
     M.can_see("fmo", lambda p: p == "game.fmo.gates"), True)
 chk("the Viewer is seen through the PML permission",
@@ -131,7 +131,7 @@ mods = reload(POL_ADMIN_GAMES_EXTRA=json.dumps(
      "Bad Key": {"title": "x", "tools": [{"id": "a", "label": "A"}]}}))
 chk("an entry becomes a tools-only module", (mods["kart"].title, mods["kart"].tools[0].id),
     ("Kart Club", "home"))
-chk("...and cannot replace a built-in", [t.id for t in mods["fmo"].tools], ["npcs", "gates", "coliseum", "war"])
+chk("...and cannot replace a built-in", [t.id for t in mods["fmo"].tools], ["npcs", "gates", "coliseum", "war", "rules"])
 chk("...and one that does not fit is reported", any("Bad Key" in p for p in M.problems()), True)
 
 print("live status")
@@ -324,7 +324,7 @@ chk("with a live source: its status, the module's report winning over the status
 spec_m = M.Module("derby2", "Derby Two", update=lambda m: (_ for _ in ()).throw(RuntimeError("no")))
 got = M._read_live(spec_m)
 chk("a report that raises: unknown, saying so",
-    (got["update"]["update"], got["update"]["why"]), ("unknown", "The update check for Derby Two failed (RuntimeError)."))
+    (got["update"]["update"], got["update"]["why"]), ("unknown", "Couldn't check Derby Two for updates."))
 chk("a module with neither has no status", M._read_live(M.Module("plain", "Plain")), None)
 import adminupdates  # noqa: E402
 os.environ["POL_ADMIN_UPDATE_REPO"] = "off"
@@ -357,7 +357,7 @@ def settle():
 
 
 chk("before the first check is in: unknown, saying it runs",
-    bg(km), {"update": "unknown", "why": "The update check for Kart Club is running."})
+    bg(km), {"update": "unknown", "why": "Checking Kart Club for updates."})
 chk("...one check started, not one per read", (bg(km)["update"], bg.state["running"]), ("unknown", True))
 GATE.set()
 settle()

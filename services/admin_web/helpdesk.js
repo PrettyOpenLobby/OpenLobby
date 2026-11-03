@@ -5,10 +5,10 @@
 // ---- Inbox > Game help ----
 // Each game's help desk needs that game's help permission; the owner sees them all.
 const canGameHelp = () => isOwner() || (SESSION.perms || []).some((p) => p.startsWith("game.") && p.endsWith(".help"));
-// The filter is the Inbox's: Waiting on us, Open, Closed, All.
+// The filter is the Inbox's: Waiting, Open, Closed, All.
 // (helpdesk.js loads before app.js, so the remembered choice is read on first use)
 let GH = { filter: null, rows: [], cur: null };
-const GH_EMPTY = { waiting: "Nobody is waiting on us.", open: "Nothing open.", closed: "Nothing closed.", all: "No requests yet." };
+const GH_EMPTY = { waiting: "Nothing waiting.", open: "Nothing open.", closed: "Nothing closed.", all: "No requests." };
 const ghOk = (t, f) => f === "all" || (f === "waiting" ? t.waiting && !t.closed : f === "closed" ? !!t.closed : !t.closed);
 
 // Nothing picked: the list takes the whole width, with no empty reading side.
@@ -33,7 +33,7 @@ async function loadGameHelp() {
   $("#tab-gamehelp .gh-split").hidden = none;
   $("#tab-gamehelp .toolbar").hidden = none;
   const waiting = all.filter((t) => t.waiting && !t.closed).length;
-  $("#ghCount").textContent = waiting ? `${waiting} waiting for an answer` : "";
+  $("#ghCount").textContent = waiting ? `${waiting} waiting` : "";
   $("#ghList").innerHTML = GH.rows.map((t) => `<li data-gh="${esc(t.game)}|${esc(t.id)}" class="${GH.cur && GH.cur.game === t.game && GH.cur.id === t.id ? "on" : ""}">`
     + `<span class="t1">${t.waiting && !t.closed ? '<span class="dot warn" aria-label="waiting"></span>' : ""}<b>${esc(t.subject)}</b>`
     + `<span class="muted"> ${esc(t.who || "?")}, ${esc(t.game_title)}${t.category ? ", " + esc(t.category) : ""}</span></span>`
@@ -63,16 +63,16 @@ async function renderHelpThread(box, game, id, quiet, after, head) {
   if (box.dataset.game !== game || box.dataset.id !== id) return null;   // another one was opened meanwhile
   const old = box.querySelector(".gh-reply");
   const draft = old ? old.value : "";
-  box.innerHTML = `<h3>${esc(t.subject || "(no subject)")}</h3>`
-    + (head ? head(t) : `<p class="muted">${esc(t.who.name || "?")} in ${esc(t.game_title)}`
-      + `${t.who.online === true ? ", online now" : t.who.online === false ? ", not online" : ""}${t.closed ? ". Closed." : ""}</p>`)
+  box.innerHTML = `<h3>${esc(t.subject || "No subject")}</h3>`
+    + (head ? head(t) : `<p class="muted">${esc(t.game_title)} · ${esc(t.who.name || "?")}`
+      + `${t.who.online === true ? " · online" : ""}${t.closed ? " · Closed" : ""}</p>`)
     + `<div class="gh-msgs">${t.messages.map((m) => `<div class="gh-msg ${m.from}">`
       + `<div class="gh-meta">${m.from === "staff" ? "Staff" : esc(t.who.name || "Player")}${m.at ? ", " + esc(ago(m.at * 1000)) : ""}</div>`
       + `${m.subject && m.subject !== t.subject ? `<div class="strong">${esc(m.subject)}</div>` : ""}<div class="gh-text">${esc(m.text)}</div></div>`).join("")}</div>`
-    + `<label class="gh-answer">Answer (goes to the player in ${esc(t.game_title)})<textarea class="gh-reply" rows="4" maxlength="4000"></textarea></label>`
-    + `<div class="gh-acts"><label class="chip"><input type="checkbox" class="gh-close"> Close it after</label>`
-    + `<span class="grow"></span>${t.closed ? "" : '<button class="ghost" data-gh-act="close">Close without answering</button>'}`
-    + `<button class="act" data-gh-act="reply">Send answer</button></div>`;
+    + `<label class="gh-answer">Reply<textarea class="gh-reply" rows="4" maxlength="4000"></textarea></label>`
+    + `<div class="gh-acts"><label class="chip"><input type="checkbox" class="gh-close"> Close after sending</label>`
+    + `<span class="grow"></span>${t.closed ? "" : '<button class="ghost" data-gh-act="close">Close</button>'}`
+    + `<button class="act" data-gh-act="reply">Send</button></div>`;
   box.querySelector(".gh-reply").value = draft;
   const msgs = box.querySelector(".gh-msgs");
   msgs.scrollTop = msgs.scrollHeight;
@@ -86,7 +86,7 @@ async function gameHelpAct(box, action) {
   if (action === "reply") { body.text = text.value; body.close = box.querySelector(".gh-close").checked; }
   try {
     const r = await post("/api/help", body);
-    toast(r.msg || "Done");
+    toast(r.msg || (action === "reply" ? "Sent." : "Closed."));
     if (action === "reply") text.value = "";
   } catch (e) { return toast(e.message, true); }
   const after = HELP_AFTER.get(box);
@@ -108,8 +108,7 @@ document.addEventListener("click", async (e) => {
   const box = act.closest("[data-game]");
   if (!box) return;
   if (act.dataset.ghAct === "reply") return gameHelpAct(box, "reply");
-  if (await uiAsk({ title: "Close this request?", text: "It closes without an answer. The player sees it as closed.",
-                    ok: "Close it" })) return gameHelpAct(box, "close");
+  if (await uiAsk({ title: "Close this request?", ok: "Close" })) return gameHelpAct(box, "close");
 });
 
 // ---- the account window: what each game knows of this player ----
@@ -118,7 +117,7 @@ async function loadAccountGames(polid) {
   if (!box) return;
   let r;
   try { r = await api("/api/account-games?polid=" + encodeURIComponent(polid)); }
-  catch (e) { box.innerHTML = `<h4>In the games</h4><div class="none">${esc(e.message)}</div>`; return; }
+  catch (e) { box.innerHTML = `<h4>Games</h4><div class="none">${esc(e.message)}</div>`; return; }
   if (!$("#acctGames") || (ACCT && ACCT.polid !== polid)) return;     // another account was opened meanwhile
   const games = r.games || [];
   const body = games.map((g) => `<div class="ag-game"><div class="strong">${esc(g.title)}</div>`
@@ -126,7 +125,7 @@ async function loadAccountGames(polid) {
       + `<span>${esc(c.detail)}</span></div>`
       + (c.facts.length ? `<div class="ag-facts">${c.facts.map((f) => `${esc(f.label)}: ${esc(f.value)}`).join("; ")}</div>` : "")).join("")
     + (g.note ? `<div class="muted">${esc(g.note)}</div>` : "") + `</div>`).join("");
-  box.innerHTML = `<h4>In the games</h4>`
-    + (body || `<div class="none">${(r.asked || []).length ? "None of " + esc(r.asked.join(", ")) + " has seen this player." : "No game here can look up players yet."}</div>`)
+  box.innerHTML = `<h4>Games</h4>`
+    + (body || `<div class="none">${(r.asked || []).length ? "Not found in any game." : "No games to check."}</div>`)
     + ((r.problems || []).length ? `<div class="muted">${esc(r.problems.join("; "))}</div>` : "");
 }

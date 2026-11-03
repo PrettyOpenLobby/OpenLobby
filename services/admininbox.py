@@ -131,9 +131,9 @@ def gather(fetchers, timeout=None):
             try:
                 rows += [r for r in (f.result() or []) if isinstance(r, dict)]
             except Exception:              # noqa: BLE001 -- one source down is a note
-                problems.append("%s: not answering right now" % futs[f])
+                problems.append("Couldn't reach %s." % futs[f])
         for f in pending:
-            problems.append("%s: took too long to answer" % futs[f])
+            problems.append("Couldn't reach %s." % futs[f])
     finally:
         pool.shutdown(wait=False)
     return rows, sorted(problems)

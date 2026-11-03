@@ -59,6 +59,7 @@ import accounts  # noqa: E402
 import contentlist  # noqa: E402  -- the shared content-id title table
 import newsgen    # noqa: E402  -- announcements store + every news PML we write
 import admincalendar  # noqa: E402
+import admincomsites  # noqa: E402  -- News > Community sites: fan sites for the banner
 import adminhelp  # noqa: E402  -- the Inbox's Game help (players' help requests in the games)
 import admininbox  # noqa: E402  -- the Inbox: every source's threads in one list
 import adminpeople  # noqa: E402  -- People: one human across PlayOnline and the games
@@ -1102,7 +1103,7 @@ def _session_valid(s, fps):
 
 def _perms_for(s):
     if s.get("role") != "mod":
-        return sorted(adminusers.perm_labels())
+        return adminusers.owner_perms()
     row = _mod_row(s.get("uid"))
     return adminusers.perms_of(row) if row else []
 
@@ -1440,6 +1441,7 @@ _GET_PERMS = {
     "/api/online": "any", "/api/push/key": "gm",
     "/api/news": "news_edit", "/api/news/outputs": "news_edit",
     "/api/news/art": "news_edit",
+    "/api/comsites": "comsites",
     "/api/pml-list": "pml", "/api/pml-load": "pml", "/api/pml-refs": "pml",
     "/api/pml-resolve": "pml", "/api/page": "pml",
     "/api/maintenance": "news_edit",
@@ -1451,7 +1453,7 @@ _GET_PERMS = {
     "/api/games/players": "any",
     # a game's patch versions (adminpatches.py): checked per game (game.<key>)
     "/api/games/patches": "any",
-    # a game updating itself: checked per game (game.<key>.update)
+    # a game updating itself: the owner's (game.<key>.update, which no moderator holds)
     "/api/updates/state": "any",
     # People (adminpeople.py): the PlayOnline parts still need accounts_view
     "/api/people": "people", "/api/person": "people", "/api/person/games": "people",
@@ -1482,11 +1484,12 @@ _POST_PERMS = {
     "/api/news": "news_edit", "/api/news/render": "news_edit",
     "/api/news/publish": "news_edit",
     "/api/maintenance": "news_edit",
+    "/api/comsites": "comsites", "/api/comsites/delete": "comsites",
     "/api/pml-expand": "pml",
     "/api/alerts": "settings",
     # each action checks its own game.<key>.<id> permission
     "/api/modules/action": "any",
-    # a game that updates itself: game.<key>.update, checked in _update_apply
+    # a game that updates itself: the owner's (game.<key>.update, checked in _update_apply)
     "/api/updates/apply": "any",
     "/api/person": "people_link",
 }
@@ -1505,7 +1508,7 @@ _POL_GET = frozenset((
     "/api/account-detail", "/api/account-clients", "/api/account-footprint",
     "/api/push/key", "/api/news", "/api/news/outputs", "/api/news/art",
     "/api/pml-list", "/api/pml-load", "/api/pml-refs", "/api/pml-resolve",
-    "/api/page", "/api/bots"))
+    "/api/page", "/api/bots", "/api/comsites"))
 _POL_POST = frozenset((
     "/api/codes", "/api/codes/random", "/api/codes/void", "/api/gm-control",
     "/api/gm-say", "/api/gm-ticket", "/api/gm-notices", "/api/gm-discord",
@@ -1514,7 +1517,8 @@ _POL_POST = frozenset((
     "/api/account-password", "/api/account-state", "/api/account-info",
     "/api/account-kick", "/api/account-clear-token", "/api/account-extmail",
     "/api/grant", "/api/revoke", "/api/account-delete", "/api/news",
-    "/api/news/render", "/api/news/publish", "/api/pml-expand", "/api/bots"))
+    "/api/news/render", "/api/news/publish", "/api/pml-expand", "/api/bots",
+    "/api/comsites", "/api/comsites/delete"))
 _POL_PREFIXES = ("/art/",)
 if CORE_OFF:
     for _p in _POL_GET:
@@ -1563,6 +1567,7 @@ _AUDIT_ACTIONS = {
     "/api/account-extmail": "changed outside mail",
     "/api/account-delete": "deleted an account",
     "/api/news": "saved announcements", "/api/news/publish": "published announcements",
+    "/api/comsites": "saved a community site", "/api/comsites/delete": "removed a community site",
     "/api/mods": "moderator", "/api/me/password": "changed their own password",
     "/api/maintenance": "posted or cleared a maintenance warning",
     "/api/alerts": "changed alert settings",
@@ -1793,7 +1798,7 @@ class Handler(BaseHTTPRequestHandler):
         s = self._session()
         if s:
             return s["user"], s.get("role") or "owner", s.get("perms") or []
-        return "open-panel", "owner", sorted(adminusers.perm_labels())
+        return "open-panel", "owner", adminusers.owner_perms()
 
     def _is_owner(self):
         return self._caller()[1] == "owner"
@@ -1821,9 +1826,7 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _core_off_refusal(self):
-        self._send(404, {"error": "This panel runs without PlayOnline, so it has no "
-                                  "player accounts, codes, GM calls, reports, news "
-                                  "or PML pages.", "core": "none"})
+        self._send(404, {"error": "This server doesn't run PlayOnline.", "core": "none"})
 
     def _authed(self, path):
         """Gate every request. True = may proceed.
@@ -1844,11 +1847,8 @@ class Handler(BaseHTTPRequestHandler):
                 # the host mints accounts for whoever finds it. Every request
                 # gets 503 until a credential exists; `--set-password` from
                 # the CLI works while it is in this state.
-                self._send(503, {"error": "This panel has no admin credential "
-                                          "and is not bound to loopback. Set "
-                                          "POL_ADMIN_PASSWORD or run "
-                                          "`admin.py --set-password`, or bind "
-                                          "it to 127.0.0.1 (POL_ADMIN_BIND)."})
+                self._send(503, {"error": "No admin password is set. Set one with "
+                                          "OpenLobby Setup, then reload."})
                 return False
             return True
         if path.startswith("/api/"):
@@ -1869,7 +1869,9 @@ class Handler(BaseHTTPRequestHandler):
                "authenticated": bool(s),
                "user": s["user"] if s else None,
                # "none": no PlayOnline core (POL_ADMIN_CORE), the UI hides its views
-               "core": "none" if CORE_OFF else "playonline"}
+               "core": "none" if CORE_OFF else "playonline",
+               # News > Community sites, only where a site serves the banner
+               "comtool": admincomsites.enabled()}
         headers = ()
         user, role, perms = self._caller() if (s or not out["auth_required"]) \
             else (None, None, [])
@@ -1879,6 +1881,10 @@ class Handler(BaseHTTPRequestHandler):
         if s and role == "mod":
             row = _mod_row(s.get("uid"))
             out["code_limit"] = row["code_limit"] if row else None
+            # what the owner gave, for My account (perms is what that comes to, per game)
+            out["grants"] = adminusers.grants_of(row) if row else []
+            out["perm_short"] = adminusers.PERM_SHORT
+            out["perm_games"] = adminmodules.games_of_categories()
             out["titles"] = adminusers.titles_of(row) if row else []
             out["remember"] = bool(s.get("remember"))
             out["expires"] = s.get("expires")
@@ -2081,7 +2087,7 @@ class Handler(BaseHTTPRequestHandler):
                 mine = [x for x in live if x.get("uid") == r["id"]]
                 rows.append({
                     "id": r["id"], "username": r["username"],
-                    "perms": adminusers.perms_of(r), "code_limit": r["code_limit"],
+                    "perms": adminusers.grants_of(r), "code_limit": r["code_limit"],
                     "titles": adminusers.titles_of(r),
                     "disabled": bool(r["disabled"]), "created_at": r["created_at"],
                     "created_by": r["created_by"],
@@ -2094,6 +2100,8 @@ class Handler(BaseHTTPRequestHandler):
             db.close()
         self._send(200, {"mods": rows, "perm_labels": adminusers.perm_labels(),
                          "perm_short": adminusers.PERM_SHORT,
+                         "perm_hints": adminusers.GAME_HINTS,
+                         "perm_games": adminmodules.games_of_categories(),
                          "owner_ready": _auth_required()})
 
     def _mods_change(self):
@@ -2630,6 +2638,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._modules()
         if path == "/api/games/players":
             return self._game_players()
+        # Settings > Logs (adminlogs.py): owner only, so in no moderator table
+        if path == "/api/logexport/areas":
+            import adminlogs
+            return self._send(*adminlogs.areas(_DATA))
+        if path == "/api/logexport":
+            import adminlogs
+            q = self._query()
+            try:
+                lines = max(1, min(int(q.get("lines") or 2000), 20000))
+            except ValueError:
+                lines = 2000
+            area = q.get("area") or "all"
+            user, role, _p = self._caller()
+            st, body, name = adminlogs.export(_DATA, area, lines, q.get("addresses") == "1", user)
+            if st != 200:
+                return self._send(st, body)
+            _audit(user, role, "downloaded logs", target=area)
+            return self._send(200, body, "text/plain; charset=utf-8",
+                              headers=[("Content-Disposition", 'attachment; filename="%s"' % name),
+                                       ("Cache-Control", "no-store")])
         if path == "/api/games/patches":
             key = self._query().get("key", "")
             m = adminmodules.enabled().get(key)
@@ -2638,7 +2666,7 @@ class Handler(BaseHTTPRequestHandler):
             import adminpatches
             return self._send(*adminpatches.for_game(m, self._caller()[0]))
         if path == "/api/updates/state":
-            # a game updating itself: the owner, or a moderator with game.<key>.update
+            # a game updating itself: the owner's (no moderator holds game.<key>.update)
             key = self._query().get("key", "")
             if not self._can("game.%s.update" % key):
                 return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
@@ -2748,6 +2776,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(os.path.join(WEB, path[len("/static/"):].lstrip("/")))
         if path == "/api/codes":
             return self._codes_list()
+        if path == "/api/comsites":
+            return self._comsites_list()
         if path == "/api/sessions":
             return self._sessions_list()
         if path == "/api/accounts":
@@ -2844,6 +2874,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._set_credentials()
         if path == "/api/codes":
             return self._codes_create()
+        if path == "/api/comsites":
+            return self._comsites_save()
+        if path == "/api/comsites/delete":
+            return self._comsites_delete()
         if path == "/api/codes/random":
             return self._send(200, {"code": _rand_code()})
         if path == "/api/codes/void":
@@ -3067,7 +3101,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _update_apply(self):
         """{"key"}: the game updates itself (path B): POST /openlobby/update on its admin port.
-        The owner, or a moderator with game.<key>.update."""
+        The owner's: no moderator permission gives game.<key>.update."""
         key = str(self._json_body().get("key") or "")
         if not self._can("game.%s.update" % key):
             return self._send(403, {"error": "You don't have permission to do that.", "forbidden": True})
@@ -3183,7 +3217,7 @@ class Handler(BaseHTTPRequestHandler):
         addr = forwarded_client(self._addr(), self.headers.get_all("X-Forwarded-For"))
         ok, wait = admindevcodes.LIMIT.allow(addr)
         if not ok:
-            return self._send(429, {"error": "Too many tries from this address. Try again in %d seconds." % wait},
+            return self._send(429, {"error": "Too many tries. Try again in %d seconds." % wait},
                               headers=[("Retry-After", str(wait))])
         status, out, aud = admindevcodes.redeem(self._json_body())
         if aud is not None:
@@ -3199,7 +3233,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._authed(path)            # the 503 every request gets in that state
         ok, wait = adminpair.LIMIT.allow(self._addr())
         if not ok:
-            return self._send(429, {"error": "Too many tries from this address. Try again in %d seconds." % wait},
+            return self._send(429, {"error": "Too many tries. Try again in %d seconds." % wait},
                               headers=[("Retry-After", str(wait))])
         body = self._json_body()
         if path == "/api/pair":
@@ -3222,7 +3256,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             n = 0
         if n <= 0:
-            return self._send(411, {"error": "The upload needs a length."})
+            return self._send(411, {"error": "Upload failed. Try again."})
         name = self.headers.get("X-Filename") or ""
         if not re.fullmatch(r"[A-Za-z0-9%._~() !*'-]{1,1024}", name):
             name = "upload"
@@ -3258,8 +3292,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST":
             n = int(self.headers.get("Content-Length", 0) or 0)
             if n > admingames.MAX_UPLOAD:
-                return self._send(413, {"error": "That file is larger than the %d MB the panel "
-                                                 "passes on." % (admingames.MAX_UPLOAD >> 20)})
+                return self._send(413, {"error": "Files over %d MB can't be uploaded."
+                                                 % (admingames.MAX_UPLOAD >> 20)})
             body = self.rfile.read(n) if n else b""
             ctype = self.headers.get("Content-Type")
         user, role, _p = self._caller()
@@ -3428,7 +3462,7 @@ class Handler(BaseHTTPRequestHandler):
         except LookupError:
             return self._send(404, {"error": "That game has no player search."})
         except Exception as exc:                   # noqa: BLE001 -- the game's fault, said by kind
-            return self._send(502, {"error": "The game's player search failed (%s)." % exc.__class__.__name__})
+            return self._send(502, {"error": "Couldn't search players. Try again."})
         db = _db()
         try:
             rows = adminpeople.logins(db, key, rows)
@@ -3505,7 +3539,7 @@ class Handler(BaseHTTPRequestHandler):
         except LookupError:
             return self._send(404, {"error": "That game has no player search."})
         except Exception as exc:                   # noqa: BLE001 -- the game's fault, said by kind
-            return self._send(502, {"error": "The game's player search failed (%s)." % exc.__class__.__name__})
+            return self._send(502, {"error": "Couldn't search players. Try again."})
         self._send(200, {"players": rows})
 
     def _modules(self):
@@ -3723,11 +3757,42 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             db.close()
         if not n:
-            return self._send(409, {"error": "no unused code by that name "
-                                             "(a redeemed code cannot be voided)"})
+            return self._send(409, {"error": "No unused code with that name. "
+                                             "Redeemed codes can't be voided."})
         who = (self._session() or {}).get("user") or "open-panel"
         print(f"[admin] {who} voided unused code {code!r}", flush=True)
         self._send(200, {"ok": True, "code": code})
+
+    # -- community sites (admincomsites.py) ------------------------------------ #
+    def _comsites_list(self):
+        out = admincomsites.info()
+        out["sites"] = []
+        if out["enabled"]:
+            db = _db()
+            try:
+                out["sites"] = admincomsites.list_sites(db)
+            finally:
+                db.close()
+        self._send(200, out)
+
+    def _comsites_save(self):
+        if not admincomsites.enabled():
+            return self._send(409, {"error": "Set POL_COMTOOL_URL first."})
+        user, _role, _p = self._caller()
+        db = _db()
+        try:
+            status, out = admincomsites.save(db, self._json_body(), user)
+        finally:
+            db.close()
+        self._send(status, out)
+
+    def _comsites_delete(self):
+        db = _db()
+        try:
+            status, out = admincomsites.delete(db, self._json_body().get("id"))
+        finally:
+            db.close()
+        self._send(status, out)
 
     # -- abuse reports ------------------------------------------------------- #
     #
@@ -3788,7 +3853,7 @@ class Handler(BaseHTTPRequestHandler):
     # one at exactly the moment somebody is looking for it.
     def _issues_list(self):
         if issuereport is None:
-            return self._send(200, {"error": "issuereport module not loaded"})
+            return self._send(200, {"error": "Bug reports aren't available."})
         self._send(200, self._with_triage("issues", issuereport.list_reports()))
 
     # -- report status: open / resolved / won't fix --------------------------- #
@@ -3906,8 +3971,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": f"keep it under {self.REPLY_MAX} characters"})
         to = str(rec.get("from") or "").strip()
         if "@" not in to:
-            return self._send(400, {"error": "this report has no sender address "
-                                             "to answer"})
+            return self._send(400, {"error": "This report has no address to reply to."})
         raw, subject = self._gm_mail(
             to, "Re: " + (rec.get("subject") or "your report"), text)
         who = (self._session() or {}).get("user") or "operator"
@@ -3915,14 +3979,14 @@ class Handler(BaseHTTPRequestHandler):
             db = _db()
             try:
                 if accounts.member_by_mail(db, to) is None:
-                    return self._send(400, {"error": f"{to} is not one of our "
-                                                     "mailboxes"})
+                    return self._send(400, {"error": f"{to} isn't a PlayOnline Mail address."})
                 accounts.deliver_mail(db, to, raw, sender=self.GM_MAIL_FROM,
                                       subject=subject)
             finally:
                 db.close()
         except Exception as exc:
-            return self._send(500, {"error": f"could not deliver: {exc}"})
+            print(f"[admin] report reply not delivered: {exc}", flush=True)
+            return self._send(500, {"error": "Couldn't send the reply. Try again."})
         with self._REPLY_LOCK:
             rows = self._report_replies(rid)
             rows.append({"at": time.time(), "by": who, "to": to, "text": text})
@@ -3944,7 +4008,8 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     adb.close()
             except adminusers.ModError as exc:
-                return self._send(400, {"error": f"mail sent, but {exc}"})
+                print(f"[admin] report reply sent, then: {exc}", flush=True)
+                return self._send(400, {"error": "Reply sent, but it couldn't be saved here."})
         print(f"[admin] {who} answered report {rid} by mail to {to}", flush=True)
         self._send(200, {"ok": True, "id": rid, "to": to, "replies": rows})
 
@@ -4045,7 +4110,7 @@ class Handler(BaseHTTPRequestHandler):
         path component and `f` is a fixed two-part shape -- so a traversal is
         neutralised at the module that owns the layout, not here."""
         if issuereport is None:
-            return self._send(404, {"error": "issuereport module not loaded"})
+            return self._send(404, {"error": "Bug reports aren't available."})
         q = urllib.parse.parse_qs(self.path.split("?", 1)[1]
                                   if "?" in self.path else "")
         rid = (q.get("id") or [""])[0]
@@ -4153,15 +4218,16 @@ class Handler(BaseHTTPRequestHandler):
         """Save the GM notices and publish them: the Viewer's GM Call > Next
         page reads /pcd/gmcall/<lang>/data.pml (gmnotices.py)."""
         if not _www_writable():
-            return self._send(409, {"error": f"{WWW_ROOT} is mounted read-only, so "
-                                             f"the notices cannot be published."})
+            return self._send(409, {"error": "The website folder is read-only. "
+                                             "Make it writable, then try again."})
         try:
             data = gmnotices.save(self._json_body().get("data") or {})
             written = gmnotices.publish(WWW_ROOT, data)
         except gmnotices.NoticeError as exc:
             return self._send(400, {"error": str(exc)})
         except OSError as exc:
-            return self._send(500, {"error": f"could not write: {exc}"})
+            print(f"[admin] GM notices not written: {exc}", flush=True)
+            return self._send(500, {"error": "Couldn't publish. Try again."})
         who = (self._session() or {}).get("user") or "operator"
         print(f"[admin] {who} published the GM notices ({len(written)} file(s))",
               flush=True)
@@ -4216,14 +4282,13 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     db.close()
             except Exception as exc:
-                return self._send(500, {"error": f"could not look the player up: {exc}"})
+                print(f"[admin] player lookup failed: {exc}", flush=True)
+                return self._send(500, {"error": "Couldn't look up the player. Try again."})
             if h is None:
-                return self._send(404, {"error": f"no player named {invite!r}" if invite
-                                        else "no such handle"})
+                return self._send(404, {"error": f"No player named {invite}." if invite
+                                        else "Player not found."})
             if not h["client_guid"]:
-                return self._send(400, {"error": f"{h['handle_name']} has not logged "
-                                                 "in yet, so their Viewer cannot be "
-                                                 "recognised"})
+                return self._send(400, {"error": f"{h['handle_name']} hasn't signed in yet."})
             invitee = {"handle": h["handle_name"], "guid": int(h["client_guid"]),
                        "handle_id": int(h["id"]), "polid": pol["polid"] if pol else ""}
         if not os.path.exists(os.path.join(GM_CALL_DIR, tid + ".json")):
@@ -4239,8 +4304,7 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 cancelled = None
             if cancelled:
-                return self._send(409, {"error": "the player cancelled this request, "
-                                                 "so it has no chat to knock or invite into"})
+                return self._send(409, {"error": "The player cancelled this call."})
         who = (self._session() or {}).get("user") or "operator"
         with self._GM_TICKET_LOCK:
             st = self._gm_ticket_state()
@@ -4282,7 +4346,8 @@ class Handler(BaseHTTPRequestHandler):
                     json.dump(st, f, indent=1)
                 os.replace(tmp, self.GM_TICKET_STATE)
             except OSError as exc:
-                return self._send(500, {"error": f"could not save: {exc}"})
+                print(f"[admin] GM call not saved: {exc}", flush=True)
+                return self._send(500, {"error": "Couldn't save. Try again."})
         print(f"[admin] {who} marked GM call {tid} {status}"
               + (" and knocked" if knock else " (knock withdrawn)"
                  if knock is False else ""), flush=True)
@@ -4722,7 +4787,7 @@ class Handler(BaseHTTPRequestHandler):
                 # deliberately left.
                 gmduty.renew(user, self.DUTY_TTL)
         except OSError as exc:
-            return self._send(500, {"error": f"could not write the desk: {exc}"})
+            return self._send(500, {"error": "Couldn't save the desk settings. Try again."})
         ctl = gmd.read_control()
         for key in ("flags", "queue"):
             if key not in body:
@@ -4746,7 +4811,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             gmd.write_control(ctl)
         except OSError as exc:
-            return self._send(500, {"error": f"could not write the desk: {exc}"})
+            return self._send(500, {"error": "Couldn't save the desk settings. Try again."})
         if changed:
             print(f"[admin] {ctl['by']} set the GM desk: {', '.join(changed)}",
                   flush=True)
@@ -5172,8 +5237,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "no such account"})
             n = accounts.clear_client_tokens(db, row["id"], sig)
             if not n:
-                return self._send(404, {"error": "no token is recorded for "
-                                                 "that client on this account"})
+                return self._send(404, {"error": "No login token for that device."})
             left = accounts.list_client_tokens(db, row["id"])
             legacy = accounts.get_login_token(db, row["id"]) is not None
             armed = accounts.login_token_armed(db, row["id"])
@@ -5297,7 +5361,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = _request_kick(pol)
         except Exception as exc:      # no answer, or the live-state store is down
-            result = {"ok": False, "error": f"auth service unavailable: {exc}", "down": True}
+            result = {"ok": False, "error": "Couldn't reach the login server. Try again in a minute.", "down": True}
         games = self._kick_in_games(pol, handles)
         if not result.get("ok"):
             err = result.get("error", "kick failed")
@@ -5595,8 +5659,8 @@ class Handler(BaseHTTPRequestHandler):
         except newsgen.NewsError as exc:
             return self._send(400, {"error": str(exc)})
         except OSError as exc:
-            return self._send(500, {"error": f"cannot write {newsgen.STORE}: "
-                                             f"{exc}"})
+            print(f"[admin] cannot write {newsgen.STORE}: {exc}", flush=True)
+            return self._send(500, {"error": "Couldn't save the news. Try again."})
         print(f"[admin] announcements saved: {len(items)} item(s) -> {path}",
               flush=True)
         self._send(200, {"ok": True, "items": items, "store": path})
@@ -5697,7 +5761,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 text = _load_pml_text(os.path.join(root, page))[0]
             except OSError:
-                return self._send(404, {"error": f"{page} is not in the mirror"})
+                return self._send(404, {"error": f"{page} not found."})
         # The story to show: by position (a new, unsaved story has no serial
         # until this copy assigns one), else by serial, else the first.
         idx = body.get("index")
@@ -5750,9 +5814,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "forbidden": True})
         if not dry and not _www_writable():
             return self._send(409, {
-                "error": f"{WWW_ROOT} is mounted read-only, so nothing can be "
-                         f"published. Drop `:ro` from the admin service's www "
-                         f"volume in docker-compose and recreate the container."})
+                "error": "The website folder is read-only. Make it writable, then try again."})
         try:
             items = newsgen.load()
             with _NEWS_LOCK:
@@ -5761,7 +5823,8 @@ class Handler(BaseHTTPRequestHandler):
         except newsgen.NewsError as exc:
             return self._send(400, {"error": str(exc)})
         except OSError as exc:
-            return self._send(500, {"error": f"write failed: {exc}"})
+            print(f"[admin] write failed: {exc}", flush=True)
+            return self._send(500, {"error": "Couldn't save. Try again."})
         if not dry:
             print(f"[admin] announcements published: {len(res['written'])} "
                   f"file(s), {len(res['pruned'])} pruned, under {WWW_ROOT}",
@@ -5812,7 +5875,7 @@ class Handler(BaseHTTPRequestHandler):
         action = body.get("action")
         titles = [t for t in (body.get("titles") or []) if isinstance(t, str)]
         if action in ("notice", "clear") and not _www_writable():
-            return self._send(409, {"error": f"{WWW_ROOT} is mounted read-only"})
+            return self._send(409, {"error": "The website folder is read-only. Make it writable, then try again."})
         try:
             if action == "notice":
                 with _NEWS_LOCK:
@@ -5834,7 +5897,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     res = _request_broadcast(body.get("subject"), body.get("text"))
                 except TimeoutError as exc:
-                    res = {"ok": False, "error": f"auth service unavailable: {exc}", "down": True}
+                    res = {"ok": False, "error": "Couldn't reach the login server. Try again in a minute.", "down": True}
                 said = self._maintenance_games(games, body.get("subject"), body.get("text"))                     if games else {}
                 if not res.get("ok"):
                     return self._send(503 if res.get("down") else 400,
@@ -5847,9 +5910,10 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self._send(400, {"error": str(exc)})
         except TimeoutError as exc:
-            return self._send(503, {"error": f"auth service unavailable: {exc}"})
+            return self._send(503, {"error": "Couldn't reach the login server. Try again in a minute."})
         except OSError as exc:
-            return self._send(500, {"error": f"write failed: {exc}"})
+            print(f"[admin] write failed: {exc}", flush=True)
+            return self._send(500, {"error": "Couldn't save. Try again."})
         return self._send(400, {"error": "action must be notice, clear or message"})
 
     def _maintenance_games_only(self):
@@ -5858,8 +5922,7 @@ class Handler(BaseHTTPRequestHandler):
         "games": [keys]} into each game's announce action the caller may run."""
         body = self._json_body()
         if body.get("action") != "message":
-            return self._send(404, {"error": "This panel runs without PlayOnline, so "
-                                             "there are no title pages to show a notice on.",
+            return self._send(404, {"error": "This server doesn't run PlayOnline.",
                                     "core": "none"})
         games = [g for g in (body.get("games") or []) if isinstance(g, str)]
         if not games:
@@ -5899,7 +5962,7 @@ class Handler(BaseHTTPRequestHandler):
             m = adminmodules.get(key)
             act = m.action("announce") if m else None
             if act is None:
-                out[key] = {"ok": False, "msg": "This game cannot announce from the panel."}
+                out[key] = {"ok": False, "msg": "Can't announce in this game."}
                 continue
             if CORE_OFF and not self._can(m.perm(act.id)):
                 out[key] = {"ok": False, "msg": "You don't have permission to announce there."}
@@ -5926,7 +5989,7 @@ class Handler(BaseHTTPRequestHandler):
             with urllib.request.urlopen(req, timeout=10) as r:
                 data = r.read()
         except Exception as exc:
-            return self._send(502, {"error": f"fetch failed: {exc}"})
+            return self._send(502, {"error": "Couldn't load it. Try again."})
         self._send(200, data, "text/plain; charset=utf-8")
 
 

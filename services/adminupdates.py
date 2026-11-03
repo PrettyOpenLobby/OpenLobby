@@ -45,7 +45,7 @@ import admindeploy  # noqa: E402
 import updatecheck  # noqa: E402
 
 DEFAULT_REPO = "PrettyOpenLobby/OpenLobby"
-DEFAULT_HOW = "Run docker compose pull and docker compose up -d."
+DEFAULT_HOW = "Update it on the server."
 CORE_NAME = "OpenLobby core"
 REFRESH_GAP = 60.0       # at most one forced check of GitHub this often
 FAIL_TTL = 300.0         # an "unknown" self-check is reused this long (unless forced)
@@ -90,7 +90,7 @@ def clean_item(raw, key=None, name=None):
         why = _text(raw.get("why"), 300)
         if why and (it["update"] != "unknown" or not it["why"]):
             it["why"] = why
-        it["why"] = it["why"] or "%s says its update failed, without saying why." % it["name"]
+        it["why"] = it["why"] or "no reason given."
     return it
 
 
@@ -101,7 +101,7 @@ def _clean_item(raw, key, name):
         return None
     name = _text(name, 80) or (_text(raw.get("name"), 80) if isinstance(raw, dict) else None) or key
     it = updatecheck.item(key, name)
-    bad = "The update report for %s does not have the expected shape, so it is not shown." % name
+    bad = "Couldn't read the update info for %s." % name
     if not isinstance(raw, dict):
         return updatecheck.unknown(it, bad)
     if isinstance(raw.get("module"), str) and _KEY.match(raw["module"]):
@@ -144,7 +144,7 @@ def _clean_item(raw, key, name):
             break
     why, how = _text(raw.get("why"), 300), _text(raw.get("how"), 300)
     if upd == "unknown":
-        return updatecheck.unknown(it, why or "%s cannot tell whether it is up to date." % name)
+        return updatecheck.unknown(it, why or "%s can't tell if it's up to date." % name)
     if upd == "available" and behind == 0:
         return updatecheck.unknown(it, bad)
     it.update(behind=behind, changes=out if upd == "available" else [], update=upd, why=why,
@@ -183,14 +183,8 @@ def self_check(refresh=False):
             return dict(hit)
     it = updatecheck.item("core", CORE_NAME, rev, built)
     if not updatecheck.REPO.match(repo) or not updatecheck.REF.match(branch):
-        return updatecheck.unknown(it, "POL_ADMIN_UPDATE_REPO must be owner/name and "
-                                       "POL_ADMIN_UPDATE_BRANCH a branch name.")
-    if rev and not it["running"]["commit"]:
-        norev = "OPENLOBBY_REVISION (%s) is not a commit, so the panel cannot tell which version runs." \
-            % _text(rev, 60)
-    else:
-        norev = ("This image was built without OPENLOBBY_REVISION, so the panel cannot tell which "
-                 "version runs.")
+        return updatecheck.unknown(it, "The update source setting isn't valid.")
+    norev = "Can't tell which version is running."
     updatecheck.check_github(it, gh, repo, branch, force=force, no_revision=norev)
     if it["update"] == "available":
         it["how"] = how
@@ -364,7 +358,7 @@ def ops_merge(items, ops):
             it = clean_item(u["version"], key=key, name=title) if isinstance(u.get("version"), dict) else None
             if it is None or (it["update"] == "unknown" and not it["why"]):
                 it = updatecheck.unknown(updatecheck.item(key, title),
-                                         "%s does not report which version it runs." % title)
+                                         "%s doesn't report its version." % title)
             items.append(it)
             by_key[key] = it
         it["ops"] = view
@@ -393,7 +387,7 @@ def _ops_outcomes(ops):
                 done = next((h for h in reversed(hist) if h.get("action") == ask["action"]
                              and (_num(h.get("at")) or 0) >= ask["at"] - 5), None)
                 if done is None and time.time() - ask["at"] > OPS_GIVE_UP:
-                    done = {"ok": False, "result": "the server's ops runner never reported how it ended"}
+                    done = {"ok": False, "result": "No result came back."}
                 if done is None:
                     continue
                 asks.remove(ask)
@@ -496,7 +490,7 @@ def apply(key, actor):
     doc, _why = _read_status(key)
     upd = doc.get("update") if isinstance(doc, dict) else None
     if not (isinstance(upd, dict) and upd.get("apply") is True):
-        msg = "%s does not offer to update itself from the panel." % title
+        msg = "%s can't update itself from the panel." % title
         return 409, {"ok": False, "msg": msg, "error": msg}
     url, token = port
     req = urllib.request.Request(url + "/openlobby/update", data=b"", method="POST", headers={
@@ -508,7 +502,7 @@ def apply(key, actor):
     except urllib.error.HTTPError as e:
         code, data = e.code, e.read(64 << 10)
     except Exception:                          # noqa: BLE001 -- nothing answered
-        msg = "%s did not answer the update request." % title
+        msg = "Couldn't reach %s. Try again in a minute." % title
         return 502, {"ok": False, "msg": msg, "error": msg}
     try:
         got = json.loads(data or b"{}")
@@ -524,7 +518,7 @@ def apply(key, actor):
     if code in (409, 503):
         msg = msg or ("%s is already updating." % title if code == 409 else "%s cannot update now." % title)
         return code, {"ok": False, "msg": msg, "error": msg, "title": title}
-    msg = "The game did not take the update request (HTTP %d)" % code
+    msg = "%s didn't start the update. Try again." % title
     return 502, {"ok": False, "msg": msg, "error": msg, "title": title}
 
 
@@ -562,6 +556,6 @@ def apply_state(key):
                 _applying.pop(key, None)
             elif doc is None and now - run["seen"] >= LOST_AFTER:
                 out["lost"] = True
-                out["message"] = "%s has not come back after updating; check its server" % title
+                out["message"] = "%s hasn't come back after updating. Check its server." % title
         out["applying"] = key in _applying
     return 200, out

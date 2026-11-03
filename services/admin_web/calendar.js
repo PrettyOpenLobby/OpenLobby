@@ -96,8 +96,8 @@ async function loadCalendar() {
 
 function calToolbar() {
   document.querySelectorAll("#tab-calendar [data-calview]").forEach((b) => b.classList.toggle("active", b.dataset.calview === CAL.view));
-  $("#calZone").textContent = CAL.utc ? "Times: UTC" : "Times: mine";
-  $("#calZone").title = `Times are shown in ${calZone()}. Click to show them in ${CAL.utc ? "your own time" : "UTC"}.`;
+  $("#calZone").textContent = CAL.utc ? "UTC" : "Local time";
+  $("#calZone").title = CAL.utc ? "Show local time" : "Show UTC";
   $("#calNew").hidden = !can("calendar_edit");
 }
 
@@ -122,9 +122,7 @@ function calRender() {
 function calEmpty() {
   if (calShown().length) return "";
   const any = ((CAL.data || {}).entries || []).length > 0;
-  const range = CAL.view === "month" ? "in " + calTitle() : "from " + calTitle().replace(" - ", " to ");
-  return `<p class="hint cal-empty">${any ? "Everything here is hidden. Click a name above to show it again."
-    : `Nothing scheduled ${esc(range)}.`}${!any && can("calendar_edit") ? " Use New entry, or the + on a day, to add one." : ""}</p>`;
+  return `<p class="hint cal-empty">${any ? "All entries hidden." : "Nothing scheduled."}</p>`;
 }
 
 // Bars for one row of days: [{e, s, n, lane}] with s the first column and n how many.
@@ -173,7 +171,7 @@ function calMonth() {
       const p = calParts(day);
       html += `<div class="cal-day${p.m !== month ? " out" : ""}${day === today ? " today" : ""}" data-calday="${day}">`
         + `<span class="cal-num">${p.d}</span>`
-        + (edit ? `<button class="cal-add" data-caladd="${day}" title="Add an entry on ${esc(calDate(day))} (or double-click the day)"`
+        + (edit ? `<button class="cal-add" data-caladd="${day}" title="Add on ${esc(calDate(day))}"`
           + ` aria-label="Add an entry on ${esc(calDate(day))}">+</button>` : "")
         + (more[i] ? `<button class="cal-more" data-calday="${day}">+${more[i]} more</button>` : "") + `</div>`;
     }
@@ -294,7 +292,7 @@ function calOpen(id) {
   $("#calDetBody").innerHTML = `<div class="kv"><span class="muted">When</span><span style="display:block">${esc(when)}<span class="muted cal-z">${esc(calZone())}</span></span>`
     + `<span class="muted">Game</span><span><i class="cal-dot ${calColour(e)}"></i>${esc(who)}</span>`
     + (kind ? `<span class="muted">Kind</span><span>${esc(kind)}</span>` : "")
-    + `<span class="muted">From</span><span>${e.source === "panel" ? `${CAL_OWN_ONE}, added by ${esc(e.by || "?")}` : `${esc(calGameName(e.game))}'s own schedule`}</span></div>`
+    + (e.source === "panel" && e.by ? `<span class="muted">Added by</span><span>${esc(e.by)}</span>` : "") + `</div>`
     + (e.about ? `<p>${esc(e.about)}</p>` : "")
     + (sessions ? `<h4>Sessions</h4><ul class="feed cal-list">${sessions}</ul>` : "");
   const mine = e.editable && can("calendar_edit");
@@ -317,7 +315,7 @@ function calEdit(id, day) {
   const e = id ? ((CAL.data || {}).entries || []).find((x) => x.id === id) : null;
   const s = e ? e.start * 1000 : (day || calDay(Date.now())) + 19 * 3600000;
   const t = e ? e.end * 1000 : s + 3600000;
-  $("#calEdTitle").textContent = e ? "Change entry" : "New calendar entry";
+  $("#calEdTitle").textContent = e ? "Edit entry" : "New entry";
   $("#calEdId").value = e ? e.id : "";
   $("#calEdName").value = e ? e.title : "";
   $("#calEdGame").innerHTML = `<option value="">All games</option>`
@@ -329,7 +327,7 @@ function calEdit(id, day) {
   $("#calEdStartD").value = calInDate(s); $("#calEdStartT").value = calClock(s);
   $("#calEdEndD").value = calInDate(e && e.all_day ? t - 1 : t); $("#calEdEndT").value = calClock(t);
   $("#calEdAbout").value = e ? e.about || "" : "";
-  $("#calEdZone").textContent = `Times are ${calZone()}.`;
+  $("#calEdZone").textContent = calZone();
   $("#calEdErr").hidden = true;
   calAllDay();
   $("#calDetModal").classList.remove("show");
@@ -348,7 +346,7 @@ async function calSaveEntry() {
   if (all && !isNaN(t)) { const p = calParts(t); t = calAt(p.y, p.m, p.d + 1); }
   const err = (m) => { $("#calEdErr").textContent = m; $("#calEdErr").hidden = false; };
   if (isNaN(s) || isNaN(t)) return err("Pick a start and an end.");
-  if (t <= s) return err("It has to end after it starts.");
+  if (t <= s) return err("End must be after start.");
   const id = $("#calEdId").value;
   try {
     await api("/api/calendar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
@@ -357,19 +355,19 @@ async function calSaveEntry() {
       about: $("#calEdAbout").value }) });
   } catch (e2) { return err(e2.message); }
   $("#calEdModal").classList.remove("show");
-  toast(id ? "Entry changed" : "Added to the calendar");
+  toast(id ? "Saved." : "Added.");
   loadCalendar();
 }
 
 async function calDelete(id) {
   const e = ((CAL.data || {}).entries || []).find((x) => x.id === id);
-  if (!e || !confirm(`Delete "${e.title}" from the calendar?`)) return;
+  if (!e || !confirm(`Delete ${e.title}?`)) return;
   try {
     await api("/api/calendar", { method: "POST", headers: { "Content-Type": "application/json" },
                                  body: JSON.stringify({ action: "delete", id }) });
   } catch (err) { return toast(err.message, true); }
   $("#calDetModal").classList.remove("show");
-  toast("Deleted");
+  toast("Deleted.");
   loadCalendar();
 }
 

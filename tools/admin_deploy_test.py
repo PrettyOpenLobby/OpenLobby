@@ -278,7 +278,7 @@ def main():
         STATE["busy"] = True
         code, out = owner.call("api/deploy/action", {"action": "update", "game": "core"})
         chk("a busy deployer's 409 comes back with the running job and a sentence",
-            (code, out.get("job"), "still running" in (out.get("error") or "")), (409, "j2", True))
+            (code, out.get("job"), "is running" in (out.get("error") or "")), (409, "j2", True))
         STATE["busy"] = False
         code, j = owner.call("api/deploy/job?id=j2")
         chk("a job with its log", (code, j.get("state"), j.get("log_size")), (200, "running", len(LOG)))
@@ -552,11 +552,11 @@ def main():
         CHANNEL_ANSWER.update(saved)
         STATE["busy"] = True
         code, out = owner.call("api/deploy/channel", {"channel": "stable"})
-        chk("a busy deployer: 409 with a sentence", (code, "still running" in (out.get("error") or "")), (409, True))
+        chk("a busy deployer: 409 with a sentence", (code, "is running" in (out.get("error") or "")), (409, True))
         STATE["busy"] = False
         CHANNEL["on"] = False
         code, ch = owner.call("api/deploy/channel")
-        chk("a deployer without channels reads as such", (code, ch.get("available"), "update the core" in
+        chk("a deployer without channels reads as such", (code, ch.get("available"), "Update OpenLobby first" in
                                                           (ch.get("why") or "")), (200, False, True))
         CHANNEL["on"] = True
     finally:

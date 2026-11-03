@@ -126,8 +126,10 @@ def main():
         gm_view.login("gm_view", "pass for gm_view")
 
         print("Game help")
-        chk("the game's help permission is one to give",
-            "game.kart.help" in (owner.call("api/session")[1].get("perm_labels") or {}), True)
+        _c, osess = owner.call("api/session")
+        chk("the game's help desk is a help request, one to give",
+            ("game.kart.help" in (osess.get("perms") or []),
+             "games.help" in (osess.get("perm_labels") or {})), (True, True))
         code, d = gm_help.call("api/help")
         chk("open requests, the one waiting for us first",
             (code, [(t["id"], t["waiting"]) for t in d.get("threads", [])]), (200, [("7", True), ("8", False)]))

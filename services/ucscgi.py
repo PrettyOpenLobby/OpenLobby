@@ -3921,8 +3921,15 @@ def serve(port, plain=False):
     # front door and only the TLS half is relayed onward.
     ssl3_host = os.environ.get("POL_UCS_SSL3_HOST") or None
     ssl3_port = int(os.environ.get("POL_UCS_SSL3_PORT") or 8443)
+    # The 360's SSLv2-format hello (see _is_tls_hello) may go to its own
+    # terminator port. Only the 360 sends that form, and on 51305 it is the
+    # wallpaper download to wh000.pol.com, not the sign-up wizard, so it can
+    # be shown a different certificate without touching the PS2 or PC.
+    sslv2_port = int(os.environ.get("POL_UCS_SSLV2_PORT") or ssl3_port)
     if ssl3_host:
-        log(f"SSLv3 terminator: TLS on {port} -> {ssl3_host}:{ssl3_port}")
+        log(f"SSLv3 terminator: TLS on {port} -> {ssl3_host}:{ssl3_port}"
+            + (f" (SSLv2-format hello -> :{sslv2_port})"
+               if sslv2_port != ssl3_port else ""))
 
     lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -3958,9 +3965,10 @@ def serve(port, plain=False):
                         log(f"{addr[0]} " + describe_hello(blob))
                     except OSError as exc:
                         log(f"{addr[0]} could not peek the hello: {exc}")
+                    to_port = ssl3_port if head[0] == 0x16 else sslv2_port
                     log(f"{addr[0]} TLS (hello {head.hex()}) -> terminator "
-                        f"{ssl3_host}[{ip}]:{ssl3_port}")
-                    _passthrough(conn, ssl3_host, ip, ssl3_port, pace=True)
+                        f"{ssl3_host}[{ip}]:{to_port}")
+                    _passthrough(conn, ssl3_host, ip, to_port, pace=True)
                     return
                 try:
                     tls = ctx.wrap_socket(conn, server_side=True)

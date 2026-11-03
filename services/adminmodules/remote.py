@@ -8,8 +8,8 @@ tool proxy (X-Devtool-Token, X-Devtool-Actor).
     GET  <url>/openlobby/module.json     what the game is (version 1):
         {"v": 1, "key": "<key>", "title": "...", "short": "...", "platform": "...",
          "about": "...", "content_ids": [..], "accounts": "<its logins' account system>",
-         "tools":    [{"id", "label", "path", "about"}],      pages under <url>/<path>
-         "actions":  [{"id", "label", "kind", "about", "danger",
+         "tools":    [{"id", "label", "path", "about", "perm", "group"}],   pages under <url>/<path>
+         "actions":  [{"id", "label", "kind", "about", "danger", "perm",
                        "fields": [{"id", "label", "type"}]}],
          "services": [{"name", "containers": [..], "ports": {"<port>": "what"},
                        "warning"}]}
@@ -21,6 +21,12 @@ tool proxy (X-Devtool-Token, X-Devtool-Actor).
         {"players": [{"id", "label", "detail", "online"}]} for the player picker (a field
         of "type": "player" gets the chosen "id")
 
+"perm" is optional: which moderator permission a tool or action belongs to, one of
+see, message, kick, ban, help, edit, logs (adminmodules.CATEGORIES). Without it the
+panel guesses from the kind and the words of the id and label, and "edit" is the default.
+A tool's "group" is optional too: tools with the same group share one tab, with a row of
+their own under it (a game with many tools keeps a short tab bar).
+
 `key` must equal the <KEY> the panel was given. An action of kind "announce"
 is used by the maintenance warning, "kick" by an account's Kick. Ids follow
 the module rules (adminmodules.ID_RE); anything that does not fit is dropped
@@ -31,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from adminmodules import Action, HelpDesk, Module, Service, Tool, sources
+from adminmodules import CATEGORIES, Action, HelpDesk, Module, Service, Tool, sources
 
 PREFIX = "openlobby/"
 TIMEOUT = 4.0
@@ -62,7 +68,15 @@ def _action(key, a):
                "type": _str(f.get("type") or "text", 16)}
               for f in (a.get("fields") or []) if isinstance(f, dict) and f.get("id")]
     return Action(aid, _str(a.get("label")) or aid, run, kind=_str(a.get("kind"), 32),
-                  fields=fields, about=_str(a.get("about"), 200), danger=bool(a.get("danger")))
+                  fields=fields, about=_str(a.get("about"), 200), danger=bool(a.get("danger")),
+                  perm=_cat(a))
+
+
+def _cat(d):
+    """The game permission a tool or action says it belongs to ("perm"), if it is one of
+    adminmodules.CATEGORIES; anything else is ignored and the panel decides."""
+    got = _str(d.get("perm"), 16)
+    return got if got in CATEGORIES else None
 
 
 def _live(m):
@@ -114,12 +128,12 @@ def _post(m, path, body, actor):
             doc = json.loads(r.read(sources.MAX_BYTES))
     except urllib.error.HTTPError as e:
         if e.code == 403:
-            return False, "The game refused the panel's token."
+            return False, "The game turned the panel away. Check its token under Modules."
         try:
             doc = json.loads(e.read(4096))
         except ValueError:
             doc = {}
-        return False, _str((doc or {}).get("msg") or (doc or {}).get("error"), 300) or "The game answered HTTP %d." % e.code
+        return False, _str((doc or {}).get("msg") or (doc or {}).get("error"), 300) or "The game sent an error. Try again."
     return bool(doc.get("ok")), _str(doc.get("msg"), 300)
 
 
@@ -164,14 +178,15 @@ def build(key, url, token):
     does not answer or its description does not fit."""
     doc = _get(url, token, PREFIX + "module.json")
     if not isinstance(doc, dict) or doc.get("v") != 1:
-        raise ValueError("not an OpenLobby module description (v 1)")
+        raise ValueError("it isn't an OpenLobby game")
     if doc.get("key") != key:
-        raise ValueError("it calls itself %r, the panel calls it %r" % (doc.get("key"), key))
+        raise ValueError("its key is %s, not %s" % (doc.get("key"), key))
     title = _str(doc.get("title"), 60)
     if not title:
         raise ValueError("it has no title")
     tools = [Tool(_str(t.get("id"), 32), _str(t.get("label")) or _str(t.get("id")),
-                  str(t.get("path") or ""), about=_str(t.get("about"), 200))
+                  str(t.get("path") or ""), about=_str(t.get("about"), 200), perm=_cat(t),
+                  group=_str(t.get("group"), 24))
              for t in (doc.get("tools") or []) if isinstance(t, dict) and t.get("id")
              and not str(t.get("path") or "").startswith(PREFIX.rstrip("/"))]
     actions = [_action(key, a) for a in (doc.get("actions") or [])

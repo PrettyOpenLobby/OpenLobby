@@ -44,8 +44,7 @@ ACTIONS = ("save", "refresh", "endpoint", "clear", "delete", "fluxer-save", "flu
 _ID = re.compile(r"^\d{5,25}$")
 #: The answer to a token save while the server has no sealing key (POL_BOT_KEY): the page's
 #: note at the top of the Bots tab says how to set one.
-NO_KEY = ("Tokens cannot be stored yet: the server has no sealing key. See the note at the top "
-          "of the Bots page.")
+NO_KEY = "Tokens can't be saved on this server yet."
 
 
 def _applied(name):
@@ -80,53 +79,45 @@ def checklist(name, r, port, command):
     url = r.get("url") or ""
     info = _info(r)
     if name == "bridge":
-        add("info", "Web address", "No page of its own: Discord reaches the bridge through the "
-            "Tetra Master board, so its address is the board's address followed by /pol.")
+        add("info", "Web address", "The Tetra Master board address plus /pol.")
     elif port:
         add("ok" if url else "todo", "Web address",
-            ("Board page on port %d of the server, published as %s." % (port, url)) if url else
-            "Not set yet (the board's page is on port %d of the server)." % port)
+            url if url else "Not set yet.")
     if not r.get("has_token"):
         add("todo", "Bot token", "Not set yet.")
         return out
     if not info:
-        add("info", "Discord settings", "Not checked yet: press Check now.")
+        add("info", "Discord settings", "Not checked yet. Press Check now.")
         return out
     want = endpoint_of(url)
     have = info.get("endpoint") or ""
     if have and want and have == want:
         add("ok", "Interactions endpoint", have)
     elif have:
-        add("warn", "Interactions endpoint", "Discord has %s%s." % (
-            have, ("; this board expects %s (press Set endpoint)" % want) if want else ""))
+        add("warn", "Interactions endpoint", "Discord has %s.%s" % (
+            have, " Press Set endpoint to fix it." if want else ""))
     else:
-        add("todo", "Interactions endpoint", "Not set. Once the card says the bot is running, press "
-            "Set endpoint%s." % ((" (or paste %s under General Information, Interactions "
-                                  "Endpoint URL)" % want) if want else " after saving the web address"))
+        add("todo", "Interactions endpoint", "Not set. Press Set endpoint once the bot is running."
+            if want else "Not set. Save the web address first.")
     if info.get("code_grant"):
-        add("warn", "Requires OAuth2 Code Grant", "On: the invite link will fail. Turn it off "
-            "under Bot in the developer portal.")
+        add("warn", "Requires OAuth2 Code Grant", "On. Turn it off under Bot in the developer portal.")
     else:
-        add("ok", "Requires OAuth2 Code Grant", "Off, as the invite link needs.")
-    add("ok", "Privileged intents", "None needed: the bot connects with no intents." + (
-        " On but unused: %s (they can be switched off under Bot)." % ", ".join(info["intents"])
-        if info.get("intents") else ""))
-    add("info", "Public bot", "On: anyone with the invite link can add it to a server. Turn it "
-        "off under Bot to keep it to your servers." if info.get("public") else
-        "Off: only you can add it to servers.")
+        add("ok", "Requires OAuth2 Code Grant", "Off")
+    add("ok", "Privileged intents", "None needed" + (
+        ". Unused but on: %s." % ", ".join(info["intents"]) if info.get("intents") else ""))
+    add("info", "Public bot", "On. Anyone with the invite link can add it." if info.get("public") else
+        "Off")
     cmds = info.get("commands")
     if cmds is None:
-        add("info", "Slash command", "/%s: could not be read." % command)
+        add("info", "Slash command", "Couldn't read /%s." % command)
     elif command in cmds:
-        add("ok", "Slash command", "/%s is registered. Run it in the channel the bot should post in."
-            % command)
+        add("ok", "Slash command", "/%s is ready. Run it in the bot's channel." % command)
     else:
-        add("todo", "Slash command", "/%s is not registered yet: the bot's service registers it when "
-            "it starts on this token. Press Check now again in a minute." % command)
+        add("todo", "Slash command", "/%s isn't ready yet. Check again in a minute." % command)
     if info.get("guilds") is not None:
         add("ok" if info["guilds"] else "todo", "Servers",
             ("In %d server%s." % (info["guilds"], "" if info["guilds"] == 1 else "s"))
-            if info["guilds"] else "Not in any server yet: use Invite.")
+            if info["guilds"] else "Not in any server yet. Use Invite.")
     return out
 
 
@@ -194,16 +185,15 @@ def fluxer_checklist(name, r, applied=None):
     if r.get("fluxer_has_token"):
         info = _fluxer_info(r)
         if not info:
-            add("info", "Fluxer settings", "Not checked yet: press Check now.")
+            add("info", "Fluxer settings", "Not checked yet. Press Check now.")
         else:
             add("ok", "Bot", "Signs in as %s." % (info.get("username") or info.get("user_id") or "?"))
             if info.get("guilds") is not None:
                 add("ok" if info["guilds"] else "todo", "Servers",
                     ("In %s." % ", ".join(info["guilds"])) if info["guilds"] else
-                    "Not in any server yet: add it to the server from its application page in Fluxer.")
+                    "Not in any server yet. Add it from its Fluxer app page.")
     elif on_env:
-        add("ok", "Bot token", "Running on the token in the server's settings. Paste it here to "
-            "check it from this page.")
+        add("ok", "Bot token", "Using the token from server settings.")
     else:
         add("todo", "Bot token", "Not set yet.")
         return out
@@ -211,21 +201,19 @@ def fluxer_checklist(name, r, applied=None):
     if name == "bridge":
         pinged = [x["label"] for x in bridge_roles(r, applied) if x["value"] or x["running"]]
         add("info", "Ping roles", ("Pings a role for %s." % ", ".join(pinged)) if pinged else
-            "None: news posts ping nobody. Paste a role id beside a game to ping it.")
+            "None. Paste a role ID beside a game to ping it.")
     for f in feeds(name):
         ids = [c for c in (chans.get(f["key"]) or "").split(",") if c]
         if not ids:
             if name == "bridge":
-                add("todo", "News channels", "None: no news posts on Fluxer. Paste the id of the "
-                    "channel they should go in.")
+                add("todo", "News channels", "None. Paste a channel ID for news.")
             elif f["key"] == name:
-                add("todo", "Board channels", "None: the board posts nowhere on Fluxer. Paste the "
-                    "id of the channel it should post in.")
+                add("todo", "Board channels", "None. Paste a channel ID to post in.")
             else:
-                add("info", "%s channels" % f["label"], "None of its own: it posts beside the board."
-                    if f["shares_main"] else "None: this feed is off on Fluxer.")
+                add("info", "%s channels" % f["label"], "Posts with the board."
+                    if f["shares_main"] else "Off on Fluxer")
             continue
-        where = " (from the server's settings)" if f["key"] not in botcreds.fluxer_channels(r) else ""
+        where = ", from server settings" if f["key"] not in botcreds.fluxer_channels(r) else ""
         if not info:
             add("info", "%s channels" % f["label"], ", ".join(ids) + where)
             continue
@@ -257,7 +245,7 @@ def listing():
     try:
         stored = botcreds.rows()
     except Exception as e:                             # noqa: BLE001
-        return 503, {"error": "The bot registry is not readable: %s" % e}
+        return 503, {"error": "Couldn't load the bots. Try again."}
     bots = []
     for name, (title, prefix, _perms, port, command) in botcreds.known().items():
         r = stored.get(name) or {}
@@ -298,7 +286,7 @@ def _reload_every():
 def _clean_url(url):
     url = str(url or "").strip().rstrip("/")
     if url and not (url.startswith("https://") and " " not in url and len(url) <= 300):
-        raise ValueError("The page address must start with https:// (Discord only calls https).")
+        raise ValueError("The page address must start with https://.")
     return url
 
 
@@ -311,8 +299,7 @@ def clean_ids(text, where="Fluxer"):
             continue
         m = re.search(r"(\d+)/?$", part)
         if not m or not _ID.match(m.group(1)):
-            raise ValueError("%r is not a %s channel id. In %s, right-click the channel "
-                             "and copy its id." % (part[:60], where, where))
+            raise ValueError("%s isn't a %s channel ID." % (part[:60], where))
         if m.group(1) not in ids:
             ids.append(m.group(1))
     return ",".join(ids)
@@ -334,8 +321,7 @@ def clean_channels(name, given):
         if key.startswith("role:"):
             m = re.search(r"(\d+)>?$", str(text or "").strip())
             if str(text or "").strip() and not (m and _ID.match(m.group(1))):
-                raise ValueError("%r is not a Fluxer role id. In Fluxer, right-click the role "
-                                 "and copy its id." % str(text)[:60])
+                raise ValueError("%s isn't a Fluxer role ID." % str(text)[:60])
             if m:                                  # an empty field: the .env value stands
                 out[key] = m.group(1)
             continue
@@ -345,8 +331,7 @@ def clean_channels(name, given):
                 continue
             m = re.search(r"(\d+)/?$", part)
             if not m or not _ID.match(m.group(1)):
-                raise ValueError("%r is not a Fluxer channel id. In Fluxer, right-click the channel "
-                                 "and copy its id." % part[:60])
+                raise ValueError("%s isn't a Fluxer channel ID." % part[:60])
             if m.group(1) not in ids:
                 ids.append(m.group(1))
         if ids:                                    # an empty field: the board's .env value stands
@@ -360,8 +345,7 @@ def _fluxer_change(name, act, body, actor, row, describe):
         if not row:
             return 200, {"ok": True, "detail": "Nothing stored."}
         botcreds.save(name, actor, fluxer_token="", fluxer_channels="", fluxer_info="")
-        return 200, {"ok": True, "detail": "Fluxer token and channels removed; %s goes back to "
-                                           "the server's own settings for Fluxer." % (what[0].lower() + what[1:])}
+        return 200, {"ok": True, "detail": "Removed."}
     chans = botcreds.fluxer_channels(row)
     if act == "fluxer-save" and "channels" in body:
         # the page sends every feed's field, so what it sends is the whole set
@@ -376,10 +360,9 @@ def _fluxer_change(name, act, body, actor, row, describe):
         return 400, {"error": NO_KEY}
     use = token or (row or {}).get("fluxer_token") or ""
     if act == "fluxer-check" and not use:
-        return 400, {"error": "No usable Fluxer token is stored for %s%s." % (
-            name, " (it was saved under a different sealing key)" if (row or {}).get("fluxer_has_token") else "")}
+        return 400, {"error": "No Fluxer token saved. Paste one first."}
     if act == "fluxer-save" and not token and "channels" not in body:
-        return 400, {"error": "Nothing to save: paste a Fluxer token or channel ids."}
+        return 400, {"error": "Paste a token or channel IDs first."}
     info = None
     if use:
         # the channels the board posts in: these, and its .env ones for the feeds these leave out
@@ -397,7 +380,7 @@ def _fluxer_change(name, act, body, actor, row, describe):
     botcreds.save(name, actor, fluxer_token=token or None, **fields)
     out = {"ok": True, "fluxer": info,
            "detail": ("Checked." if act == "fluxer-check" else
-                      "Saved. %s picks it up within about a minute." % what)}
+                      "Saved. Takes about a minute.")}
     return 200, out
 
 
@@ -416,27 +399,24 @@ def change(body, actor, describe=None, set_endpoint=None, fluxer_describe=None):
     try:
         row = botcreds.get(name)
     except Exception as e:                             # noqa: BLE001
-        return 503, {"error": "The bot registry is not readable: %s" % e}
+        return 503, {"error": "Couldn't load the bots. Try again."}
 
     if act.startswith("fluxer-"):
         return _fluxer_change(name, act, body, actor, row, fluxer_describe)
 
     if act == "delete":
         botcreds.delete(name)
-        return 200, {"ok": True, "detail": "Removed. The %s service goes back to the server's own "
-                                           "settings when it next restarts." % name}
+        return 200, {"ok": True, "detail": "Removed."}
     if act == "clear":
         if not row:
             return 200, {"ok": True, "detail": "Nothing stored."}
         botcreds.save(name, actor, token="")
-        return 200, {"ok": True, "detail": "Token removed; the service restarts on the token in the "
-                                           "server's settings."}
+        return 200, {"ok": True, "detail": "Token removed."}
 
     if act in ("refresh", "endpoint"):
         token = (row or {}).get("token") or ""
         if not token:
-            return 400, {"error": "No usable token is stored for %s%s." % (
-                name, " (it was saved under a different sealing key)" if (row or {}).get("has_token") else "")}
+            return 400, {"error": "No token saved. Paste one first."}
         if act == "refresh":
             info = describe(token)
             if info.get("error"):
@@ -482,9 +462,9 @@ def change(body, actor, describe=None, set_endpoint=None, fluxer_describe=None):
         fields.update(app_id=info["app_id"], public_key=info["public_key"], username=info["username"],
                       discord_info=json.dumps(info))
     if not token and not fields:
-        return 400, {"error": "Nothing to save: paste a token, a page address or channel ids."}
+        return 400, {"error": "Paste a token, address or channel IDs first."}
     botcreds.save(name, actor, token=token or None, **fields)
-    out = {"ok": True, "detail": "Saved. The %s service picks it up within about a minute." % name}
+    out = {"ok": True, "detail": "Saved. Takes about a minute."}
     if info:
         out["discord"] = info
         out["invite"] = botcreds.invite_url(name, info["app_id"])

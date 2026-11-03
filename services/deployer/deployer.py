@@ -82,6 +82,7 @@ import gameupdater  # noqa: E402
 import updatecheck  # noqa: E402
 import patches  # noqa: E402
 import patchfeed  # noqa: E402
+import logexport  # noqa: E402
 
 VERSION = "3.0"
 
@@ -3231,6 +3232,36 @@ class Deployer:
         self.diag_cache = (time.time(), {"keys": list(keys), "found": found})
         return found
 
+    def log_areas(self):
+        catalog = load_catalog(self.cfg.core)
+        return logexport.areas(catalog, Runner(self.cfg, catalog, None).enabled())
+
+    def log_export(self, area_ids, lines, addresses):
+        """(200, the text) or (400, {"error"}): the logs of these areas, to send with a report
+        (logexport.py)."""
+        catalog = load_catalog(self.cfg.core)
+        on = Runner(self.cfg, catalog, None).enabled()
+        all_areas = logexport.areas(catalog, on)
+        ids = {a["id"] for a in all_areas}
+        area_ids = [a.strip() for a in area_ids if a.strip()]
+        if not area_ids or any(a != "all" and a not in ids for a in area_ids):
+            return 400, {"error": "unknown area; one of all, %s" % ", ".join(sorted(ids))}
+        try:
+            lines = int(lines)
+        except ValueError:
+            return 400, {"error": "lines must be a number"}
+        env = read_dotenv(os.path.join(self.cfg.core, ".env"))
+        for key in on:
+            if key in catalog and catalog[key].get("checkout"):
+                env.update(read_dotenv(os.path.join(self.cfg.root, catalog[key]["checkout"], ".env")))
+        secrets = logexport.env_secrets(env) + [self.cfg.token]
+        head = ["compose"] + (["--ghcr"] if self.cfg.ghcr else []) + ["--no-prebuild"]
+        text = logexport.export(area_ids, all_areas, lambda args: self._stack_text(head + args, 120),
+                                lines, addresses, secrets,
+                                {"Deployer": VERSION, "Games on": ", ".join(on) or "none",
+                                 "Channel": devchannel.read_channel(self.cfg.core)["channel"]})
+        return 200, text
+
     def _stack_text(self, args, timeout):
         """stack.py's output (stdout and stderr) for `args`; "" when it cannot run."""
         env = {k: v for k, v in os.environ.items()
@@ -3726,6 +3757,22 @@ def make_handler(dep):
                 return self.send_json(*dep.patch_provenance())
             if parts == ["api", "patches", "feed"]:
                 return self.send_json(*dep.feed_list(truthy((q.get("refresh") or [""])[0])))
+            if parts == ["api", "logs", "areas"]:
+                return self.send_json(200, {"areas": dep.log_areas()})
+            if parts == ["api", "logs", "export"]:
+                code, body = dep.log_export((q.get("area") or ["all"])[0].split(","),
+                                            (q.get("lines") or [str(logexport.LINES)])[0],
+                                            truthy((q.get("addresses") or [""])[0]))
+                if code != 200:
+                    return self.send_json(code, body)
+                data = body.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if parts == ["api", "uploads"]:
                 dep.expire_uploads()
                 return self.send_json(200, {"uploads": [clientdata.public_upload(m)

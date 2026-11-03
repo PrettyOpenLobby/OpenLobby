@@ -39,7 +39,7 @@ def _all(actor):
         st, out = admingames.get_json("patches", "versions.json", "", actor)
         if st == 200 and isinstance(out.get("bundles"), list):
             return 200, out, "patchinfo"
-        return 502, {"error": out.get("error") or "The patch versions service did not answer (%s)." % st}, None
+        return 502, {"error": out.get("error") or "Couldn't load patch versions. Try again."}, None
     return 200, {"bundles": []}, None
 
 

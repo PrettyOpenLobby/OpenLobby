@@ -170,7 +170,7 @@ def main():
         chk("  the PS2 row: what it serves, that it is ours, and the retail version not here",
             [c.strip() for c in (b.js("[...%s.cells].map(c=>c.innerText)" % ps2) or [])],
             ["▸ FINAL FANTASY XI (PlayStation 2, Japan) PS2-0001", "20261009_14 Ours",
-             "3 (2 retail, 1 ours)", "1 not here"])
+             "3 · 2 retail, 1 ours", "1 missing"])
         if shots:
             b.screenshot(os.path.join(shots, "ffxi-patches.png"))
         b.click_el('tr[data-gp="ffxi:PS2-0001"]')
@@ -178,7 +178,7 @@ def main():
         body = "document.querySelector('[data-gpbody=\"ffxi:PS2-0001\"]')"
         chk("a click opens the timeline, newest first, the missing one in place",
             b.js("[...%s.querySelectorAll('table > tbody > tr')].map(r=>r.cells[0].innerText+' '+r.cells[1].innerText)" % body),
-            ["20261009_14 Ours", "20160203_0 Retail", "20151204_0 Not here", "20151103_0 Retail"])
+            ["20261009_14 Ours", "20160203_0 Retail", "20151204_0 Missing", "20151103_0 Retail"])
         b.pump(16.0)       # the page's own status redraw
         chk("  it stays open through the page's redraw", b.js("%s.hidden" % body), False)
         if shots:

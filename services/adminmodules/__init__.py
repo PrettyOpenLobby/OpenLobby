@@ -21,8 +21,12 @@ A module is a file in this package (or in POL_ADMIN_MODULES_DIR) that sets
                 or that has no status JSON at all.
 
 Every module gets permissions of its own: `game.<key>` to see it, and one
-`game.<key>.<id>` per tool and per action. A moderator holding the old
-`games_<key>` permission is read as holding all of them (see expand_legacy).
+`game.<key>.<id>` per tool and per action. A moderator is not given those one by
+one: they hold the seven game permissions (CATEGORIES), the same for every game,
+and each tool and action belongs to one of them (category()). A module can say
+which with `perm=` on a Tool or Action ("perm" in a game's own description), or
+`categories={id: ...}` in a file whose game describes itself. A moderator saved
+before then is read the old way until the owner saves them again (from_legacy).
 
 Which modules a server shows:
 
@@ -70,6 +74,12 @@ KEY_RE = re.compile(r"^[a-z0-9]{1,16}$")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 TOOL_PATH_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,63}$|^$")
 
+#: The game permissions a moderator is given, the same for every game (games added later
+#: included): see a game, send messages in it, disconnect players, ban and mute, answer its
+#: help requests, change its data, read its server logs. Each tool and action of a module
+#: belongs to one of them (category()). A game's updates are the owner's alone.
+CATEGORIES = ("see", "message", "kick", "ban", "help", "edit", "logs")
+
 #: Built-in modules, in the order the panel lists them. A module whose file is
 #: missing is skipped, so a fork can delete the ones it does not want.
 BUILTIN = ("viewer", "ffxi", "tm", "jan", "fe", "fmo", "doc")
@@ -78,14 +88,20 @@ BUILTIN = ("viewer", "ffxi", "tm", "jan", "fe", "fmo", "doc")
 class Tool:
     """A page the game's tool port serves. `path` is relative to the port's
     root; the tool also owns every endpoint under it (`path`, `path.json`,
-    `path/...`). A tool at "" owns whatever no other tool claims."""
+    `path/...`). A tool at "" owns whatever no other tool claims. Tools that
+    share a `group` sit under one tab in the panel, each still its own page
+    and permission."""
 
-    def __init__(self, id, label, path="", about="", panel=False, perm=None):
+    def __init__(self, id, label, path="", about="", panel=False, perm=None, group=""):
         self.id, self.label, self.path, self.about = id, label, path, about
+        #: the tab it sits under with the other tools of that group ("": a tab of its own)
+        self.group = group
         #: a page the panel itself draws (the PML preview), not the game's port
         self.panel = panel
+        #: one of CATEGORIES: the game permission this page belongs to (category())
+        self.cat = perm if perm in CATEGORIES else None
         #: a panel page keeps the permission it always had ("pml")
-        self.perm = perm
+        self.perm = None if self.cat else perm
 
     def owns(self, sub):
         if self.panel:
@@ -99,9 +115,11 @@ class Action:
     returns (ok, message). `kind` lets the core find the right action for a
     job: "announce" is used by the maintenance warning."""
 
-    def __init__(self, id, label, run, kind="", fields=(), about="", danger=False):
+    def __init__(self, id, label, run, kind="", fields=(), about="", danger=False, perm=None):
         self.id, self.label, self.run, self.kind = id, label, run, kind
         self.fields, self.about, self.danger = list(fields), about, danger
+        #: one of CATEGORIES, when the module says which game permission this is (category())
+        self.cat = perm if perm in CATEGORIES else None
 
 
 def core_project():
@@ -153,8 +171,14 @@ class Module:
     def __init__(self, key, title, short="", platform="", kind="game",
                  tools=(), services=None, live=None, actions=(), content_ids=(),
                  about="", markers=(), present=None, self_described=False, calendar=None,
-                 help=None, player=None, players=None, accounts="", update=None):
+                 help=None, player=None, players=None, accounts="", update=None,
+                 categories=None):
         self.key, self.title, self.short = key, title, short or title
+        #: {tool or action id: one of CATEGORIES}, for a file whose game describes itself
+        #: (its own description can say "perm" per tool and action, and that wins)
+        self.categories = {k: v for k, v in (categories or {}).items() if v in CATEGORIES}
+        #: tool or action ids marked "owner" in `categories`: no moderator is ever given them
+        self.owner_only = {k for k, v in (categories or {}).items() if v == "owner"}
         self.platform, self.kind, self.about = platform, kind, about
         self.tools = list(tools)
         self.services = services
@@ -234,19 +258,19 @@ class Module:
     def perms(self):
         """{perm: label} for everything a moderator can be given here. A panel
         page's own permission (t.perm) belongs to the core list, not here."""
-        out = {self.perm(): "See %s: status, who is playing, services" % self.title}
+        out = {self.perm(): "See %s" % self.title}
         for t in self.tools:
             if not t.perm:
                 out[self.perm(t.id)] = "%s: %s" % (self.title, t.label)
         for a in self.actions:
             out.setdefault(self.perm(a.id), "%s: %s" % (self.title, a.label))
         if self.help is not None:
-            out.setdefault(self.perm("help"), "%s: answer players' help requests" % self.title)
+            out.setdefault(self.perm("help"), "%s: help requests" % self.title)
         if self.services:
-            out[self.perm("serverlogs")] = "%s: its server logs (players' addresses hidden)" % self.title
+            out[self.perm("serverlogs")] = "%s: server logs" % self.title
         if self.remote:
             # a game that applies its own updates (docs/installs.md, "Updates")
-            out.setdefault(self.perm("update"), "%s: update it, when it can update itself" % self.title)
+            out.setdefault(self.perm("update"), "%s: updates" % self.title)
         return out
 
     def tool_for(self, sub):
@@ -268,7 +292,7 @@ class Module:
             "key": self.key, "title": self.title, "short": self.short,
             "platform": self.platform, "kind": self.kind, "about": self.about,
             "tools": [{"id": t.id, "label": t.label, "path": t.path, "about": t.about,
-                       "panel": t.panel}
+                       "panel": t.panel, "group": t.group}
                       for t in self.tools if can(self.perm(t.id))],
             "actions": [{"id": a.id, "label": a.label, "kind": a.kind, "about": a.about,
                          "fields": a.fields, "danger": a.danger}
@@ -309,19 +333,19 @@ def _note(msg):
 
 def _accept(mod, where, out, origin="file"):
     if not isinstance(mod, Module):
-        _note("%s: MODULE is not a Module; skipped" % where)
+        _note("%s isn't a valid game module." % where)
         return
     if not KEY_RE.match(mod.key or ""):
-        _note("%s: key %r does not fit [a-z0-9]{1,16}; skipped" % (where, mod.key))
+        _note("%s: the key %s isn't valid." % (where, mod.key))
         return
     if mod.key in out:
-        _note("%s: key %r is already taken; skipped" % (where, mod.key))
+        _note("%s: the key %s is already used." % (where, mod.key))
         return
     ids = [t.id for t in mod.tools] + [a.id for a in mod.actions]
     bad = [i for i in ids if not ID_RE.match(i or "")]
     bad += [t.path for t in mod.tools if not TOOL_PATH_RE.match(t.path) or ".." in t.path]
     if bad:
-        _note("%s: %r do not fit; skipped" % (where, bad))
+        _note("%s: these settings aren't valid: %s" % (where, ", ".join(map(str, bad))))
         return
     mod.origin = origin
     out[mod.key] = mod
@@ -334,7 +358,7 @@ def _load_file(path, out):
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
     except Exception as exc:                   # noqa: BLE001 -- one bad file, not the panel
-        _note("%s did not load: %r" % (path, exc))
+        _note("%s didn't load: %s" % (path, exc))
         return
     _accept(getattr(m, "MODULE", None), path, out)
 
@@ -348,7 +372,7 @@ def _legacy_extras(out):
     try:
         got = json.loads(raw)
     except ValueError as exc:
-        _note("POL_ADMIN_GAMES_EXTRA is not JSON (%s); ignored" % exc)
+        _note("The old games setting isn't valid.")
         return
     for key, g in (got.items() if isinstance(got, dict) else ()):
         try:
@@ -358,7 +382,7 @@ def _legacy_extras(out):
             mod = Module(key, g["title"].strip()[:60], str(g.get("short") or key.upper())[:12],
                          tools=tools)
         except (KeyError, TypeError, AttributeError, ValueError):
-            _note("POL_ADMIN_GAMES_EXTRA entry %r does not fit; skipped" % (key,))
+            _note("The old games setting has a bad entry: %s" % (key,))
             continue
         if key in out:
             # a built-in module of that key: the JSON may only name its tools
@@ -377,7 +401,7 @@ def _read_store():
     try:
         got = STORE() or {}
     except Exception as exc:                   # noqa: BLE001 -- the database is away
-        _note("the games added in the panel could not be read (%s)" % exc.__class__.__name__)
+        _note("Couldn't read the games added here.")
         return
     _STORED = {k: (str(v[0]), str(v[1] or "")) for k, v in got.items()
                if KEY_RE.match(k or "") and v and v[0]}
@@ -427,19 +451,21 @@ def _remotes(out):
             mod = remote.build(key, url.strip().rstrip("/"), token)
         except Exception as exc:               # noqa: BLE001 -- the game is down or not one
             _remote_failed["keys"].add(key)
-            _note("%s: the game at %s did not describe itself (%s); %strying again in a minute"
-                  % (key, url, getattr(exc, "reason", None) or exc,
-                     "its module file stands in; " if file_mod is not None else ""))
+            _note("Couldn't reach %s at %s. Trying again in a minute." % (key, url))
             continue
         if file_mod is not None:
             out.pop(key)
             mod.services = file_mod.services
             mod.markers = file_mod.markers
+            # the panel's own line wins, so every card reads alike whatever each game says
+            mod.about = file_mod.about or mod.about
             mod.calendar = mod.calendar or file_mod.calendar
             mod.help = mod.help or file_mod.help
             mod.player = mod.player or file_mod.player
             mod.players = mod.players or file_mod.players
             mod.update = mod.update or file_mod.update
+            mod.categories = dict(file_mod.categories, **mod.categories)
+            mod.owner_only = set(file_mod.owner_only)
             if mod.accounts == key:
                 mod.accounts = file_mod.accounts
         _accept(mod, "the game at %s" % url, out, "game")
@@ -463,10 +489,10 @@ def load(reload=False):
             except ImportError as exc:
                 if getattr(exc, "name", "") == "adminmodules." + key:
                     continue                    # deleted on purpose
-                _note("built-in %s did not load: %r" % (key, exc))
+                _note("%s didn't load: %s" % (key, exc))
                 continue
             except Exception as exc:           # noqa: BLE001
-                _note("built-in %s did not load: %r" % (key, exc))
+                _note("%s didn't load: %s" % (key, exc))
                 continue
             _accept(getattr(m, "MODULE", None), "adminmodules/%s.py" % key, out, "built-in")
         extra = os.environ.get("POL_ADMIN_MODULES_DIR", "").strip()
@@ -570,6 +596,160 @@ def can_see(key, can):
     return any(can(p) for p in m.perms()) or any(can(t.perm) for t in m.tools if t.perm)
 
 
+# --------------------------------------------------------------------------- #
+# the game permissions a moderator holds (CATEGORIES)
+# --------------------------------------------------------------------------- #
+#: An action's kind, when it names the job outright
+_CAT_KINDS = {"kick": "kick", "announce": "message", "ban": "ban"}
+#: else words in its id and label, tried in this order; nothing found is "edit", the
+#: cautious default (the permission most moderators are not given)
+_CAT_WORDS = (
+    ("ban", re.compile(r"\b(?:un)?(?:ban|mute)s?\b|\brefus")),
+    ("kick", re.compile(r"\b(?:kick|disconnect)")),
+    ("help", re.compile(r"\b(?:help|faq)\b|\bgm chat\b")),
+    ("logs", re.compile(r"\blogs?\b")),
+    ("message", re.compile(r"\b(?:announce\w*|notices?|messages?|sysmsg|banners?|chat|tips?"
+                           r"|news)\b")),
+)
+
+
+def _guess(item):
+    kind = str(getattr(item, "kind", "") or "").lower()
+    if kind in _CAT_KINDS:
+        return _CAT_KINDS[kind]
+    text = re.sub(r"[_\-]+", " ", "%s %s" % (item.id or "", item.label or "")).lower()
+    for cat, rx in _CAT_WORDS:
+        if rx.search(text):
+            return cat
+    return "edit"
+
+
+def category(m, sub=None):
+    """Which of CATEGORIES holds the permission m.perm(sub): the module's own word for the
+    tool or action ("perm" in its description, or the file's `categories`) when it has one,
+    else a guess from the action's kind and the words of its id and label. None for what no
+    moderator is given (a game's updates) and for a panel page's own permission."""
+    if sub is None:
+        return "see"
+    if sub == "update" or sub in m.owner_only:
+        return None
+    if sub == "serverlogs":
+        return "logs"
+    item = next((t for t in m.tools if t.id == sub), None) \
+        or next((a for a in m.actions if a.id == sub), None)
+    if item is None:
+        return m.categories.get(sub) or ("help" if sub == "help" else "edit")
+    if getattr(item, "perm", None):
+        return None
+    return item.cat or m.categories.get(sub) or _guess(item)
+
+
+def game_perms(m):
+    """{perm: category} for every permission of module `m` a moderator can hold."""
+    out = {}
+    for p in m.perms():
+        sub = p[len(m.perm()) + 1:] if p != m.perm() else None
+        cat = category(m, sub)
+        if cat is not None:
+            out[p] = cat
+    return out
+
+
+def classify():
+    """[(key, title, perm, label, category)] over every module found, for a check by eye."""
+    out = []
+    for k, m in load().items():
+        labels = m.perms()
+        for p, cat in game_perms(m).items():
+            out.append((k, m.title, p, labels.get(p, ""), cat))
+    return out
+
+
+GRANT = "games."
+_GRANT_RE = re.compile(r"^games\.([a-z]+)(?::not:([a-z0-9]{1,16}))?$")
+
+
+def is_legacy(perms):
+    """Saved before the game permissions: per game ("game.<key>[.<id>]") or older still
+    ("games_<key>")."""
+    return any(p.startswith("game.") or p.startswith("games_") for p in perms or ())
+
+
+def grants(perms):
+    """{category: {game keys left out}} from a moderator's saved list ("games.kick",
+    "games.kick:not:kart")."""
+    out = {}
+    for p in perms or ():
+        got = _GRANT_RE.match(p)
+        if got and got.group(1) in CATEGORIES and not got.group(2):
+            out.setdefault(got.group(1), set())
+    for p in perms or ():
+        got = _GRANT_RE.match(p)
+        if got and got.group(2) and got.group(1) in out:
+            out[got.group(1)].add(got.group(2))
+    return out
+
+
+def granted(perms):
+    """Every game permission ("game.<key>[.<id>]") a saved list of game permissions gives,
+    over every module found, so a game added later is covered at once. Any of them in a
+    game also lets the moderator see that game."""
+    g = grants(perms)
+    out = set()
+    for key, m in load().items():
+        got = {p for p, cat in game_perms(m).items() if cat in g and key not in g[cat]}
+        if got:
+            got.add(m.perm())
+        out |= got
+    return out
+
+
+def legacy_granted(perms):
+    """What an old list gave, read the old way: its own per-game permissions (games_<key>
+    expanded), not a game's updates, which only the owner does now."""
+    known = {}
+    for m in load().values():
+        known.update(game_perms(m))
+    return {p for p in expand_legacy(perms or []) if p in known}
+
+
+def from_legacy(perms):
+    """An old list in the new form. A category is given when the old list held any of its
+    permissions in any game, with every game that has some of that category and where the
+    old list held none of it left out. Seeing a game counts any permission in it, as the
+    old panel did (can_see). Everything else in the list is kept as it is."""
+    perms = expand_legacy(list(perms or []))
+    held = {p for p in perms if p.startswith("game.")}
+    out = [p for p in perms if not p.startswith("game.")]
+    per_game = {k: game_perms(m) for k, m in load().items()}
+    for cat in CATEGORIES:
+        rel = {}
+        for k, gp in per_game.items():
+            ps = set(gp) if cat == "see" else {p for p, c in gp.items() if c == cat}
+            if ps:
+                rel[k] = ps
+        has = {k for k, ps in rel.items() if ps & held}
+        if has:
+            out.append(GRANT + cat)
+            out += ["%s%s:not:%s" % (GRANT, cat, k) for k in sorted(rel) if k not in has]
+    return out
+
+
+def games_of_categories():
+    """[{"key", "title", "short", "cats": [...]}]: every module found and the categories it
+    has, for the moderator editor's lists of games."""
+    out = []
+    mods = load()
+    order = [k for k in BUILTIN if k in mods] + sorted(
+        (k for k in mods if k not in BUILTIN), key=lambda k: mods[k].title.lower())
+    for k in order:
+        m = mods[k]
+        cats = set(game_perms(m).values())
+        out.append({"key": k, "title": m.title, "short": m.short,
+                    "cats": [c for c in CATEGORIES if c in cats]})
+    return out
+
+
 PLAYERS_MAX = 50
 
 
@@ -629,8 +809,7 @@ def _read_live(m):
         try:
             upd = m.update(m)
         except Exception as exc:               # noqa: BLE001
-            upd = {"update": "unknown", "why": "The update check for %s failed (%s)."
-                   % (m.title, exc.__class__.__name__)}
+            upd = {"update": "unknown", "why": "Couldn't check %s for updates." % m.title}
         if upd is not None:
             got = dict(got) if got is not None else {"up": None}
             got["update"] = upd

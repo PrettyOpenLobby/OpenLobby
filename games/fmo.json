@@ -34,11 +34,7 @@
   "profiles": {"board": ["fmoboard"]},
   "env": [
     {"name": "FMO_DB", "default": "1", "description": "1 keeps the pilots in PostgreSQL, 0 in the JSON character store."},
-    {"name": "FMO_UDP_PEER_LINK", "default": "", "description": "The peer link between pilots (release default on)."},
-    {"name": "FMO_CHAR_WIRE_BASE", "default": "", "description": "Character id base the client sees (release default 0x1000)."},
     {"name": "FMO_BATTLE_DEATH_END", "default": "", "description": "Seconds after a pilot's wanzer is destroyed until their battle ends (release default 5)."},
-    {"name": "FMO_GROUP_VOICE_TO", "default": "", "description": "Group voice routing: talkers (release default) or all."},
-    {"name": "FMO_NATION_CHANGE_TOGGLE", "default": "", "description": "Change Nations switches nation (release default 1)."},
     {"name": "FMO_DEVTOOL_PORT", "default": "", "description": "Port of the lobby NPC editor (8798 to use the published port). Empty: off."},
     {"name": "FMO_DEVTOOL_BIND", "default": "", "description": "Address the NPC editor binds. Empty: loopback."},
     {"name": "FMO_DEVTOOL_TOKEN", "default": "", "description": "Token the NPC editor requires on a wider bind."},

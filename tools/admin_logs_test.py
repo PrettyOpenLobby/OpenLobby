@@ -79,8 +79,10 @@ def main():
         gm_logs.login("gm_logs", "pass for gm_logs")
         gm_kart.login("gm_kart", "pass for gm_kart")
 
-        chk("a game with services has a serverlogs permission to give",
-            "game.kart.serverlogs" in (owner.call("api/session")[1].get("perm_labels") or {}), True)
+        _c, osess = owner.call("api/session")
+        chk("a game with services has server logs, a permission to give",
+            ("game.kart.serverlogs" in (osess.get("perms") or []),
+             "games.logs" in (osess.get("perm_labels") or {})), (True, True))
         code, d = owner.call("api/logs?group=kart")
         lines = d["logs"]["containers"][0]["lines"] if code == 200 else []
         chk("the owner reads a game's logs, addresses and all",
@@ -108,7 +110,7 @@ def main():
         chk("asking is in the activity log", sum("read server logs" in json.dumps(r) for r in rows) >= 2, True)
         status(tmp, time.time() - 600)
         code, out = owner.call("api/logs", {"group": "kart"})
-        chk("a runner that stopped reporting is not asked", (code, "not running" in out.get("error", "")), (409, True))
+        chk("a runner that stopped reporting is not asked", (code, "unavailable" in out.get("error", "")), (409, True))
         chk("...and the page says the logs are not available", owner.call("api/logs?group=kart")[1].get("available"), False)
     finally:
         stop(proc)

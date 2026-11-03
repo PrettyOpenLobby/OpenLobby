@@ -220,11 +220,11 @@ def set_updater_state(key, approve, seen, actor):
         rec = _rec(row)
         if approve:
             if rec is None:
-                return 400, {"error": "The updater %s sent no longer fits the rules, so it cannot be "
-                                      "approved." % title, "title": title}
+                return 400, {"error": "The %s updater isn't valid anymore. Pair the game again." % title,
+                             "title": title}
             if seen != gameupdater.fingerprint(rec):
-                return 409, {"error": "The updater of %s changed since this page was loaded. Look at it "
-                                      "again." % title, "title": title}
+                return 409, {"error": "The %s updater changed. Reload and check it again." % title,
+                             "title": title}
             db.execute("UPDATE admin_game_updater SET state = 'approved', approved_by = %s, approved_at = %s"
                        " WHERE key = %s", (actor, _now(), key))
         else:
@@ -318,21 +318,20 @@ def probe(key, url, token):
         return remote.build(key, url, token), None
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            return None, "The game at %s refused that token." % url
+            return None, "The game at %s rejected that token." % url
         if exc.code == 404:
-            return None, ("%s answered, but has no /openlobby/module.json. Is that the game's "
-                          "admin port?" % url)
-        return None, "%s answered HTTP %d." % (where, exc.code)
+            return None, "%s isn't a game admin address." % url
+        return None, "%s sent an error. Check the address." % where
     except (socket.timeout, TimeoutError):
-        return None, "Nothing answered at %s within %d seconds." % (url, int(remote.TIMEOUT))
+        return None, "Couldn't reach %s. Check the address." % url
     except urllib.error.URLError as exc:
-        return None, "Nothing answered at %s (%s)." % (url, _text(exc.reason, 120))
+        return None, "Couldn't reach %s. Check the address." % url
     except json.JSONDecodeError:
-        return None, "%s answered something that is not JSON." % where
+        return None, "%s isn't a game admin address." % where
     except ValueError as exc:
-        return None, "The game at %s answered, but %s." % (url, _text(exc, 200))
+        return None, "The game at %s sent a bad reply: %s." % (url, _text(exc, 200))
     except OSError as exc:
-        return None, "Nothing answered at %s (%s)." % (url, _text(exc, 120))
+        return None, "Couldn't reach %s. Check the address." % url
 
 
 def described(m):
@@ -575,8 +574,7 @@ def pair(body):
             return 403, {"error": "That code has expired. Make a new one in the panel."}, \
                 ("a setup program tried to pair %s with an expired code" % key, False)
         if _env_url(key):
-            return 400, {"error": "This panel's settings already point %s at a game (POL_ADMIN_GAME_%s_URL). "
-                                  "Take that out first." % (key, key.upper())}, None
+            return 400, {"error": "Server settings already set an address for %s." % key}, None
         m, why = probe(key, url, token)
         if m is None:
             return 400, {"error": why}, ("a setup program could not pair %s: %s" % (key, why), False)

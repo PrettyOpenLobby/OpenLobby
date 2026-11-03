@@ -108,55 +108,32 @@ def _warbots(m, params, actor):
 
 MODULE = Module(
     "fe", "Fantasy Earth", platform="PlayOnline: PC", content_ids=[11],
+    about="Nation war game.",
     markers=["felobby", "feworld"],
     tools=[Tool("world", "World builder", "")],
     actions=[Action("sysmsg", "System message", _sysmsg, kind="announce",
                     fields=[{"id": "text", "label": "Message", "type": "text"}],
-                    about="The GM banner window, shown to every player in the world."),
+                    about="Shows a GM banner to every player."),
              Action("war", "Start a war", _war, danger=True,
                     fields=[{"id": "area", "label": "Field number (1-95)", "type": "text"},
                             {"id": "nation", "label": "Attacking nation (1-5)", "type": "text"}],
-                    about="Puts the field into War Prep with that nation attacking, under the "
-                          "same rules as a keep vote: the field must border the nation's land "
-                          "and neither side may already be at war. Players in the field are "
-                          "shown War Prep straight away."),
+                    about="The field must border the attacking nation."),
              Action("rings", "Give Rings", _rings,
                     fields=[{"id": "name", "label": "Character", "type": "player"},
                             {"id": "amount", "label": "Rings (1-999)", "type": "text"}],
-                    about="Adds Rings to the character's balance, the way a war's reward does. "
-                          "Rings otherwise come only from wars; this is for testing the Ring "
-                          "Shop and the Dragon feast's Ruby. A character in the world sees the "
-                          "new balance at their next purchase or field change."),
+                    about="For testing the Ring Shop."),
              Action("testmode", "Summon test mode", _testmode, danger=True,
-                    fields=[{"id": "on", "label": "on or off", "type": "text"}],
-                    about="For trying summons on a quiet server: one vote declares a war, "
-                          "summons cost nothing, and a player holding the Dragon item rises as "
-                          "the Dragon on every death. It changes the running world only; "
-                          "turn it off after the test (a restart of the world also does)."),
+                    fields=[{"id": "on", "label": "On or off", "type": "text"}],
+                    about="Free summons and one-vote wars. Turn it off after testing."),
              Action("popscale", "War scaling", _popscale,
-                    fields=[{"id": "on", "label": "on or off (empty = keep)", "type": "text"},
-                            {"id": "full", "label": "Retail values from (players a side)",
+                    fields=[{"id": "on", "label": "On or off", "type": "text"},
+                            {"id": "full", "label": "Full strength, players a side",
                              "type": "text"},
-                            {"id": "extra", "label": "Pretend extra players (N, or attack:defence; "
-                                                     "0 = none)", "type": "text"}],
-                    about="A small war scales toward the retail values by each side's players "
-                          "online: summon prices, keep and building HP, and "
-                          "crystals per draw and per kill (every war still runs its full hour). At the full-strength number and "
-                          "above, everything is retail. Pretend players let you see a big "
-                          "war's values with two people. Send it empty to see what each war "
-                          "under way scales to now. Changes last until the world restarts."),
+                            {"id": "extra", "label": "Extra test players", "type": "text"}],
+                    about="Leave empty to see current scaling. Resets when the world restarts."),
              Action("warbots", "War bots", _warbots, danger=True,
                     fields=[{"id": "count", "label": "Soldiers a side (0 = off)", "type": "text"}],
-                    about="A test mode for a big war with few people: every war fills with "
-                          "soldier bots, this many a side, never more than the war cap less 5 "
-                          "(45 at the usual cap of 50), so real players can still join. "
-                          "They start behind their keep and set off a squad at a time, "
-                          "march on the enemy by their own paths, fight players, each other "
-                          "and the enemy keep, and count in the war's sign-ups. Bots alone "
-                          "never take a keep below half its HP, so players decide the war. Each player is shown only the "
-                          "bots near them. They earn nothing and are never saved. A war "
-                          "under way gets them at once; 0 takes them all out. Changes last "
-                          "until the world restarts.")],
+                    about="Fills each war with bots. Resets when the world restarts.")],
     players=_players,
     services=[Service(["{core}-felobby-1", "{core}-feworld-1", "{core}-fellb-1"], {54848: "lobby"},
                       warning="Everyone in Fantasy Earth is disconnected.")],

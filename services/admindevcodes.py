@@ -78,13 +78,11 @@ KIND_KEY = re.compile(r"^[a-z][a-z0-9]{0,11}$")
 SCOPES = ("read:package", "read:repository")
 DEFAULT_SCOPES = ["read:package"]
 
-UNKNOWN = "That dev code is not known here. Check it, or ask for a new one."
+UNKNOWN = "Unknown dev code. Check it or ask for a new one."
 REVOKED = "That dev code was revoked. Ask for a new one."
-TAKEN = "That dev code is already used by another server. Each code works for one server; ask for a new one."
-HAS_ONE = ("This server already redeemed another dev code of this kind, which is still valid. Use the "
-           "access code it gave, or ask for that one to be revoked first.")
-KIND_OFF = ("This panel does not hand out that kind of dev code at the moment. Try again later, or "
-            "ask the people who gave you the code.")
+TAKEN = "That dev code is in use on another server. Ask for a new one."
+HAS_ONE = "This server already has a dev code of this kind."
+KIND_OFF = "That kind of dev code isn't available right now. Try again later."
 
 
 def _now():
@@ -159,22 +157,19 @@ def _kind(key, label, prefix):
     named = ("%s codes" % label) if key else "Codes"
     code = _env(prefix, "CODE")
     if not code:
-        k["why"] = ("%s are not handed out: %sCODE (the access code they redeem to) is not set."
-                    % (named, prefix))
+        k["why"] = "%s are off. Their access code isn't set." % named
         return k
     try:
         base = devchannel.parse_code(code)
     except devchannel.ChannelError as exc:
-        k["why"] = "%s are not handed out: %sCODE is not an access code this panel can read: %s" % (
-            named, prefix, exc)
+        k["why"] = "%s are off. Their access code isn't valid." % named
         return k
     raw = _env(prefix, "SCOPES")
     if raw:
         want = [s.strip() for s in raw.split(",") if s.strip()]
         odd = [s for s in want if s not in SCOPES]
         if odd or not want:
-            k["why"] = ("%s are not handed out: %sSCOPES may name only read:package and read:repository, "
-                        "and it names %s." % (named, prefix, ", ".join(odd) or "nothing"))
+            k["why"] = "%s are off. Their scopes setting isn't valid." % named
             return k
         k["scopes"] = [s for s in SCOPES if s in want]
     url, user, auth = _env(prefix, "FORGEJO_URL"), _env(prefix, "FORGEJO_USER"), _env(prefix, "FORGEJO_AUTH")
@@ -182,16 +177,12 @@ def _kind(key, label, prefix):
     if url or user or auth:
         if not (url.startswith(("http://", "https://")) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user)
                 and ":" in auth and auth.split(":", 1)[0] and auth.split(":", 1)[1]):
-            k["why"] = ("The %sFORGEJO_ settings are incomplete (URL, USER, and AUTH as name:password), "
-                        "so %s all redeem to the shared access code." % (prefix, named if key else "codes"))
+            k["why"] = "%s share one access code. The registry settings are incomplete." % named
             return k
         k["forgejo"] = Forgejo(url, user, auth, k["scopes"])
-        k["why"] = ("%s get a registry token of their own on Forgejo (user %s, %s), and Revoke deletes it."
-                    % (named, user, " and ".join(k["scopes"])))
+        k["why"] = "%s each get their own registry token." % named
     else:
-        k["why"] = ("%s all redeem to the same shared access code, so Revoke cannot cut one server off. "
-                    "Set %sFORGEJO_URL, _USER and _AUTH to give each code its own registry token."
-                    % (named, prefix))
+        k["why"] = "%s share one access code." % named
     return k
 
 
@@ -209,11 +200,10 @@ def config():
         key, _, label = part.partition(":")
         key, label = key.strip(), " ".join(label.split())[:LABEL_MAX]
         if not KIND_KEY.match(key) or not label:
-            problems.append("POL_DEV_ISSUER_KINDS has %r, which is not key:Label (a key is a lower-case "
-                            "letter then up to 11 letters or digits)." % part[:40])
+            problems.append("The dev code kinds setting has a bad entry: %s" % part[:40])
             continue
         if key in seen:
-            problems.append("POL_DEV_ISSUER_KINDS names the kind %s twice." % key)
+            problems.append("The dev code kinds setting lists %s twice." % key)
             continue
         seen.add(key)
         kinds.append(_kind(key, label, "POL_DEV_ISSUER_%s_" % key.upper()))
@@ -225,9 +215,8 @@ def config():
         who = (f.url.lower(), f.user.lower())
         if who in readers:
             k["base"], k["forgejo"] = None, None
-            k["why"] = ("%s codes are not handed out: they use the same Forgejo user as %s codes (%s). "
-                        "Give each kind its own reader user, because a Forgejo token cannot be limited "
-                        "to one org." % (k["label"], readers[who]["label"], who[1]))
+            k["why"] = "%s codes are off. They share a registry user with %s codes." % (
+                k["label"], readers[who]["label"])
         else:
             readers[who] = k
     return {"kinds": kinds, "problems": problems}
@@ -273,7 +262,7 @@ def listing():
     issuing = [k for k in kinds if k["base"] is not None]
     why = kinds[0]["why"] if len(kinds) == 1 else None
     if not kinds:
-        why = "This panel does not hand out dev codes: POL_DEV_ISSUER_KINDS names no kind it can use."
+        why = "No dev code kinds are set up."
     out = []
     for r in rows:
         k = _find(cfg, r["kind"])
@@ -359,13 +348,13 @@ def revoke(code, actor):
             where = ("its kind (%s) is not configured here now" % row["kind"] if k is None and row["kind"]
                      else "the %sFORGEJO_ settings are not set now" % (k["prefix"] if k else "POL_DEV_ISSUER_"))
             return 200, dict(out, token_deleted=False,
-                             warning="Revoked, but its Forgejo token was not deleted: %s. Delete the token "
-                                     "%s by hand, or set them again and press Revoke once more."
-                                     % (where, _token_name(row["kind"], short)))
+                             warning="Revoked, but its registry token %s wasn't deleted. Delete it by hand."
+                                     % _token_name(row["kind"], short))
         try:
             k["forgejo"].delete(ref)
         except ForgejoError as exc:
-            return 502, dict(out, error="Revoked here, but %s. Press Revoke again to retry." % exc)
+            print("[admin] dev code %s: registry token not deleted: %s" % (short, exc), flush=True)
+            return 502, dict(out, error="Revoked, but the registry token wasn't deleted. Press Revoke again.")
         db = adminusers.connect()
         try:
             db.execute("UPDATE dev_codes SET token_ref = NULL WHERE code = %s", (short,))

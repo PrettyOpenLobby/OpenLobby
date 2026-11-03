@@ -252,14 +252,18 @@ class AdminPort:
             return fn
         return wrap
 
-    def tool(self, id, label, path, about=""):
+    def tool(self, id, label, path, about="", group=""):
         """Decorator: a page of the game's own, served at /<path> and below.
-        `fn(method, subpath, query, body, actor)` -> (status, content_type, bytes)."""
+        `fn(method, subpath, query, body, actor)` -> (status, content_type, bytes).
+        Tools of one `group` share a tab in the panel."""
         if not _ID.match(id) or path.startswith("openlobby") or ".." in path:
             raise ValueError("tool %r / %r does not fit" % (id, path))
 
         def wrap(fn):
-            self._tools.append(({"id": id, "label": label, "path": path, "about": about}, fn))
+            meta = {"id": id, "label": label, "path": path, "about": about}
+            if group:
+                meta["group"] = group
+            self._tools.append((meta, fn))
             return fn
         return wrap
 

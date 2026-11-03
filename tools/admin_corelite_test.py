@@ -157,10 +157,13 @@ def main():
         chk("...nor held by the owner", sorted(POL_PERMS & set(s.get("perms") or [])), [])
         chk("no built-in PlayOnline title's either", sorted(p for p in labels if p.startswith("game.")
                                                             and not p.startswith("game.kart")), [])
-        chk("the panel's own and the game's remain",
+        chk("the panel's own and the game permissions remain",
             all(p in labels for p in ("calendar", "calendar_edit", "audit", "health", "settings",
-                                      "game.kart", "game.kart.laps", "game.kart.banner", "game.kart.help")),
+                                      "games.see", "games.message", "games.help", "games.edit")),
             True)
+        chk("...and the owner holds the game's own",
+            all(p in (s.get("perms") or []) for p in
+                ("game.kart", "game.kart.laps", "game.kart.banner", "game.kart.help")), True)
 
         print("the game")
         code, m = owner.call("api/modules")
@@ -219,11 +222,11 @@ def main():
         leaks = []
         for p in REFUSED_GET:
             code, d = owner.call(p)
-            if code != 404 or not isinstance(d, dict) or "without PlayOnline" not in d.get("error", ""):
+            if code != 404 or not isinstance(d, dict) or "doesn't run PlayOnline" not in d.get("error", ""):
                 leaks.append(("GET", p, code))
         for p in REFUSED_POST:
             code, d = owner.call(p, {"polid": "KART0001", "code": "AAAA-BBBB-CCCC-DDDD-EEEE"})
-            if code != 404 or not isinstance(d, dict) or "without PlayOnline" not in d.get("error", ""):
+            if code != 404 or not isinstance(d, dict) or "doesn't run PlayOnline" not in d.get("error", ""):
                 leaks.append(("POST", p, code))
         chk("every one answers 404 with a plain sentence", leaks, [])
         code, d = owner.call("api/online")
@@ -240,8 +243,8 @@ def main():
                                                       "game.kart.help", "calendar"]})
         chk("a moderator is added", code, 200)
         row = next((x for x in owner.call("api/mods")[1].get("mods", []) if x["username"] == "racedesk"), {})
-        chk("...without the PlayOnline permissions asked for", sorted(row.get("perms") or []),
-            ["calendar", "game.kart", "game.kart.help"])
+        chk("...without the PlayOnline permissions asked for, in the new form",
+            sorted(row.get("perms") or []), ["calendar", "games.help", "games.see"])
         mod = Client(url)
         chk("the moderator signs in", mod.login("racedesk", "race desk pass 1"), 200)
         code, s = mod.call("api/session")

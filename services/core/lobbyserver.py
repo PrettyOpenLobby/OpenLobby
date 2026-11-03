@@ -384,6 +384,43 @@ def _serve_http_on_lobby(conn, first, peer, port):
                             break
                     if done:
                         break
+        # A REGIONAL TWIN THE CRAWL NEVER HAD.
+        # A European English Viewer sends the same `[en]` User-Agent as a US one,
+        # but its $_USER_LANG is `en-GB`, and SE's pages build every data URL
+        # from it: /pcd/ntool/en-GB/latestnews.pml, /pcd/topics/ff11/en-GB/...,
+        # /pcd/sftp/en-GB/ff11/XBOX360/anews.pml, /pml/main/bn_i/en-GB/... SE
+        # hosted an en-GB copy of each; our tree only has en-US, so the net
+        # above (well-formed tags are left alone) let these fall to the
+        # built-in page, the news arrays were never defined, and the client
+        # drew an empty news bar and `(Variable Error)` on the FFXI page
+        # (2026-10-27, a UK 360). Serve the twin in the SAME language only, so
+        # this can never hand Japanese to an English client, and wherever the
+        # tag sits in the path (topics carry it one segment deeper than ntool).
+        if not os.path.isfile(cand) and rel.lower().startswith(("pcd/", "pml/")):
+            parts = rel.split("/")
+            for i, seg in enumerate(parts[:-1]):
+                m = re.fullmatch(r"([a-z]{2})-[A-Z]{2}", seg)
+                if not m:
+                    continue
+                order = ([lang] if lang else []) + [
+                    s.strip() for s in os.environ.get(
+                        "POL_PORTAL_LANG_FALLBACK", "ja-JP,en-US").split(",")
+                    if s.strip()]
+                done = False
+                for want in order:
+                    if want == seg or not want.startswith(m.group(1) + "-"):
+                        continue
+                    for root, label in roots:
+                        alt = os.path.normpath(os.path.join(
+                            root, host, "/".join(parts[:i] + [want] + parts[i + 1:])))
+                        if portalauth._under(root, alt) and os.path.isfile(alt):
+                            log("lobby", f"{peer}   lang twin [{label}]: "
+                                         f"{seg} -> {want}")
+                            cand, done = alt, True
+                            break
+                    if done:
+                        break
+                break
         if portalauth._under(www, cand) and os.path.isfile(cand):
             with open(cand, "rb") as f:
                 body = f.read()

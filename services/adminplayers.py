@@ -50,12 +50,12 @@ def lookup(who, can, owner):
                 try:
                     doc = f.result()
                 except Exception:          # noqa: BLE001 -- one game down is a note
-                    problems.append("%s is not answering right now" % m.title)
+                    problems.append("Couldn't reach %s." % m.title)
                     continue
                 if isinstance(doc, dict) and (doc.get("characters") or doc.get("note")):
                     out.append(_clean(m, doc))
             for f in pending:
-                problems.append("%s took too long" % futs[f].title)
+                problems.append("Couldn't reach %s." % futs[f].title)
     order = list(adminmodules.enabled())
     out.sort(key=lambda g: order.index(g["game"]) if g["game"] in order else 99)
     return 200, {"games": out, "problems": sorted(problems),

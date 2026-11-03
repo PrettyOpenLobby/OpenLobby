@@ -52,9 +52,9 @@ def listing(can, owner, open_only=True):
                 try:
                     rows += [_row(m, t) for t in (f.result() or []) if isinstance(t, dict)]
                 except Exception:          # noqa: BLE001 -- one game down is a note
-                    problems.append("%s: its help desk is not answering right now" % m.title)
+                    problems.append("Couldn't reach %s." % m.title)
             for f in pending:
-                problems.append("%s: its help desk took too long" % futs[f].title)
+                problems.append("Couldn't reach %s." % futs[f].title)
     # the ones waiting for us first, then newest
     rows.sort(key=lambda r: (not r["waiting"] or r["closed"], -(r["at"] or 0)))
     return 200, {"threads": rows, "problems": sorted(problems),
@@ -79,7 +79,7 @@ def thread(game, tid, can, owner):
     except LookupError as exc:
         return 404, {"error": str(exc) or "That request is gone."}
     except Exception as exc:                      # noqa: BLE001
-        return 502, {"error": "%s's help desk did not answer (%s)." % (m.title, exc.__class__.__name__)}
+        return 502, {"error": "Couldn't reach %s. Try again in a minute." % m.title}
     if not isinstance(t, dict):
         return 404, {"error": "That request is gone."}
     who = t.get("who") if isinstance(t.get("who"), dict) else {"name": t.get("who")}
@@ -113,5 +113,5 @@ def act(body, actor, can, owner):
         else:
             return 400, {"error": "Unknown action."}
     except Exception as exc:                      # noqa: BLE001
-        return 502, {"error": "%s's help desk did not answer (%s)." % (m.title, exc.__class__.__name__)}
+        return 502, {"error": "Couldn't reach %s. Try again in a minute." % m.title}
     return (200 if ok else 409), ({"ok": True, "msg": str(msg)} if ok else {"error": str(msg)})

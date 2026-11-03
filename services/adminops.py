@@ -178,19 +178,19 @@ def ops_request(data_dir, action, by, now=None):
     listed is accepted, and not while its status is stale."""
     st = ops_status(data_dir, now)
     if st is None or st["stale"]:
-        return False, "The server checker is not running, so it cannot do that."
+        return False, "Server checks aren't running. Try again in a minute."
     actions = st.get("actions") or {}
     if not isinstance(action, str) or not _OPS_ID.match(action) or action not in actions:
-        return False, "That is not a fix the server knows."
+        return False, "Unknown fix."
     if st.get("running"):
-        return False, "Another fix is still running. Wait for it to finish."
+        return False, "Another fix is running. Try again when it ends."
     # a game's update (status "updates", one per game the runner can update): it runs beside
     # the other fixes, one at a time per game
     update = next((u for u in (st.get("updates") or {}).values()
                    if isinstance(u, dict) and u.get("action") == action), None) \
         if isinstance(st.get("updates"), dict) else None
     if update is not None and update.get("running"):
-        return False, "That update is still running. Wait for it to finish."
+        return False, "That update is still running."
     now = time.time() if now is None else now
     req = os.path.join(data_dir, "ops", "requests")
     os.makedirs(req, exist_ok=True)
@@ -200,9 +200,8 @@ def ops_request(data_dir, action, by, now=None):
         json.dump({"action": action, "by": str(by)[:64], "at": now}, f)
     os.replace(tmp, os.path.join(req, name))
     if update is not None:
-        return True, ("%s: asked. It can take a few minutes; the result shows here when it ends."
-                      % actions[action].get("name", action))
-    return True, "%s requested. It usually takes under a minute." % actions[action].get("name", action)
+        return True, "Update started."
+    return True, "%s started." % actions[action].get("name", action)
 
 
 #: IPv4 and IPv6 addresses, masked in logs shown to anyone but the owner
@@ -218,9 +217,9 @@ def logs_request(data_dir, group, by, now=None):
     the runner listed, and not while it is stale."""
     st = ops_status(data_dir, now)
     if st is None or st["stale"]:
-        return False, "The server checker is not running, so it cannot read logs."
+        return False, "Logs unavailable. Try again in a minute."
     if not isinstance(group, str) or not _OPS_ID.match(group) or group not in (st.get("logs") or []):
-        return False, "The server checker has no logs for that."
+        return False, "No logs for that."
     now = time.time() if now is None else now
     req = os.path.join(data_dir, "ops", "logreq")
     os.makedirs(req, exist_ok=True)

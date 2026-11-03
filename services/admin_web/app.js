@@ -67,7 +67,7 @@ function uiAsk(o) {
       for (let i = 0; i < fields.length; i++) {
         const v = $("#askF" + i).value.trim();
         if (fields[i].required && !v) {
-          $("#askErr").textContent = fields[i].required === true ? `${fields[i].label}: write something first.` : fields[i].required;
+          $("#askErr").textContent = fields[i].required === true ? `Fill in ${fields[i].label}.` : fields[i].required;
           $("#askErr").hidden = false;
           return $("#askF" + i).focus();
         }
@@ -116,6 +116,8 @@ const VIEWS = [
   // PML Preview belongs to the PlayOnline Viewer's module (Games > POL Viewer)
   { id: "pml", group: "games", perm: "pml", pol: true },
   { id: "news", group: "news", perm: "news_edit", pol: true },
+  // the fan sites the Community Site Tool banner knows (comsites.js); needs POL_COMTOOL_URL
+  { id: "comsites", group: "news", perm: "comsites", pol: true },
   // without the core, the News section is only the maintenance warning, into the games
   { id: "maint", group: "news", tab: "news", lite: true },
   { id: "calendar", group: "calendar", perm: "calendar" },
@@ -125,6 +127,7 @@ const VIEWS = [
   { id: "bots", group: "settings", perm: "owner", pol: true },
   { id: "modules", group: "settings", perm: "owner" },
   { id: "deploy", group: "settings", perm: "owner" },
+  { id: "logs", group: "settings", perm: "owner" },
   { id: "activity", group: "settings", tab: "security", sub: "activity", perm: "audit" },
 ];
 const GROUP_TITLE = { overview: "Overview", players: "People", inbox: "Inbox",
@@ -164,7 +167,7 @@ const isOwner = () => SESSION.role !== "mod";
 // the PlayOnline routes; here the same permissions simply read as not held.
 const coreOff = () => SESSION.core === "none";
 const POL_PERMS = new Set(["gm", "codes", "codes_void", "reports", "accounts_view", "accounts_manage",
-                           "accounts_delete", "news_edit", "news_publish", "pml"]);
+                           "accounts_delete", "news_edit", "news_publish", "comsites", "pml"]);
 const can = (p) => !(coreOff() && POL_PERMS.has(p)) && (isOwner() || (SESSION.perms || []).includes(p));
 // the maintenance warning without the core: any game's announce action
 const canAnnounce = () => isOwner() || (SESSION.perms || []).some((p) => /^game\.[a-z0-9]+\.announce$/.test(p));
@@ -178,6 +181,7 @@ const tabAllowed = (t) => {
   if (t === "games") return canSeeGames();
   if (t === "gamehelp") return canGameHelp();
   if (t === "inbox") return can("gm") || can("reports") || canGameHelp();
+  if (t === "comsites" && !SESSION.comtool) return false;
   return !v.perm || (v.perm === "owner" ? isOwner() : can(v.perm));
 };
 const visibleTabs = () => TABS.filter(tabAllowed);
@@ -191,7 +195,6 @@ function applyRole() {
     GROUP_TITLE.news = "Maintenance";
     const nb = document.querySelector('.side .grp[data-group="news"]');
     if (nb && nb.lastChild) nb.lastChild.textContent = "Maintenance";
-    $("#maintHint").textContent = "Sends a message into each game you tick, to the players in it now.";
     $("#maintMsgBtn").textContent = "Announce in the games";
     $("#maintGamesLabel").textContent = "Announce in";
     $("#alertsTab").textContent = "Service checks";
@@ -203,6 +206,8 @@ function applyRole() {
   document.querySelectorAll("[data-perm]").forEach((el) => { el.hidden = !can(el.dataset.perm); });
   if (coreOff()) $("#maintPanel").hidden = !canAnnounce();
   $("#mePanel").hidden = isOwner();
+  const ag = $("#signinGrid");
+  ag.classList.toggle("solo", [...ag.children].filter((el) => !el.hidden).length < 2);
   const sec = document.querySelector('.subtabs button[data-tab="security"]');
   sec.textContent = isOwner() ? (coreOff() ? "My login" : "Sign-in") : "My account";
 }
@@ -217,7 +222,7 @@ function showTab(name) {
   document.querySelectorAll(".side .grp").forEach(
     (x) => x.classList.toggle("on", x.dataset.group === v.group));
   document.querySelectorAll(".subtabs").forEach((n) => {
-    n.hidden = n.dataset.group !== v.group;
+    n.hidden = n.dataset.group !== v.group || !n.querySelector("button[data-tab]:not([hidden])");
     n.querySelectorAll("button[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   });
   $("#gamesList").hidden = v.group !== "games";
@@ -245,12 +250,14 @@ function loadTab(name, refresh) {
   if (name === "issues") loadIssues().then(() => markSeen("issues"));
   if (name === "gmcalls") { loadGmCalls(); startGmDesk(); renderAlertBtn(); }
   if (name === "news") loadNews();
+  if (name === "comsites") loadComsites();
   if (name === "maint") loadMaint();
   if (name === "calendar") loadCalendar();
   if (name === "gamehelp") loadGameHelp();
   if (name === "inbox") loadInbox();
   if (name === "games") loadGames(refresh);
   if (name === "bots") loadBots();
+  if (name === "logs") loadLogAreas();
   if (name === "modules") loadModules();
   if (name === "deploy") loadDeploy();
   if (name !== "deploy") stopDeployPoll();
@@ -308,9 +315,7 @@ async function loadSession() {
   try { SESSION = await api("/api/session"); } catch { SESSION = {}; }
   const who = $("#who");
   if (SESSION.authenticated) {
-    who.innerHTML = `<span title="${SESSION.remember
-        ? "Remembered on this device: stays signed in across restarts"
-        : "Signed in until this browser closes"}">signed in as ` +
+    who.innerHTML = `<span>Signed in as ` +
       `<b style="color:var(--text)">${esc(SESSION.user)}</b>` +
       (SESSION.role === "mod" ? ` <span class="pill open">moderator</span>` : "") + `</span>`;
     const out = document.createElement("button");
@@ -321,7 +326,7 @@ async function loadSession() {
     };
     who.appendChild(out);
   } else {
-    who.innerHTML = `<span title="Anyone who can reach this address has full access.">no password set</span>`;
+    who.innerHTML = `<span>No password set</span>`;
   }
 
   const authOn = !!SESSION.auth_required;
@@ -330,37 +335,38 @@ async function loadSession() {
   const st = $("#secState");
   if (!authOn) {
     st.className = "note warn";
-    st.innerHTML = `<b>No password is set.</b> Anyone who can reach this address has
-      full access. Set one below.`;
+    st.textContent = "No password set. Anyone who can open this page has full access.";
   } else if (SESSION.credential_set) {
-    const when = (SESSION.updated_at || "").slice(0, 19).replace("T", " ");
-    st.className = "note";
-    st.innerHTML = `Password last changed ${when ? when + " UTC" : "(unknown)"}.`
-      + (SESSION.env_override ? ` An override password is also set in the server
-        environment (<code class="mono">POL_ADMIN_PASSWORD</code>).` : "");
+    const ms = whenMs(SESSION.updated_at);
+    st.className = "gml-state";
+    st.textContent = ms ? "Changed " + shortDate(new Date(ms)) : "";
+    if (SESSION.env_override) {
+      const o = document.createElement("span");
+      o.title = "POL_ADMIN_PASSWORD";
+      o.textContent = (st.textContent ? ". " : "") + "An override password is also set.";
+      st.appendChild(o);
+    }
   } else {
     st.className = "note warn";
-    st.innerHTML = `Signed in with the environment override password. Set a password
-      here to manage it from the panel.`;
+    st.textContent = "Signed in with the override password. Set a password here.";
   }
 }
 
 $("#secSave").onclick = async () => {
   const username = $("#secUser").value.trim();
   const password = $("#secNew").value, confirm = $("#secNew2").value;
-  if (!username) return toast("Username is required", true);
+  if (!username) return toast("Enter a username.", true);
   // Both new-password boxes empty: keep the password, change only the username.
   const keep = !password && !confirm && !!SESSION.credential_set;
-  if (!keep && password !== confirm) return toast("The two new passwords do not match", true);
-  if (!keep && password.length < 8) return toast("Password must be at least 8 characters", true);
+  if (!keep && password !== confirm) return toast("The new passwords don't match.", true);
+  if (!keep && password.length < 8) return toast("Use at least 8 characters.", true);
   try {
     const r = await api("/api/credentials", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ current: $("#secCurrent").value, username, password })
     });
     $("#secCurrent").value = ""; $("#secNew").value = ""; $("#secNew2").value = "";
-    toast(keep ? "Username saved. Your other browsers were signed out."
-               : "Saved. Your other browsers were signed out.");
+    toast("Saved. Other browsers signed out.");
     loadSession();
   } catch (e) { toast(e.message, true); }
 };
@@ -419,11 +425,9 @@ $("#code").addEventListener("input", (e) => {
   while (pos < el.value.length && seen < before) { if (el.value[pos] !== "-") seen++; pos++; }
   el.setSelectionRange(pos, pos);
   const short = el.value.replace(/-/g, "").length;
-  $("#codeHint").textContent = !short
-    ? "Format XXXX-XXXX-XXXX-XXXX-XXXX. Leave blank for a random code."
-    : short < CODE_GROUPS * CODE_GLEN
-      ? `${CODE_GROUPS * CODE_GLEN - short} more character(s).`
-      : "Complete.";
+  const left = CODE_GROUPS * CODE_GLEN - short;
+  $("#codeHint").textContent = !short ? "Leave blank for a random code."
+    : left ? `${left} more character${left === 1 ? "" : "s"}.` : "Complete.";
 });
 
 // ---- small shared helpers ----
@@ -447,6 +451,12 @@ function fmtWhen(t) {
   if (d.toDateString() === now.toDateString()) return "today " + hm;
   if (d.getFullYear() !== now.getFullYear()) return d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
   return d.toLocaleDateString([], { month: "short", day: "numeric" }) + ", " + hm;
+}
+// "Oct 25", or "Oct 25, 2025" in another year: a date in the viewer's local time
+function shortDate(d) {
+  const o = { month: "short", day: "numeric" };
+  if (d.getFullYear() !== new Date().getFullYear()) o.year = "numeric";
+  return d.toLocaleDateString([], o);
 }
 function utcTitle(t) {
   const ms = whenMs(t);
@@ -479,7 +489,7 @@ async function copyText(text, what) {
     try { ok = document.execCommand("copy"); } catch (e) {}
     ta.remove();
   }
-  toast(ok ? `Copied ${what}` : "Copy failed. Select the text and copy it manually.", !ok);
+  toast(ok ? `Copied ${what}.` : "Couldn't copy. Select the text and copy it.", !ok);
 }
 
 // the small copy button beside a code or an ID (class "copy", title says what it copies)
@@ -544,7 +554,7 @@ function renderCodes() {
     `${rows.length} shown · ${unused} unused of ${CODES.length}`;
   if (!rows.length) {
     body.innerHTML = `<tr><td colspan="8" class="muted">${CODES.length
-      ? "No codes match." : "No codes yet. Make one above."}</td></tr>`;
+      ? "No matches." : "No codes yet."}</td></tr>`;
     renderCodeLimit();
     return;
   }
@@ -555,7 +565,7 @@ function renderCodes() {
     // code judged on redeemed_by alone would read as unused again.
     const used = codeUsed(r);
     const by = r.redeemed_by ? "redeemed by " + esc(r.redeemed_by)
-                             : "redeemed (account deleted)";
+                             : "redeemed by a deleted account";
     return `<tr>` +
       `<td style="white-space:nowrap"><code class="mono">${esc(r.code)}</code>` +
         `<button class="copy" data-copy="${esc(r.code)}" title="Copy the code" aria-label="Copy the code">${COPY_ICON}</button></td>` +
@@ -580,8 +590,7 @@ function renderCodeLimit() {
   const day = Date.now() - 86400e3;
   const used = CODES.filter((r) => isoMs(r.created_at) > day).length;
   el.hidden = false;
-  el.textContent = `You can make ${lim} code${lim === 1 ? "" : "s"} per 24 hours: `
-    + `${Math.max(0, lim - used)} left right now.`;
+  el.textContent = `${Math.max(0, lim - used)} of ${lim} codes left for the next 24 hours.`;
 }
 
 $("#codesBody").onclick = async (e) => {
@@ -590,15 +599,14 @@ $("#codesBody").onclick = async (e) => {
   const v = e.target.closest("[data-void]");
   if (!v) return;
   const code = v.dataset.void;
-  if (!await uiAsk({ title: `Void ${code}?`, text: "It is deleted and can no longer be redeemed.",
-                     ok: "Void the code", danger: true })) return;
+  if (!await uiAsk({ title: `Void ${code}?`, ok: "Void", danger: true })) return;
   v.disabled = true;
   try {
     await api("/api/codes/void", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code })
     });
-    toast("Voided " + code);
+    toast("Voided.");
     loadCodes();
   } catch (err) { v.disabled = false; toast(err.message, true); }
 };
@@ -608,20 +616,19 @@ $("#codeSearch").addEventListener("input", () => {
 });
 $("#codeCopyShown").onclick = () => {
   const rows = codesShown();
-  if (!rows.length) return toast("Nothing to copy", true);
-  copyText(rows.map((r) => r.code).join("\n"), `${rows.length} code(s)`);
+  if (!rows.length) return toast("Nothing to copy.", true);
+  copyText(rows.map((r) => r.code).join("\n"), `${rows.length} code${rows.length === 1 ? "" : "s"}`);
 };
 $("#codeVoidShown").onclick = async () => {
   const rows = codesShown().filter((r) => !codeUsed(r));
-  if (!rows.length) return toast("No unused codes shown", true);
+  if (!rows.length) return toast("No unused codes shown.", true);
   if (!await uiAsk({ title: `Void ${rows.length} unused code${rows.length === 1 ? "" : "s"}?`,
-                     text: "The codes shown are deleted and can no longer be redeemed.",
-                     ok: `Void ${rows.length}`, danger: true })) return;
+                     ok: "Void", danger: true })) return;
   let n = 0;
   for (const r of rows) {
     try { await post("/api/codes/void", { code: r.code }); n++; } catch (e) { toast(e.message, true); break; }
   }
-  toast(`Voided ${n} code${n === 1 ? "" : "s"}`);
+  toast(`Voided ${n} code${n === 1 ? "" : "s"}.`);
   loadCodes();
 };
 
@@ -633,14 +640,14 @@ $("#codeCsv").onclick = () => downloadCsv("registration-codes.csv",
 
 $("#createBtn").onclick = async () => {
   const contents = [...document.querySelectorAll("#contentChips input:checked")].map((c) => +c.value);
-  if (!contents.length) return toast("Pick at least one content", true);
+  if (!contents.length) return toast("Pick at least one title.", true);
   const n = parseInt($("#codeCount").value, 10) || 1;
-  if (n < 1 || n > 50) return toast("Make between 1 and 50 at a time", true);
+  if (n < 1 || n > 50) return toast("Make 1 to 50 at a time.", true);
   const typed = $("#code").value.trim();
-  if (typed && n > 1) return toast("Leave the code blank to make several at once", true);
+  if (typed && n > 1) return toast("Leave the code blank to make more than one.", true);
   const note = $("#note").value.trim(), btn = $("#createBtn"), made = [];
   const exp = $("#codeExpire").value.trim();
-  if (exp && !(+exp > 0)) return toast("Expiry must be a number of days", true);
+  if (exp && !(+exp > 0)) return toast("Enter the expiry in days.", true);
   btn.disabled = true;
   try {
     for (let i = 0; i < n; i++) {
@@ -654,16 +661,17 @@ $("#createBtn").onclick = async () => {
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; btn.textContent = "Create code"; }
   if (!made.length) return;
-  toast(made.length === 1 ? "Created " + made[0] : `Created ${made.length} codes`);
-  $("#code").value = ""; $("#codeHint").textContent = "Format XXXX-XXXX-XXXX-XXXX-XXXX. Leave blank for a random code.";
+  toast(made.length === 1 ? "Created." : `Created ${made.length} codes.`);
+  $("#code").value = ""; $("#codeHint").textContent = "Leave blank for a random code.";
   $("#newCodesList").textContent = made.join("\n");
-  $("#newCodesCount").textContent = `Just created: ${made.length} code${made.length === 1 ? "" : "s"}`;
+  $("#newCodesCount").textContent = `${made.length} new code${made.length === 1 ? "" : "s"}`;
   $("#newCodes").hidden = false;
   loadCodes();
 };
 $("#newCodesCopy").onclick = () => {
   const t = $("#newCodesList").textContent.trim();
-  if (t) copyText(t, `${t.split("\n").length} code(s)`);
+  const n = t.split("\n").length;
+  if (t) copyText(t, `${n} code${n === 1 ? "" : "s"}`);
 };
 
 // ---- accounts ----
@@ -794,14 +802,13 @@ $("#accCsv").onclick = () => downloadCsv("accounts.csv",
     r.created_at]));
 
 async function kickAccount(polid) {
-  if (!await uiAsk({ title: `Kick ${polid}?`, ok: "Kick", danger: true,
-                     text: "Every current session is disconnected. They can sign in again unless a login refusal is set." })) return;
+  if (!await uiAsk({ title: `Kick ${polid}?`, ok: "Kick", danger: true })) return;
   try {
     const result = await api("/api/account-kick", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({polid})
     });
-    toast(`Disconnected ${result.kicked} current session${result.kicked === 1 ? "" : "s"} for ${polid}`);
+    toast(`Kicked ${result.kicked} session${result.kicked === 1 ? "" : "s"}.`);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -818,8 +825,7 @@ $("#stateCode").innerHTML = ACCOUNT_STATES.filter(([code]) =>
 function selectState(code) {
   $("#stateCode").value = String(code);
   const state = accountState(code);
-  $("#stateMeaning").textContent = state ?
-    `Client text: ${state[2]}` : "";
+  $("#stateMeaning").textContent = state && code ? `Player sees “${state[2]}”` : "";
   syncStateDuration();
   $("#stateChoices").querySelectorAll("button").forEach((button) => {
     const selected = Number(button.dataset.code) === code;
@@ -837,10 +843,7 @@ function syncStateDuration() {
   if (disabled) $("#stateDuration").value = "none";
   $("#stateUntilWrap").style.display = !disabled &&
     $("#stateDuration").value === "custom" ? "" : "none";
-  $("#stateDurationHint").textContent = permanent
-    ? "Permanent bans cannot have an expiration."
-    : code === 0 ? "Clearing a refusal also clears its expiration."
-    : "At expiration, the account is allowed to log in again automatically.";
+  $("#stateDurationHint").textContent = permanent ? "Bans don't expire." : "";
 }
 
 function localDateTime(iso) {
@@ -889,10 +892,10 @@ $("#stateGo").onclick = async () => {
   if (code && code !== 0xE7 && duration !== "none") {
     if (duration === "custom") {
       const local = $("#stateUntil").value;
-      if (!local) return toast("Choose an expiration date and time", true);
+      if (!local) return toast("Pick when it expires.", true);
       const date = new Date(local);
       if (!Number.isFinite(date.getTime()) || date <= new Date())
-        return toast("Expiration must be in the future", true);
+        return toast("Pick a time in the future.", true);
       until = date.toISOString();
     } else {
       const periods = { "1h": 3600000, "1d": 86400000,
@@ -909,9 +912,9 @@ $("#stateGo").onclick = async () => {
     });
     closeState();
     toast(result.kick_error
-      ? `${polid}: refusal saved, but current sessions could not be kicked: ${result.kick_error}`
-      : `${polid}: ${code ? stateLabel(code) : "refusal cleared"}` +
-        (kick ? `; disconnected ${result.kicked} current session${result.kicked === 1 ? "" : "s"}` : ""),
+      ? `Saved. Couldn't kick sessions: ${result.kick_error}`
+      : (code ? "Saved." : "Refusal cleared.") +
+        (kick ? ` Kicked ${result.kicked} session${result.kicked === 1 ? "" : "s"}.` : ""),
       !!result.kick_error);
     loadAccounts();
   } catch (e) { toast(e.message, true); }
@@ -931,9 +934,7 @@ $("#infoCode").innerHTML = INFO_CODES.map((code) => {
 function selectInformation(code) {
   $("#infoCode").value = String(code);
   const state = accountState(code);
-  $("#infoMeaning").textContent = state ? `Expected client text: ${state[2]}` +
-    (code === 0xDE ? " OpenLobby does not currently fill the date fields." : "")
-    : "The client text for this code has not been documented here.";
+  $("#infoMeaning").textContent = !code ? "" : state ? `Player sees “${state[2]}”` : "No text known for this code.";
 }
 
 function askInformation(account) {
@@ -968,7 +969,7 @@ $("#infoGo").onclick = async () => {
       body: JSON.stringify({ polid, code, repeat })
     });
     closeInformation();
-    toast(`${polid}: ${code ? stateLabel(code) : "login notice cleared"}`);
+    toast(code ? "Saved." : "Notice cleared.");
     loadAccounts();
   } catch (e) { toast(e.message, true); }
   finally { button.disabled = false; }
@@ -984,7 +985,7 @@ function outsideAddr(r) {
 const extMailWord = (on) => on ? "Turn off outside mail" : "Turn on outside mail";
 const extMailTitle = (r) => outsideAddr(r)
   ? `Mail to and from the internet as ${outsideAddr(r)}`
-  : "Outside mail isn't set up on this server, or this account has no mail name yet";
+  : "Not set up for this account";
 async function toggleExtMail(r, btn) {
   const on = !r.ext_mail;
   btn.disabled = true;
@@ -995,7 +996,7 @@ async function toggleExtMail(r, btn) {
     });
     r.ext_mail = res.ext_mail;
     btn.textContent = extMailWord(res.ext_mail);
-    toast(`Outside mail ${res.ext_mail ? "on" : "off"} for ${res.polid}`);
+    toast(`Outside mail ${res.ext_mail ? "on" : "off"}.`);
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; }
 }
@@ -1035,7 +1036,7 @@ function renderIssues() {
   body.innerHTML = "";
   if (!rows.length) {
     body.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">` +
-      (ISSUES.length ? "No bug reports match." : "No bug reports filed.") + `</td></tr>`;
+      (ISSUES.length ? "No matches." : "No bug reports.") + `</td></tr>`;
     return;
   }
   rows.forEach((r) => {
@@ -1049,7 +1050,7 @@ function renderIssues() {
       `<td><b>${esc(r.handle) || "-"}</b><br>` +
         `<span style="color:var(--muted)">${esc(r.host) || ""}</span></td>` +
       `<td>${esc(r.title) || "-"}</td>` +
-      `<td><div class="clamp2">${esc(first) || "<i>(no description)</i>"}</div></td>` +
+      `<td><div class="clamp2">${esc(first) || "<i>No description</i>"}</div></td>` +
       // The honest-negative column. A bundle whose lines could not be tied to
       // this client is the case you must not read as "the server was quiet".
       `<td>${w.correlation_warning
@@ -1067,8 +1068,9 @@ function showIssue(r, refresh) {
   triPaint("iss", "issues", r, () => renderIssues());
   if (refresh) return;          // a reload keeps the file already open
   const w = r.window || {};
-  $("#issueId").textContent = r.id || "";
-  $("#issueDesc").textContent = r.description || "(no description)";
+  $("#issueId").textContent = r.handle ? "from " + r.handle : "";
+  $("#issueId").title = r.id || "";
+  $("#issueDesc").textContent = r.description || "No description.";
   const warn = $("#issueWarn");
   warn.style.display = w.correlation_warning ? "" : "none";
   warn.textContent = w.correlation_warning || "";
@@ -1088,15 +1090,17 @@ function showIssue(r, refresh) {
   const link = (rel, label, note) =>
     `<a href="#" data-f="${esc(rel)}">${esc(label)}</a>` +
     (note ? ` <span style="color:var(--muted)">${esc(note)}</span>` : "") + "<br>";
-  let html = "<b>client</b><br>";
+  let html = "<b>Player</b><br>";
   (r.client_files || []).forEach((f) => {
     html += link("client/" + f.name, f.name, fmtBytes(f.bytes));
   });
-  html += "<br><b>server</b><br>";
+  if (!(r.client_files || []).length) html += `<span style="color:var(--muted)">None.</span><br>`;
+  html += "<br><b>Server</b><br>";
+  if (!(r.server_files || []).length) html += `<span style="color:var(--muted)">None.</span><br>`;
   (r.server_files || []).forEach((n) => {
     const c = cuts[n];
     html += link("server/" + n, n,
-      c ? `${c.lines} lines${c.truncated ? " (truncated)" : ""}` : "");
+      c ? `${c.lines} lines${c.truncated ? ", cut short" : ""}` : "");
   });
   const box = $("#issueFiles");
   box.innerHTML = html;
@@ -1123,7 +1127,7 @@ async function openIssueFile(id, rel) {
     $("#issueViewName").textContent = rel;
     $("#issueViewName").style.display = "";
     // textContent, NOT innerHTML -- see the note at the top of this section.
-    $("#issueView").textContent = text || "(empty)";
+    $("#issueView").textContent = text || "Empty file.";
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1158,7 +1162,7 @@ function renderReports() {
   body.innerHTML = "";
   if (!rows.length) {
     body.innerHTML = `<tr><td colspan="6" style="color:var(--muted)">` +
-      (REPORTS.length ? "No reports match." : "No reports filed.") + `</td></tr>`;
+      (REPORTS.length ? "No matches." : "No reports.") + `</td></tr>`;
     return;
   }
   rows.forEach((r) => {
@@ -1182,26 +1186,26 @@ $("#repSearch").addEventListener("input", () => renderReports());
 // The attached transcript is the client's own, so it is shown verbatim.
 // `keep`: a reload of the one already open, which keeps a half-written answer.
 function showReport(r, keep) {
-  $("#reportLogWho").textContent = r.suspect || "(unnamed)";
-  $("#reportExpl").textContent = r.explanation || "(no explanation)";
+  $("#reportLogWho").textContent = r.suspect || "an unnamed player";
+  $("#reportExpl").textContent = r.explanation || "No explanation.";
   $("#reportLogHint").hidden = !r.log;
   $("#reportLog").hidden = !r.log;
   $("#reportLog").textContent = r.log || "";
   triPaint("rep", "reports", r, () => renderReports());
   const calls = r.gm_calls || [];
-  $("#repWho").innerHTML = (r.polid ? `Sent by POL ID <b class="mono">${esc(r.polid)}</b>.` :
-      `The sender address matches no account.`) +
+  $("#repWho").innerHTML = (r.polid ? `From <span class="mono">${esc(r.polid)}</span>.` :
+      `No matching account.`) +
     (calls.length ? ` <a href="#" id="repToGm">${calls.length} GM call${calls.length === 1 ? "" : "s"} from this player</a>` : "");
   const link = $("#repToGm");
   if (link) link.onclick = (e) => {
     e.preventDefault(); GM_SEL = calls[0]; GM_TICKET_SIG = ""; location.hash = "#gmcalls";
   };
-  $("#repReplyTo").textContent = r.from || "(no address)";
+  $("#repReplyTo").textContent = r.from || "no address";
   repPaintReplies(r);
   if (!keep) { $("#repReplyText").value = ""; $("#repReplyClose").checked = false; }
   const send = async (b) => {
     const text = $("#repReplyText").value.trim();
-    if (!text) { toast("Write a message first", true); return; }
+    if (!text) { toast("Write an answer first.", true); return; }
     const status = !triClosed(r) && $("#repReplyClose").checked ? "resolved" : null;
     b.disabled = true;
     try {
@@ -1213,7 +1217,7 @@ function showReport(r, keep) {
                                      status_at: Date.now() / 1000 });
       $("#repReplyText").value = "";
       $("#repReplyClose").checked = false;
-      toast(`Mail sent to ${out.to}` + (status ? ", report marked resolved" : ""));
+      toast(`Sent to ${out.to}.` + (status ? " Marked resolved." : ""));
       repPaintReplies(r);
       triPaint("rep", "reports", r, () => renderReports());
       renderReports();
@@ -1249,7 +1253,7 @@ const triChip = (r) =>
   `<span class="tri-st ${esc(r.status || "open")}">${TRI_LABEL[r.status] || "Open"}</span>`;
 function triCount(shown, all) {
   const open = all.filter((r) => !triClosed(r)).length;
-  return `${shown} shown, ${open} open of ${all.length}`;
+  return `${shown} of ${all.length} · ${open} open`;
 }
 function triFillSelect(sel, values) {
   const el = $(sel), keep = el.value;
@@ -1283,8 +1287,8 @@ function triPaint(pfx, kind, r, after) {
       const changed = status !== st;
       Object.assign(r, { status, status_note: text, status_by: SESSION.user || "you",
                          status_at: Date.now() / 1000 });
-      toast(!changed ? "Note saved" : status === "open" ? "Reopened"
-            : `Marked ${TRI_LABEL[status].toLowerCase()}`);
+      toast(!changed ? "Note saved." : status === "open" ? "Reopened."
+            : `Marked ${TRI_LABEL[status].toLowerCase()}.`);
       triPaint(pfx, kind, r, after);
       after();
       loadInboxCounts();
@@ -1373,9 +1377,8 @@ function gmRenderDuty(d) {
     ? "You're on duty" + (others.length ? ` with ${others.join(", ")}` : "")
     : gms.length ? `${others.join(", ")} ${others.length === 1 ? "is" : "are"} on duty`
     : "Nobody is on duty";
-  const away = gms.length ? "Players can start a chat once their request is knocked"
-    : "New requests get an automatic reply by mail";
-  $("#gmStateSub").textContent = `${away} · ${d.waiting} on a GM Call now`;
+  $("#gmStateSub").textContent = [d.waiting ? `${d.waiting} on GM Call now` : "",
+    gms.length ? "" : "Automatic mail replies on"].filter(Boolean).join(" · ");
   const btn = $("#gmDutyBtn");
   btn.textContent = mine ? "Go off duty" : "Go on duty";
   btn.className = mine ? "ghost" : "act";
@@ -1388,8 +1391,8 @@ function gmRenderDuty(d) {
   const has = (v) => v !== null && v !== undefined;
   if (has(pf) || has(pq)) {
     $("#gmWarnText").textContent = has(pf)
-      ? "An override is set: players' GM Call screens ignore duty until it is cleared."
-      : `An override is set: players see a queue of ${pq} until it is cleared.`;
+      ? "An override hides duty from players."
+      : `An override shows players a queue of ${pq}.`;
     $("#gmWarn").hidden = false;
   } else {
     $("#gmWarn").hidden = true;
@@ -1401,11 +1404,11 @@ function gmRenderDutyPanel(d) {
   $("#gmDutyList").innerHTML = gms.length
     ? gms.map((g) => `<div>${esc(g.user)}${g.user === d.me ? " (you)" : ""} · until ${esc(gmTime(g.until))}
         · ${g.via === "discord" ? "from Discord" : "from this page"}</div>`).join("")
-    : `<div class="gmn-empty">Nobody is on duty.</div>`;
+    : `<div class="gmn-empty">Nobody on duty.</div>`;
   const link = d.discord;
   $("#gmDiscordState").textContent = link
-    ? `Linked to ${link.name || "Discord user " + link.discord_id}. /gm duty in Discord acts as you.`
-    : "Not linked. Link a Discord account to go on or off duty with /gm duty.";
+    ? `Linked to ${link.name || "Discord user " + link.discord_id}.`
+    : "Not linked. Run /gm link in Discord and paste the code.";
   $("#gmDiscordLinkRow").hidden = !!link;
   $("#gmDiscordUnlinkRow").hidden = !link;
 }
@@ -1414,14 +1417,14 @@ $("#gmDiscordLink").onclick = async () => {
   try {
     await api("/api/gm-discord", gmPost({ code: $("#gmDiscordCode").value }));
     $("#gmDiscordCode").value = "";
-    toast("Discord linked");
+    toast("Linked.");
     loadGmDesk();
   } catch (e) { toast(e.message, true); }
 };
 $("#gmDiscordUnlink").onclick = async () => {
   try {
     await api("/api/gm-discord", gmPost({ unlink: true }));
-    toast("Discord unlinked");
+    toast("Unlinked.");
     loadGmDesk();
   } catch (e) { toast(e.message, true); }
 };
@@ -1466,9 +1469,8 @@ function gmRenderLog(d) {
     }
   });
   if (d.pending > 0)
-    html += `<div class="gm-sys">${d.pending} line${d.pending > 1 ? "s" : ""} waiting to be delivered.</div>`;
-  log.innerHTML = html || `<div class="gm-log-empty">No messages yet. Messages appear ` +
-    `here once the player joins the chat from their GM Call screen.</div>`;
+    html += `<div class="gm-sys">${d.pending} line${d.pending > 1 ? "s" : ""} not delivered yet.</div>`;
+  log.innerHTML = html || `<div class="gm-log-empty">No messages yet.</div>`;
   if (wasBottom) log.scrollTop = log.scrollHeight;
 }
 
@@ -1479,11 +1481,11 @@ function gmRenderChatState(d) {
   for (let i = rows.length - 1; i >= 0; i--) if (rows[i].dir === "in") { lastIn = rows[i].at; break; }
   let text, cls = "";
   if (lastIn && Date.now() / 1000 - lastIn < 600) {
-    text = `Player active, last heard ${gmAgo(lastIn)}`; cls = "good";
+    text = `Player active ${gmAgo(lastIn)}`; cls = "good";
   } else if (lastIn) {
-    text = `Room quiet, last player line ${gmAgo(lastIn)}`;
+    text = `Player last spoke ${gmAgo(lastIn)}`;
   } else {
-    text = "Nobody has spoken in this room yet";
+    text = "";
   }
   el.textContent = text;
   el.className = "gm-chat-state " + cls;
@@ -1493,7 +1495,7 @@ function gmRenderChatState(d) {
 function gmRenderComposeHint() {
   const t = GM_CALLS.find((x) => x.id === GM_SEL);
   $("#gmComposeHint").textContent = t && !t.knocked_at && t.status !== "closed"
-    ? "Knock first so the player can join the chat." : "";
+    ? "Knock first to let the player join." : "";
 }
 
 const gmPost = (body) => ({
@@ -1513,16 +1515,16 @@ async function gmControl(body, msg) {
 
 $("#gmDutyBtn").onclick = () => {
   const d = GM_DESK || {};
-  if (d.me_on_duty) return gmControl({ on_duty: false }, "Off duty");
+  if (d.me_on_duty) return gmControl({ on_duty: false }, "Off duty.");
   // Going on duty means "let callers in", so it also drops any pins that would
   // hide the buttons. A pin is a diagnostic; leaving one in force here is how
   // the 09-26 caller got a desk that looked open and was not.
   const body = { on_duty: true };
   const pinned = (d.pinned_flags ?? null) !== null || (d.pinned_queue ?? null) !== null;
   if (pinned) { body.flags = null; body.queue = null; }
-  gmControl(body, "On duty" + (pinned ? " (pins cleared)" : ""));
+  gmControl(body, "On duty." + (pinned ? " Pins cleared." : ""));
 };
-$("#gmWarnFix").onclick = () => gmControl({ flags: null, queue: null }, "Pins cleared");
+$("#gmWarnFix").onclick = () => gmControl({ flags: null, queue: null }, "Pins cleared.");
 
 // -- notices ----------------------------------------------------------------
 // The GM Call > Next page's list (gmnotices.py). The sections are SE's and
@@ -1539,7 +1541,7 @@ function gmnRender() {
   $("#gmnSecs").innerHTML = GMN[loc].sections.map((sec, si) => `
     <div class="gmn-sec">
       <h3 class="gm-diag-h">${esc(sec.title)}</h3>
-      ${sec.items.length ? "" : `<div class="gmn-empty">Empty. Players see "${esc(GMN[loc].empty)}"</div>`}
+      ${sec.items.length ? "" : `<div class="gmn-empty">Empty. Players see “${esc(GMN[loc].empty)}”</div>`}
       ${sec.items.map((it, ii) => `
         <div class="gmn-item" data-s="${si}" data-i="${ii}">
           <div class="row">
@@ -1549,10 +1551,10 @@ function gmnRender() {
               <select data-k="mark">${GMN_MARKS.map(([v, t]) =>
                 `<option value="${v}"${it.mark === v ? " selected" : ""}>${t}</option>`).join("")}</select></div>
           </div>
-          <div><label>Hover text <span class="hint" style="display:inline">(blank = the title)</span></label>
-            <input type="text" data-k="hover" maxlength="120" value="${esc(it.hover)}"></div>
-          <div><label>Details <span class="hint" style="display:inline">(blank = no details sheet)</span></label>
-            <textarea data-k="body" maxlength="2000">${esc(it.body)}</textarea></div>
+          <div><label>Hover text</label>
+            <input type="text" data-k="hover" maxlength="120" placeholder="Same as the title" value="${esc(it.hover)}"></div>
+          <div><label>Details</label>
+            <textarea data-k="body" maxlength="2000" placeholder="Optional">${esc(it.body)}</textarea></div>
           <div><button class="ghost" data-act="del">Remove</button>
             ${ii ? `<button class="ghost" data-act="up">Move up</button>` : ""}</div>
         </div>`).join("")}
@@ -1584,7 +1586,7 @@ $("#gmnSave").onclick = async () => {
     const out = await api("/api/gm-notices", gmPost({ data: GMN }));
     GMN = out.data;
     gmnRender();
-    toast(out.written.length ? "Notices published" : "No changes to publish");
+    toast(out.written.length ? "Published." : "No changes.");
   } catch (e) { toast(e.message, true); }
 };
 $("#gmNotices").addEventListener("toggle", () => { if ($("#gmNotices").open && !GMN) loadGmNotices(); });
@@ -1670,8 +1672,8 @@ function gmRenderList() {
     (b) => b.classList.toggle("on", b.dataset.f === GM_FILTER));
   if (!shown.length) {
     $("#gmList").innerHTML = `<div class="gm-none">` + (!GM_CALLS.length
-      ? "No GM calls yet. They appear here the moment a player submits one."
-      : { waiting: "Nobody is waiting on us.", open: "Nothing open.", closed: "Nothing closed." }[GM_FILTER]
+      ? "No GM calls yet."
+      : { waiting: "Nobody waiting.", open: "Nothing open.", closed: "Nothing closed." }[GM_FILTER]
         || "Nothing here.") + `</div>`;
     return;
   }
@@ -1679,9 +1681,9 @@ function gmRenderList() {
     `<div class="gm-item${r.id === GM_SEL ? " sel" : ""}${r.status === "closed" ? " closed" : ""}" data-id="${esc(r.id)}">` +
       `<div class="gm-item-top">` +
         `<span class="gm-item-who">${r.connected ? `<span class="gm-dot" title="On a GM Call now"></span>` : ""}` +
-          `${esc(gmClean(r.handle) || r.caller || "") || "(no handle)"}</span>` +
+          `${esc(gmClean(r.handle) || r.caller || "") || "No handle"}</span>` +
         `<span class="gm-item-when">${gmAgoSpan(gmIso(r.received_at))}</span></div>` +
-      `<div class="gm-item-subj">${esc(gmClean(r.subject)) || "(no subject)"}</div>` +
+      `<div class="gm-item-subj">${esc(gmClean(r.subject)) || "No subject"}</div>` +
       `<div><span class="gm-st ${esc(r.status)}">${esc(gmStWord(r.status))}</span></div>` +
     `</div>`).join("");
 }
@@ -1725,8 +1727,8 @@ function gmRenderTicket() {
   $("#gmEmpty").hidden = !!r;
   $("#gmTicket").hidden = !r;
   if (!r) return;
-  $("#gmTWho").textContent = gmClean(r.handle) || r.caller || "(no handle)";
-  $("#gmTSubj").textContent = gmClean(r.subject) || "(no subject)";
+  $("#gmTWho").textContent = gmClean(r.handle) || r.caller || "No handle";
+  $("#gmTSubj").textContent = gmClean(r.subject) || "No subject";
   $("#gmTChips").innerHTML =
     (r.connected ? `<span class="gm-st live">On a GM Call now</span>` : "") +
     `<span class="gm-st ${esc(r.status)}">${esc(gmStWord(r.status))}</span>` +
@@ -1736,14 +1738,14 @@ function gmRenderTicket() {
     esc(r.content_label || ""),
     r.request_no != null ? `request #${esc(r.request_no)}` : "",
     t ? `${esc(gmDay(t))} ${esc(gmTime(t))} (${gmAgoSpan(t)})` : "",
-    r.polid ? `POL ID ${esc(r.polid)}` : "",
+    r.polid ? `PlayOnline ID ${esc(r.polid)}` : "",
   ].filter(Boolean);
   const reps = r.reports || [];
   $("#gmTMeta").innerHTML = meta.map((m) => `<span>${m}</span>`).join("") +
     (reps.length && can("reports") ? `<span><a href="#" id="gmToRep">${reps.length} report${reps.length === 1 ? "" : "s"} from this player</a></span>` : "");
   const toRep = $("#gmToRep");
   if (toRep) toRep.onclick = (e) => { e.preventDefault(); REPORT_SEL = reps[0]; location.hash = "#reports"; };
-  $("#gmTBody").textContent = gmClean(r.body).trim() || "(no message text)";
+  $("#gmTBody").textContent = gmClean(r.body).trim() || "No message.";
   const btn = (st, label, cls) =>
     `<button class="${cls}" data-st="${st}">${label}</button>`;
   // The knock is how the player learns GM chat is ready: their GM Call screen
@@ -1761,14 +1763,13 @@ function gmRenderTicket() {
       (i.polid ? ` (${esc(i.polid)})` : "") + ` invited ` +
       `<a href="#" data-uninvite-guid="${esc(String(i.guid || ""))}" data-uninvite="${esc(i.handle)}"` +
       ` title="Withdraw the invitation">×</a></span>`).join("") +
-    `<div class="gm-picker"><input type="text" id="gmInvQ" placeholder="Invite a player: search by handle or POL ID"` +
+    `<div class="gm-picker"><input type="text" id="gmInvQ" placeholder="Invite a player"` +
     ` autocomplete="off" value="${esc(GM_INV.q)}"><div class="gm-picks" id="gmInvRes">${gmPicks()}</div></div></div>`;
   // CLOSE asks for a resolution first: it is mailed, with the transcript, to
   // everyone in the call.
   const closing = GM_CLOSING === r.id ?
-    `<div class="gm-close-box"><label>Resolution <span class="hint" style="display:inline">` +
-    `(optional; mailed with the chat transcript to the player and anyone invited)</span></label>` +
-    `<textarea id="gmResolution" maxlength="2000">${esc(GM_RESOLUTION)}</textarea>` +
+    `<div class="gm-close-box"><label for="gmResolution">Resolution</label>` +
+    `<textarea id="gmResolution" maxlength="2000" placeholder="Mailed to the player with the chat">${esc(GM_RESOLUTION)}</textarea>` +
     `<div><button class="act" data-close-go="1">Close and mail</button> ` +
     `<button class="ghost" data-close-cancel="1">Cancel</button></div></div>` : "";
   $("#gmTActions").innerHTML = knock +
@@ -1790,10 +1791,10 @@ function gmFace(fid) {
 function gmPicks() {
   return GM_INV.rows.map((p) =>
     `<button class="gm-pick" data-pick-id="${p.handle_id}" data-pick-name="${esc(p.handle)}"` +
-    ` data-pick-pol="${esc(p.polid || "")}"${p.can_invite ? "" : " disabled title=\"Has not logged in yet\""}>` +
+    ` data-pick-pol="${esc(p.polid || "")}"${p.can_invite ? "" : " disabled title=\"Has not signed in yet\""}>` +
     `${gmFace(p.face)}<span class="who"><b>${esc(p.handle)}</b>` +
-    `<span class="pid">POL ID ${esc(p.polid || "?")}${p.can_invite ? "" : " · never logged in"}</span></span></button>`
-  ).join("") || (GM_INV.q.length >= 2 ? `<div class="gmn-empty">No player matches.</div>` : "");
+    `<span class="pid">PlayOnline ID ${esc(p.polid || "?")}${p.can_invite ? "" : " · never signed in"}</span></span></button>`
+  ).join("") || (GM_INV.q.length >= 2 ? `<div class="gmn-empty">No matches.</div>` : "");
 }
 async function gmInvSearch() {
   const q = GM_INV.q, seq = ++GM_INV.seq;
@@ -1859,9 +1860,9 @@ async function gmInvite(id, body, label) {
       ({ handle: i.handle, polid: i.polid, guid: i.guid, at: i.at }));
     GM_TICKET_SIG = "";
     gmRenderTicket();
-    toast(undo ? `Invitation for ${who} withdrawn`
-      : out.knock_message === "sent" ? `${who} invited: their GM Call screen offers Join`
-      : `${who} invited. They will see Join on their GM Call screen, but the live message was not sent: ${out.knock_message}`,
+    toast(undo ? "Invitation withdrawn."
+      : out.knock_message === "sent" ? `Invited ${who}.`
+      : `Invited ${who}. Live message not sent: ${out.knock_message}`,
       !undo && out.knock_message !== "sent");
   } catch (e) { toast(e.message, true); }
 }
@@ -1873,9 +1874,9 @@ async function gmKnock(id, on) {
     if (r) r.knocked_at = out.knocked_at || null;
     GM_TICKET_SIG = "";
     gmRenderTicket();
-    toast(!on ? "Knock withdrawn"
-      : out.knock_message === "sent" ? "Knocked: the player has been told GM chat is ready"
-      : `Knocked. Their GM Call screen will show it, but the live message was not sent: ${out.knock_message}`,
+    toast(!on ? "Knock withdrawn."
+      : out.knock_message === "sent" ? "Knocked."
+      : `Knocked. Live message not sent: ${out.knock_message}`,
       on && out.knock_message !== "sent");
   } catch (e) { toast(e.message, true); }
 }
@@ -1889,9 +1890,9 @@ async function gmSetStatus(id, status, quiet, extra) {
     gmBadge(GM_CALLS);
     gmRenderList();
     gmRenderTicket();
-    if (!quiet) toast(status === "open" ? "Reopened"
-      : status === "closed" && out.transcript ? `Closed. Transcript ${out.transcript}`
-      : `Marked ${status}`, status === "closed" && /^not mailed|failed/.test(out.transcript || ""));
+    if (!quiet) toast(status === "open" ? "Reopened."
+      : status === "closed" && out.transcript ? `Closed. Transcript ${out.transcript}.`
+      : status === "closed" ? "Closed." : `Marked ${status}.`, status === "closed" && /^not mailed|failed/.test(out.transcript || ""));
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1934,8 +1935,8 @@ async function askDelete(polid) {
     line("On other people's lists", fp.referenced_by, fp.referenced_by > 0) +
     line("Mail messages", fp.mail, fp.mail > 0) +
     line("Open sessions", fp.sessions);
-  if (fp.online) html += line("Signed in", "yes (they will be signed out)", true);
-  if (fp.regcodes.length) html += line("Redeemed code(s)", fp.regcodes.join(", "));
+  if (fp.online) html += line("Signed in now", "Yes", true);
+  if (fp.regcodes.length) html += line("Redeemed codes", fp.regcodes.join(", "));
   $("#delInv").innerHTML = html;
   $("#delModal").classList.add("show");
   $("#delConfirm").focus();
@@ -1968,7 +1969,7 @@ $("#delGo").onclick = async () => {
                              release_codes: $("#delRelease").checked })
     });
     closeDelete();
-    toast("Deleted " + polid);
+    toast("Deleted.");
     loadAccounts();
     loadCodes();          // a released code becomes unused again
   } catch (e) { btn.disabled = false; toast(e.message, true); }
@@ -1985,8 +1986,7 @@ $("#delGo").onclick = async () => {
 // player out at the keyboard, so warn before creating one.
 function viewerTypable(pw) {
   return !pw || /^[A-Za-z0-9]*$/.test(pw) ||
-    window.confirm("This password contains characters the client's login " +
-      "screen cannot type (only letters and digits work there). Use it anyway?");
+    window.confirm("The Viewer can only type letters and digits. Use this password anyway?");
 }
 
 $("#newBtn").onclick = async () => {
@@ -2017,10 +2017,10 @@ $("#newBtn").onclick = async () => {
       line("Content", r.contents_label || "-") +
       line("Mail", r.mail) +
       `<div class="hot"><span>Save this password</span>` +
-      `<span>It cannot be shown again.</span></div>`;
+      `<span>Shown only once.</span></div>`;
     $("#newResult").style.display = "";
     $("#newHandle").value = ""; $("#newPw").value = ""; $("#newCode").value = "";
-    toast("Created " + r.polid);
+    toast("Created.");
     loadAccounts();
     loadCodes();          // a code spent here is no longer unused
   } catch (e) { toast(e.message, true); }
@@ -2054,7 +2054,7 @@ $("#pwGo").onclick = async () => {
   const pw = $("#pwNew").value.trim(), reset = $("#pwResetToken").checked;
   // Ticking the box alone is a legitimate action -- unlocking somebody out of
   // the lobby without touching a password they still know.
-  if (!pw && !reset) return toast("Type a password, or tick the token reset", true);
+  if (!pw && !reset) return toast("Enter a password or tick the token reset.", true);
   if (!viewerTypable(pw)) return;
   btn.disabled = true;
   try {
@@ -2063,8 +2063,7 @@ $("#pwGo").onclick = async () => {
       body: JSON.stringify({ polid, password: pw, reset_token: reset })
     });
     closePassword();
-    toast((r.changed ? `Password changed for ${r.polid}` : `${r.polid}`)
-          + (r.token_reset ? ". Login token reset." : ""));
+    toast([r.changed ? "Password changed." : "", r.token_reset ? "Login token reset." : ""].filter(Boolean).join(" ") || "Saved.");
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; }
 };
@@ -2084,7 +2083,7 @@ let TOK_POLID = null;
 function askTokens(polid) {
   TOK_POLID = polid;
   $("#tokPolid").textContent = polid;
-  $("#tokList").innerHTML = `<div><span>Reading…</span></div>`;
+  $("#tokList").innerHTML = `<div><span>Loading…</span></div>`;
   $("#tokModal").classList.add("show");
   renderTokens();
 }
@@ -2104,11 +2103,10 @@ async function renderTokens() {
   if (!r.clients.length) {
     // Not an error: an account that has never signed in to the lobby, or
     // one whose tokens were just cleared, legitimately has no rows.
-    list.innerHTML = `<div><span>No device has signed in to the lobby yet.</span></div>`;
+    list.innerHTML = `<div><span>No devices yet.</span></div>`;
     if (!r.legacy_token && !r.armed) {
       list.innerHTML += `<div class="hot"><span>Next sign-in</span>` +
-        `<span>reads as this account's first ever - arm it first ` +
-        `(accounts.py arm)</span></div>`;
+        `<span title="accounts.py arm">Arm the account first</span></div>`;
     }
     return;
   }
@@ -2121,7 +2119,7 @@ async function renderTokens() {
     who.innerHTML =
       `<span><b>${esc(c.known ? c.label + " Viewer" : "Unknown device")}</b>` +
       `<span style="color:var(--muted)"> · last seen ` +
-      `${esc((c.last_seen || "").slice(0, 19).replace("T", " ")) || "never"}</span></span>` +
+      `${c.last_seen ? esc(fmtWhen(c.last_seen)) : "never"}</span></span>` +
       `<span class="sig">${esc(c.client_sig)}</span>`;
     const btn = document.createElement("button");
     btn.className = "danger";
@@ -2142,10 +2140,7 @@ async function clearToken(polid, sig, btn) {
     // `rearm_needed` is the trap: nothing recorded anywhere reads to the lobby
     // as this account's FIRST login, and the arm gate refuses that unless the
     // account is armed. Say so rather than reporting a flat success.
-    toast(r.rearm_needed
-      ? `Cleared - but nothing is recorded now, so the next sign-in needs this `
-        + `account armed (accounts.py arm)`
-      : `Cleared ${r.label} on ${r.polid} - its next sign-in records a fresh token`,
+    toast(r.rearm_needed ? "Cleared. Arm the account before its next sign-in." : "Cleared.",
       !!r.rearm_needed);
     renderTokens();
   } catch (e) { btn.disabled = false; toast(e.message, true); }
@@ -2165,7 +2160,7 @@ $("#grantNoneBtn").onclick = () => grantChecks().forEach((c) => { c.checked = fa
 // The account to grant to: found by PlayOnline ID or handle (/api/accounts/find).
 const findAccounts = (q, limit) =>
   api(`/api/accounts/find?q=${encodeURIComponent(q)}&limit=${limit}`).then((r) => r.players || []);
-const GRANT_PK = makePicker({ id: "grantPolQ", placeholder: "Search by handle or PlayOnline ID",
+const GRANT_PK = makePicker({ id: "grantPolQ", placeholder: "Search accounts",
                               search: findAccounts });
 if ($("#grantPol")) $("#grantPol").replaceWith(GRANT_PK.el);
 GRANT_PK.el.id = "grantPol";
@@ -2173,8 +2168,8 @@ GRANT_PK.el.id = "grantPol";
 $("#grantBtn").onclick = async () => {
   const polid = GRANT_PK.value();
   const codes = grantChecks().filter((c) => c.checked).map((c) => +c.value);
-  if (!polid) return toast("Which account?", true);
-  if (!codes.length) return toast("Pick at least one content", true);
+  if (!polid) return toast("Pick an account.", true);
+  if (!codes.length) return toast("Pick at least one title.", true);
   try {
     const r = await api("/api/grant", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -2184,8 +2179,8 @@ $("#grantBtn").onclick = async () => {
     // the client's launch gate reads. A grant that links nothing means the
     // account has no handle yet, and the titles will not be playable until it
     // does, so say so rather than reporting a flat success.
-    toast(r.linked ? `Granted to ${polid}`
-                   : "Granted, but the account has no handle yet, so it cannot play",
+    toast(r.linked ? "Granted."
+                   : "Granted. The account has no handle yet, so it can't play.",
           !r.linked);
     loadAccounts();
   } catch (e) { toast(e.message, true); }
@@ -2194,15 +2189,15 @@ $("#grantBtn").onclick = async () => {
 $("#revokeBtn").onclick = async () => {
   const polid = GRANT_PK.value();
   const codes = grantChecks().filter((c) => c.checked).map((c) => +c.value);
-  if (!polid) return toast("Which account?", true);
-  if (!codes.length) return toast("Pick at least one content to revoke", true);
+  if (!polid) return toast("Pick an account.", true);
+  if (!codes.length) return toast("Pick at least one title.", true);
   if (!await askRevoke(polid, codes)) return;
   try {
     const r = await api("/api/revoke", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ polid, content_codes: codes })
     });
-    toast(`Revoked from ${r.polid}`);
+    toast("Revoked.");
     grantChecks().forEach((c) => { c.checked = false; });
     loadAccounts();
   } catch (e) { toast(e.message, true); }
@@ -2211,7 +2206,7 @@ $("#revokeBtn").onclick = async () => {
 function askRevoke(polid, codes) {
   const names = codes.map((c) => CONTENT[c] || c).join(", ");
   return uiAsk({ title: `Revoke ${names} from ${polid}?`, ok: "Revoke", danger: true,
-                 text: "Its characters are removed from the launcher. Granting it again brings them back." });
+                 text: "Granting it again restores the characters." });
 }
 
 // ---- PML preview ----
@@ -2274,7 +2269,7 @@ async function renderPreview() {
     describeRender(LAST_RENDER);
     startRuntime(LAST_RENDER);
   } catch (e) {
-    stage.innerHTML = `<div style="color:#ff8a8a;padding:12px;font:13px monospace">Could not draw this file: ${esc(e.message)}</div>`;
+    stage.innerHTML = `<div style="color:#ff8a8a;padding:12px;font:13px monospace">Couldn't draw this file: ${esc(e.message)}</div>`;
     $("#stageNote").textContent = "";
   }
   stage.classList.toggle("pml-inspect", INSPECT);
@@ -2297,7 +2292,7 @@ function noteMissingArt(src) {
     el.className = "warn";
     $("#stageNote").appendChild(el);
   }
-  el.textContent = `${MISSING_ART.size} image${MISSING_ART.size === 1 ? "" : "s"} not in the mirror (hatched plates; "Missing art" highlights them)`;
+  el.textContent = `${MISSING_ART.size} image${MISSING_ART.size === 1 ? "" : "s"} missing`;
   el.title = [...MISSING_ART].join("\n");
 }
 
@@ -2311,29 +2306,29 @@ function describeRender(r) {
     bits.push(`<b>${r.placed}</b> element${r.placed === 1 ? "" : "s"}`);
     const parts = PARTS[ACTIVE_FILE] || 0;
     if (parts) bits.push(`built from <b>${parts}</b> other file${parts === 1 ? "" : "s"}`);
-    if (!r.hasBody) bits.push("a piece of a page (no &lt;body&gt;)");
+    if (!r.hasBody) bits.push("part of a page");
   } else if (r.mode === "document") {
-    bits.push(`<b>${r.records}</b> block${r.records === 1 ? "" : "s"} of text, shown the way a page displays it`);
+    bits.push(`<b>${r.records}</b> block${r.records === 1 ? "" : "s"} of text`);
   } else {
-    bits.push("<b>Nothing to draw.</b> This file only defines data for other pages");
+    bits.push("Data only, nothing to draw");
   }
   const warn = [];
-  if (!r.fontReady) warn.push("the Viewer font did not load, so text is missing");
-  if (r.standIn) warn.push(`${r.standIn} character${r.standIn === 1 ? "" : "s"} not in the Viewer font (drawn in a stand-in font)`);
-  if (r.varErrors) warn.push(`${r.varErrors} unresolved variable${r.varErrors === 1 ? "" : "s"} (the Viewer shows "(Variable error)")`);
-  if (r.unresolved) warn.push(`${r.unresolved} element${r.unresolved === 1 ? "" : "s"} with values that could not be worked out (dotted outline)`);
-  if ((r.missingStyles || []).length) warn.push("missing styles: " + r.missingStyles.slice(0, 4).map(esc).join(", "));
-  if ((r.missingData || []).length) warn.push("missing text data: " + r.missingData.slice(0, 4).map(esc).join(", "));
-  if ((r.unsupported || []).length) warn.push("not drawn: &lt;" + r.unsupported.slice(0, 5).map(esc).join("&gt;, &lt;") + "&gt;");
+  if (!r.fontReady) warn.push("The Viewer font didn't load");
+  if (r.standIn) warn.push(`${r.standIn} character${r.standIn === 1 ? "" : "s"} not in the Viewer font`);
+  if (r.varErrors) warn.push(`${r.varErrors} unresolved variable${r.varErrors === 1 ? "" : "s"}`);
+  if (r.unresolved) warn.push(`${r.unresolved} element${r.unresolved === 1 ? "" : "s"} with unknown values, outlined`);
+  if ((r.missingStyles || []).length) warn.push("Missing styles: " + r.missingStyles.slice(0, 4).map(esc).join(", "));
+  if ((r.missingData || []).length) warn.push("Missing text data: " + r.missingData.slice(0, 4).map(esc).join(", "));
+  if ((r.unsupported || []).length) warn.push("Not drawn: &lt;" + r.unsupported.slice(0, 5).map(esc).join("&gt;, &lt;") + "&gt;");
   const miss = (EXPAND_REPORT.missing || []).slice(0, 5);
-  if (miss.length && r.mode !== "page") warn.push("uses " + miss.map((v) => "$" + esc(v)).join(", ") + ", which the page that includes this defines");
+  if (miss.length && r.mode !== "page") warn.push("Needs " + miss.map((v) => "$" + esc(v)).join(", ") + " from the page that includes it");
   const unres = (EXPAND_REPORT.unresolved || []).slice(0, 3);
-  if (unres.length) warn.push("included file not found: " + unres.map(esc).join(", "));
+  if (unres.length) warn.push("Included file not found: " + unres.map(esc).join(", "));
   // A page opened without the query its links pass: the values the mirror
   // holds for the missing piece, one click each.
   const guesses = (EXPAND_REPORT.guesses || []).slice(0, 12);
   const open = guesses.length
-    ? `<br><span class="pv-guess">This page gets its content from the link that opens it. Open it with: ` +
+    ? `<br><span class="pv-guess">Open with ` +
       guesses.map((g) => `<a data-q="${esc(g.query)}">?${esc(g.query)}</a>`).join(" ") + `</span>`
     : "";
   note.innerHTML = bits.join(" · ") + (warn.length ? `<br><span class="warn">${warn.join("<br>")}</span>` : "") + open;
@@ -2347,7 +2342,7 @@ function renderLayerSwitch(layers) {
   if (!layers.length) return;
   const lbl = document.createElement("span");
   lbl.className = "lbl";
-  lbl.textContent = "Hidden panels:";
+  lbl.textContent = "Hidden panels";
   box.appendChild(lbl);
   const btn = (value, text) => {
     const b = document.createElement("button");
@@ -2365,7 +2360,7 @@ function renderLayerSwitch(layers) {
       `<option value="*all">all at once</option>`;
     sel.value = REVEAL === "all" ? "*all" : (REVEAL || "");
     sel.onchange = () => { REVEAL = sel.value === "*all" ? "all" : (sel.value || null); renderPreview(); };
-    lbl.textContent = `${layers.length} hidden panels:`;
+    lbl.textContent = `${layers.length} hidden panels`;
     box.appendChild(sel);
     return;
   }
@@ -2434,7 +2429,7 @@ function startRuntime(r) {
     });
   } catch (e) {
     RT = null;
-    logEvent("ignored", "The page could not start: " + e.message);
+    logEvent("ignored", "Page didn't start: " + e.message);
   }
 }
 
@@ -2447,8 +2442,8 @@ async function openLink(url) {
   try { r = await api(`/api/pml-resolve?from=${encodeURIComponent(ACTIVE_FILE || "")}&href=${encodeURIComponent(href)}`); }
   catch (e) { return toast(e.message, true); }
   if (r.path) return openPmlFile(r.path, { push: true, query });
-  if (r.external) return toast("Link to " + r.external + " (outside the mirror)");
-  toast("Link target not found in the mirror: " + href, true);
+  if (r.external) return toast("Outside the mirror: " + r.external);
+  toast("Not in the mirror: " + href, true);
 }
 
 // The event log under the stage: actions run, commands the page's elements
@@ -2491,7 +2486,7 @@ $("#pvInteractive").onclick = () => {
   store.set("pvInteractive", INTERACTIVE ? "1" : "0");
   paintInteractive();
   renderPreview();
-  toast(INTERACTIVE ? "Interactive: the page runs as it does in the Viewer" : "Interactive off: the page is drawn as it loads");
+  toast(INTERACTIVE ? "Interactive on." : "Interactive off.");
 };
 $("#pvRestart").onclick = () => { renderPreview(); stage.focus({ preventScroll: true }); };
 paintInteractive();
@@ -2506,14 +2501,14 @@ async function followHref(href) {
     else { REVEAL = null; renderPreview(); }
     return;
   }
-  if (/^toviewer:/i.test(href)) return toast("This link returns to the Viewer's own menu");
-  if (/^(eval|javascript|sd):/i.test(href) || !href) return toast("This link runs a page action the preview does not follow");
+  if (/^toviewer:/i.test(href)) return toast("Goes back to the Viewer menu.");
+  if (/^(eval|javascript|sd):/i.test(href) || !href) return toast("The preview can't follow this link.");
   let r;
   try { r = await api(`/api/pml-resolve?from=${encodeURIComponent(ACTIVE_FILE || "")}&href=${encodeURIComponent(href)}`); }
   catch (e) { return toast(e.message, true); }
   if (r.path) return openPmlFile(r.path, { push: true });
-  if (r.external) return toast("Link to " + r.external + " (outside the mirror)");
-  toast("Link target not found in the mirror: " + href, true);
+  if (r.external) return toast("Outside the mirror: " + r.external);
+  toast("Not in the mirror: " + href, true);
 }
 
 // Highlight the art the mirror does not have. Remembered per browser.
@@ -2534,7 +2529,7 @@ $("#pvInspect").onclick = () => {
   $("#pvInspect").classList.toggle("on", INSPECT);
   stage.classList.toggle("pml-inspect", INSPECT);
   if (!INSPECT) { $("#pvInspector").hidden = true; if (PICKED) { PICKED.classList.remove("pml-picked"); PICKED = null; } }
-  toast(INSPECT ? "Inspect: click any element" : "Inspect off");
+  toast(INSPECT ? "Click an element to inspect it." : "Inspect off.");
 };
 
 function pickElement(hit) {
@@ -2789,7 +2784,7 @@ async function loadPmlFileList() {
     $("#fLocale").value = store.get("pvLang", "English");
     if (!$("#fLocale").value) $("#fLocale").value = "";
     renderFileList();
-  } catch (e) { $("#pmlCount").textContent = "(list unavailable)"; }
+  } catch (e) { $("#pmlCount").textContent = "List unavailable"; }
 }
 
 const kindMatches = (kind, shape) => !kind || (kind === "draws" ? shape !== "data" : shape === kind);
@@ -2933,9 +2928,9 @@ function renderFileList() {
     !(locale === "English" && !f.variant && EN_COPIES.has(f.canon));
   FILE_ROWS = ALLFILES.filter((f) => passes(f) &&
     (!q || f.path.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)));
-  $("#pmlCount").textContent = `(${FILE_ROWS.length.toLocaleString()} of ${ALLFILES.length.toLocaleString()})`;
+  $("#pmlCount").textContent = `${FILE_ROWS.length.toLocaleString()} of ${ALLFILES.length.toLocaleString()}`;
   const list = $("#fileList");
-  if (!FILE_ROWS.length) { list.innerHTML = `<div class="pv-more">No files match.</div>`; return; }
+  if (!FILE_ROWS.length) { list.innerHTML = `<div class="pv-more">No matches.</div>`; return; }
 
   if (sort === "folders" && !q) {
     const out = [];
@@ -2967,7 +2962,7 @@ function renderFileList() {
   FILE_ROWS.sort(sort === "path" ? (a, b) => a.path.localeCompare(b.path) : byLabel);
   const CAP = 400;
   list.innerHTML = FILE_ROWS.slice(0, CAP).map((f) => fileRow(f, 0, true)).join("")
-    + (FILE_ROWS.length > CAP ? `<div class="pv-more">${(FILE_ROWS.length - CAP).toLocaleString()} more. Search or filter to narrow.</div>` : "");
+    + (FILE_ROWS.length > CAP ? `<div class="pv-more">${(FILE_ROWS.length - CAP).toLocaleString()} more</div>` : "");
 }
 
 // Open every folder above a file, so opening it from a link or the history
@@ -3039,7 +3034,7 @@ async function openPmlFile(path, opts) {
     }
     renderPreview();
     loadRefs(path);
-  } catch (e) { toast("Could not open " + path + ": " + e.message, true); }
+  } catch (e) { toast("Couldn't open " + path + ": " + e.message, true); }
   updateNavButtons();
 }
 
@@ -3081,7 +3076,7 @@ $("#loadBtn").onclick = async () => {
     renderFileList();
     renderPreview();
     updateNavButtons();
-  } catch (e) { toast("Could not load the wizard page: " + e.message, true); }
+  } catch (e) { toast("Couldn't load the page: " + e.message, true); }
 };
 
 if (store.get("pvSource", "0") === "1") showSource(true);
@@ -3138,10 +3133,10 @@ function newsMarkDirty() {
 function renderNewsStatus() {
   const el = $("#nwStatus");
   let dot = "ok", text;
-  if (NEWS_DIRTY) { dot = "warn"; text = "Unsaved changes (kept in this browser until you save)"; }
+  if (NEWS_DIRTY) { dot = "warn"; text = "Unsaved changes"; }
   else if (NEWS_PENDING === null) { text = "Saved"; }
-  else if (NEWS_PENDING > 0) { dot = "warn"; text = "Saved, not published yet"; }
-  else { text = "Published: players see what is here"; }
+  else if (NEWS_PENDING > 0) { dot = "warn"; text = "Saved, not published"; }
+  else { text = "Published"; }
   el.innerHTML = `<span class="dot ${dot}"></span>${esc(text)}`;
   $("#newsSaveBtn").classList.toggle("act", NEWS_DIRTY);
 }
@@ -3158,7 +3153,7 @@ async function loadNews() {
     fillNewsPickers();
     const st = $("#newsState");
     st.hidden = j.writable !== false;
-    if (!st.hidden) st.innerHTML = `<b>Publishing is unavailable:</b> ${esc(j.www)} is read-only.`;
+    if (!st.hidden) { st.textContent = "Can't publish. The news folder is read-only."; st.title = j.www || ""; }
     NEWS_DRAFT_KEY = "pol-admin:news-draft:" + (j.store || "?");
     NEWS_BASE = JSON.stringify(NEWS);
     newsRestoreDraft();
@@ -3183,8 +3178,8 @@ function newsRestoreDraft() {
   const moved = d.base !== undefined && d.base !== NEWS_BASE;
   note.hidden = false;
   note.className = moved ? "note warn" : "note";
-  note.innerHTML = `<b>Unsaved changes restored</b> from ${esc(new Date(d.at || Date.now()).toLocaleString())}.` +
-    (moved ? " <b>The saved announcements changed since then;</b> saving will replace them." : "") +
+  note.innerHTML = `Restored unsaved changes from ${esc(fmtWhen(d.at || Date.now()))}.` +
+    (moved ? " Saving replaces newer saved changes." : "") +
     ` <button class="ghost sm" id="newsDraftDiscard" style="margin-left:6px">Discard changes</button>`;
   $("#newsDraftDiscard").onclick = () => { newsDraftClear(); loadNews(); };
 }
@@ -3202,7 +3197,7 @@ function renderNewsAuto() {
   return `<div class="nw-autohead">Event calendar</div>` + auto.map((it) => {
     const k = (NEWS_META.kinds || {})[it.kind] || {};
     const cat = (NEWS_META.categories || [])[k.category] || "";
-    return `<div class="nw-item nw-auto" title="Posted from the event calendar. It comes down on its own once the event's results close.">` +
+    return `<div class="nw-item nw-auto" title="From the event calendar">` +
       `${newsBadge("ticker:" + (it.content || "playonline")) || "<span></span>"}` +
       `<div style="min-width:0"><div class="t">${esc(it.title || "")}</div>` +
       `<div class="m">${esc(it.date || "")} · ${esc(cat)}</div></div>` +
@@ -3212,7 +3207,7 @@ function renderNewsAuto() {
 function renderNewsList() {
   const box = $("#newsList");
   if (!NEWS.length) {
-    box.innerHTML = `<div class="nw-empty">No announcements yet. Use <b>New announcement</b> to write one.</div>` +
+    box.innerHTML = `<div class="nw-empty">No announcements yet.</div>` +
       renderNewsAuto();
     return;
   }
@@ -3227,7 +3222,7 @@ function renderNewsList() {
       + `<button type="button" data-nwmove="1" title="Move down" aria-label="Move down"${i === NEWS.length - 1 ? " disabled" : ""}>&#9660;</button></span>`;
     return `<div class="nw-item${i === NEWS_SEL ? " active" : ""}" data-i="${i}">` +
       `${newsBadge("ticker:" + (it.content || "playonline")) || "<span></span>"}` +
-      `<div style="min-width:0"><div class="t">${esc(it.title || "(no headline)")}</div>` +
+      `<div style="min-width:0"><div class="t">${esc(it.title || "No headline")}</div>` +
       `<div class="m">${esc(it.date || "no date")} · ${esc(cat)}</div></div>` +
       `<div>${flags.map((f) => `<span class="flag">${esc(f)}</span>`).join(" ")}${mv}</div></div>`;
   }).join("") + renderNewsAuto();
@@ -3330,7 +3325,7 @@ function renderNewsEffect() {
   const label = (NEWS_META.contents || {})[it.content] || it.content;
   const body = (it.body || "").trim(), link = (it.link || "").trim();
   const rows = [
-    ["Ticker headline", link ? "opens the link" : body ? "opens the story page" : "<b style=\"color:var(--warn)\">opens nothing</b>: add a story or a link"],
+    ["Ticker headline", link ? "opens the link" : body ? "opens the story page" : "<span style=\"color:var(--warn)\">opens nothing. Add a story or a link.</span>"],
     ["Information section", `listed under <b>${esc(cat)}</b>` + (NEWS_META.content_ids[it.content] === 1 ? " on every service's page" : ` on the <b>${esc(label)}</b> page and View All`)],
     ["Status panel", it.status ? `listed as ${k.maint === 2 ? "an issue" : k.maint === 3 ? "maintenance" : "other"}` : "not listed"],
   ];
@@ -3357,8 +3352,8 @@ $("#nDateNow").onclick = () => {
 };
 function showDateHint() {
   const v = $("#nDate").value.trim();
-  $("#nDateHint").textContent = !v ? "Shown as written." : NEWS_DATE_RE.test(v) ? ""
-    : `Usual format: ${newsDateString(new Date())}`;
+  $("#nDateHint").textContent = !v || NEWS_DATE_RE.test(v) ? ""
+    : `For example ${newsDateString(new Date())}`;
 }
 
 // --- list actions --------------------------------------------------------------
@@ -3375,7 +3370,7 @@ $("#newsAddBtn").onclick = () => {
 };
 $("#nDelBtn").onclick = () => {
   const it = NEWS[NEWS_SEL];
-  if (!it || !confirm(`Delete "${it.title || "this announcement"}"? Its story page goes on the next publish.`)) return;
+  if (!it || !confirm(`Delete “${it.title || "this announcement"}”?`)) return;
   NEWS.splice(NEWS_SEL, 1);
   NEWS_SEL = Math.max(0, Math.min(NEWS_SEL, NEWS.length - 1));
   newsMarkDirty(); renderNewsList(); bindNewsForm();
@@ -3408,11 +3403,11 @@ async function saveNews(quiet) {
   bindNewsForm();
   $("#nwPvState").textContent = "";
   await loadNewsOutputs();
-  if (!quiet) toast(`Saved ${NEWS.length} announcement${NEWS.length === 1 ? "" : "s"}`);
+  if (!quiet) toast("Saved.");
   return j;
 }
 $("#newsSaveBtn").onclick = async () => {
-  try { await saveNews(); } catch (e) { toast("Save failed: " + e.message, true); }
+  try { await saveNews(); } catch (e) { toast("Couldn't save: " + e.message, true); }
 };
 
 // Publish shows what will change first, then writes.
@@ -3422,14 +3417,14 @@ $("#newsPublishBtn").onclick = async () => {
     const r = await post("/api/news/publish", { dry_run: true });
     const n = r.written.length + r.pruned.length;
     $("#nwPubSummary").textContent = n
-      ? `${n} file${n === 1 ? "" : "s"} will be updated on the server. Players see the change the next time the Viewer loads the news.`
-      : "Nothing to publish: players already see these announcements.";
+      ? `${n} file${n === 1 ? "" : "s"} will change.`
+      : "Nothing to publish.";
     // each file by what players see it as; its path is in the tooltip
     $("#nwPubList").innerHTML = [...r.written.map((p) => ["Update", p]), ...r.pruned.map((p) => ["Remove", p])]
       .map(([w, p]) => `<div title="${esc(p)}"><span>${w}</span><span>${esc(newsFileWords(p))}</span></div>`).join("");
     $("#nwPubGo").disabled = !n;
     $("#nwPubModal").classList.add("show");
-  } catch (e) { toast("Publish failed: " + e.message, true); }
+  } catch (e) { toast("Couldn't publish: " + e.message, true); }
 };
 // a published file, in words: "Login ticker, en-US"
 function newsFileWords(path) {
@@ -3453,9 +3448,9 @@ $("#nwPubGo").onclick = async () => {
   try {
     const r = await post("/api/news/publish", { dry_run: false });
     $("#nwPubModal").classList.remove("show");
-    toast(`Published: ${r.written.length} file${r.written.length === 1 ? "" : "s"} updated`);
+    toast("Published.");
     await loadNewsOutputs();
-  } catch (e) { toast("Publish failed: " + e.message, true); }
+  } catch (e) { toast("Couldn't publish: " + e.message, true); }
   finally { $("#nwPubGo").disabled = false; }
 };
 
@@ -3467,14 +3462,14 @@ async function loadMaint() {
     renderMaintChoices(j);
     if (coreOff()) {
       const n = Object.keys(j.games || {}).length;
-      $("#maintStatus").textContent = n ? "" : "None of your games can announce from the panel.";
+      $("#maintStatus").textContent = n ? "" : "No games can announce.";
       $("#maintGamesWrap").hidden = !n;
       return;
     }
     const shown = j.files.filter((f) => f.posted);
     $("#maintStatus").textContent = shown.length
-      ? `Notice up on ${shown.length} of ${j.files.length} title pages: ${shown[0].subject || "(no subject)"}`
-      : `No notice up (${j.files.length} title pages can show one).`;
+      ? `Notice up on ${shown.length} of ${j.files.length} titles: ${shown[0].subject || "no subject"}`
+      : "No notice up.";
   } catch (e) { $("#maintStatus").textContent = ""; }
 }
 // The title folders a notice can go on, by the game's own title from its module (games.js
@@ -3491,7 +3486,7 @@ function renderMaintChoices(j) {
   const draw = () => {
     $("#maintTitles").innerHTML = (j.titles || []).map((t) =>
       `<label class="chip"><input type="checkbox" value="${esc(t)}"${keep.has(t) ? " checked" : ""}>` +
-      `${esc(maintTitleName(t))}</label>`).join("") || `<span class="muted">No title pages found.</span>`;
+      `${esc(maintTitleName(t))}</label>`).join("") || `<span class="muted">No titles.</span>`;
   };
   draw();
   if (!GAMES_LOADED && canSeeGames()) fetchGames(false).then(() => { keep.clear(); maintTitles().forEach((t) => keep.add(t)); draw(); });
@@ -3510,34 +3505,34 @@ function maintSubjectCut() {
   if (!el) return;
   const v = $("#maintSubject").value.trim();
   el.textContent = coreOff() ? "" : v.length > 15
-    ? `The message to everyone online shows the first 15 characters: "${v.slice(0, 15)}".`
-    : "The message to everyone online shows up to 15 characters of it.";
+    ? `The online message shows “${v.slice(0, 15)}”.`
+    : "The online message shows up to 15 characters.";
 }
 $("#maintSubject").addEventListener("input", maintSubjectCut);
 const maintTitles = () => [...document.querySelectorAll("#maintTitles input:checked")].map((i) => i.value);
 const maintGames = () => [...document.querySelectorAll("#maintGames input:checked")].map((i) => i.value);
 $("#maintPostBtn").onclick = async () => {
   const subject = $("#maintSubject").value.trim(), text = $("#maintText").value.trim();
-  if (!subject || !text) return toast("A notice needs a subject and a text.", true);
-  if (!confirm("Show this notice on the title pages now?")) return;
+  if (!subject || !text) return toast("Add a subject and text.", true);
+  if (!confirm("Show this notice now?")) return;
   try {
     const r = await post("/api/maintenance", { action: "notice", subject, text, titles: maintTitles() });
-    toast(`Notice up on ${r.written.length} title page${r.written.length === 1 ? "" : "s"}`);
-  } catch (e) { toast("Notice failed: " + e.message, true); }
+    toast(`Notice up on ${r.written.length} title${r.written.length === 1 ? "" : "s"}.`);
+  } catch (e) { toast("Couldn't post the notice: " + e.message, true); }
   loadMaint();
 };
 $("#maintClearBtn").onclick = async () => {
   try {
     const r = await post("/api/maintenance", { action: "clear", titles: maintTitles() });
-    toast(`Notice taken down from ${r.restored.length} title page${r.restored.length === 1 ? "" : "s"}`);
-  } catch (e) { toast("Take down failed: " + e.message, true); }
+    toast(`Notice taken down from ${r.restored.length} title${r.restored.length === 1 ? "" : "s"}.`);
+  } catch (e) { toast("Couldn't take it down: " + e.message, true); }
   loadMaint();
 };
 $("#maintMsgBtn").onclick = async () => {
   const lite = coreOff();
   const subject = lite ? $("#maintSubject").value.trim() : $("#maintSubject").value.trim().slice(0, 15);
   const text = $("#maintText").value.trim();
-  if (!subject || !text) return toast("A message needs a subject and a text.", true);
+  if (!subject || !text) return toast("Add a subject and text.", true);
   if (lite && !maintGames().length) return toast("Tick at least one game.", true);
   if (!confirm(lite ? `Announce "${subject}" in ${maintGames().length} game${maintGames().length === 1 ? "" : "s"} now?`
                     : `Send "${subject}" to everyone online now?`)) return;
@@ -3546,16 +3541,16 @@ $("#maintMsgBtn").onclick = async () => {
     if (lite) {
       const g = Object.entries(r.games || {}), failed = g.filter(([, v]) => !v.ok);
       if (!failed.length) toast(`Announced in ${g.length} game${g.length === 1 ? "" : "s"}.`);
-      else toast(`Announcing failed in ${failed.map(([k, v]) => maintTitleName(k) + " (" + v.msg + ")").join(", ")}`, true);
+      else toast(`Couldn't announce in ${failed.map(([k, v]) => maintTitleName(k) + " (" + v.msg + ")").join(", ")}`, true);
       return;
     }
-    const sent = `Sent ${r.messages} message${r.messages === 1 ? "" : "s"} to ${r.members} member${r.members === 1 ? "" : "s"} online`;
+    const sent = `Sent to ${r.members} member${r.members === 1 ? "" : "s"} online.`;
     const g = Object.entries(r.games || {});
     const failed = g.filter(([, v]) => !v.ok);
     if (!g.length) toast(sent);
-    else if (!failed.length) toast(`${sent}, and announced in ${g.length} game${g.length === 1 ? "" : "s"}.`);
-    else toast(`${sent}, but announcing failed in ${failed.map(([k, v]) => maintTitleName(k) + " (" + v.msg + ")").join(", ")}`, true);
-  } catch (e) { toast("Message failed: " + e.message, true); }
+    else if (!failed.length) toast(`${sent} Announced in ${g.length} game${g.length === 1 ? "" : "s"}.`);
+    else toast(`${sent} Couldn't announce in ${failed.map(([k, v]) => maintTitleName(k) + " (" + v.msg + ")").join(", ")}`, true);
+  } catch (e) { toast("Couldn't send: " + e.message, true); }
 };
 
 // Whether what players see is up to date.
@@ -3583,11 +3578,7 @@ function fitNewsStage() {
 }
 window.addEventListener("resize", () => { if (CUR_TAB === "news") fitNewsStage(); });
 
-const NEWS_VIEW_NOTE = {
-  snews: "The page players see around login.",
-  story: "SE's story page, for the selected announcement.",
-  ticker: "SE's main menu. The headline scrolls in the ticker bar near the top.",
-};
+const NEWS_VIEW_NOTE = { snews: "", story: "", ticker: "" };
 document.querySelectorAll("#nwView button").forEach((b) => {
   b.classList.toggle("on", b.dataset.v === NEWS_VIEW);
   b.onclick = () => {
@@ -3609,7 +3600,7 @@ async function renderNewsPreview() {
   } catch (e) {
     if (seq !== NEWS_PV_SEQ) return;
     $("#nwPvState").textContent = "";
-    $("#newsNote").innerHTML = `<span class="warn">Cannot preview: ${esc(e.message)}</span>`;
+    $("#newsNote").innerHTML = `<span class="warn">Couldn't preview: ${esc(e.message)}</span>`;
     return;
   }
   if (seq !== NEWS_PV_SEQ) return;
@@ -3617,8 +3608,8 @@ async function renderNewsPreview() {
   fitNewsStage();
   const res = PML.render(r.text, $("#newsStage"), r.path, {});
   $("#nwPvState").textContent = NEWS_DIRTY ? "Showing unsaved changes" : "";
-  $("#newsNote").textContent = NEWS_VIEW_NOTE[NEWS_VIEW] +
-    (res.standIn ? ` ${res.standIn} character${res.standIn === 1 ? "" : "s"} are not in the Viewer font.` : "");
+  $("#newsNote").textContent = ((NEWS_VIEW_NOTE[NEWS_VIEW] || "") +
+    (res.standIn ? ` ${res.standIn} character${res.standIn === 1 ? " is" : "s are"} not in the Viewer font.` : "")).trim();
 }
 
 // ---- overview ----
@@ -3644,7 +3635,7 @@ async function loadOverview() {
   const card = (go, lab, num, sub, cls) => !tabAllowed(go) ? "" :
     `<button class="stat ${cls || ""}" data-go="${go}"><span class="lab">${lab}</span>` +
     `<span class="num">${num}</span><span class="sub">${sub}</span></button>`;
-  const duty = desk ? (desk.on_duty ? "GM on duty" : "no GM on duty") : "GM service unavailable";
+  const duty = desk ? (desk.on_duty ? "GM on duty" : "no GM on duty") : "GM desk unavailable";
   if (coreOff()) {
     loadOverviewLite(card);
     $("#ovAttention").innerHTML = `<li class="empty">Nothing needs attention.</li>`;
@@ -3661,11 +3652,11 @@ async function loadOverview() {
     card("gmcalls", "Open GM calls", calls ? openCalls.length : "?", duty,
          openCalls.length ? "warn" : "") +
     card("reports", "Open player reports", reports ? openR : "?",
-         (newR ? `${newR} new, ` : "") + `${R.length} in total`, newR ? "warn" : "") +
+         (newR ? `${newR} new, ` : "") + `${R.length} total`, newR ? "warn" : "") +
     card("issues", "Open bug reports", issues ? openI : "?",
-         (newI ? `${newI} new, ` : "") + `${I.length} in total`, newI ? "warn" : "") +
+         (newI ? `${newI} new, ` : "") + `${I.length} total`, newI ? "warn" : "") +
     card("news", "Announcements", news && news.items ? news.items.length : "?",
-         news && news.writable === false ? "publishing unavailable" : "published",
+         news && news.writable === false ? "can't publish" : "published",
          news && news.writable === false ? "warn" : "");
 
   const li = (go, t1, t2, extra) =>
@@ -3678,15 +3669,15 @@ async function loadOverview() {
 
   const att = [];
   openCalls.slice(0, 4).forEach((r) => att.push(li("gmcalls",
-    `GM call from <b>${esc(r.handle || "?")}</b>: ${esc(r.subject || "(no subject)")}`,
+    `GM call from <b>${esc(r.handle || "?")}</b>: ${esc(r.subject || "no subject")}`,
     esc(ago(isoMs(r.received_at))))));
   if (newR) att.push(li("reports", `${newR} new player report${newR === 1 ? "" : "s"}`, ""));
   if (newI) att.push(li("issues", `${newI} new bug report${newI === 1 ? "" : "s"}`, ""));
   notPlayable.slice(0, 4).forEach((r) => att.push(li("accounts",
-    `<code class="mono">${esc(r.polid)}</code> has titles that cannot be played yet`,
+    `<code class="mono">${esc(r.polid)}</code> can't play some titles`,
     `${(r.unlinked || []).length} not linked`, ` data-q="${esc(r.polid)}"`)));
   if (news && news.writable === false)
-    att.push(li("news", "News publishing is unavailable (read-only web root)", ""));
+    att.push(li("news", "News can't be published", ""));
   if (codes && !unused && isOwner()) att.push(li("codes", "No unused registration codes left", ""));
   $("#ovAttention").innerHTML = att.join("") || `<li class="empty">Nothing needs attention.</li>`;
   setBadge("#issuesBadge", newI);
@@ -3717,7 +3708,7 @@ async function loadOverviewLite(card) {
   const next = E.find((e) => e.end > now);
   $("#ovStats").innerHTML =
     card("games", "Games", G.length ? `${running} of ${G.length}` : "0",
-         !G.length ? "none set up yet" : trouble ? `${trouble} need${trouble === 1 ? "s" : ""} a look` : "running",
+         !G.length ? "none yet" : trouble ? `${trouble} need${trouble === 1 ? "s" : ""} a look` : "running",
          trouble ? "warn" : "") +
     card("games", "Playing now", online, `across ${G.length} game${G.length === 1 ? "" : "s"}`) +
     card("gamehelp", "Help requests", help ? waiting.length : "?",
@@ -3729,7 +3720,7 @@ async function loadOverviewLite(card) {
     `<li data-go="games"><span class="t1"><b>${esc(g.title)}</b>: ${esc(states[i].word)}</span>` +
     `<span class="t2">${esc(states[i].why || "")}</span></li>`); });
   waiting.slice(0, 4).forEach((t) => att.push(
-    `<li data-go="gamehelp"><span class="t1">Help request from <b>${esc(t.who || "?")}</b>: ${esc(t.subject || "(no subject)")}</span>` +
+    `<li data-go="gamehelp"><span class="t1">Help request from <b>${esc(t.who || "?")}</b>: ${esc(t.subject || "no subject")}</span>` +
     `<span class="t2">${esc(t.game_title || "")}${t.at ? ", " + esc(ago(t.at * 1000)) : ""}</span></li>`));
   $("#ovAttention").innerHTML = att.join("") || `<li class="empty">Nothing needs attention.</li>`;
   renderOverviewGames();
@@ -3740,7 +3731,7 @@ async function loadRecentActivity() {
   let r;
   try { r = await api("/api/audit?limit=8"); } catch (e) { return; }
   $("#ovActivity").innerHTML = (r.rows || []).map((a) =>
-    `<li data-go="activity"><span class="t1"><b>${esc(a.actor)}</b> ${esc(a.action)}` +
+    `<li data-go="activity"><span class="t1"><b>${esc(a.actor)}</b> ${esc(auditAction(a.action))}` +
     `${a.target ? " <span class=\"muted\">" + esc(a.target) + "</span>" : ""}${a.ok ? "" : " (refused)"}</span>` +
     `<span class="t2">${esc(ago(a.at * 1000))}</span></li>`).join("")
     || `<li class="empty">Nothing yet.</li>`;
@@ -3814,29 +3805,27 @@ async function loadSessions() {
   const mine = rows.filter((r) => !r.current && (r.role || "owner") === meRole);
   const mods = isOwner() ? rows.filter((r) => r.role === "mod") : [];
   $("#sessOthers").hidden = !mine.length;
-  $("#sessOthers").textContent = `Sign out my other browsers (${mine.length})`;
+  $("#sessOthers").textContent = `Sign out other browsers (${mine.length})`;
   $("#sessMods").hidden = !mods.length;
   $("#sessMods").textContent = `Sign out all moderators (${mods.length})`;
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="6" class="muted">No sessions.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="muted">No browsers signed in.</td></tr>`;
     return;
   }
   body.innerHTML = rows.map((r) =>
     `<tr><td>${esc(uaName(r.ua))} <span class="muted">(${esc(r.user || "?")})</span>` +
-      (r.current ? ` <span class="pill open">this browser</span>` : "") + `</td>` +
+      (r.current ? ` <span class="pill open">this browser</span>` : "") +
+      (r.remember ? ` <span class="pill" title="Until ${esc(new Date((r.expires || 0) * 1000).toLocaleString())}">remembered</span>` : "") + `</td>` +
     `<td class="mono">${esc(r.addr || "")}</td>` +
     `<td class="muted">${esc(ago((r.created || 0) * 1000))}</td>` +
     `<td class="muted">${esc(ago((r.seen || 0) * 1000))}</td>` +
-    `<td>${r.remember ? `<span class="pill open" title="Until ${esc(new Date((r.expires || 0) * 1000).toLocaleString())}">remembered</span>`
-                      : `<span class="muted">this visit</span>`}</td>` +
     `<td style="text-align:right"><button class="danger sm" data-sid="${esc(r.id)}"` +
       ` data-cur="${r.current ? 1 : ""}">Sign out</button></td></tr>`).join("");
 }
 $("#sessBody").onclick = async (e) => {
   const b = e.target.closest("button[data-sid]");
   if (!b) return;
-  if (b.dataset.cur && !(await uiAsk({ title: "Sign out this browser?", text: "You will need to sign in again here.",
-                                       ok: "Sign out" }))) return;
+  if (b.dataset.cur && !(await uiAsk({ title: "Sign out this browser?", ok: "Sign out" }))) return;
   b.disabled = true;
   try {
     const r = await api("/api/sessions/revoke", {
@@ -3844,7 +3833,7 @@ $("#sessBody").onclick = async (e) => {
       body: JSON.stringify({ id: b.dataset.sid })
     });
     if (r.was_current) return location.reload();
-    toast("Signed out");
+    toast("Signed out.");
     loadSessions();
   } catch (err) { b.disabled = false; toast(err.message, true); }
 };
@@ -3852,17 +3841,14 @@ async function sessRevokeMany(body, ask) {
   if (!(await uiAsk(ask))) return;
   try {
     const r = await post("/api/sessions/revoke", body);
-    toast(`Signed out ${r.revoked} browser${r.revoked === 1 ? "" : "s"}`);
+    toast(`Signed out ${r.revoked} browser${r.revoked === 1 ? "" : "s"}.`);
     loadSessions();
   } catch (e) { toast(e.message, true); }
 }
 $("#sessOthers").onclick = () => sessRevokeMany({ others: true }, {
-  title: "Sign out your other browsers?", ok: "Sign out",
-  text: isOwner() ? "Every other browser signed in as the owner is signed out. Moderators stay signed in."
-                  : "Every other browser signed in as you is signed out." });
+  title: "Sign out your other browsers?", ok: "Sign out" });
 $("#sessMods").onclick = () => sessRevokeMany({ mods: true }, {
-  title: "Sign out all moderators?", ok: "Sign out moderators", danger: true,
-  text: "Every moderator is signed out of every browser. They can sign in again with their passwords." });
+  title: "Sign out all moderators?", ok: "Sign out", danger: true });
 
 // ---- refresh + keyboard ----
 $("#refreshBtn").onclick = async () => {
@@ -3873,7 +3859,7 @@ $("#refreshBtn").onclick = async () => {
   await new Promise((ok) => setTimeout(ok, 50));
   for (let i = 0; i < 150 && API_BUSY > 0; i++) await new Promise((ok) => setTimeout(ok, 100));
   b.disabled = false;
-  toast("Refreshed");
+  toast("Refreshed.");
 };
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -3897,7 +3883,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---- moderators (owner) ----
-let MODS = [], MOD_LABELS = {}, MOD_SHORT = {}, MOD_EDIT = null;
+let MODS = [], MOD_LABELS = {}, MOD_SHORT = {}, MOD_HINTS = {}, MOD_GAMES = [], MOD_EDIT = null;
 const post = (u, body) => api(u, { method: "POST", headers: { "Content-Type": "application/json" },
                                    body: JSON.stringify(body) });
 
@@ -3905,21 +3891,22 @@ async function loadMods() {
   let r;
   try { r = await api("/api/mods"); } catch (e) { return; }
   MODS = r.mods || []; MOD_LABELS = r.perm_labels || {}; MOD_SHORT = r.perm_short || {};
+  MOD_HINTS = r.perm_hints || {}; MOD_GAMES = r.perm_games || [];
   $("#modCount").textContent = `${MODS.length} moderator${MODS.length === 1 ? "" : "s"}`;
   $("#modAdd").disabled = !r.owner_ready;
   $("#modAdd").title = r.owner_ready ? "" : "Set an owner password first";
   const body = $("#modsBody");
   if (!MODS.length) {
-    body.innerHTML = `<tr><td colspan="6" class="muted">No moderators. ` +
-      `${r.owner_ready ? "" : `Set an owner password on the <a href="#security">Sign-in</a> tab before adding moderators.`}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">No moderators yet.` +
+      `${r.owner_ready ? "" : ` Set an owner password on <a href="#security">Sign-in</a> first.`}</td></tr>`;
     return;
   }
   body.innerHTML = MODS.map((m, i) =>
     `<tr><td><b>${esc(m.username)}</b></td>` +
-    `<td>${m.perms.length ? permChips(m.perms) : `<span class="muted">nothing yet</span>`}</td>` +
+    `<td>${m.perms.length ? `<div class="permchips">${permChips(m.perms)}</div>` : `<span class="muted">nothing yet</span>`}</td>` +
     `<td class="pol-only">${m.perms.includes("codes") ? `${m.codes_24h} / ${m.code_limit ?? "no limit"}` : `<span class="muted">-</span>`}</td>` +
     `<td>${m.disabled ? `<span class="pill used">disabled</span>` : `<span class="pill open">active</span>`}</td>` +
-    `<td class="muted">${m.last_seen ? esc(ago(m.last_seen * 1000)) + ` (${m.sessions} signed in)` : "not signed in"}</td>` +
+    `<td class="muted">${m.last_seen ? esc(ago(m.last_seen * 1000)) + ` · ${m.sessions} signed in` : "not signed in"}</td>` +
     `<td><div class="rowacts">` +
       `<button class="ghost" data-mi="${i}" data-ma="edit">Edit</button>` +
       `<button class="ghost" data-mi="${i}" data-ma="password">New password</button>` +
@@ -3935,7 +3922,7 @@ function showModResult(html) {
 }
 const pwLine = (who, pw) =>
   `<div class="hot"><span>Password for ${esc(who)}</span><span class="mono">${esc(pw)}</span></div>` +
-  `<div><span>Shown once</span><span>Copy it now. It cannot be shown again.</span></div>`;
+  `<div><span>Shown only once</span><span>Copy it now.</span></div>`;
 
 $("#modsBody").onclick = async (e) => {
   const b = e.target.closest("button[data-ma]");
@@ -3943,19 +3930,17 @@ $("#modsBody").onclick = async (e) => {
   const m = MODS[+b.dataset.mi], act = b.dataset.ma;
   if (!m) return;
   if (act === "edit") return openModModal(m);
-  if (act === "delete" && !(await uiAsk({ title: `Remove moderator ${m.username}?`, ok: `Remove ${m.username}`, danger: true,
-                                          text: "Their login is deleted and they are signed out at once." }))) return;
-  if (act === "password" && !(await uiAsk({ title: `New password for ${m.username}?`, ok: "Make a new password",
-                                            text: "A new password is generated and shown once. Their current one stops working and they are signed out." }))) return;
+  if (act === "delete" && !(await uiAsk({ title: `Remove ${m.username}?`, ok: "Remove", danger: true }))) return;
+  if (act === "password" && !(await uiAsk({ title: `Give ${m.username} a new password?`, ok: "New password" }))) return;
   b.disabled = true;
   try {
     const body = act === "toggle" ? { action: "update", id: m.id, disabled: !m.disabled }
                                   : { action: act, id: m.id };
     const r = await post("/api/mods", body);
     if (r.password) showModResult(pwLine(r.username, r.password));
-    toast(act === "toggle" ? `${m.username} ${m.disabled ? "enabled" : "disabled"}`
-      : act === "delete" ? `Removed ${m.username}` : act === "signout" ? `Signed out ${m.username}`
-      : `New password for ${m.username}`);
+    toast(act === "toggle" ? (m.disabled ? "Enabled." : "Disabled.")
+      : act === "delete" ? "Removed." : act === "signout" ? "Signed out."
+      : "New password made.");
     loadMods(); loadAudit(); loadSessions();
   } catch (err) { b.disabled = false; toast(err.message, true); }
 };
@@ -3968,85 +3953,116 @@ function openModModal(m) {
   $("#modLimit").value = m && m.code_limit !== null && m.code_limit !== undefined ? m.code_limit : "";
   $("#modPw").value = "";
   $("#modPwWrap").hidden = !!m;
-  renderModPerms(new Set(m ? m.perms : []));
+  renderModPerms(m ? m.perms : []);
   const own = new Set(((m && m.titles) || []).map(String));
   $("#modTitles").innerHTML = Object.entries(CONTENT).map(([code, name]) =>
     `<label class="chip"><input type="checkbox" value="${esc(code)}" ${own.has(code) ? "checked" : ""}> ${esc(name)}</label>`).join("");
   $("#modModal").classList.add("show");
   (m ? $("#modPerms input") : $("#modUser")).focus();
 }
-// The permissions, the panel's own first, then one row per game: the box to
-// see the game, then one per tool and action ("game.<key>[.<id>]").
-function permGroups() {
-  const core = [], games = {};
-  for (const [k, label] of Object.entries(MOD_LABELS)) {
-    const m = /^game\.([a-z0-9]+)(?:\.(.+))?$/.exec(k);
-    if (!m) { core.push([k, label]); continue; }
-    const g = games[m[1]] || (games[m[1]] = { key: m[1], title: m[1], view: null, items: [] });
-    if (!m[2]) { g.view = k; g.title = label.replace(/^See /, "").split(":")[0]; }
-    else g.items.push([k, label.split(": ").slice(1).join(": ") || m[2]]);
-  }
-  return { core, games: Object.values(games) };
+// The panel's own permissions, then the seven game permissions ("games.<what>"), each
+// with the games it leaves out ("games.<what>:not:<key>", adminusers.GAME_PERMS).
+const GAME_PERM_RE = /^games\.([a-z]+)(?::not:([a-z0-9]+))?$/;
+function permGroups(labels) {
+  const core = [], games = [];
+  for (const [k, label] of Object.entries(labels || MOD_LABELS)) (GAME_PERM_RE.test(k) ? games : core).push([k, label]);
+  return { core, games };
 }
-
-// A moderator's permissions as short chips, in the edit dialog's order: the panel's own,
-// then per game "Kart Club: Help desk" for each tool, or "Kart Club: see" for the game alone.
-function permChips(perms) {
-  const { core, games } = permGroups();
-  const mine = new Set(perms);
+// {"games.kick": Set of game keys left out} for the game permissions a list holds
+function gameGrants(perms) {
+  const out = {};
+  for (const p of perms) { const m = GAME_PERM_RE.exec(p); if (m && !m[2]) out[p] = new Set(); }
+  for (const p of perms) {
+    const m = GAME_PERM_RE.exec(p);
+    if (m && m[2] && out[`games.${m[1]}`]) out[`games.${m[1]}`].add(m[2]);
+  }
+  return out;
+}
+// " (not Kart)" or " (only Kart, Orbit)", whichever names fewer games; games = [{key, short, cats}]
+function gameScope(perm, left, games) {
+  if (!left || !left.size) return "";
+  const cat = perm.split(".")[1];
+  const byName = (a, b) => a.localeCompare(b);
+  const name = (k) => (games.find((g) => g.key === k) || { short: k.toUpperCase() }).short;
+  const kept = games.filter((g) => g.cats.includes(cat) && !left.has(g.key)).map((g) => g.short).sort(byName);
+  if (kept.length < left.size) return kept.length ? ` (only ${kept.join(", ")})` : " (no games)";
+  return ` (not ${[...left].map(name).sort(byName).join(", ")})`;
+}
+// A moderator's permissions as short chips: the panel's own in their order, then each game
+// permission with the games it leaves out.
+function permChips(perms, labels, short, games) {
+  labels = labels || MOD_LABELS; short = short || MOD_SHORT; games = games || MOD_GAMES;
+  const { core, games: cats } = permGroups(labels);
+  const mine = new Set(perms), held = gameGrants(perms);
   const chip = (label, title) => `<span class="permchip" title="${esc(title || "")}">${esc(label)}</span>`;
-  const shortOf = (k, label) => MOD_SHORT[k] || String(label || k).split(/[:(]/)[0].trim();
+  const shortOf = (k, label) => short[k] || String(label || k).split(/[:(]/)[0].trim();
   return core.filter(([k]) => mine.has(k)).map(([k, label]) => chip(shortOf(k, label), label)).join("")
-    + games.map((g) => {
-      const tools = g.items.filter(([k]) => mine.has(k));
-      if (tools.length) return tools.map(([k, l]) => chip(`${g.title}: ${l}`, MOD_LABELS[k])).join("");
-      return mine.has(g.view) ? chip(`${g.title}: see`, MOD_LABELS[g.view]) : "";
-    }).join("");
+    + cats.filter(([k]) => held[k]).map(([k, label]) => chip(shortOf(k, label) + gameScope(k, held[k], games), label)).join("");
 }
 
 // Starting points; the owner adjusts the boxes after.
 const MOD_PRESETS = {
-  "GM": { core: ["gm", "accounts_view", "accounts_manage", "reports", "codes"], games: "view",
-          tools: /^(kick|announce|chars|help|gm|notices)$/ },
-  "Event host": { core: ["news_edit", "news_publish"], games: "view",
-                  tools: /^(events|bonanza|notices|announce|banner|presents)$/ },
-  "Support": { core: ["reports", "accounts_view", "gm"], games: "view", tools: /^(help|faq)$/ },
-  "Watcher": { core: ["accounts_view", "audit", "health"], games: "view", tools: null },
+  "GM": { core: ["gm", "accounts_view", "accounts_manage", "reports", "codes"],
+          games: ["see", "message", "kick", "help", "edit"] },
+  "Event host": { core: ["news_edit", "news_publish"], games: ["see", "message", "edit"] },
+  "Support": { core: ["reports", "accounts_view", "gm"], games: ["see", "help"] },
+  "Watcher": { core: ["accounts_view", "audit", "health"], games: ["see"] },
 };
 
-function renderModPerms(have) {
-  const { core, games } = permGroups();
+function renderModPerms(perms) {
+  const { core, games: cats } = permGroups();
+  const have = new Set(perms), held = gameGrants(perms);
   const box = (k, label, cls) => `<label class="${cls || ""}"><input type="checkbox" value="${esc(k)}"`
     + `${have.has(k) ? " checked" : ""}> ${esc(label)}</label>`;
+  const cat = ([k, label]) => {
+    const what = k.split(".")[1], left = held[k] || new Set();
+    // the games this one applies to, and any left out that this server no longer lists
+    const games = MOD_GAMES.filter((g) => g.cats.includes(what));
+    for (const key of left) if (!games.some((g) => g.key === key)) games.push({ key, title: key.toUpperCase() });
+    const hint = MOD_HINTS[k] ? `<div class="hint">${esc(MOD_HINTS[k])}</div>` : "";
+    const fold = games.length ? `<details class="perm-out"><summary>Leave out games`
+      + `<span class="perm-out-n">${left.size ? ` · ${left.size} left out` : ""}</span></summary>`
+      + `<div class="chips">${games.map((g) => `<label class="chip"><input type="checkbox" data-out="${esc(k)}"`
+        + ` value="${esc(g.key)}"${left.has(g.key) ? " checked" : ""}> ${esc(g.title)}</label>`).join("")}</div></details>` : "";
+    return `<div class="perm-cat">${box(k, MOD_SHORT[k] || label)}${hint}${fold}</div>`;
+  };
   $("#modPerms").innerHTML =
     `<div class="perm-presets">${Object.keys(MOD_PRESETS).map((n) =>
       `<button type="button" class="ghost sm" data-preset="${esc(n)}">${esc(n)}</button>`).join("")}`
-    + `<span class="hint">start from a role, then adjust</span></div>`
+    + `</div>`
     + `<div class="perm-h">The panel</div><div class="perm-core">${core.map(([k, l]) => box(k, l)).join("")}</div>`
-    + (games.length ? `<div class="perm-h">Games <span class="hint">(seeing a game is separate from changing anything in it)</span></div>`
-      + games.map((g) => `<div class="perm-game">${g.view ? box(g.view, g.title, "perm-view") : `<b>${esc(g.title)}</b>`}`
-        + `<div class="perm-tools">${g.items.map(([k, l]) => box(k, l, "chip")).join("")}</div></div>`).join("") : "");
+    + (cats.length ? `<div class="perm-h">Games</div><div class="hint">Every game, also ones added later.</div>`
+      + `<div class="perm-cats">${cats.map(cat).join("")}</div>` : "");
 }
 
 $("#modPerms").addEventListener("click", (e) => {
   const b = e.target.closest("[data-preset]");
   if (!b) return;
   const p = MOD_PRESETS[b.dataset.preset];
-  const { games } = permGroups();
-  const want = new Set(p.core);
-  for (const g of games) {
-    if (p.games === "view" && g.view) want.add(g.view);
-    for (const [k] of g.items) if (p.tools && p.tools.test(k.split(".").pop())) want.add(k);
-  }
-  document.querySelectorAll("#modPerms input[type=checkbox]").forEach((c) => { c.checked = want.has(c.value); });
+  const want = new Set(p.core.concat(p.games.map((g) => `games.${g}`)));
+  document.querySelectorAll("#modPerms input[type=checkbox]").forEach((c) => {
+    c.checked = c.dataset.out ? false : want.has(c.value);
+  });
+  document.querySelectorAll("#modPerms .perm-out-n").forEach((el) => { el.textContent = ""; });
 });
-// ticking a tool also lets the moderator see that game
+// the count beside "Leave out games"
 $("#modPerms").addEventListener("change", (e) => {
   const c = e.target;
-  if (!c.checked || !/^game\.[a-z0-9]+\./.test(c.value)) return;
-  const view = $(`#modPerms input[value="${c.value.split(".").slice(0, 2).join(".")}"]`);
-  if (view) view.checked = true;
+  if (!c.dataset.out) return;
+  const n = document.querySelectorAll(`#modPerms input[data-out="${c.dataset.out}"]:checked`).length;
+  c.closest(".perm-out").querySelector(".perm-out-n").textContent = n ? ` · ${n} left out` : "";
 });
+// what the dialog says: the ticked permissions, and for each ticked game permission the games it leaves out
+function modPermsPicked() {
+  const out = [];
+  document.querySelectorAll("#modPerms input:checked").forEach((c) => {
+    if (!c.dataset.out) out.push(c.value);
+  });
+  document.querySelectorAll("#modPerms input[data-out]:checked").forEach((c) => {
+    if (out.includes(c.dataset.out)) out.push(`${c.dataset.out}:not:${c.value}`);
+  });
+  return out;
+}
 
 function closeModModal() { $("#modModal").classList.remove("show"); MOD_EDIT = null; }
 $("#modAdd").onclick = () => openModModal(null);
@@ -4056,25 +4072,25 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("#modModal").classList.contains("show")) closeModModal();
 });
 $("#modSave").onclick = async () => {
-  const perms = [...document.querySelectorAll("#modPerms input:checked")].map((c) => c.value);
+  const perms = modPermsPicked();
   const titles = [...document.querySelectorAll("#modTitles input:checked")].map((c) => +c.value);
   const lim = $("#modLimit").value.trim();
   const body = MOD_EDIT
     ? { action: "update", id: MOD_EDIT.id, perms, code_limit: lim === "" ? null : lim, titles }
     : { action: "create", username: $("#modUser").value.trim(), perms,
         code_limit: lim === "" ? null : lim, password: $("#modPw").value, titles };
-  if (!MOD_EDIT && !body.username) return toast("Enter a username", true);
-  if (!perms.length && !(await uiAsk({ title: "No permissions ticked", ok: "Save anyway",
-                                      text: "This moderator could sign in but use nothing. Save anyway?" }))) return;
+  if (!MOD_EDIT && !body.username) return toast("Enter a username.", true);
+  if (!perms.length && !(await uiAsk({ title: "Save with no permissions?", ok: "Save" }))) return;
   const btn = $("#modSave");
   btn.disabled = true;
   try {
     const r = await post("/api/mods", body);
+    const editing = !!MOD_EDIT;     // closing the dialog forgets which moderator it was
     closeModModal();
     if (r.password) showModResult(pwLine(r.username, r.password));
-    else if (!MOD_EDIT && body.password) showModResult(
-      `<div><span>Added ${esc(r.username)}</span><span>with the password you typed</span></div>`);
-    toast(MOD_EDIT ? `Saved ${r.username}` : `Added ${r.username}`);
+    else if (!editing && body.password) showModResult(
+      `<div><span>Added ${esc(r.username)}</span><span>Uses the password you typed</span></div>`);
+    toast(editing ? "Saved." : "Added.");
     loadMods(); loadAudit();
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; }
@@ -4111,9 +4127,16 @@ function auditValue(k, v) {
   if (v === true) return "yes";
   if (v === false) return "no";
   if (v === null || v === undefined || v === "") return "none";
-  if (Array.isArray(v)) return v.map((x) => k === "perms" ? (MOD_SHORT[x] || x) : x).join(", ") || "none";
+  if (Array.isArray(v)) return v.map((x) => k === "perms" ? auditPerm(x) : x).join(", ") || "none";
   if (typeof v === "object") return Object.entries(v).map(([a, b]) => `${a.replace(/_/g, " ")} ${auditValue(a, b)}`).join(", ");
   return String(v);
+}
+// "games.kick:not:kart" -> "Disconnect players not Kart"
+function auditPerm(x) {
+  const m = GAME_PERM_RE.exec(x);
+  if (!m || !m[2]) return MOD_SHORT[x] || x;
+  const g = MOD_GAMES.find((y) => y.key === m[2]);
+  return `${MOD_SHORT[`games.${m[1]}`] || m[1]} not ${g ? g.short : m[2].toUpperCase()}`;
 }
 function auditDetail(d) {
   if (!d) return "";
@@ -4145,7 +4168,7 @@ function renderAudit() {
   const q = $("#auditSearch").value.trim().toLowerCase();
   const rows = AUDIT.filter((a) => !q || [a.action, a.target, a.detail, a.actor]
     .some((v) => String(v || "").toLowerCase().includes(q)));
-  $("#auditCount").textContent = `${rows.length} shown` + (AUDIT_MORE ? ", older ones below" : "");
+  $("#auditCount").textContent = `${rows.length} shown`;
   $("#auditMore").hidden = !AUDIT_MORE;
   $("#auditBody").innerHTML = rows.map((a) =>
     `<tr class="${a.ok ? "" : "audit-bad"}"><td class="muted" style="white-space:nowrap" title="${esc(new Date(a.at * 1000).toLocaleString())}">${esc(ago(a.at * 1000))}</td>` +
@@ -4153,7 +4176,7 @@ function renderAudit() {
     `<td title="${esc(a.action)}">${esc(auditAction(a.action))}${a.ok ? "" : " (refused)"}</td>` +
     `<td class="mono">${esc(a.target || "")}</td>` +
     `<td class="muted" style="font-size:12px; overflow-wrap:anywhere">${esc(auditDetail(a.detail))}</td></tr>`).join("")
-    || `<tr><td colspan="5" class="muted">Nothing recorded yet.</td></tr>`;
+    || `<tr><td colspan="5" class="muted">Nothing yet.</td></tr>`;
 }
 $("#auditActor").onchange = () => loadAudit();
 $("#auditMore").onclick = async () => {
@@ -4167,22 +4190,24 @@ $("#auditSearch").addEventListener("input", renderAudit);
 // ---- a moderator's own password ----
 $("#meSave").onclick = async () => {
   const pw = $("#meNew").value;
-  if (pw !== $("#meNew2").value) return toast("The two new passwords do not match", true);
-  if (pw.length < 8) return toast("Password must be at least 8 characters", true);
+  if (pw !== $("#meNew2").value) return toast("The new passwords don't match.", true);
+  if (pw.length < 8) return toast("Use at least 8 characters.", true);
   try {
     await post("/api/me/password", { current: $("#meCurrent").value, password: pw });
     $("#meCurrent").value = $("#meNew").value = $("#meNew2").value = "";
-    toast("Password changed. Your other browsers were signed out.");
+    toast("Password changed. Other browsers signed out.");
     loadSessions();
   } catch (e) { toast(e.message, true); }
 };
+// the chips on My account, as the Moderators table shows them
 function renderMeState() {
   if (isOwner()) return;
-  const labels = SESSION.perm_labels || {};
-  const perms = SESSION.perms || [];
-  $("#meState").innerHTML = `Signed in as moderator <b>${esc(SESSION.user)}</b>. ` +
-    (perms.length ? "Access: " + perms.map((p) => esc(labels[p] || p)).join("; ") + "."
-                  : "No access has been assigned yet.");
+  const perms = SESSION.grants || SESSION.perms || [];
+  const el = $("#meState");
+  el.className = "me-perms";
+  el.innerHTML = perms.length
+    ? "<span>Access</span>" + permChips(perms, SESSION.perm_labels || {}, SESSION.perm_short || {}, SESSION.perm_games || [])
+    : "No access yet.";
 }
 
 // ---- a moderator only sees the titles they may put on a code ----
@@ -4212,7 +4237,7 @@ async function loadOnline() {
     `${esc(a.handle || "")}</span><span class="t2">since ${esc(ago(isoMs(a.since)))}` +
     `${a.addr ? " · " + esc(a.addr) : ""}</span></li>`).join("")
     + (r.accounts.length > 12 ? `<li class="empty">and ${r.accounts.length - 12} more</li>` : "")
-    || `<li class="empty">Nobody is signed in.</li>`;
+    || `<li class="empty">Nobody signed in.</li>`;
 }
 
 // A port check's socket error, in words: the raw text goes in the tooltip.
@@ -4221,7 +4246,7 @@ function plainSocketError(err) {
   if (!e) return "down";
   if (/getaddrinfo|name or service|nodename|no address|name resolution|unknown host/.test(e)) return "can't find the host";
   if (/refused|10061|errno 111/.test(e)) return "nothing is listening";
-  if (/timed out|timeout|10060/.test(e)) return "no answer (timed out)";
+  if (/timed out|timeout|10060/.test(e)) return "timed out";
   if (/unreachable|no route|10065|10051/.test(e)) return "can't reach it";
   if (/reset|10054|broken pipe/.test(e)) return "the connection was dropped";
   return "can't reach it";
@@ -4255,10 +4280,9 @@ async function loadHealth(fresh) {
       (last ? `last good ${esc(ago(last.at * 1000))}, ${esc(fmtBytes(last.bytes))}` : "none succeeded") +
       `</span></li>`;
   }
-  $("#ovHealth").innerHTML = bl + rows.join("") || `<li class="empty">No ports to check yet. ` +
-    (isOwner() ? "Add them in Settings, under Service checks." : "The owner can add them.") + `</li>`;
+  $("#ovHealth").innerHTML = bl + rows.join("") || `<li class="empty">No checks yet.</li>`;
   const d = r.disk;
-  $("#ovHealthFoot").innerHTML = (d ? `Disk: ${esc(fmtBytes(d.free))} free of ${esc(fmtBytes(d.total))}. ` : "") +
+  $("#ovHealthFoot").innerHTML = (d ? `${esc(fmtBytes(d.free))} of ${esc(fmtBytes(d.total))} disk free. ` : "") +
     `Checked ${esc(ago(r.checked_at * 1000))}. <a class="acct-link" id="healthRecheck">Check now</a>`;
   $("#healthRecheck").onclick = () => loadHealth(true);
 }
@@ -4281,8 +4305,7 @@ async function loadOps() {
   const sum = $("#opsSum");
   if (r.stale) {
     sum.className = "ops-sum bad";
-    sum.textContent = `The server checker last reported ${ago(r.at * 1000)}. ` +
-      "What is shown below may be out of date, and the fix buttons are off.";
+    sum.textContent = `Last report ${ago(r.at * 1000)}. This may be out of date.`;
   } else if (r.running) {
     const a = (r.actions || {})[r.running.action] || {};
     sum.className = "ops-sum";
@@ -4292,7 +4315,7 @@ async function loadOps() {
     sum.textContent = bad === 1 ? "1 thing is broken." : `${bad} things are broken.`;
   } else if (warn) {
     sum.className = "ops-sum";
-    sum.textContent = warn === 1 ? "Working, with 1 thing to look at." : `Working, with ${warn} things to look at.`;
+    sum.textContent = warn === 1 ? "1 thing to look at." : `${warn} things to look at.`;
   } else {
     sum.className = "ops-sum ok";
     sum.textContent = "Everything is working.";
@@ -4311,8 +4334,8 @@ async function loadOps() {
       hour: "numeric", minute: "2-digit"}) : "";
     const quiet = c.state === "ok" || c.state === "info";
     const restarted = rs && !quiet
-      ? `<div class="ops-restart" title="${esc(rs.container)}">Last restart ${esc(ago(rs.at * 1000))} ` +
-        `(${esc(when)}): ${esc(rs.reason)}.</div>`
+      ? `<div class="ops-restart" title="${esc(when + ", " + rs.container)}">Restarted ${esc(ago(rs.at * 1000))}: ` +
+        `${esc(rs.reason)}.</div>`
       : "";
     return `<li class="${esc(c.state)}${quiet ? " quiet" : ""}"><span class="dot ${esc(dot)}"></span>` +
       `<div class="ops-text"><div class="ops-name">${esc(c.name)}</div>` +
@@ -4355,15 +4378,15 @@ async function openAccount(polid) {
   try { r = await api("/api/account-detail?polid=" + encodeURIComponent(polid)); }
   catch (e) { return toast(e.message, true); }
   ACCT = r;
-  const when = (iso) => iso ? `<span title="${esc(utcTitle(iso))}">${esc(fmtWhen(iso))} (${esc(ago(isoMs(iso)))})</span>` : "-";
+  const when = (iso) => iso ? `<span title="${esc(utcTitle(iso))}">${esc(fmtWhen(iso))}</span>` : "-";
   const kv = (k, v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
   const sec = (title, inner, cls) => `<div class="acct-sec${cls ? " " + cls : ""}"><h4>${title}</h4>${inner}</div>`;
   const m = r.members[0] || {};
   const manage = can("accounts_manage");
   $("#acctTitle").innerHTML = `<code class="mono">${esc(r.polid)}</code> ${esc(r.handles[0] || "")}`;
   $("#acctSub").textContent = r.online.length
-    ? `Signed in now, since ${ago(isoMs(r.online[0].since))}` + (r.online[0].addr ? ` from ${r.online[0].addr}` : "")
-      + (r.online.length > 1 ? ` (${r.online.length} sessions)` : "")
+    ? `Online, signed in ${ago(isoMs(r.online[0].since))}` + (r.online[0].addr ? ` from ${r.online[0].addr}` : "")
+      + (r.online.length > 1 ? ` · ${r.online.length} sessions` : "")
     : "Not signed in";
   const status = r.status && r.status !== "active" ? `<span class="pill used">${esc(r.status)}</span>` : `<span class="pill open">active</span>`;
   const refusalTime = r.effective_reject_code && r.reject_until
@@ -4377,7 +4400,7 @@ async function openAccount(polid) {
     kv("Created", when(r.created_at)) +
     kv("Login name", esc(m.login_name || "-")) +
     kv("Handles", esc(r.handles.join(", ") || "-")) +
-    kv("Mail", esc(m.mail || "-") + (m.ext_mail ? " (outside mail on)" : "")) +
+    kv("Mail", esc(m.mail || "-") + (m.ext_mail ? " · outside mail on" : "")) +
     kv("Messages / friends", `${r.mail_count ?? "-"} / ${r.friends ?? "-"}`));
   // Titles: with the manage permission, one switch per title that grants or
   // revokes that title alone.
@@ -4402,25 +4425,26 @@ async function openAccount(polid) {
   else empty.push("registration codes");
   if (r.gm_calls !== null) {
     if (r.gm_calls.length) html += sec("GM calls", r.gm_calls.map((g) => kv(
-      `<a class="acct-link" data-gm="${esc(g.id)}">${esc(g.subject || "(no subject)")}</a>`, esc(ago(isoMs(g.received_at))))).join(""));
+      `<a class="acct-link" data-gm="${esc(g.id)}">${esc(g.subject || "No subject")}</a>`, esc(ago(isoMs(g.received_at))))).join(""));
     else empty.push("GM calls");
   }
   if (r.reports !== null) {
     if (r.reports.length) html += sec("Reports about this player", r.reports.map((x) => kv(
-      `<a class="acct-link" data-rep="${esc(x.id || "")}">${esc(String(x.explanation || "(no text)").slice(0, 80))}</a>`,
+      `<a class="acct-link" data-rep="${esc(x.id || "")}">${esc(String(x.explanation || "No text").slice(0, 80))}</a>`,
       esc(ago(isoMs(x.received_at))))).join(""));
     else empty.push("reports about this player");
   }
   if (r.activity !== null) {
     if (r.activity.length) html += sec("Panel activity", r.activity.slice(0, 5).map((a) =>
-      kv(`${esc(a.actor)}: ${esc(a.action)}${a.ok ? "" : " (refused)"}`, esc(ago(a.at * 1000)))).join("")
+      kv(`${esc(a.actor)} ${esc(auditAction(a.action))}${a.ok ? "" : ", refused"}`, esc(ago(a.at * 1000)))).join("")
       + (tabAllowed("activity") ? `<div class="acct-more"><a class="acct-link" data-audit="${esc(r.polid)}">`
-        + `${r.activity.length > 5 ? "All of it" : "Open"} in the Activity log</a></div>` : ""));
+        + `Open in Activity log</a></div>` : ""));
     else empty.push("panel activity");
   }
-  html += `<div class="acct-sec" id="acctGames"><h4>In the games</h4><div class="none">Asking the games...</div></div>`;
+  html += `<div class="acct-sec" id="acctGames"><h4>In the games</h4><div class="none">Loading…</div></div>`;
   html += `</div>`;
-  if (empty.length) html += `<div class="acct-empty">Nothing yet: ${esc(empty.join(", "))}.</div>`;
+  if (empty.length) html += `<div class="acct-empty">No ${esc(empty.length > 1
+    ? empty.slice(0, -1).join(", ") + " or " + empty[empty.length - 1] : empty[0])}.</div>`;
   $("#acctBody").innerHTML = html;
   loadAccountGames(r.polid);
   // the everyday buttons, the rest under More, Delete last
@@ -4480,8 +4504,8 @@ $("#acctBody").addEventListener("change", async (e) => {
   try {
     const res = await post(on ? "/api/grant" : "/api/revoke", { polid, content_codes: [code] });
     const name = CONTENT[code] || code;
-    if (on) toast(res.linked ? `Granted ${name} to ${polid}` : `Granted ${name}, but the account has no handle yet, so it cannot play`, !res.linked);
-    else toast(`Revoked ${name} from ${polid}`);
+    if (on) toast(res.linked ? `Granted ${name}.` : `Granted ${name}. The account has no handle yet, so it can't play.`, !res.linked);
+    else toast(`Revoked ${name}.`);
     if (ACCOUNTS.length) loadAccounts();
     if (ACCT && ACCT.polid === polid) openAccount(polid);
   } catch (err) { box.checked = !on; box.disabled = false; toast(err.message, true); }
@@ -4518,13 +4542,13 @@ async function renderAlertBtn() {
   if (!st.supported) {
     btn.textContent = "Alerts: unavailable";
     btn.disabled = true;
-    btn.title = "Browser alerts need the panel to be opened over https.";
+    btn.title = "Needs https";
     return;
   }
   btn.disabled = false;
   btn.textContent = st.on ? "Alerts: on" : "Alerts: off";
   btn.className = st.on ? "act" : "ghost";
-  btn.title = st.on ? "This device gets a notification for each new GM call" : "Get a notification on this device for each new GM call";
+  btn.title = st.on ? "This device is notified of new GM calls" : "Notify this device of new GM calls";
 }
 $("#gmAlertBtn").onclick = async () => {
   const btn = $("#gmAlertBtn");
@@ -4534,10 +4558,10 @@ $("#gmAlertBtn").onclick = async () => {
     if (st.on) {
       await post("/api/push/unsubscribe", { endpoint: st.sub.endpoint });
       await st.sub.unsubscribe();
-      toast("Alerts turned off on this device");
+      toast("Alerts off.");
     } else {
       if ((await Notification.requestPermission()) !== "granted") {
-        toast("Notifications are blocked for this site in the browser settings", true);
+        toast("Notifications are blocked in your browser settings.", true);
         return;
       }
       const reg = st.reg || await navigator.serviceWorker.register("/sw.js");
@@ -4548,7 +4572,7 @@ $("#gmAlertBtn").onclick = async () => {
       sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToBytes(key) });
       await post("/api/push/subscribe", { subscription: sub.toJSON(), origin: location.origin });
       const t = await post("/api/push/test", {}).catch((e) => ({ error: e.message }));
-      toast(t.error ? "Alerts on, but the test failed: " + t.error : "Alerts on. A test notification was sent.", !!t.error);
+      toast(t.error ? "Alerts on. Test failed: " + t.error : "Alerts on. Test sent.", !!t.error);
     }
   } catch (e) { toast(e.message, true); }
   finally { renderAlertBtn(); }
@@ -4559,8 +4583,8 @@ async function loadAlerts() {
   let r;
   try { r = await api("/api/alerts"); } catch (e) { return; }
   $("#discordUrl").value = "";
-  $("#discordUrl").placeholder = r.discord_set ? "Saved. Paste a new URL to replace it." : "https://discord.com/api/webhooks/...";
-  $("#discordHint").textContent = r.discord_set ? `(saved, ends ${r.discord_hint})` : "(not set)";
+  $("#discordUrl").placeholder = r.discord_set ? "Paste a new URL to replace it" : "https://discord.com/api/webhooks/...";
+  $("#discordHint").textContent = r.discord_set ? `· saved, ends ${r.discord_hint}` : "";
   $("#discordTest").disabled = $("#discordClear").disabled = !r.discord_set;
   $("#panelUrl").value = r.panel_url || "";
   $("#healthTargets").value = r.health_targets || "";
@@ -4570,33 +4594,75 @@ async function loadAlerts() {
     `<td class="muted">${esc(ago(d.created_at * 1000))}</td>` +
     `<td class="muted">${d.last_error ? `<span style="color:var(--bad)">${esc(d.last_error)}</span>`
                                       : d.last_ok ? esc(ago(d.last_ok * 1000)) : "not yet"}</td></tr>`).join("")
-    || `<tr><td colspan="4" class="muted">No devices. Turn alerts on from the GM Calls tab.</td></tr>`;
+    || `<tr><td colspan="4" class="muted">No devices yet.</td></tr>`;
   $("#alertRecent").innerHTML = r.recent.map((a) =>
     `<li><span class="t1">${esc(a.ticket.replace(/\.json$/, ""))}</span><span class="t2">${esc(a.result || "")} · ${esc(ago(a.at * 1000))}</span></li>`).join("")
-    || `<li class="empty">No GM calls since alerts were set up.</li>`;
+    || `<li class="empty">No alerts yet.</li>`;
 }
 $("#alertsSave").onclick = async () => {
   try {
     await post("/api/alerts", { discord_webhook: $("#discordUrl").value.trim(), panel_url: $("#panelUrl").value.trim() });
-    toast("Saved");
+    toast("Saved.");
     loadAlerts();
   } catch (e) { toast(e.message, true); }
 };
 $("#discordTest").onclick = async () => {
-  try { await post("/api/alerts", { action: "test_discord" }); toast("Test sent to Discord"); }
+  try { await post("/api/alerts", { action: "test_discord" }); toast("Test sent."); }
   catch (e) { toast(e.message, true); }
 };
 $("#discordClear").onclick = async () => {
-  if (!(await uiAsk({ title: "Remove the Discord webhook?", ok: "Remove webhook", danger: true,
-                      text: "New GM calls will no longer be posted to that Discord channel." }))) return;
-  try { await post("/api/alerts", { clear_discord: true }); toast("Webhook removed"); loadAlerts(); }
+  if (!(await uiAsk({ title: "Remove the Discord webhook?", ok: "Remove", danger: true }))) return;
+  try { await post("/api/alerts", { clear_discord: true }); toast("Removed."); loadAlerts(); }
   catch (e) { toast(e.message, true); }
 };
 $("#checksSave").onclick = async () => {
   try {
     await post("/api/alerts", { health_targets: $("#healthTargets").value, health_host: $("#healthHost").value.trim() });
-    toast("Checks saved");
+    toast("Saved.");
   } catch (e) { toast(e.message, true); }
+};
+
+// ---- Settings > Logs (owner): adminlogs.py ----
+// One area's logs as a text file to attach to a report. The server blanks secrets; the file
+// comes back as a download (Content-Disposition), so it is fetched and saved, not opened.
+async function loadLogAreas() {
+  let r;
+  try { r = await api("/api/logexport/areas"); }
+  catch (e) { $("#logBody").hidden = true; $("#logEmpty").hidden = false; return; }
+  $("#logEmpty").hidden = true;
+  $("#logBody").hidden = false;
+  const sel = $("#logArea"), keep = sel.value;
+  sel.innerHTML = `<option value="all">Everything</option>`
+    + r.areas.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  $("#logLines").hidden = !r.lines;
+}
+$("#logGet").onclick = async () => {
+  const btn = $("#logGet"), was = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Gathering...";
+  try {
+    const q = new URLSearchParams({ area: $("#logArea").value, lines: $("#logLines").value,
+                                    addresses: $("#logAddr").checked ? "1" : "0" });
+    const r = await fetch("/api/logexport?" + q);
+    if (!r.ok) {
+      let j = {};
+      try { j = await r.json(); } catch (x) { j = {}; }
+      throw new Error(j.error || r.statusText);
+    }
+    const blob = await r.blob();
+    const name = ((r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/) || [])[1]
+      || "openlobby-logs.txt";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast("Downloaded.");
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.textContent = was; }
 };
 
 // ---- Bots (owner): adminbots.py ----
@@ -4612,10 +4678,10 @@ const BOTS_OPEN = new Set();           // "<view>:<bot>" whose Settings are open
 const BOTS_FLUX_SHOW = new Set();      // bots not on Fluxer whose card was asked for ("set up")
 function botState(b) {
   const a = b.applied || {};
-  if (b.has_token && !b.token_ok) return ["off", "Token unreadable: saved under another key"];
-  if (b.live) return ["live", "Running on this token"];
-  if (b.has_token) return ["wait", a.at ? "Restarting onto the new values" : "Waiting for its service"];
-  if (a.source === "env") return ["env", "Running on the server's settings"];
+  if (b.has_token && !b.token_ok) return ["off", "Token unreadable"];
+  if (b.live) return ["live", "Running"];
+  if (b.has_token) return ["wait", a.at ? "Restarting" : "Waiting to start"];
+  if (a.source === "env") return ["env", "Running on server settings"];
   return ["off", a.at ? "No token" : "Not running"];
 }
 const BOT_MARK = { ok: "✓", todo: "•", warn: "!", info: "i" };
@@ -4633,10 +4699,10 @@ function botChecklist(items, checked) {
     + (ok.length ? `<details class="bc-ok"><summary>${ok.length} check${ok.length === 1 ? "" : "s"} pass${ok.length === 1 ? "es" : ""}${when}</summary>${botItems(ok)}</details>` : "");
 }
 function fluxerState(f) {
-  if (f.has_token && !f.token_ok) return ["off", "Token unreadable: saved under another key"];
+  if (f.has_token && !f.token_ok) return ["off", "Token unreadable"];
   if (f.live) return ["live", "Running"];
-  if (f.has_token) return ["wait", "Restarting onto the new values"];
-  if (f.source === "env") return ["env", "Running on the server's settings"];
+  if (f.has_token) return ["wait", "Restarting"];
+  if (f.source === "env") return ["env", "Running on server settings"];
   return ["off", "Not set up"];
 }
 // Nothing of it on Fluxer at all: no token, no channels, nothing running from the server's settings.
@@ -4654,11 +4720,10 @@ function botShell(b, view, state, sub, checklist, settings) {
 }
 function discordCard(b) {
   const state = botState(b);
-  const who = b.username ? `${esc(b.username)} · app ${esc(b.app_id)}` : (b.app_id ? `app ${esc(b.app_id)}` : "Not set up here");
-  const where = b.port ? `port ${esc(b.port)}` : "reached through the Tetra Master board";
-  const sub = `${who} · <code>/${esc(b.command)}</code> · ${where}`;
+  const who = b.username ? esc(b.username) : (b.app_id ? "Set up" : "Not set up");
+  const sub = `${who} · <code>/${esc(b.command)}</code>`;
   const settings = `
-    <label>Bot token ${b.has_token ? `<span class="muted">(saved, ends ${esc(b.token_hint || "?")})</span>` : ""}</label>
+    <label title="${esc(b.env_prefix)}_DISCORD_BOT_TOKEN in .env">Bot token ${b.has_token ? `<span class="muted">· saved, ends ${esc(b.token_hint || "?")}</span>` : ""}</label>
     <input type="password" class="botToken" autocomplete="off" spellcheck="false"
       placeholder="${b.has_token ? "Paste a new token to replace it" : "Paste the bot token"}">
     <label>${b.bot === "bridge" ? "Interactions base address" : "Board page address"}</label>
@@ -4666,18 +4731,17 @@ function discordCard(b) {
       placeholder="${b.bot === "bridge" ? "https://tm.example.com/pol" : `https://${esc(b.bot)}.example.com`}">
     ${b.endpoint ? `<div class="hint">Interactions endpoint: <code>${esc(b.endpoint)}</code></div>` : ""}
     ${b.news_channels === null || b.news_channels === undefined ? "" : `
-    <label>Channels: Game news <span class="botfeed">(this game's news only, posted by this bot; none = off)</span></label>
+    <label>Game news channels</label>
     <input type="text" class="botNews" value="${esc(b.news_channels)}" spellcheck="false"
-      inputmode="numeric" placeholder="Channel ids, comma separated">`}
+      inputmode="numeric" placeholder="Channel IDs, empty for off">`}
     <div class="rowacts">
       <button class="act sm" data-act="save">Save</button>
       ${b.invite ? `<a class="ghost sm btnlink" href="${esc(b.invite)}" target="_blank" rel="noopener">Invite</a>` : ""}
       <button class="ghost sm" data-act="endpoint" ${b.has_token && b.url ? "" : "disabled"}
-        title="Point Discord's interactions at this board (it must already be running on this token)">Set endpoint</button>
+        title="Point Discord at this board once it is running">Set endpoint</button>
       <button class="ghost sm" data-act="refresh" ${b.has_token ? "" : "disabled"}>Check now</button>
       <button class="ghost sm" data-act="clear" ${b.has_token ? "" : "disabled"}>Remove token</button>
-    </div>
-    <div class="hint" title="${esc(b.env_prefix)}_DISCORD_BOT_TOKEN in .env">Left empty, the bot keeps the token from the server's own settings.</div>`;
+    </div>`;
   return botShell(b, "discord", state, sub, botChecklist(b.checklist, b.checked_at), settings);
 }
 function fluxerCard(b) {
@@ -4686,19 +4750,20 @@ function fluxerCard(b) {
   const envHint = b.bot === "bridge"
     ? "POL_BRIDGE_FLUXER_BOT_TOKEN, POL_BRIDGE_FLUXER_ANNOUNCE, POL_BRIDGE_FLUXER_ANNOUNCE_ROLES in .env"
     : `${b.env_prefix}_FLUXER_BOT_TOKEN, ${b.env_prefix}_FLUXER_CHANNELS in .env`;
-  const roles = (f.roles || []).length ? `<label>Ping roles <span class="botfeed">(role id per game; empty = no ping)</span></label>
+  const roles = (f.roles || []).length ? `<label>Ping roles</label>
     <div class="bc-roles">${f.roles.map((r) => `<label><span>${esc(r.label)}</span>
     <input type="text" class="fluxChan" data-key="${esc(r.key)}" value="${esc(r.value || "")}"
-      spellcheck="false" inputmode="numeric" placeholder="${r.running ? `Server setting: ${esc(r.running)}` : "Role id"}"></label>`).join("")}</div>` : "";
+      spellcheck="false" inputmode="numeric" placeholder="${r.running ? `Server setting: ${esc(r.running)}` : "Role ID, empty for no ping"}"></label>`).join("")}</div>` : "";
   const chans = f.feeds.map((d) => {
     const run = (f.running_channels || {})[d.key];
-    return `<label>Channels: ${esc(d.label)}${d.key === b.bot ? "" : `
-      <span class="botfeed">(${d.shares_main ? "none = beside the board" : "none = off"})</span>`}</label>
+    const ph = run ? `Server setting: ${esc(run)}` : d.key === b.bot ? "Channel IDs, comma separated"
+      : d.shares_main ? "Empty posts beside the board" : "Channel IDs, empty for off";
+    return `<label>${esc(d.label)} channels</label>
     <input type="text" class="fluxChan" data-key="${esc(d.key)}" value="${esc((f.channels || {})[d.key] || "")}"
-      spellcheck="false" inputmode="numeric" placeholder="${run ? `Empty: the server's setting, ${esc(run)}` : "Channel ids, comma separated"}">`;
+      spellcheck="false" inputmode="numeric" placeholder="${ph}">`;
   }).join("");
   const settings = `
-    <label>Bot token ${f.has_token ? `<span class="muted">(saved, ends ${esc(f.token_hint || "?")})</span>` : ""}</label>
+    <label title="${esc(envHint)}">Bot token ${f.has_token ? `<span class="muted">· saved, ends ${esc(f.token_hint || "?")}</span>` : ""}</label>
     <input type="password" class="fluxToken" autocomplete="off" spellcheck="false"
       placeholder="${f.has_token ? "Paste a new token to replace it" : "Paste the Fluxer bot token"}">
     ${chans}${roles}
@@ -4706,10 +4771,9 @@ function fluxerCard(b) {
       <button class="act sm" data-act="fluxer-save">Save</button>
       <button class="ghost sm" data-act="fluxer-check" ${f.has_token ? "" : "disabled"}>Check now</button>
       <button class="ghost sm" data-act="fluxer-clear" ${f.has_token || Object.keys(f.channels || {}).length ? "" : "disabled"}>Remove</button>
-    </div>
-    <div class="hint" title="${esc(envHint)}">Left empty, the bot keeps what the server's own settings say.</div>`;
+    </div>`;
   const run = Object.values(f.running_channels || {}).filter(Boolean).length;
-  const sub = `${f.username ? esc(f.username) : (f.source === "env" ? "On the server's token" : "Not set up here")}`
+  const sub = `${f.username ? esc(f.username) : (f.source === "env" ? "On the server token" : "Not set up")}`
     + (run ? ` · ${run} feed${run === 1 ? "" : "s"} posting` : "");
   return botShell(b, "fluxer", fluxerState(f), sub, botChecklist(f.checklist, f.checked_at), settings);
 }
@@ -4785,16 +4849,14 @@ $("#botsList").addEventListener("click", async (e) => {
     card.querySelectorAll(".fluxChan").forEach((el) => { body.channels[el.dataset.key] = el.value.trim(); });
   }
   const title = (BOTS.bots.find((x) => x.bot === bot) || {}).title || bot;
-  if (act === "clear" && !(await uiAsk({ title: `Remove the ${title} Discord token?`, ok: "Remove token", danger: true,
-      text: "Its service goes back to the token in the server's own settings, if there is one." }))) return;
-  if (act === "fluxer-clear" && !(await uiAsk({ title: `Remove ${title} from Fluxer?`, ok: "Remove", danger: true,
-      text: "Its Fluxer token and channels are removed here. It goes back to the server's own settings for Fluxer, if there are any." }))) return;
+  if (act === "clear" && !(await uiAsk({ title: `Remove the ${title} Discord token?`, ok: "Remove", danger: true }))) return;
+  if (act === "fluxer-clear" && !(await uiAsk({ title: `Remove ${title} from Fluxer?`, ok: "Remove", danger: true }))) return;
   btn.disabled = true;
   try {
     const r = await post("/api/bots", body);
     const d = r.discord, f = r.fluxer;
-    toast(d ? `Saved: ${d.username || d.name} (app ${d.app_id})`
-      : f ? `${r.detail || "Done"} Fluxer: ${f.username || f.user_id}` : (r.detail || "Done"));
+    toast(d ? `Saved as ${d.username || d.name}.`
+      : f ? `${r.detail || "Done."} Fluxer: ${f.username || f.user_id}` : (r.detail || "Done."));
     botsRedrawOne(bot);
   } catch (err) { toast(err.message, true); btn.disabled = false; }
 });
@@ -4844,7 +4906,7 @@ window.addEventListener("beforeinstallprompt", (e) => {
 window.addEventListener("appinstalled", () => {
   INSTALL_PROMPT = null;
   $("#installBtn").hidden = true;
-  toast("App installed");
+  toast("App installed.");
   renderAppState();
 });
 $("#installBtn").onclick = async () => {
@@ -4880,7 +4942,7 @@ function syncInboxBadge() {
   const b = $("#inboxBadge");
   b.textContent = n > 99 ? "99+" : String(n);
   b.hidden = !n;
-  b.title = n ? `${n} waiting on us` : "";
+  b.title = n ? `${n} waiting` : "";
 }
 
 // ---- boot ----

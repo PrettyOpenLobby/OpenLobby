@@ -333,8 +333,7 @@ def background(check, ttl=3600.0, retry=300.0, pending=None):
             got = check(m)
             again = isinstance(got, dict) and got.pop("retry", None) is True
         except Exception as exc:                       # noqa: BLE001 -- the report says so
-            got = {"update": "unknown", "why": "The update check for %s failed (%s)."
-                   % (m.title, exc.__class__.__name__)}
+            got = {"update": "unknown", "why": "Couldn't check %s for updates." % m.title}
             again = True
         with lock:
             state.update(at=time.time(), report=got, running=False, retry=again)
@@ -351,6 +350,6 @@ def background(check, ttl=3600.0, retry=300.0, pending=None):
         if rep is not None:
             return rep
         return pending(m) if pending else {"update": "unknown",
-                                           "why": "The update check for %s is running." % m.title}
+                                           "why": "Checking %s for updates." % m.title}
     update.state = state
     return update

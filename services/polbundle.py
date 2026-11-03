@@ -14,6 +14,7 @@ from its small text files alone.
 import array
 import json
 import os
+import re
 import sys
 
 try:
@@ -86,6 +87,30 @@ def parse_cfg(cfg_bytes):
                    "olc": olc_path, "olc_size": olc_size}
 
 
+# A bundle's own files, as they would appear if a bundle folder (or a copy of
+# mirrors/) were built as though it were an installed title. The client takes
+# patch.cfg's paths literally: on 2026-10-25 a self-hosted P2U/1000 tree built
+# that way had a PS2 write manifest.json, patch.cfg and 1,741 blobs onto its
+# Viewer partition, which then would not start ("Cannot find data required to
+# start PlayOnline Viewer"). No real client tree has any of these.
+BUNDLE_TOP_FILES = ("patch.cfg", "patchlist.raw", "meta.json", "manifest.json")
+_BLOB_DIR = re.compile(r"(^|/)blobs/\d{8}_[0-9A-Za-z]{1,2}/")
+
+
+def bundle_file(path):
+    """True when a patch.cfg client path is one of a bundle's own files."""
+    name = path.rsplit("/", 1)[-1]
+    return (path in BUNDLE_TOP_FILES
+            or name in ("patchlist.raw", "polpatch.json")
+            or name.endswith((".slc", ".olc", ".polpatch"))
+            or bool(_BLOB_DIR.search(path)))
+
+
+def wrapped_path(paths):
+    """The first client path that is a bundle's own file, or None."""
+    return next((p for p in paths if bundle_file(p)), None)
+
+
 def manifest(bundle):
     """Rows for a bundle: cached manifest.json, else parsed from patch.cfg."""
     mp = os.path.join(bundle, "manifest.json")
@@ -131,6 +156,12 @@ def selftest():
     assert spaced["slc"] == "20030429_0/Direct/Example Config.exe.slc"
     assert spaced["slc_size"] == 4
     assert signed_bytesum(b"\x01\x02\xff\x80") == 1 + 2 - 1 - 128
+    assert wrapped_path(["data/a.bin", "V/pol.pex.enc", "patch.txt", "file.txt"]) is None
+    for p in ("patch.cfg", "manifest.json", "blobs/20031006_0/Direct/SCUS-97269.slc",
+              "P2U-1000/blobs/20130107_0/Direct/V/a.bin.slc", "mirrors/P2U-1000/patchlist.raw",
+              "P2U-1000.polpatch"):
+        assert bundle_file(p), p
+    assert not bundle_file("V/manifest.json") and not bundle_file("data/blobs/x.bin")
     print("polbundle selftest OK")
     return 0
 

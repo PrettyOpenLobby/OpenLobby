@@ -52,7 +52,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, ".."))                    # patchver
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "services"))  # slc, polbundle
 import slc                                                       # noqa: E402
-from polbundle import signed_bytesum                             # noqa: E402
+from polbundle import signed_bytesum, wrapped_path               # noqa: E402
 import patchver                                                  # noqa: E402
 
 STD_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -240,6 +240,13 @@ def synth(args):
             raise SystemExit(f"{source} has no file.txt; pass --walk to take every file")
         rows = [r for r in rows if r[0] not in excludes]
         origin = "file.txt"
+    bad = wrapped_path(r[0] for r in rows)
+    if bad:
+        raise SystemExit(
+            f"{source} holds {bad}, a patch bundle's own file, so it is a bundle "
+            f"(or a mirrors folder), not an installed title. Built as an install, "
+            f"every client would be sent the bundle's files instead of the "
+            f"title's. Import the bundle's .polpatch instead.")
 
     if os.path.exists(out) and os.listdir(out) and not args.force:
         raise SystemExit(f"{out} exists and is not empty - pass --force to rebuild")

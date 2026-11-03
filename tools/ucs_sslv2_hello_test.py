@@ -83,20 +83,28 @@ os.environ["POL_UCS_SSL3_PORT"] = str(term_port)
 os.environ["POL_UCS_PASSTHROUGH_IP"] = "127.0.0.1"
 os.environ["POL_UCS_PASSTHROUGH_PORT"] = str(portal_port)
 
-probe = socket.socket(); probe.bind(("127.0.0.1", 0))
-band_port = probe.getsockname()[1]; probe.close()
-threading.Thread(target=m.serve, args=(band_port,), daemon=True).start()
-for _ in range(50):
-    try:
-        socket.create_connection(("127.0.0.1", band_port), timeout=0.2).close()
-        break
-    except OSError:
-        time.sleep(0.05)
+
+
+def start_door():
+    """Run serve() on a free port; it reads its env when it starts."""
+    probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]; probe.close()
+    threading.Thread(target=m.serve, args=(port,), daemon=True).start()
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    return port
+
+
+band_port = start_door()
 portal_got.clear(); term_got.clear()   # the readiness probe sent nothing
 
 
-def send(opener):
-    c = socket.create_connection(("127.0.0.1", band_port))
+def send(opener, port=None):
+    c = socket.create_connection(("127.0.0.1", port or band_port))
     c.sendall(opener)
     time.sleep(0.3)
     c.close()
@@ -114,3 +122,22 @@ for name, opener, want_term in (("360 SSLv2 hello", X360_HELLO, True),
     assert to_term == want_term and to_portal == (not want_term), name
 
 print("routing: PASS")
+
+
+# With POL_UCS_SSLV2_PORT set, the 360's hello gets its own terminator (the
+# wh000.pol.com certificate) and the PS2's stays on the wizard's.
+v2_port, v2_got = sink()
+os.environ["POL_UCS_SSLV2_PORT"] = str(v2_port)
+split_port = start_door()
+portal_got.clear(); term_got.clear(); v2_got.clear()
+for name, opener, want in (("360 SSLv2 hello", X360_HELLO, "v2"),
+                           ("PS2 SSL3 hello", PS2_HELLO, "term"),
+                           ("portal HTTP", HTTP_GET, "portal")):
+    term_got.clear(); portal_got.clear(); v2_got.clear()
+    send(opener, split_port)
+    got = {"term": opener in term_got, "v2": opener in v2_got,
+           "portal": opener in portal_got}
+    print("%-16s -> %s" % (name, got))
+    assert got == {k: k == want for k in got}, name
+
+print("split routing: PASS")
